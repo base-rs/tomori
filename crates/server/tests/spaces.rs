@@ -42,6 +42,62 @@ fn space_identifiers_are_not_reused_by_a_later_server_run() {
 }
 
 #[test]
+fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
+    // See `design/environments.md`.
+    let server = TestServer::start();
+    let mut ada = TestClient::open(server.address);
+    ada.send(&ClientMessage::Hello {
+        protocol: protocol::PROTOCOL_VERSION,
+        participant: "ada".into(),
+        name: "Ada".into(),
+        credentials: None,
+    });
+    let offered = ada.wait_for(|message| match message {
+        ServerMessage::Welcome { environments, .. } => Some(environments.clone()),
+        _ => None,
+    });
+    let ids: Vec<&str> = offered.iter().map(|offered| offered.id.as_str()).collect();
+    assert_eq!(ids, ["sky"]);
+
+    // An environment the server doesn't offer is refused, naming those it does, and no space is created.
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Elsewhere".into(),
+        backend: "fake".into(),
+        directory: "/tmp".into(),
+        session: None,
+        environment: Some("observe".into()),
+    });
+    assert_eq!(ada.error(), "Unknown environment; available: sky.");
+    ada.send(&ClientMessage::ListSpaces);
+    let spaces = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => Some(spaces.clone()),
+        _ => None,
+    });
+    assert!(spaces.is_empty());
+
+    // The state names the chosen environment, and a second participant sees the same one.
+    let space = ada.create_space("Shrine");
+    assert_eq!(space.environment, "sky");
+    let mut bob = server.connect("bob", "Bob");
+    let listed = bob.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces.first().cloned(),
+        _ => None,
+    });
+    assert_eq!(listed.environment, "sky");
+    assert_eq!(join(&mut bob, &space.id, 2).environment, "sky");
+
+    // A request from a client that predates environments binds the first offered.
+    bob.send(&ClientMessage::CreateSpace {
+        title: "Older".into(),
+        backend: "fake".into(),
+        directory: "/tmp".into(),
+        session: None,
+        environment: None,
+    });
+    assert_eq!(bob.space(|state| state.title == "Older").environment, "sky");
+}
+
+#[test]
 fn listing_the_backend_sessions_returns_the_created_ones() {
     let server = TestServer::start();
     let mut ada = server.connect("ada", "Ada");
@@ -62,7 +118,13 @@ fn listing_the_backend_sessions_returns_the_created_ones() {
         .map(|session| session.title.as_str())
         .collect();
     assert_eq!(titles, vec!["First", "Second"]);
-    assert!(sessions.iter().all(|session| session.directory == "/tmp"));
+    // Sessions report the canonical directory, which differs from `/tmp` where it is a symbolic link, as on macOS.
+    let tmp = std::fs::canonicalize("/tmp").unwrap();
+    assert!(
+        sessions
+            .iter()
+            .all(|session| std::path::Path::new(&session.directory) == tmp)
+    );
 
     // A directory that resolves, beneath a root, but holds no sessions lists none.
     let empty_dir =
@@ -466,6 +528,7 @@ fn shutdown_completes_while_a_space_is_being_created() {
         backend: "fake".to_owned(),
         directory: "/tmp".to_owned(),
         session: None,
+        environment: None,
     });
     wait_creating(&backend, 1);
 
@@ -499,6 +562,7 @@ fn a_creator_who_moved_on_is_not_moved_into_the_new_space() {
         backend: "fake".to_owned(),
         directory: "/tmp".to_owned(),
         session: None,
+        environment: None,
     });
     wait_creating(&backend, 1);
     join(&mut ada, &other, 2);
@@ -1266,7 +1330,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         head,
         left: Some(head),
         right: None,
-        hands: Some([Some(left_hand), None]),
+        hands: Some(Box::new([Some(left_hand), None])),
     });
 
     bob.wait_for(|message| match message {
@@ -1281,7 +1345,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
             assert_eq!(*relayed_head, head);
             assert_eq!(*left, Some(head));
             assert_eq!(*right, None);
-            assert_eq!(*hands, Some([Some(left_hand), None]));
+            assert_eq!(hands.as_deref(), Some(&[Some(left_hand), None]));
             Some(())
         }
         _ => None,
@@ -1295,7 +1359,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         right: None,
         hands: None,
     });
-    bob.wait_for(|message| Some(()).filter(|_| matches!(message, ServerMessage::Presence { .. })));
+    bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {
         assert!(
             !matches!(message, ServerMessage::Presence { .. }),

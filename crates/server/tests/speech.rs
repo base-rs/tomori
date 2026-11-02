@@ -349,6 +349,7 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
             backend: server::fake::FAKE_BACKEND_NAME.into(),
             directory: "/tmp".into(),
             session: None,
+            environment: None,
         })
         .unwrap();
     let space = receive(&ada, |message| match message {
@@ -824,6 +825,7 @@ fn the_client_player_plays_the_spoken_reply() {
             backend: server::fake::FAKE_BACKEND_NAME.into(),
             directory: "/tmp".into(),
             session: None,
+            environment: None,
         })
         .unwrap();
     let space = receive(&ada, |message| match message {

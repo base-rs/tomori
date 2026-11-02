@@ -1,8 +1,19 @@
 struct Camera {
     view_projection: mat4x4<f32>,
     inverse_view_projection: mat4x4<f32>,
+    // Centre and radius of the sphere Sky is drawn inside; a negative radius fills the world.
+    reveal: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// Whether a ray from `origin` along unit `direction` meets the reveal sphere, as distant sky is seen through it.
+fn sees_reveal(origin: vec3<f32>, direction: vec3<f32>) -> bool {
+    if camera.reveal.w < 0.0 { return true; }
+    let offset = origin - camera.reveal.xyz;
+    let b = dot(offset, direction);
+    let c = dot(offset, offset) - camera.reveal.w * camera.reveal.w;
+    return c <= 0.0 || (b <= 0.0 && b * b >= c);
+}
 
 struct Shadow {
     world_to_light: mat4x4<f32>,
@@ -39,7 +50,9 @@ fn night(direction: vec3<f32>) -> vec3<f32> {
 fn sky_fragment(in: SkyVertex) -> @location(0) vec4<f32> {
     let near_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.0, 1.0);
     let far_h = camera.inverse_view_projection * vec4<f32>(in.ndc, 0.99, 1.0);
-    let direction = normalize(far_h.xyz / far_h.w - near_h.xyz / near_h.w);
+    let origin = near_h.xyz / near_h.w;
+    let direction = normalize(far_h.xyz / far_h.w - origin);
+    if !sees_reveal(origin, direction) { discard; }
     let moon_direction = normalize(vec3<f32>(0.48, 0.53, -0.8));
     let separation = length(direction - moon_direction);
     let disc = 1.0 - smoothstep(0.039, 0.042, separation);
@@ -59,6 +72,13 @@ fn sky_fragment(in: SkyVertex) -> @location(0) vec4<f32> {
     let star = (1.0 - smoothstep(0.02, 0.12, length(fract(star_uv) - vec2<f32>(0.5))))
         * step(0.987, random) * smoothstep(0.08, 0.35, direction.y);
     color += vec3<f32>(0.22, 0.28, 0.35) * star * (1.0 - disc);
+    // Seen from outside, the sphere's edge glows faintly, so it reads as a bubble rather than a hole.
+    let offset = origin - camera.reveal.xyz;
+    if camera.reveal.w > 0.0 && dot(offset, offset) > camera.reveal.w * camera.reveal.w {
+        let along = dot(offset, direction);
+        let miss = sqrt(max(dot(offset, offset) - along * along, 0.0));
+        color += vec3<f32>(0.1, 0.16, 0.24) * smoothstep(0.75, 1.0, miss / camera.reveal.w);
+    }
     return vec4<f32>(color, 1.0);
 }
 
@@ -123,6 +143,18 @@ fn moon_visibility(position: vec3<f32>, normal: vec3<f32>) -> f32 {
 
 @fragment
 fn scenery_fragment(in: SceneryVertex) -> @location(0) vec4<f32> {
+    return shade(in);
+}
+
+// The scenery inside the reveal sphere only. Shaded first, since shadows take derivatives.
+@fragment
+fn revealed_scenery_fragment(in: SceneryVertex) -> @location(0) vec4<f32> {
+    let color = shade(in);
+    if camera.reveal.w >= 0.0 && distance(in.world_position, camera.reveal.xyz) > camera.reveal.w { discard; }
+    return color;
+}
+
+fn shade(in: SceneryVertex) -> vec4<f32> {
     let moon = normalize(vec3<f32>(0.48, 0.53, -0.8));
     let normal = normalize(in.normal);
     let visibility = moon_visibility(in.world_position, normal);

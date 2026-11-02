@@ -152,7 +152,7 @@ impl Feed {
                         head: *head,
                         left: *left,
                         right: *right,
-                        hands: *hands,
+                        hands: hands.as_deref().copied(),
                     },
                 );
             }
@@ -363,6 +363,7 @@ mod tests {
                 server: "Test".into(),
                 backends: vec![],
                 roots: vec![],
+                environments: vec![],
             }));
         let mut space = SpaceState {
             id: "space".into(),

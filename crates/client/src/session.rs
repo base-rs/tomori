@@ -306,6 +306,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
             source,
             backends,
             roots,
+            environments,
         } => {
             if protocol != PROTOCOL_VERSION {
                 return Err(Disconnect::Protocol(format!(
@@ -317,6 +318,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
                 server,
                 backends,
                 roots,
+                environments,
             });
             Ok(source)
         }
