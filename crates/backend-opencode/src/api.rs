@@ -12,12 +12,13 @@ use base_http::{
     body::{BodyFrame, BufferedBody, EmptyBody, ReadableBody},
 };
 use base_http_client::{Client, ResponseBody};
-use base_scheduler::Cancellation;
+use base_scheduler::{Cancellation, Timers};
 use futures_lite::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::endpoint::Resolved;
 use crate::wire::question_from_form;
@@ -239,6 +240,27 @@ pub async fn active_sessions<'scope>(
     )
     .await?;
     parse_active_sessions(&read_json(response, cancellation).await?)
+}
+
+/// Active-state lookup is optional evidence and must not hold up the record
+/// fallback or the initial snapshot if the endpoint stalls.
+pub async fn active_sessions_with_timeout<S: Timers>(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    cancellation: &Cancellation,
+    timers: &S,
+) -> Option<std::collections::HashSet<String>> {
+    let local = cancellation.child();
+    let result = futures_lite::future::race(
+        async { active_sessions(client, resolved, &local).await.ok() },
+        async {
+            let _ = timers.sleep(Duration::from_secs(1), &local).await;
+            None
+        },
+    )
+    .await;
+    local.cancel();
+    result
 }
 
 fn parse_active_sessions(value: &Value) -> Result<std::collections::HashSet<String>, Failure> {
@@ -962,17 +984,18 @@ impl SnapshotParts {
 
 /// The session record's running state, from its `time.busy` / `time.idle`
 /// timestamps: running when the last turn started after its last end.
-pub async fn session_running<'scope>(
+pub async fn session_running<'scope, S: Timers>(
     client: &Client<'scope>,
     resolved: &Resolved,
     session_id: &str,
     cancellation: &Cancellation,
+    timers: &S,
 ) -> Result<Option<bool>, Failure> {
     let info = session_info(client, resolved, session_id, cancellation).await?;
     if !valid_session_record(&info) {
         return Ok(None);
     }
-    let active = active_sessions(client, resolved, cancellation).await.ok();
+    let active = active_sessions_with_timeout(client, resolved, cancellation, timers).await;
     let running = match active {
         Some(active) if active.contains(session_id) => Some(true),
         Some(_) if info.get("parentID").is_none() => Some(false),

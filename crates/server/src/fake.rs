@@ -5,7 +5,7 @@
 //!
 //! Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -88,17 +88,19 @@ impl FakeBackend {
 
     fn start(&self, title: &str, directory: &str) -> FakeSession {
         let number = self.shared.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let (sender, receiver) = async_channel::unbounded();
+        let handle = Arc::new(FakeHandle::new(1));
         let session = FakeSession {
-            handle: Arc::new(FakeHandle::new(1)),
+            handle: handle.clone(),
             inner: Arc::new(FakeSessionInner {
                 id: format!("fake-{number}"),
                 title: title.to_owned(),
                 directory: directory.to_owned(),
                 manual: self.shared.manual.load(Ordering::SeqCst),
                 snapshot_failure: self.shared.snapshot_failure.clone(),
-                sender,
-                receiver,
+                outbound: Mutex::new(FakeOutbound {
+                    current: Some(handle),
+                    backlog: VecDeque::new(),
+                }),
                 busy: AtomicBool::new(false),
                 bound: Mutex::new(Some(1)),
                 next_generation: AtomicU64::new(1),
@@ -180,13 +182,17 @@ impl Backend for FakeBackend {
             ));
         }
         let generation = session.inner.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let handle = Arc::new(FakeHandle::new(generation));
+        let mut outbound = session.inner.outbound.lock().unwrap();
+        while let Some(event) = outbound.backlog.pop_front() {
+            let _ = handle.sender.try_send(event);
+        }
+        outbound.current = Some(handle.clone());
         *bound = Some(generation);
         let inner = session.inner.clone();
+        drop(outbound);
         drop(bound);
-        Ok(FakeSession {
-            inner,
-            handle: Arc::new(FakeHandle::new(generation)),
-        })
+        Ok(FakeSession { inner, handle })
     }
 }
 
@@ -201,16 +207,26 @@ struct FakeHandle {
     generation: u64,
     closing: Cancellation,
     closed: AtomicBool,
+    sender: async_channel::Sender<Event>,
+    receiver: async_channel::Receiver<Event>,
 }
 
 impl FakeHandle {
     fn new(generation: u64) -> Self {
+        let (sender, receiver) = async_channel::unbounded();
         Self {
             generation,
             closing: Cancellation::new(),
             closed: AtomicBool::new(false),
+            sender,
+            receiver,
         }
     }
+}
+
+struct FakeOutbound {
+    current: Option<Arc<FakeHandle>>,
+    backlog: VecDeque<Event>,
 }
 
 struct FakeSessionInner {
@@ -219,8 +235,7 @@ struct FakeSessionInner {
     directory: String,
     manual: bool,
     snapshot_failure: Arc<AtomicBool>,
-    sender: async_channel::Sender<Event>,
-    receiver: async_channel::Receiver<Event>,
+    outbound: Mutex<FakeOutbound>,
     busy: AtomicBool,
     bound: Mutex<Option<u64>>,
     next_generation: AtomicU64,
@@ -276,8 +291,12 @@ impl FakeSession {
                 .retain(|entry| entry.id != *id),
             _ => {}
         }
-        // The receiver lives as long as the session, so sending cannot fail.
-        let _ = self.inner.sender.try_send(event);
+        let mut outbound = self.inner.outbound.lock().unwrap();
+        if let Some(handle) = &outbound.current {
+            let _ = handle.sender.try_send(event);
+        } else {
+            outbound.backlog.push_back(event);
+        }
     }
 
     /// Stream an assistant reply in two deltas, complete it, and end the turn.
@@ -347,7 +366,7 @@ impl Session for FakeSession {
                 Ok(Event::Closed { reason: None })
             },
             async {
-                self.inner
+                self.handle
                     .receiver
                     .recv()
                     .await
@@ -457,6 +476,11 @@ impl Session for FakeSession {
         }
         self.inner.log.lock().unwrap().closed = true;
         self.handle.closing.cancel();
+        let mut outbound = self.inner.outbound.lock().unwrap();
+        while let Ok(event) = self.handle.receiver.try_recv() {
+            outbound.backlog.push_back(event);
+        }
+        outbound.current = None;
         *bound = None;
         Ok(())
     }

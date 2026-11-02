@@ -1040,7 +1040,7 @@ async fn service<S: Timers>(
                                     let info = current.map_or(Value::Null, |agent| serde_json::json!({"agent":agent}));
                                     Some(modes(client, resolved, &directory, &info, &local_cancel).await)
                                 } else { None };
-                                let running = api::session_running(client, resolved, &id, &local_cancel).await.ok().flatten();
+                                let running = api::session_running(client, resolved, &id, &local_cancel, timers).await.ok().flatten();
                                 (modes, running)
                             },
                             async {
@@ -1670,26 +1670,9 @@ async fn snapshot<S: Timers>(
     cancellation: &Cancellation,
     timers: &S,
 ) -> std::result::Result<Snapshot, Failure> {
-    let active_cancel = cancellation.child();
-    let lookup = async {
-        let active = futures_lite::future::race(
-            async {
-                api::active_sessions(client, resolved, &active_cancel)
-                    .await
-                    .ok()
-            },
-            async {
-                let _ = timers.sleep(Duration::from_secs(1), &active_cancel).await;
-                None
-            },
-        )
-        .await;
-        active_cancel.cancel();
-        active
-    };
     let (parts, active) = futures_lite::future::zip(
         api::SnapshotParts::fetch(client, resolved, id, cancellation),
-        lookup,
+        api::active_sessions_with_timeout(client, resolved, cancellation, timers),
     )
     .await;
     let parts = parts?;
@@ -2712,19 +2695,24 @@ mod tests {
         let server_stopped = stopped.clone();
         let stall_reconcile = Arc::new(AtomicBool::new(false));
         let server_stall_reconcile = stall_reconcile.clone();
+        let stall_active = Arc::new(AtomicBool::new(false));
+        let server_stall_active = stall_active.clone();
         let (event_tx, event_rx) = mpsc::channel::<String>();
         let event_rx = Arc::new(Mutex::new(event_rx));
         let (stalled_tx, stalled_rx) = mpsc::channel();
         let (reconcile_tx, reconcile_rx) = mpsc::channel();
+        let (active_tx, active_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
             while !server_stopped.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
                         let stopped = server_stopped.clone();
                         let stall_reconcile = server_stall_reconcile.clone();
+                        let stall_active = server_stall_active.clone();
                         let event_rx = event_rx.clone();
                         let stalled = stalled_tx.clone();
                         let reconcile = reconcile_tx.clone();
+                        let active = active_tx.clone();
                         std::thread::spawn(move || {
                             socket
                                 .set_read_timeout(Some(Duration::from_secs(3)))
@@ -2787,6 +2775,18 @@ mod tests {
                                 );
                                 let _ = socket.flush();
                                 let _ = reconcile.send(());
+                                while !stopped.load(Ordering::Acquire) {
+                                    std::thread::sleep(Duration::from_millis(20));
+                                }
+                            } else if path == "/api/session/active"
+                                && stall_active.load(Ordering::Acquire)
+                            {
+                                let _ = write!(
+                                    socket,
+                                    "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{"
+                                );
+                                let _ = socket.flush();
+                                let _ = active.send(());
                                 while !stopped.load(Ordering::Acquire) {
                                     std::thread::sleep(Duration::from_millis(20));
                                 }
@@ -3099,6 +3099,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
+        // A stalled optional active-session lookup must not discard the
+        // valid idle record used to recover a missed idle event.
+        let busy_events = fast_events.clone();
+        let (busy_tx, busy_wait) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(event) = block_on(busy_events.recv()) {
+                if matches!(event.into_current(), Some(Event::Busy)) {
+                    let _ = busy_tx.send(());
+                    return;
+                }
+            }
+        });
+        event_tx
+            .send(
+                json!({"type":"session.execution.started","data":{"sessionID":"fast"}}).to_string(),
+            )
+            .unwrap();
+        busy_wait
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the busy event was not delivered");
+        stall_active.store(true, Ordering::Release);
+        active_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("active lookup did not stall");
+        let idle_events = fast_events.clone();
+        let (idle_tx, idle_wait) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(event) = block_on(idle_events.recv()) {
+                if matches!(event.into_current(), Some(Event::Idle)) {
+                    let _ = idle_tx.send(());
+                    return;
+                }
+            }
+        });
+        idle_wait
+            .recv_timeout(Duration::from_secs(4))
+            .expect("idle reconciliation did not fall back to the session record");
+        stall_active.store(false, Ordering::Release);
         let (slow_reply, slow_wait) = async_channel::bounded(1);
         commands
             .tx()
