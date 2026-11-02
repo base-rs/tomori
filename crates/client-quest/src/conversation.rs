@@ -1092,12 +1092,17 @@ impl Conversation {
         self.stop_live();
         // X may have been released while capture failed, before the queued end
         // was sent. Cancel instead of finalizing an incomplete utterance.
+        // Only an utterance whose end has not been performed yet is lost; a
+        // failure after that comes from the live capture reopened after it,
+        // and the sent utterance is still transcribed.
+        let mut cancelled = false;
         if let Some(Talk::Sending { utterance, .. }) = &self.talk
             && self
                 .actions
                 .iter()
                 .any(|action| matches!(action, Action::EndUtterance))
         {
+            cancelled = true;
             let pending = self
                 .actions
                 .iter()
@@ -1111,7 +1116,7 @@ impl Conversation {
             }
         }
         self.stop_talking();
-        if matches!(self.talk, Some(Talk::Sending { .. })) {
+        if cancelled {
             self.talk = None;
         }
         self.error = Some(error.into());
@@ -3294,6 +3299,31 @@ mod tests {
         );
         assert!(conversation.text().contains("capture failed"));
         assert!(!conversation.live);
+    }
+
+    #[test]
+    fn a_live_failure_after_an_utterance_was_ended_keeps_its_pending_transcript() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        // The end has been performed: the utterance is with the server.
+        conversation.take_actions();
+        assert!(matches!(conversation.talk, Some(Talk::Sending { .. })));
+        // The live capture reopened afterwards fails.
+        conversation.microphone_failed("capture failed");
+        assert!(matches!(conversation.talk, Some(Talk::Sending { .. })));
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(!conversation.live);
+        // The panel no longer claims a live microphone, and the error is kept
+        // to show once the pending transcript is resolved.
+        assert!(!conversation.text().contains("MIC LIVE"));
+        assert_eq!(conversation.error.as_deref(), Some("capture failed"));
+        let utterance = conversation.talk.as_ref().unwrap().utterance().to_owned();
+        conversation.apply(transcript(&utterance, "hello", true));
+        assert!(conversation.talk.is_none());
+        assert!(conversation.text().contains("capture failed"));
     }
 
     #[test]

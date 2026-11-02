@@ -76,6 +76,11 @@ trait InputStream {
     /// returns only what the device has already captured.
     fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String>;
     fn stop(&mut self);
+    /// How many times the device has discarded audio because it was not read
+    /// in time, or zero if it cannot tell.
+    fn overruns(&self) -> i32 {
+        0
+    }
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -97,8 +102,10 @@ const MAX_DRAIN_READS: usize = 64;
 /// The capture boundary is the moment `stop` is observed. Every sample the
 /// device captured before it is delivered: a read in flight when stop is set,
 /// then what the device already holds, read without waiting, including a final
-/// partial frame. If that cannot be read intact, capture fails, so the
-/// utterance is cancelled visibly instead of being sent short.
+/// partial frame. If that cannot be read intact, including when the device
+/// reports an overrun during push-to-talk, capture fails, so the utterance is
+/// cancelled visibly instead of being sent with a gap. Live audio tolerates an
+/// overrun, which only glitches what the other participants hear.
 ///
 /// A connection that ended before or while the device opened never starts
 /// the stream, and no sample is delivered once `active` reports false. A
@@ -126,17 +133,32 @@ fn run_capture<S: InputStream>(
         return Ok(());
     }
     stream.start()?;
+    let overruns = stream.overruns();
+    // Push-to-talk (no `active`) must reach recognition intact.
+    let intact = |stream: &S| -> Result<(), String> {
+        let lost = stream.overruns().saturating_sub(overruns);
+        if lost > 0 {
+            if active.is_none() {
+                return Err("The microphone lost audio; your words were not sent.".into());
+            }
+            log::warn!("The live microphone lost audio ({lost} overruns).");
+        }
+        Ok(())
+    };
     let result = loop {
         if !current() {
             break Err(CONNECTION_LOST.into());
         }
         if stop.load(Ordering::Acquire) {
-            break drain(&mut stream, samples, &current, buffer);
+            break drain(&mut stream, samples, &current, &intact, buffer);
         }
         match stream.read(buffer, READ_TIMEOUT_NS) {
             // A successful read was captured before stop was observed, so it
             // is delivered even if stop was set while it was in flight.
             Ok(count) => {
+                if let Err(error) = intact(&stream) {
+                    break Err(error);
+                }
                 if current() {
                     samples(&buffer[..count]);
                 }
@@ -154,10 +176,12 @@ fn drain<S: InputStream>(
     stream: &mut S,
     samples: &mut dyn FnMut(&[f32]),
     current: &dyn Fn() -> bool,
+    intact: &dyn Fn(&S) -> Result<(), String>,
     buffer: &mut [f32],
 ) -> Result<(), String> {
     for _ in 0..MAX_DRAIN_READS {
         let count = stream.read(buffer, 0)?;
+        intact(stream)?;
         if count == 0 {
             return Ok(());
         }
@@ -428,6 +452,10 @@ mod android {
         fn stop(&mut self) {
             let _ = self.0.request_stop();
         }
+
+        fn overruns(&self) -> i32 {
+            self.0.x_run_count()
+        }
     }
 
     /// The samples read. ndk 0.9 returns a positive count from `AAudioStream_read` as an error code, so only negative values are errors.
@@ -472,6 +500,7 @@ mod tests {
         stopped: bool,
         blocking_reads: usize,
         drain_reads: usize,
+        overruns: i32,
     }
 
     struct Fake {
@@ -511,6 +540,10 @@ mod tests {
 
         fn stop(&mut self) {
             self.log.borrow_mut().stopped = true;
+        }
+
+        fn overruns(&self) -> i32 {
+            self.log.borrow().overruns
         }
     }
 
@@ -656,6 +689,49 @@ mod tests {
         assert_eq!(result.unwrap_err(), "read failed");
         assert!(delivered.is_empty());
         assert!(log.borrow().stopped);
+    }
+
+    #[test]
+    fn an_overrun_fails_push_to_talk_but_only_glitches_live_audio() {
+        let overrun = |log: &Rc<RefCell<Log>>| {
+            let log = log.clone();
+            Box::new(move || log.borrow_mut().overruns += 1) as Box<dyn FnOnce()>
+        };
+        let log = Rc::new(RefCell::new(Log::default()));
+        let device = Fake {
+            steps: vec![
+                Step::Read(vec![0.1; 4], Box::new(|| {})),
+                Step::Read(vec![0.2; 4], overrun(&log)),
+            ]
+            .into(),
+            buffered: VecDeque::new(),
+            log: log.clone(),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (result, delivered) = run(device, &stop, None, || {});
+        assert!(result.unwrap_err().contains("lost audio"));
+        // The samples after the gap are not delivered.
+        assert_eq!(delivered, vec![0.1; 4]);
+
+        let log = Rc::new(RefCell::new(Log::default()));
+        let release = stop.clone();
+        stop.store(false, Ordering::Release);
+        let device = Fake {
+            steps: vec![
+                Step::Read(vec![0.2; 4], overrun(&log)),
+                Step::Read(
+                    vec![0.3; 4],
+                    Box::new(move || release.store(true, Ordering::Release)),
+                ),
+            ]
+            .into(),
+            buffered: VecDeque::new(),
+            log,
+        };
+        let active: Active = Box::new(|| true);
+        let (result, delivered) = run(device, &stop, Some(&active), || {});
+        result.unwrap();
+        assert_eq!(delivered.len(), 8);
     }
 
     #[test]

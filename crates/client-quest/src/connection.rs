@@ -205,7 +205,9 @@ impl Voice {
             self.recording = None;
             return Err(format!("Cannot send: {error}"));
         }
-        if resume_live && let Err(error) = self.open(client, true, generation) {
+        // Agent audio is captured as push-to-talk always is, for recognition;
+        // `finish` reopens live capture afterwards.
+        if resume_live && let Err(error) = self.open(client, false, generation) {
             if let Some(microphone) = self.lock().microphone.as_mut() {
                 let _ = microphone.cancel();
             }
@@ -925,6 +927,67 @@ mod tests {
         );
         assert_eq!(utterance(&voice), None);
         assert!(voice.lock().microphone.is_some());
+        voice.stop_live().unwrap();
+        client.close();
+    }
+
+    /// A capture that records which kind of capture each step opened.
+    struct KindCapture(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Capture for KindCapture {
+        fn open(&mut self, _samples: Samples, _failed: Failed) -> Result<Recording, String> {
+            self.0.lock().unwrap().push("agent");
+            Ok(Recording::new(16_000, ()))
+        }
+        fn open_live(
+            &mut self,
+            _samples: Samples,
+            _failed: Failed,
+            _active: Active,
+        ) -> Result<Recording, String> {
+            self.0.lock().unwrap().push("live");
+            Ok(Recording::new(16_000, ()))
+        }
+    }
+
+    fn kind_voice() -> (Voice, Arc<Mutex<Vec<&'static str>>>) {
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let voice = Voice {
+            capture: Box::new(KindCapture(opened.clone())),
+            shared: Arc::new(Mutex::new(Captured::default())),
+            recording: None,
+            live: false,
+            generation: None,
+        };
+        (voice, opened)
+    }
+
+    #[test]
+    fn push_to_talk_during_live_audio_captures_for_recognition() {
+        let client = client();
+        let (mut voice, opened) = kind_voice();
+        voice.start_live(&client, 0).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        voice.finish(Some(&client), true).unwrap();
+        assert_eq!(*opened.lock().unwrap(), ["live", "agent", "live"]);
+        client.close();
+    }
+
+    #[test]
+    fn a_capture_for_one_connection_is_never_reused_for_another() {
+        let client = client();
+        let (mut voice, opened) = kind_voice();
+        voice.start_live(&client, 0).unwrap();
+        // Neither live audio nor push-to-talk for a later connection may use
+        // the earlier connection's open capture.
+        assert!(voice.start_live(&client, 1).is_err());
+        assert!(voice.begin(&client, "u1".into(), 1).is_err());
+        assert_eq!(*opened.lock().unwrap(), ["live"]);
+        // The capture feeds only a microphone bound to its own connection.
+        assert_eq!(
+            voice.lock().microphone.as_ref().unwrap().connection(),
+            Some(0)
+        );
         voice.stop_live().unwrap();
         client.close();
     }
