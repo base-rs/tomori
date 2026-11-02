@@ -1122,6 +1122,15 @@ impl Conversation {
         self.error = Some(error.into());
     }
 
+    /// Ending the utterance failed, so its words were not sent: stop showing
+    /// them as on their way, and report why.
+    pub fn utterance_not_sent(&mut self, error: impl Into<String>) {
+        if matches!(self.talk, Some(Talk::Sending { .. })) {
+            self.talk = None;
+        }
+        self.microphone_failed(error);
+    }
+
     /// How long X has been held, while recording.
     pub fn recording(&self) -> Option<Duration> {
         match &self.talk {
@@ -3324,6 +3333,27 @@ mod tests {
         conversation.apply(transcript(&utterance, "hello", true));
         assert!(conversation.talk.is_none());
         assert!(conversation.text().contains("capture failed"));
+    }
+
+    #[test]
+    fn an_utterance_whose_end_failed_is_not_left_sending() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        // The end was taken to be performed, and failed while stopping.
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        conversation.utterance_not_sent("Microphone lost audio; not sent.");
+        assert!(conversation.talk.is_none());
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(
+            conversation
+                .text()
+                .contains("Microphone lost audio; not sent."),
+            "{}",
+            conversation.text()
+        );
     }
 
     #[test]

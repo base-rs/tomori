@@ -77,7 +77,8 @@ trait InputStream {
     fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String>;
     fn stop(&mut self);
     /// How many times the device has discarded audio because it was not read
-    /// in time, or zero if it cannot tell.
+    /// in time. A device that cannot tell reports a constant, such as zero or
+    /// an error code, which is never taken as a loss.
     fn overruns(&self) -> i32 {
         0
     }
@@ -133,15 +134,17 @@ fn run_capture<S: InputStream>(
         return Ok(());
     }
     stream.start()?;
-    let overruns = stream.overruns();
+    let overruns = std::cell::Cell::new(stream.overruns());
     // Push-to-talk (no `active`) must reach recognition intact.
     let intact = |stream: &S| -> Result<(), String> {
-        let lost = stream.overruns().saturating_sub(overruns);
+        let count = stream.overruns();
+        let lost = count.saturating_sub(overruns.get());
         if lost > 0 {
             if active.is_none() {
-                return Err("The microphone lost audio; your words were not sent.".into());
+                return Err("Microphone lost audio; not sent.".into());
             }
             log::warn!("The live microphone lost audio ({lost} overruns).");
+            overruns.set(count);
         }
         Ok(())
     };

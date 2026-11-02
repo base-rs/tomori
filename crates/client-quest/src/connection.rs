@@ -52,6 +52,22 @@ pub struct Connection {
 /// A hook that renders the other participants' presence reports, which the conversation ignores.
 type PresenceHook = Box<dyn FnMut(&ServerMessage) + Send>;
 
+/// Why ending push-to-talk failed: the utterance itself, or only the live
+/// microphone reopened after it was sent.
+#[derive(Debug, PartialEq)]
+enum Finish {
+    Utterance(String),
+    Live(String),
+}
+
+impl From<Finish> for String {
+    fn from(finish: Finish) -> Self {
+        match finish {
+            Finish::Utterance(error) | Finish::Live(error) => error,
+        }
+    }
+}
+
 /// Live and push-to-talk audio through the client's [`Microphone`].
 struct Voice {
     capture: Box<dyn Capture>,
@@ -217,7 +233,7 @@ impl Voice {
     }
 
     /// Close the microphone, after which every captured sample has been passed on, then end or cancel the utterance.
-    fn finish(&mut self, client: Option<&Client>, send: bool) -> Result<(), String> {
+    fn finish(&mut self, client: Option<&Client>, send: bool) -> Result<(), Finish> {
         let resume_live = self.live;
         let generation = self.generation;
         // Join the capture thread before changing the gate or checking for
@@ -226,25 +242,26 @@ impl Voice {
         let mut captured = self.lock();
         let failure = if send { captured.failure.take() } else { None };
         let Some(microphone) = captured.microphone.as_mut() else {
-            return failure.map_or(Ok(()), Err);
+            return failure.map_or(Ok(()), |error| Err(Finish::Utterance(error)));
         };
         if let Some(error) = failure {
             microphone
                 .cancel()
-                .map_err(|error| format!("Cannot cancel: {error}"))?;
-            return Err(error);
+                .map_err(|error| Finish::Utterance(format!("Cannot cancel: {error}")))?;
+            return Err(Finish::Utterance(error));
         }
         let result = if send {
             microphone.end()
         } else {
             microphone.cancel()
         };
-        result.map_err(|error| format!("Cannot send: {error}"))?;
+        result.map_err(|error| Finish::Utterance(format!("Cannot send: {error}")))?;
         drop(captured);
         if resume_live {
-            let client = client.ok_or("Connection lost; live microphone stopped.")?;
-            let generation = generation.ok_or("Connection lost; live microphone stopped.")?;
-            self.open(client, true, generation)?;
+            let lost = || Finish::Live("Connection lost; live microphone stopped.".into());
+            let client = client.ok_or_else(lost)?;
+            let generation = generation.ok_or_else(lost)?;
+            self.open(client, true, generation).map_err(Finish::Live)?;
         }
         Ok(())
     }
@@ -594,14 +611,14 @@ impl Connection {
                         conversation.microphone_failed(error);
                     }
                 }
-                Action::EndUtterance => {
-                    if let Err(error) = self.voice.finish(self.client.as_ref(), true) {
-                        conversation.microphone_failed(error);
-                    }
-                }
+                Action::EndUtterance => match self.voice.finish(self.client.as_ref(), true) {
+                    Ok(()) => {}
+                    Err(Finish::Utterance(error)) => conversation.utterance_not_sent(error),
+                    Err(Finish::Live(error)) => conversation.microphone_failed(error),
+                },
                 Action::CancelUtterance => {
                     if let Err(error) = self.voice.finish(self.client.as_ref(), false) {
-                        conversation.fail(error);
+                        conversation.fail(String::from(error));
                     }
                 }
                 Action::AbandonUtterance => {
@@ -923,7 +940,7 @@ mod tests {
         voice.lock().failure = Some("capture failed".into());
         assert_eq!(
             voice.finish(Some(&client), true).unwrap_err(),
-            "capture failed"
+            Finish::Utterance("capture failed".into())
         );
         assert_eq!(utterance(&voice), None);
         assert!(voice.lock().microphone.is_some());
@@ -970,6 +987,45 @@ mod tests {
         voice.begin(&client, "u1".into(), 0).unwrap();
         voice.finish(Some(&client), true).unwrap();
         assert_eq!(*opened.lock().unwrap(), ["live", "agent", "live"]);
+        client.close();
+    }
+
+    #[test]
+    fn a_failed_live_reopen_after_a_sent_utterance_is_reported_separately() {
+        struct ReopenFails(u32);
+        impl Capture for ReopenFails {
+            fn open(&mut self, _samples: Samples, _failed: Failed) -> Result<Recording, String> {
+                Ok(Recording::new(16_000, ()))
+            }
+            fn open_live(
+                &mut self,
+                _samples: Samples,
+                _failed: Failed,
+                _active: Active,
+            ) -> Result<Recording, String> {
+                self.0 += 1;
+                if self.0 > 1 {
+                    return Err("Cannot open the microphone.".into());
+                }
+                Ok(Recording::new(16_000, ()))
+            }
+        }
+        let client = client();
+        let mut voice = Voice {
+            capture: Box::new(ReopenFails(0)),
+            shared: Arc::new(Mutex::new(Captured::default())),
+            recording: None,
+            live: false,
+            generation: None,
+        };
+        voice.start_live(&client, 0).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        // The utterance was ended; only the live microphone failed afterwards.
+        assert_eq!(
+            voice.finish(Some(&client), true).unwrap_err(),
+            Finish::Live("Cannot open the microphone.".into())
+        );
+        assert_eq!(utterance(&voice), None);
         client.close();
     }
 
@@ -1098,7 +1154,7 @@ mod tests {
         voice.begin(&client, "u1".into(), 0).unwrap();
         assert_eq!(
             voice.finish(Some(&client), true).unwrap_err(),
-            "read failed while stopping"
+            Finish::Utterance("read failed while stopping".into())
         );
         assert_eq!(utterance(&voice), None);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
