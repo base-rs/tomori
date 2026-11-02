@@ -1122,7 +1122,7 @@ impl Hub {
                                 head,
                                 left,
                                 right,
-                                hands,
+                                hands: hands.clone(),
                             },
                         );
                     }
