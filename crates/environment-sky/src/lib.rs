@@ -14,7 +14,7 @@ mod mesh;
 mod shadows;
 
 use bytemuck::{Pod, Zeroable};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -22,6 +22,8 @@ use wgpu::util::DeviceExt;
 struct Camera {
     view_projection: [f32; 16],
     inverse_view_projection: [f32; 16],
+    /// The sphere Sky is drawn inside while it grows or shrinks: its centre, then its radius, which is negative when Sky fills the world.
+    reveal: [f32; 4],
 }
 
 /// GPU resources for Sky. The caller owns render targets, depth, transforms,
@@ -29,6 +31,9 @@ struct Camera {
 pub struct Sky {
     background: wgpu::RenderPipeline,
     scenery: wgpu::RenderPipeline,
+    /// The scenery, discarded outside the reveal sphere. Separate, so that the scenery keeps early depth testing whenever Sky fills the world.
+    revealed_scenery: wgpu::RenderPipeline,
+    reveal: Option<(Vec3, f32)>,
     cameras: [wgpu::Buffer; 2],
     bindings: [wgpu::BindGroup; 2],
     vertices: wgpu::Buffer,
@@ -102,7 +107,7 @@ impl Sky {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &attributes,
         })];
-        let pipeline = |scenery| {
+        let pipeline = |scenery, fragment: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(if scenery {
                     "Sky scenery"
@@ -126,11 +131,7 @@ impl Sky {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some(if scenery {
-                        "scenery_fragment"
-                    } else {
-                        "sky_fragment"
-                    }),
+                    entry_point: Some(fragment),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -159,8 +160,10 @@ impl Sky {
             })
         };
         Self {
-            background: pipeline(false),
-            scenery: pipeline(true),
+            background: pipeline(false, "sky_fragment"),
+            scenery: pipeline(true, "scenery_fragment"),
+            revealed_scenery: pipeline(true, "revealed_scenery_fragment"),
+            reveal: None,
             cameras,
             bindings,
             vertices,
@@ -169,6 +172,11 @@ impl Sky {
             shadows,
             lightmap,
         }
+    }
+
+    /// Draw Sky only inside a sphere, `(centre, radius)` in scene coordinates, as it grows out of a point or shrinks back into it; `None` fills the world. Applied by the next [`Sky::prepare_eye`]. Through the sphere, from outside it, the sky and clouds show as through a window; the platform and shrine show only where they are inside it.
+    pub fn set_reveal(&mut self, reveal: Option<(Vec3, f32)>) {
+        self.reveal = reveal.filter(|(centre, radius)| centre.is_finite() && radius.is_finite());
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -199,6 +207,10 @@ impl Sky {
                 Mat4::IDENTITY
             }
             .to_cols_array(),
+            reveal: match self.reveal {
+                Some((centre, radius)) => [centre.x, centre.y, centre.z, radius.max(0.0)],
+                None => [0.0, 0.0, 0.0, -1.0],
+            },
         };
         queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
     }
@@ -210,7 +222,11 @@ impl Sky {
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         pass.set_pipeline(&self.background);
         pass.draw(0..3, 0..1);
-        pass.set_pipeline(&self.scenery);
+        pass.set_pipeline(if self.reveal.is_some() {
+            &self.revealed_scenery
+        } else {
+            &self.scenery
+        });
         pass.set_bind_group(1, &self.shadows.binding, &[]);
         pass.set_bind_group(2, &self.lightmap.binding, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));

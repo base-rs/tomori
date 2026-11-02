@@ -3,6 +3,7 @@
 
 use crate::{
     graphics::Renderer,
+    pointing::Ray,
     spectator_feed::Feed,
     spectator_view::{RenderInputs, SpectatorView},
     swarm::{CENTER, Swarm},
@@ -296,7 +297,10 @@ impl State {
         } else {
             (config.width, config.height)
         };
-        let renderer = Renderer::new(&device, &queue, render_format, render_width, render_height);
+        let mut renderer =
+            Renderer::new(&device, &queue, render_format, render_width, render_height);
+        // The desktop window has no server, so it is never in a space and chooses its scenery itself.
+        renderer.set_environment(crate::environment::Environment::initial());
         let spectator = match (spectator, feed) {
             (true, Some(feed)) => Some(SpectatorView::new(feed)),
             _ => None,
@@ -506,15 +510,22 @@ impl Camera {
         self.distance = (self.distance * (-amount).exp()).clamp(1.0, 10.0);
     }
 
-    fn attractor(&self, cursor: Vec2, size: Vec2) -> Vec3 {
+    /// The ray from the camera through the cursor, for pointing with the mouse as a controller points on the headset.
+    fn ray(&self, cursor: Vec2, size: Vec2) -> Option<Ray> {
         let ndc = Vec2::new(cursor.x / size.x * 2.0 - 1.0, 1.0 - cursor.y / size.y * 2.0);
         let inverse = self.view_projection(size.x / size.y).inverse();
         let near = inverse.project_point3(ndc.extend(0.0));
         let far = inverse.project_point3(ndc.extend(1.0));
-        let ray = (far - near).normalize();
+        Ray::new(near, far - near)
+    }
+
+    fn attractor(&self, cursor: Vec2, size: Vec2) -> Vec3 {
+        let Some(ray) = self.ray(cursor, size) else {
+            return CENTER;
+        };
         let normal = (self.position() - CENTER).normalize();
         // Intersect a camera-facing plane through the swarm's center.
-        near + ray * (CENTER - near).dot(normal) / ray.dot(normal)
+        ray.at((CENTER - ray.origin).dot(normal) / ray.direction.dot(normal))
     }
 }
 
@@ -561,6 +572,27 @@ mod tests {
         assert!(up.y > CENTER.y);
         assert!((right - CENTER).dot(normal).abs() < 0.001);
         assert!((up - CENTER).dot(normal).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_mouse_points_at_what_is_under_the_cursor() {
+        use crate::pointing::{Pointer, Shape, Target};
+        let mut camera = Camera::default();
+        camera.orbit(Vec2::new(120.0, -40.0));
+        let size = Vec2::new(1100.0, 760.0);
+        let target = Target {
+            key: "swarm",
+            shape: Shape::Sphere {
+                center: CENTER,
+                radius: 0.1,
+            },
+        };
+        let mut pointer = Pointer::default();
+        let centre = camera.ray(size * 0.5, size);
+        let pointing = pointer.update(centre, Some(1.0), [&target]);
+        assert_eq!(pointing.chosen, Some("swarm"));
+        let corner = camera.ray(Vec2::ZERO, size);
+        assert_eq!(pointer.update(corner, Some(0.0), [&target]).hit, None);
     }
 
     #[test]

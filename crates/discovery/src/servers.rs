@@ -66,6 +66,8 @@ mod tests {
             addresses: Vec::new(),
             port: 8765,
             protocol: Some(protocol),
+            spaces: None,
+            participants: None,
         }
     }
 
@@ -96,5 +98,18 @@ mod tests {
             instance: "a".to_owned()
         }));
         assert_eq!(servers.compatible().len(), 1);
+    }
+
+    #[test]
+    fn changed_counts_replace_the_listed_server() {
+        let mut servers = Servers::new();
+        let mut beta = server("b", "Beta", PROTOCOL_VERSION);
+        assert!(servers.apply(Event::Found(beta.clone())));
+        beta.spaces = Some(1);
+        beta.participants = Some(2);
+        assert!(servers.apply(Event::Found(beta.clone())));
+        assert!(!servers.apply(Event::Found(beta)));
+        let listed = servers.compatible()[0];
+        assert_eq!((listed.spaces, listed.participants), (Some(1), Some(2)));
     }
 }

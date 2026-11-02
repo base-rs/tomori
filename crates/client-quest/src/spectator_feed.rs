@@ -363,6 +363,7 @@ mod tests {
                 server: "Test".into(),
                 backends: vec![],
                 roots: vec![],
+                environments: vec![],
             }));
         let mut space = SpaceState {
             id: "space".into(),

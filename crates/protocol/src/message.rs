@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BackendInfo, Gate, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot};
+use crate::{
+    BackendInfo, EnvironmentInfo, Gate, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+};
 
 /// A tracked pose in the space's coordinate system.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -52,6 +54,9 @@ pub enum ClientMessage {
         directory: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// The identifier of one of the environments the server offers in `Welcome`, which the space is bound to for its lifetime. Absent from older clients, which did not choose one: the server then binds the first environment it offers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
     },
     /// Join a space, leaving any other space.
     Join {
@@ -131,6 +136,9 @@ pub enum ServerMessage {
         backends: Vec<BackendInfo>,
         /// The directories a space may run in, so a client can choose one without typing a path.
         roots: Vec<WorkspaceRoot>,
+        /// The environments a space may be bound to, the first being the one bound when a `CreateSpace` names none. Absent from older servers.
+        #[serde(default)]
+        environments: Vec<EnvironmentInfo>,
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
@@ -260,6 +268,41 @@ mod tests {
             frame.to_server_message().unwrap(),
             ServerMessage::Ping { nonce: u64::MAX }
         );
+    }
+
+    #[test]
+    fn environments_are_optional_for_older_peers() {
+        // An older client chooses no environment, and the server binds its first.
+        let create: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "create_space", "title": "Tomori", "backend": "fake", "directory": "/tmp",
+        }))
+        .unwrap();
+        assert!(matches!(
+            create,
+            ClientMessage::CreateSpace {
+                environment: None,
+                ..
+            }
+        ));
+        let json = serde_json::to_value(ClientMessage::CreateSpace {
+            title: "Tomori".into(),
+            backend: "fake".into(),
+            directory: "/tmp".into(),
+            session: None,
+            environment: Some("sky".into()),
+        })
+        .unwrap();
+        assert_eq!(json["environment"], "sky");
+
+        // An older server offers none.
+        let welcome: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "welcome", "protocol": 1, "server": "tomori", "source": 1, "backends": [], "roots": [],
+        }))
+        .unwrap();
+        assert!(matches!(
+            welcome,
+            ServerMessage::Welcome { environments, .. } if environments.is_empty()
+        ));
     }
 
     #[test]

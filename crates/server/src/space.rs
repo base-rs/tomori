@@ -23,6 +23,8 @@ pub struct SpaceModel {
     pub title: String,
     pub backend: String,
     pub directory: String,
+    /// The environment the space is bound to for its lifetime, the same for every participant.
+    pub environment: String,
     /// The bound session's identifier, namespaced by backend.
     pub session: String,
     /// Participant identifiers, in join order.
@@ -141,6 +143,7 @@ impl SpaceModel {
         title: String,
         backend: String,
         directory: String,
+        environment: String,
         session: String,
         snapshot: Snapshot,
     ) -> Self {
@@ -154,6 +157,7 @@ impl SpaceModel {
             title,
             backend,
             directory,
+            environment,
             session,
             participants: Vec::new(),
             busy: snapshot.busy,
@@ -589,6 +593,7 @@ impl SpaceModel {
             title: self.title.clone(),
             backend: self.backend.clone(),
             directory: self.directory.clone(),
+            environment: self.environment.clone(),
             activity: self.activity(),
             messages: self
                 .messages
@@ -630,6 +635,7 @@ impl SpaceModel {
             title: self.title.clone(),
             backend: self.backend.clone(),
             directory: self.directory.clone(),
+            environment: self.environment.clone(),
             activity: self.activity(),
             participants: self.participants.len(),
         }
@@ -646,6 +652,7 @@ mod tests {
             "Title".into(),
             "fake".into(),
             "/tmp".into(),
+            "sky".into(),
             "fake-1".into(),
             Snapshot {
                 busy: Some(false),

@@ -8,7 +8,7 @@ use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use protocol::PROTOCOL_VERSION;
 
 use crate::record::{INSTANCE_LIMIT, properties, truncate};
-use crate::{Error, SERVICE_TYPE};
+use crate::{Counts, Error, SERVICE_TYPE};
 
 /// How long dropping an [`Advertisement`] waits for its goodbye packets, so that browsers drop the server at once rather than when its records expire.
 const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -17,7 +17,48 @@ const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct Advertisement {
     daemon: ServiceDaemon,
     fullname: String,
+    service: Service,
+}
+
+/// What a service is built from, so that it can be registered again with other counts.
+struct Service {
+    name: String,
     instance: String,
+    host: String,
+    port: u16,
+    address: IpAddr,
+}
+
+impl Service {
+    fn info(&self, counts: Counts) -> Result<ServiceInfo, mdns_sd::Error> {
+        let properties = properties(&self.name, PROTOCOL_VERSION, counts);
+        if self.address.is_unspecified() {
+            let mut service = ServiceInfo::new(
+                SERVICE_TYPE,
+                &self.instance,
+                &self.host,
+                (),
+                self.port,
+                properties.as_slice(),
+            )?
+            .enable_addr_auto();
+            if self.address.is_ipv4() {
+                service.set_interfaces(vec![IfKind::IPv4]);
+            }
+            Ok(service)
+        } else {
+            let mut service = ServiceInfo::new(
+                SERVICE_TYPE,
+                &self.instance,
+                &self.host,
+                self.address,
+                self.port,
+                properties.as_slice(),
+            )?;
+            service.set_interfaces(vec![IfKind::Addr(self.address)]);
+            Ok(service)
+        }
+    }
 }
 
 impl std::fmt::Debug for Advertisement {
@@ -32,7 +73,16 @@ impl std::fmt::Debug for Advertisement {
 impl Advertisement {
     /// The requested instance name. If another service on the network already uses it, the responder renames this one (`Name (2)`); the TXT `name` keeps the display name.
     pub fn instance(&self) -> &str {
-        &self.instance
+        &self.service.instance
+    }
+
+    /// Advertise `counts` in place of the previous ones, without blocking. The responder announces the changed TXT record, and browsers report the server as [`crate::Event::Found`] again with the new counts.
+    ///
+    /// `mdns_sd` probes a changed record before announcing it, which takes about a second, and a browser flushes a cached record only once it has held it for a second (RFC 6762, section 10.2), so a count that changes back within a second can leave browsers showing the one in between. Update at most every couple of seconds, coalescing the changes in between.
+    pub fn update(&self, counts: Counts) -> Result<(), Error> {
+        // Registering the same service again re-announces it, under the instance and host names the responder settled on.
+        self.daemon.register(self.service.info(counts)?)?;
+        Ok(())
     }
 }
 
@@ -47,57 +97,44 @@ impl Drop for Advertisement {
     }
 }
 
-/// Advertise a Tomori server called `name`, listening on `port` at `address`, until the returned [`Advertisement`] is dropped.
+/// Advertise a Tomori server called `name`, listening on `port` at `address`, with its current `counts`, until the returned [`Advertisement`] is dropped.
 ///
 /// `address` is the address the server is bound to. If it is unspecified (`0.0.0.0` or `::`), the server is advertised on every interface with that address family's addresses (`::` includes IPv4, as dual-stack sockets accept both), and the addresses follow interface changes. Otherwise only that address is advertised, on its interface.
 ///
 /// The responder runs on its own thread; this does not block beyond starting it.
-pub fn advertise(name: &str, port: u16, address: IpAddr) -> Result<Advertisement, Error> {
+pub fn advertise(
+    name: &str,
+    port: u16,
+    address: IpAddr,
+    counts: Counts,
+) -> Result<Advertisement, Error> {
     let name = match name.trim() {
         "" => "Tomori",
         name => name,
     };
     let instance = truncate(name, INSTANCE_LIMIT).to_owned();
-    let host = host_name(&instance);
+    let service = Service {
+        name: name.to_owned(),
+        host: host_name(&instance),
+        instance,
+        port,
+        address,
+    };
     let daemon = ServiceDaemon::new()?;
-    let properties = properties(name, PROTOCOL_VERSION);
-    let service = if address.is_unspecified() {
+    if address.is_unspecified() {
         // Loopback interfaces only reach this computer, and may carry many alias addresses.
         daemon.disable_interface(vec![IfKind::LoopbackV4, IfKind::LoopbackV6])?;
-        let mut service = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            (),
-            port,
-            properties.as_slice(),
-        )?
-        .enable_addr_auto();
-        if address.is_ipv4() {
-            service.set_interfaces(vec![IfKind::IPv4]);
-        }
-        service
-    } else {
-        let mut service = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &host,
-            address,
-            port,
-            properties.as_slice(),
-        )?;
-        service.set_interfaces(vec![IfKind::Addr(address)]);
-        service
-    };
-    let fullname = service.get_fullname().to_owned();
-    if let Err(error) = daemon.register(service) {
+    }
+    let info = service.info(counts)?;
+    let fullname = info.get_fullname().to_owned();
+    if let Err(error) = daemon.register(info) {
         let _ = daemon.shutdown();
         return Err(error.into());
     }
     Ok(Advertisement {
         daemon,
         fullname,
-        instance,
+        service,
     })
 }
 

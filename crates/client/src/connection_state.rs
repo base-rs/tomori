@@ -54,6 +54,8 @@ pub enum ConnectionState {
         backends: Vec<protocol::BackendInfo>,
         /// The directories a space may run in, so the client can choose one without typing a path.
         roots: Vec<protocol::WorkspaceRoot>,
+        /// The environments a space may be bound to, so the client can choose one when creating a space.
+        environments: Vec<protocol::EnvironmentInfo>,
     },
     /// The connection ended; another attempt follows after `retry_in`.
     Disconnected {
@@ -106,6 +108,7 @@ mod tests {
                 server: "s".into(),
                 backends: vec![],
                 roots: vec![],
+                environments: vec![],
             }
             .is_connected()
         );

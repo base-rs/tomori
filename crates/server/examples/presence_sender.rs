@@ -208,6 +208,7 @@ fn main() {
                 backend: "fake".to_owned(),
                 directory,
                 session: None,
+                environment: None,
             });
             client.wait_for(|message| match message {
                 ServerMessage::Space { state } => Some(state.id.clone()),

@@ -13,13 +13,15 @@ use std::time::{Duration, Instant};
 
 use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use base_scheduler::Cancellation;
+use discovery::Counts;
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
-    AudioFrame, ClientMessage, Frame, FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant,
-    ServerMessage, WorkspaceRoot,
+    AudioFrame, ClientMessage, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
+    PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
 };
 
 use crate::backends::Backends;
+use crate::environments;
 use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::space::{AnswerOutcome, SpaceModel};
@@ -63,6 +65,8 @@ pub struct CreateRequest {
     pub backend: String,
     pub directory: String,
     pub session: Option<String>,
+    /// The identifier of the offered environment the space is bound to.
+    pub environment: String,
     /// The participant who asked; they join the space once it exists, unless they have joined another space meanwhile.
     pub creator: String,
     /// The space the creator was in when they asked.
@@ -90,8 +94,12 @@ pub struct Hub {
     slots: Arc<SpaceSlots>,
     /// The directories a space may run in, sent to clients in `Welcome` so they can choose one without typing a path.
     roots: RwLock<Vec<WorkspaceRoot>>,
+    /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
+    environments: Vec<EnvironmentInfo>,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
+    /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
+    counts_changed: Notify,
     this: Weak<Hub>,
 }
 
@@ -113,6 +121,8 @@ struct HubState {
     utterances: HashMap<UtteranceId, UtteranceRecord>,
     /// Set once shutdown has begun: no further spaces are registered.
     shutting_down: bool,
+    /// The counts when they were last compared, to notice a change.
+    counts: Counts,
 }
 
 struct ConnectionRecord {
@@ -238,6 +248,20 @@ fn error_message(error: impl Into<String>) -> ServerMessage {
 }
 
 impl HubState {
+    /// The spaces listed, which includes closed spaces until they are forgotten, and the greeted participants with a connection, whether in a space or in the lobby. A space still being created is not listed, so it is not counted.
+    fn counts(&self) -> Counts {
+        let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+        Counts {
+            spaces: count(self.spaces.len()),
+            participants: count(
+                self.participants
+                    .values()
+                    .filter(|record| record.connection.is_some())
+                    .count(),
+            ),
+        }
+    }
+
     fn outbox(&self, participant: &str) -> Option<&Arc<Outbox>> {
         let connection = self.participants.get(participant)?.connection?;
         Some(&self.connections.get(&connection)?.outbox)
@@ -449,7 +473,9 @@ impl Hub {
             jobs,
             slots,
             roots: RwLock::new(roots),
+            environments: environments::offered(),
             deferred_snapshot: Notify::new(),
+            counts_changed: Notify::new(),
             this: this.clone(),
         })
     }
@@ -464,6 +490,25 @@ impl Hub {
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
         self.state.lock().expect("hub state is never left poisoned")
+    }
+
+    /// How many spaces are listed and participants connected, as advertised; see `design/server.md`.
+    pub fn counts(&self) -> Counts {
+        self.lock().counts()
+    }
+
+    /// Wait for [`counts`](Self::counts) to change. Check them after creating the listener to avoid a lost wakeup.
+    pub fn listen_counts(&self) -> EventListener {
+        self.counts_changed.listen()
+    }
+
+    /// Notify listeners if the counts changed since this was last called. Called after every change that can add or remove a space or a connected participant.
+    fn recount(&self, state: &mut HubState) {
+        let counts = state.counts();
+        if counts != state.counts {
+            state.counts = counts;
+            self.counts_changed.notify(usize::MAX);
+        }
     }
 
     fn run(&self, deferred: Vec<Deferred>) {
@@ -617,6 +662,7 @@ impl Hub {
                     }
                 }
             }
+            self.recount(&mut state);
         }
         self.run(deferred);
     }
@@ -683,6 +729,8 @@ impl Hub {
             } else if let Some(record) = state.connections.get(&connection) {
                 record.outbox.message(error_message("Send hello first."));
             }
+            // Hello connects a participant, and joining or leaving may forget a closed space.
+            self.recount(&mut state);
         }
         self.run(deferred);
     }
@@ -784,6 +832,7 @@ impl Hub {
             source,
             backends,
             roots,
+            environments: self.environments.clone(),
         });
         match rejoin.filter(|space| state.space(space).is_some()) {
             Some(space) => state.join(&participant, &space),
@@ -822,6 +871,7 @@ impl Hub {
                 backend,
                 directory,
                 session,
+                environment,
             } => {
                 let checked = limits::check(&title, limits::TITLE_BYTES, "title")
                     .and_then(|()| limits::check(&directory, limits::DIRECTORY_BYTES, "directory"))
@@ -848,6 +898,14 @@ impl Hub {
                     );
                     return;
                 }
+                let environment =
+                    match environments::choose(&self.environments, environment.as_deref()) {
+                        Ok(environment) => environment,
+                        Err(error) => {
+                            state.error(participant, error);
+                            return;
+                        }
+                    };
                 // Refuse early when the limit is already reached. The supervisor checks the directory outside the lock and only then takes a place, so that a refused directory never holds one.
                 if self.slots.is_full() {
                     state.error(participant, self.slots.full_error());
@@ -858,6 +916,7 @@ impl Hub {
                     backend,
                     directory,
                     session,
+                    environment,
                     creator: participant.to_owned(),
                     creator_space: space.map(str::to_owned),
                 };
@@ -1385,14 +1444,16 @@ impl Hub {
             request.title.clone(),
             request.backend.clone(),
             request.directory.clone(),
+            request.environment.clone(),
             session,
             snapshot,
         );
         log::info!(
-            "Space {id} {:?} is bound to {} session {}.",
+            "Space {id} {:?} is bound to {} session {} in the {} environment.",
             model.title,
             model.backend,
-            model.session
+            model.session,
+            model.environment
         );
         state.spaces.push(SpaceRecord {
             model,
@@ -1414,6 +1475,7 @@ impl Hub {
         state.pump(&id);
         state.forget_closed();
         state.touch_lobby();
+        self.recount(&mut state);
         Some(id)
     }
 
@@ -1601,6 +1663,7 @@ impl Hub {
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
         state.touch_space(space);
+        self.recount(&mut state);
     }
 
     /// Announce an agent speech segment to the space's current participants, in order with its frames.
@@ -1704,6 +1767,120 @@ mod tests {
             Vec::new(),
             SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
         )
+    }
+
+    /// Connect and say hello as `participant`.
+    fn greet(hub: &Hub, participant: &str) -> ConnectionId {
+        let (connection, ..) = hub.connect(Cancellation::new());
+        hub.handle(
+            connection,
+            ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                participant: participant.to_owned(),
+                name: participant.to_owned(),
+                credentials: None,
+            },
+        );
+        connection
+    }
+
+    /// Register a space created by `creator`, as the supervisor does once its session has started.
+    fn create(hub: &Hub, creator: &str) -> String {
+        let (commands, _) = async_channel::unbounded();
+        let request = CreateRequest {
+            title: "Space".to_owned(),
+            backend: "fake".to_owned(),
+            directory: "/tmp".to_owned(),
+            session: None,
+            creator: creator.to_owned(),
+            creator_space: None,
+            environment: "sky".to_owned(),
+        };
+        hub.register_space(
+            &request,
+            "session".to_owned(),
+            Snapshot::default(),
+            commands,
+        )
+        .expect("the hub is not shutting down")
+    }
+
+    fn counts(spaces: u32, participants: u32) -> Counts {
+        Counts {
+            spaces,
+            participants,
+        }
+    }
+
+    /// Whether `action` notified a counts listener.
+    fn notifies(hub: &Hub, action: impl FnOnce()) -> bool {
+        let listener = hub.listen_counts();
+        action();
+        futures_lite::future::block_on(futures_lite::future::poll_once(listener)).is_some()
+    }
+
+    #[test]
+    fn counts_follow_connections_and_listed_spaces() {
+        let hub = hub();
+        assert_eq!(hub.counts(), counts(0, 0));
+
+        // A connection counts once it has said hello.
+        let (silent, ..) = hub.connect(Cancellation::new());
+        assert_eq!(hub.counts(), counts(0, 0));
+        let mut ada = 0;
+        assert!(notifies(&hub, || ada = greet(&hub, "ada")));
+        assert_eq!(hub.counts(), counts(0, 1));
+        let bob = greet(&hub, "bob");
+        assert_eq!(hub.counts(), counts(0, 2));
+        hub.disconnect(silent);
+
+        let mut space = String::new();
+        assert!(notifies(&hub, || space = create(&hub, "ada")));
+        assert_eq!(hub.counts(), counts(1, 2));
+
+        // Moving between a space and the lobby changes neither count.
+        assert!(!notifies(&hub, || {
+            hub.handle(
+                bob,
+                ClientMessage::Join {
+                    space: space.clone(),
+                },
+            );
+            hub.handle(bob, ClientMessage::Leave);
+        }));
+        assert_eq!(hub.counts(), counts(1, 2));
+
+        // A reconnect replaces the participant's connection; it does not add one.
+        let again = greet(&hub, "ada");
+        assert_eq!(hub.counts(), counts(1, 2));
+        hub.disconnect(ada);
+        assert_eq!(hub.counts(), counts(1, 2));
+
+        assert!(notifies(&hub, || hub.disconnect(again)));
+        assert_eq!(hub.counts(), counts(1, 1));
+
+        // A closed space is still listed, so it still counts.
+        assert!(!notifies(&hub, || hub.space_ended(&space, None)));
+        assert_eq!(hub.counts(), counts(1, 1));
+        hub.disconnect(bob);
+        assert_eq!(hub.counts(), counts(1, 0));
+    }
+
+    #[test]
+    fn forgotten_closed_spaces_are_no_longer_counted() {
+        let hub = hub();
+        let spaces: Vec<String> = (0..=CLOSED_SPACES)
+            .map(|_| create(&hub, "nobody"))
+            .collect();
+        let listed = u32::try_from(spaces.len()).unwrap();
+        assert_eq!(hub.counts(), counts(listed, 0));
+        for space in &spaces[..CLOSED_SPACES] {
+            hub.space_ended(space, None);
+        }
+        assert_eq!(hub.counts(), counts(listed, 0));
+        // Closing one more than are kept forgets the oldest.
+        assert!(notifies(&hub, || hub.space_ended(&spaces[CLOSED_SPACES], None)));
+        assert_eq!(hub.counts(), counts(listed - 1, 0));
     }
 
     #[test]

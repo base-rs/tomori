@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use protocol::PROTOCOL_VERSION;
 
-use crate::{NAME_KEY, PROTOCOL_KEY, SERVICE_TYPE};
+use crate::{NAME_KEY, PARTICIPANTS_KEY, PROTOCOL_KEY, SERVICE_TYPE, SPACES_KEY};
 
 /// The longest DNS label, which bounds the instance name.
 pub(crate) const INSTANCE_LIMIT: usize = 63;
@@ -29,6 +29,19 @@ pub struct Server {
     pub port: u16,
     /// The advertised protocol version, or `None` if the TXT record has no valid one.
     pub protocol: Option<u32>,
+    /// The advertised number of spaces, or `None` if the TXT record has no valid one, as from a server that predates it.
+    pub spaces: Option<u32>,
+    /// The advertised number of connected participants, or `None` if the TXT record has no valid one.
+    pub participants: Option<u32>,
+}
+
+/// What a server advertises about its use: see the crate documentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// The spaces the server lists, closed ones included.
+    pub spaces: u32,
+    /// The participants connected, whether in a space or in the lobby.
+    pub participants: u32,
 }
 
 impl Server {
@@ -55,11 +68,18 @@ pub enum Event {
 }
 
 /// The TXT properties a server advertises.
-pub(crate) fn properties(name: &str, protocol: u32) -> Vec<(String, String)> {
+pub(crate) fn properties(name: &str, protocol: u32, counts: Counts) -> Vec<(String, String)> {
     vec![
         (PROTOCOL_KEY.to_owned(), protocol.to_string()),
         (NAME_KEY.to_owned(), truncate(name, NAME_LIMIT).to_owned()),
+        (SPACES_KEY.to_owned(), counts.spaces.to_string()),
+        (PARTICIPANTS_KEY.to_owned(), counts.participants.to_string()),
     ]
+}
+
+/// A decimal `u32` TXT value; anything else, such as a sign, a fraction or an empty value, is unknown rather than a guess.
+fn number(value: Option<&str>) -> Option<u32> {
+    value.and_then(|value| value.trim().parse().ok())
 }
 
 /// `name` cut to at most `limit` bytes on a character boundary.
@@ -138,14 +158,15 @@ pub(crate) fn resolved<'a>(
     let name = property(NAME_KEY)
         .filter(|name| !name.is_empty())
         .map_or_else(|| instance.clone(), str::to_owned);
-    let protocol = property(PROTOCOL_KEY).and_then(|value| value.trim().parse().ok());
     let server = Server {
         instance,
         name,
         host: host.to_owned(),
         addresses,
         port,
-        protocol,
+        protocol: number(property(PROTOCOL_KEY)),
+        spaces: number(property(SPACES_KEY)),
+        participants: number(property(PARTICIPANTS_KEY)),
     };
     if server.is_compatible() {
         Event::Found(server)
@@ -179,20 +200,75 @@ mod tests {
     }
 
     #[test]
-    fn encodes_the_protocol_version_and_name() {
+    fn encodes_the_protocol_version_name_and_counts() {
+        let counts = Counts {
+            spaces: 2,
+            participants: 1,
+        };
         assert_eq!(
-            properties("Studio", 7),
+            properties("Studio", 7, counts),
             vec![
                 ("protocol".to_owned(), "7".to_owned()),
-                ("name".to_owned(), "Studio".to_owned())
+                ("name".to_owned(), "Studio".to_owned()),
+                ("spaces".to_owned(), "2".to_owned()),
+                ("participants".to_owned(), "1".to_owned()),
             ]
         );
     }
 
     #[test]
+    fn decodes_the_counts_it_encodes() {
+        let counts = Counts {
+            spaces: 3,
+            participants: u32::MAX,
+        };
+        let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts)
+            .into_iter()
+            .collect();
+        let Event::Found(server) = event(&txt) else {
+            panic!("expected Found");
+        };
+        assert_eq!(server.spaces, Some(3));
+        assert_eq!(server.participants, Some(u32::MAX));
+    }
+
+    #[test]
+    fn missing_or_malformed_counts_are_unknown() {
+        let protocol = PROTOCOL_VERSION.to_string();
+        // A server from before the counts were advertised is still found.
+        let Event::Found(server) = event(&lookup(&[("protocol", &protocol)])) else {
+            panic!("expected Found");
+        };
+        assert_eq!((server.spaces, server.participants), (None, None));
+        for value in ["", "two", "-1", "1.5", "4294967296", "0x2"] {
+            let Event::Found(server) = event(&lookup(&[
+                ("protocol", &protocol),
+                ("spaces", value),
+                ("participants", value),
+            ])) else {
+                panic!("expected Found");
+            };
+            assert_eq!(
+                (server.spaces, server.participants),
+                (None, None),
+                "{value:?}"
+            );
+        }
+        // Each count is read on its own.
+        let Event::Found(server) = event(&lookup(&[
+            ("protocol", &protocol),
+            ("spaces", " 0 "),
+            ("participants", "many"),
+        ])) else {
+            panic!("expected Found");
+        };
+        assert_eq!((server.spaces, server.participants), (Some(0), None));
+    }
+
+    #[test]
     fn truncates_long_names_on_a_character_boundary() {
         let name = "é".repeat(200);
-        let encoded = &properties(&name, 1)[1].1;
+        let encoded = &properties(&name, 1, Counts::default())[1].1;
         assert!(encoded.len() + "name=".len() <= 255);
         assert!(encoded.chars().all(|character| character == 'é'));
         assert_eq!(truncate("añb", 2), "a");

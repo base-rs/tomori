@@ -36,6 +36,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         backend: "fake".into(),
         directory: "/tmp".into(),
         session: None,
+        environment: None,
     });
     let error = ada.error();
     assert!(error.contains("title") && error.len() < 100, "{error}");
@@ -45,6 +46,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         backend: "B".repeat(600_000),
         directory: "/tmp".into(),
         session: None,
+        environment: None,
     });
     let error = ada.error();
     assert!(!error.contains("BBB"), "{error}");
@@ -142,6 +144,7 @@ fn the_lobby_listing_stays_within_the_budget() {
             backend: "fake".into(),
             directory: directory.clone(),
             session: None,
+            environment: None,
         });
         let title = format!("Space {index}");
         creator.space(|state| state.title == title);
