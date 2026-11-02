@@ -220,16 +220,25 @@ impl Scene {
         }
     }
 
-    /// What can be pointed at: every object, a little larger than it looks.
+    /// What can be pointed at: every object, a little larger than it looks. The create object stands straight ahead, so a box fits its plus.
     pub fn targets(&self) -> Vec<Target<Key>> {
         self.objects
             .iter()
-            .map(|object| Target {
-                key: object.key.clone(),
-                shape: Shape::Sphere {
-                    center: object.position,
-                    radius: object.size * TARGET_MARGIN,
-                },
+            .map(|object| {
+                let reach = object.size * TARGET_MARGIN;
+                Target {
+                    key: object.key.clone(),
+                    shape: match object.kind {
+                        Kind::Create { .. } => Shape::Box {
+                            center: object.position,
+                            half_extents: Vec3::new(reach, reach, object.size * 0.6),
+                        },
+                        _ => Shape::Sphere {
+                            center: object.position,
+                            radius: reach,
+                        },
+                    },
+                }
             })
             .collect()
     }
@@ -263,11 +272,7 @@ fn description(item: &Item) -> String {
 
 fn lines(item: &Item) -> Vec<String> {
     let mut lines = vec![clip(&item.label, LABEL_COLUMNS)];
-    lines.extend(
-        item.detail
-            .iter()
-            .map(|detail| clip(detail, LABEL_COLUMNS)),
-    );
+    lines.extend(item.detail.iter().map(|detail| clip(detail, LABEL_COLUMNS)));
     lines
 }
 
@@ -409,7 +414,13 @@ mod tests {
         Ring {
             step: Step::Backend,
             items: (0..count)
-                .map(|n| item(Key::Backend(format!("b{n}")), Kind::Choice, &format!("b{n}")))
+                .map(|n| {
+                    item(
+                        Key::Backend(format!("b{n}")),
+                        Kind::Choice,
+                        &format!("b{n}"),
+                    )
+                })
                 .collect(),
         }
     }
@@ -419,7 +430,9 @@ mod tests {
         let target = scene.object(key).unwrap().position;
         let ray = Ray::new(HOME, target - HOME).unwrap();
         let mut pointer = Pointer::default();
-        pointer.update(Some(ray), Some(1.0), &scene.targets()).chosen
+        pointer
+            .update(Some(ray), Some(1.0), &scene.targets())
+            .chosen
     }
 
     fn assert_separate(scene: &Scene) {
@@ -529,7 +542,13 @@ mod tests {
         let scene = Scene::layout(&lobby(5, Some(ring(6))));
         for object in &scene.objects {
             assert!(object.label.anchor.distance(object.position) < 0.25);
-            assert!(object.label.lines.iter().all(|line| line.len() <= LABEL_COLUMNS));
+            assert!(
+                object
+                    .label
+                    .lines
+                    .iter()
+                    .all(|line| line.len() <= LABEL_COLUMNS)
+            );
             let facing = facing(object.label.anchor);
             let towards = (HOME - object.label.anchor).with_y(0.0).normalize();
             assert!(facing.distance(towards) < 1e-5);

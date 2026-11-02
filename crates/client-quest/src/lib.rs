@@ -3,8 +3,8 @@
 
 #[cfg(target_os = "android")]
 mod android;
-#[allow(dead_code, reason = "wired into the headset in the following commits")]
 mod arrival;
+mod arrival_graphics;
 mod caption;
 mod capture;
 mod connection;
@@ -27,7 +27,6 @@ mod interaction;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
 mod playback;
-#[allow(dead_code, reason = "wired into arrival in the following commits")]
 mod pointing;
 mod server_choice;
 #[cfg(not(target_os = "android"))]

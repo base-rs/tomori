@@ -44,9 +44,15 @@ impl Ray {
 /// A simple shape to point at, in scene coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
-    Sphere { center: Vec3, radius: f32 },
+    Sphere {
+        center: Vec3,
+        radius: f32,
+    },
     /// An axis-aligned box.
-    Box { center: Vec3, half_extents: Vec3 },
+    Box {
+        center: Vec3,
+        half_extents: Vec3,
+    },
 }
 
 impl Shape {
@@ -261,8 +267,8 @@ mod tests {
 
     #[test]
     fn a_pose_points_along_its_negative_z_axis() {
-        let ray = Ray::from_pose(Vec3::Y, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
-            .unwrap();
+        let ray =
+            Ray::from_pose(Vec3::Y, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)).unwrap();
         assert!(ray.direction.distance(-Vec3::X) < 1e-5);
         assert_eq!(ray.origin, Vec3::Y);
         assert!(Ray::from_pose(Vec3::ZERO, Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)).is_none());
@@ -412,10 +418,7 @@ mod tests {
         let mut pointer = Pointer::default();
         pointer.update(Some(forward()), Some(0.3), &targets);
         // Losing the trigger, as on focus loss, ends the pull without choosing.
-        assert_eq!(
-            pointer.update(Some(forward()), None, &targets).chosen,
-            None
-        );
+        assert_eq!(pointer.update(Some(forward()), None, &targets).chosen, None);
         let pointing = pointer.update(Some(forward()), Some(1.0), &targets);
         assert_eq!(pointing.chosen, Some("space"));
         pointer.release();
