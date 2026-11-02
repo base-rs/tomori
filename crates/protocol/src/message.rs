@@ -104,6 +104,10 @@ pub enum ClientMessage {
     SetAttribution {
         enabled: bool,
     },
+    /// Switch the current space's session to one of the modes it offers. Any participant may switch it.
+    SetMode {
+        mode: String,
+    },
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,

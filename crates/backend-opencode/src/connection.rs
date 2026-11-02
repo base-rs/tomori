@@ -20,7 +20,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use backend::{Event, SessionSpec, SessionSummary, Snapshot, Worker};
+use backend::{Event, Modes, SessionSpec, SessionSummary, Snapshot, Worker};
 use base_http::body::ReadableBody;
 use base_http_client::{Client, Endpoint};
 use base_scheduler::{
@@ -43,6 +43,9 @@ use crate::wire;
 /// while a turn is genuinely running, which is why the cadence can be loose:
 /// it only matters once a turn has ended and the stream has not reported it.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many reconciliations list a session's agents again while OpenCode offers none.
+const LISTINGS: u8 = 30;
 
 /// The sender side of one session's event channel.
 #[derive(Clone)]
@@ -82,6 +85,13 @@ pub struct Registration {
     children: HashSet<String>,
     /// An event-triggered refresh failed and must be retried.
     workers_dirty: bool,
+    /// The agents the session offers and the one its prompts go to, as last confirmed by the server.
+    modes: Modes,
+    /// The session's directory, whose agents are its modes.
+    directory: String,
+    /// How many more times reconciliation lists the agents while none are offered: OpenCode answers an empty listing
+    /// while it loads a directory.
+    listings: u8,
 }
 
 /// The running state of a session as the server's record reports it, derived
@@ -114,6 +124,9 @@ impl Registration {
                 running: RunningState::Unknown,
                 children: HashSet::new(),
                 workers_dirty: false,
+                modes: Modes::default(),
+                directory: String::new(),
+                listings: LISTINGS,
             },
             rx,
         )
@@ -171,6 +184,12 @@ pub enum Command {
         id: String,
         form: String,
         answer: Value,
+        reply: async_channel::Sender<backend::Result<()>>,
+    },
+    /// Choose the agent for `id`'s later prompts.
+    SetMode {
+        id: String,
+        mode: String,
         reply: async_channel::Sender<backend::Result<()>>,
     },
     /// Close `id`'s session; when it is the last one, stop the connection.
@@ -461,14 +480,69 @@ fn sse_payload(group: &str) -> Option<String> {
     }
 }
 
-/// Register `id` in the map, returning its receiver.
+/// Register `id` in the map with its modes, returning its receiver.
 fn insert_registration(
     registrations: &mut HashMap<String, Registration>,
     id: String,
+    directory: &str,
+    modes: Modes,
 ) -> async_channel::Receiver<Event> {
-    let (registration, rx) = Registration::new();
+    let (mut registration, rx) = Registration::new();
+    registration.modes = modes;
+    registration.directory = directory.to_owned();
     registrations.insert(id, registration);
     rx
+}
+
+/// The agents offered in `directory` and the one the session described by `info` uses. A listing that fails leaves
+/// the session without offered modes rather than failing it; reconciliation lists them again.
+async fn modes(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    directory: &str,
+    info: &Value,
+    cancellation: &Cancellation,
+) -> Modes {
+    let offered = match api::list_agents(client, resolved, directory, cancellation).await {
+        Ok(agents) => wire::modes_from_agents(&agents),
+        Err(failure) => {
+            eprintln!("listing the agents of {directory}: {}", failure.message);
+            Vec::new()
+        }
+    };
+    let current = wire::current_mode(info, &offered);
+    Modes { offered, current }
+}
+
+/// List the agents of a session that offers none yet, and report them once there are some.
+async fn list_modes(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    registration: &mut Registration,
+    cancellation: &Cancellation,
+) {
+    if !registration.modes.offered.is_empty() || registration.listings == 0 {
+        return;
+    }
+    registration.listings -= 1;
+    let info = match &registration.modes.current {
+        Some(agent) => serde_json::json!({ "agent": agent }),
+        None => Value::Null,
+    };
+    let modes = modes(
+        client,
+        resolved,
+        &registration.directory,
+        &info,
+        cancellation,
+    )
+    .await;
+    if !modes.offered.is_empty() {
+        registration.modes = modes;
+        registration
+            .events
+            .deliver(Event::ModesChanged(registration.modes.clone()));
+    }
 }
 
 /// Feed one complete SSE event to every session it names; refresh the worker
@@ -486,16 +560,24 @@ async fn dispatch_events(
     let parents = worker_refresh_targets(&value, registrations);
     if let Some(session_id) = wire::session_id_of(&value)
         && let Some(registration) = registrations.get_mut(&session_id)
-        && let Some(event) = wire::event_for(
+    {
+        if let Some(agent) = wire::agent_switched(&value, &session_id) {
+            if registration.modes.current.as_deref() != Some(agent.as_str()) {
+                registration.modes.current = Some(agent);
+                registration
+                    .events
+                    .deliver(Event::ModesChanged(registration.modes.clone()));
+            }
+        } else if let Some(event) = wire::event_for(
             &value,
             &session_id,
             &mut registration
                 .seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-    {
-        registration.events.deliver(event);
+        ) {
+            registration.events.deliver(event);
+        }
     }
     for parent in parents {
         refresh_workers(client, resolved, registrations, &parent, cancellation).await;
@@ -573,7 +655,7 @@ async fn refresh_workers(
 /// path; the record is the backstop, so a missed idle event cannot leave a
 /// space — and the queue it gates — stuck on a stale busy state. A session
 /// whose record cannot be read keeps its last state: a transient failure is
-/// not a state change.
+/// not a state change. A session that offers no agents yet lists them again.
 async fn reconcile(
     client: &Client<'_>,
     resolved: &Resolved,
@@ -582,6 +664,9 @@ async fn reconcile(
 ) {
     let ids: Vec<String> = registrations.keys().cloned().collect();
     for id in ids {
+        if let Some(registration) = registrations.get_mut(&id) {
+            list_modes(client, resolved, registration, cancellation).await;
+        }
         let Some(running) = api::session_running(client, resolved, &id, cancellation)
             .await
             .ok()
@@ -661,7 +746,7 @@ async fn handle_command(
             true
         }
         Command::Create { spec, reply } => {
-            let result = api::create_session(
+            let result = match api::create_session(
                 client,
                 resolved,
                 &spec.directory,
@@ -669,18 +754,26 @@ async fn handle_command(
                 cancellation,
             )
             .await
-            .and_then(|info| {
-                let id = info
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| Failure {
+            {
+                Ok(info) => match info.get("id").and_then(Value::as_str) {
+                    Some(id) => {
+                        let modes =
+                            modes(client, resolved, &spec.directory, &info, cancellation).await;
+                        let rx = insert_registration(
+                            registrations,
+                            id.to_owned(),
+                            &spec.directory,
+                            modes,
+                        );
+                        Ok((id.to_owned(), rx))
+                    }
+                    None => Err(Failure {
                         status: None,
                         message: "the server did not return the new session's id".to_owned(),
-                    })?;
-                let rx = insert_registration(registrations, id.clone());
-                Ok((id, rx))
-            })
+                    }),
+                },
+                Err(failure) => Err(failure),
+            }
             .map_err(map_failure);
             reply.send(result).await.ok();
             true
@@ -690,29 +783,40 @@ async fn handle_command(
             directory,
             reply,
         } => {
-            let result = api::session_info(client, resolved, &id, cancellation)
-                .await
-                .and_then(|info| {
+            let result = match api::session_info(client, resolved, &id, cancellation).await {
+                Ok(info) => {
                     let session_directory = info
                         .get("location")
                         .and_then(|location| location.get("directory"))
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    if session_directory != directory {
-                        return Err(Failure {
+                    if session_directory == directory {
+                        let modes = modes(client, resolved, &directory, &info, cancellation).await;
+                        Ok(insert_registration(
+                            registrations,
+                            id.clone(),
+                            &directory,
+                            modes,
+                        ))
+                    } else {
+                        Err(Failure {
                             status: Some(404),
                             message: "the session is not in that directory".to_owned(),
-                        });
+                        })
                     }
-                    Ok(())
-                })
-                .map(|()| insert_registration(registrations, id.clone()))
-                .map_err(map_failure);
+                }
+                Err(failure) => Err(failure),
+            }
+            .map_err(map_failure);
             reply.send(result).await.ok();
             true
         }
         Command::Snapshot { id, reply } => {
-            let result = snapshot(client, resolved, &id, cancellation)
+            let modes = registrations
+                .get(&id)
+                .map(|registration| registration.modes.clone())
+                .unwrap_or_default();
+            let result = snapshot(client, resolved, &id, modes, cancellation)
                 .await
                 .map_err(map_failure);
             if let Ok(snapshot) = &result
@@ -733,6 +837,32 @@ async fn handle_command(
             let result = api::send_prompt(client, resolved, &id, &key, &text, cancellation)
                 .await
                 .map_err(map_failure);
+            reply.send(result).await.ok();
+            true
+        }
+        Command::SetMode { id, mode, reply } => {
+            // OpenCode accepts any agent name, so only an offered one is passed on. The mode changes when the server
+            // confirms the switch on the event stream.
+            if let Some(registration) = registrations.get_mut(&id) {
+                list_modes(client, resolved, registration, cancellation).await;
+            }
+            let offered = registrations.get(&id).is_some_and(|registration| {
+                registration
+                    .modes
+                    .offered
+                    .iter()
+                    .any(|offered| offered.id == mode)
+            });
+            let result = if offered {
+                api::switch_agent(client, resolved, &id, &mode, cancellation)
+                    .await
+                    .map_err(map_failure)
+            } else {
+                Err(backend::Error::new(
+                    backend::ErrorKind::Invalid,
+                    format!("the session does not offer the {mode} agent"),
+                ))
+            };
             reply.send(result).await.ok();
             true
         }
@@ -775,11 +905,13 @@ async fn snapshot(
     client: &Client<'_>,
     resolved: &Resolved,
     id: &str,
+    modes: Modes,
     cancellation: &Cancellation,
 ) -> std::result::Result<Snapshot, Failure> {
     let parts = api::SnapshotParts::fetch(client, resolved, id, cancellation).await?;
     let messages = snapshot_messages(&parts.messages);
     Ok(Snapshot {
+        modes,
         busy: Some(parts.busy),
         messages,
         permission: parts.permission(),
@@ -890,8 +1022,13 @@ mod tests {
 
     fn registrations() -> HashMap<String, Registration> {
         let mut registrations = HashMap::new();
-        insert_registration(&mut registrations, "parent".into());
-        insert_registration(&mut registrations, "other".into());
+        insert_registration(
+            &mut registrations,
+            "parent".into(),
+            "/tmp",
+            Modes::default(),
+        );
+        insert_registration(&mut registrations, "other".into(), "/tmp", Modes::default());
         registrations
     }
 
@@ -1042,7 +1179,13 @@ mod tests {
             )
             .unwrap();
             let mut registrations = HashMap::new();
-            let events = insert_registration(&mut registrations, "parent".into());
+            let events = insert_registration(
+                &mut registrations,
+                "parent".into(),
+                "/tmp",
+                Modes::default(),
+            );
+            registrations.get_mut("parent").unwrap().listings = 0;
             registrations
                 .get_mut("parent")
                 .unwrap()
@@ -1153,7 +1296,13 @@ mod tests {
             )
             .unwrap();
             let mut registrations = HashMap::new();
-            let events = insert_registration(&mut registrations, "parent".into());
+            let events = insert_registration(
+                &mut registrations,
+                "parent".into(),
+                "/tmp",
+                Modes::default(),
+            );
+            registrations.get_mut("parent").unwrap().listings = 0;
             registrations
                 .get_mut("parent")
                 .unwrap()

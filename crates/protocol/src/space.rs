@@ -73,6 +73,44 @@ pub struct SpaceState {
     pub attribution: bool,
     /// A space-level problem, such as a lost backend connection. Shared state is retained.
     pub error: Option<String>,
+    /// The id of the session's current mode, as the agent last reported it. Absent from older servers.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The modes the session offers, in the order the agent's own interface steps through them. Absent from older
+    /// servers.
+    #[serde(default)]
+    pub modes: Vec<Mode>,
+}
+
+impl SpaceState {
+    /// The mode after the current one in the agent's order, wrapping around, as the agent's terminal key steps. A
+    /// current mode that is not offered steps to the first. `None` when the session offers no modes.
+    pub fn next_mode(&self) -> Option<&Mode> {
+        let index = self
+            .modes
+            .iter()
+            .position(|mode| Some(&mode.id) == self.mode.as_ref())
+            .map_or(0, |index| (index + 1) % self.modes.len());
+        self.modes.get(index)
+    }
+
+    /// The current mode, when it is one the session offers.
+    pub fn current_mode(&self) -> Option<&Mode> {
+        self.modes
+            .iter()
+            .find(|mode| Some(&mode.id) == self.mode.as_ref())
+    }
+}
+
+/// A mode a session can be switched to, such as a Claude Code permission mode or an OpenCode primary agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mode {
+    /// The agent's identifier, sent back in [`crate::ClientMessage::SetMode`].
+    pub id: String,
+    /// The name the agent's interface shows.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +243,47 @@ pub struct Participant {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn modes(current: Option<&str>) -> SpaceState {
+        SpaceState {
+            mode: current.map(Into::into),
+            modes: ["default", "acceptEdits", "plan", "auto"]
+                .map(|id| Mode {
+                    id: id.into(),
+                    name: id.into(),
+                    description: None,
+                })
+                .into(),
+            ..SpaceState::default()
+        }
+    }
+
+    #[test]
+    fn the_next_mode_follows_the_agents_order_and_wraps() {
+        let next = |current| modes(current).next_mode().map(|mode| mode.id.clone());
+        assert_eq!(next(Some("default")).as_deref(), Some("acceptEdits"));
+        assert_eq!(next(Some("plan")).as_deref(), Some("auto"));
+        assert_eq!(next(Some("auto")).as_deref(), Some("default"));
+        // A mode that is not offered, such as one set by the user's configuration, steps to the first.
+        assert_eq!(next(Some("dontAsk")).as_deref(), Some("default"));
+        assert_eq!(next(None).as_deref(), Some("default"));
+        assert_eq!(SpaceState::default().next_mode(), None);
+        assert_eq!(modes(Some("dontAsk")).current_mode(), None);
+    }
+
+    #[test]
+    fn modes_are_optional_on_the_wire() {
+        let mut json = serde_json::to_value(SpaceState::default()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("mode");
+        object.remove("modes");
+        object.insert("future".into(), serde_json::json!(true));
+        let state: SpaceState = serde_json::from_value(json).unwrap();
+        assert_eq!(state, SpaceState::default());
+        let mode: Mode =
+            serde_json::from_value(serde_json::json!({"id": "plan", "name": "Plan"})).unwrap();
+        assert_eq!(mode.description, None);
+    }
 
     #[test]
     fn approvals_list_options_only_when_offered() {

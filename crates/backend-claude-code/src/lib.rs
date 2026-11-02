@@ -23,6 +23,7 @@ use backend::{Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummar
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
+use protocol::State;
 pub use session::ClaudeCodeSession;
 use workers::Workers;
 
@@ -37,7 +38,19 @@ pub struct Config {
     pub grace: Duration,
     /// Where Claude Code keeps session transcripts, normally `~/.claude/projects`.
     pub projects: Option<PathBuf>,
+    /// The permission mode every process starts in, passed as `--permission-mode`: [`DEFAULT_PERMISSION_MODE`] unless
+    /// the server's operator chooses another. Claude Code starts in its default mode instead of one it refuses.
+    pub permission_mode: String,
 }
+
+/// The permission mode sessions start in, so that a space works autonomously; see `design/agent-backends.md`.
+pub const DEFAULT_PERMISSION_MODE: &str = "auto";
+
+/// Arguments with which Claude Code offers bypass permissions mode.
+const BYPASS_ARGUMENTS: [&str; 2] = [
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+];
 
 impl Default for Config {
     fn default() -> Self {
@@ -49,6 +62,7 @@ impl Default for Config {
             arguments: Vec::new(),
             grace: Duration::from_secs(5),
             projects: configuration.map(|directory| directory.join("projects")),
+            permission_mode: DEFAULT_PERMISSION_MODE.into(),
         }
     }
 }
@@ -78,9 +92,24 @@ impl ClaudeCode {
             // Send every permission prompt to this process as a `can_use_tool` control request.
             "--permission-prompt-tool",
             "stdio",
+            "--permission-mode",
+            &self.config.permission_mode,
         ]);
         command.current_dir(directory);
         command
+    }
+
+    /// The protocol state of a process started by [`ClaudeCode::command`].
+    fn state(&self, session: String, workers: Workers) -> State {
+        // Claude Code offers bypass permissions mode only to a process launched with bypassing allowed, which starting
+        // in that mode also does.
+        let bypass = self.config.permission_mode == protocol::BYPASS_MODE
+            || self
+                .config
+                .arguments
+                .iter()
+                .any(|argument| BYPASS_ARGUMENTS.contains(&argument.as_str()));
+        State::starting(session, workers, &self.config.permission_mode, bypass)
     }
 
     /// The directory holding transcripts for sessions started in `directory`. Claude Code names it after the canonical
@@ -139,7 +168,11 @@ impl backend::Backend for ClaudeCode {
         if !spec.title.is_empty() {
             command.args(["--name", &spec.title]);
         }
-        ClaudeCodeSession::spawn(command, id, self.config.grace, Workers::default())
+        ClaudeCodeSession::spawn(
+            command,
+            self.state(id, Workers::default()),
+            self.config.grace,
+        )
     }
 
     async fn attach(&self, id: &str, directory: &str) -> Result<ClaudeCodeSession> {
@@ -175,7 +208,7 @@ impl backend::Backend for ClaudeCode {
         };
         let mut command = self.command(directory);
         command.args(["--resume", id]);
-        ClaudeCodeSession::spawn(command, id.into(), self.config.grace, workers)
+        ClaudeCodeSession::spawn(command, self.state(id.into(), workers), self.config.grace)
     }
 }
 

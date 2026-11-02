@@ -318,6 +318,63 @@ pub async fn send_prompt<'scope>(
     Ok(())
 }
 
+/// `GET /api/agent?location[directory]=`: the agents configured for a directory, in OpenCode's order. The first call
+/// for a directory the server has not loaded yet answers an empty list while it loads, so an empty answer is retried a
+/// few times.
+pub async fn list_agents<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    directory: &str,
+    cancellation: &Cancellation,
+) -> Result<Vec<Value>, Failure> {
+    let path = format!(
+        "/api/agent?location%5Bdirectory%5D={}",
+        urlencoding(directory)
+    );
+    let mut agents = Vec::new();
+    for _ in 0..3 {
+        let response = exchange(
+            client,
+            get(&path),
+            resolved.authorization_header().as_deref(),
+            cancellation,
+        )
+        .await?;
+        let value = read_json(response).await?;
+        agents = value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !agents.is_empty() {
+            break;
+        }
+    }
+    Ok(agents)
+}
+
+/// `POST /api/session/:id/agent`: choose the agent that answers the session's later prompts. OpenCode confirms with a
+/// `session.next.agent.switched` event.
+pub async fn switch_agent<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    agent: &str,
+    cancellation: &Cancellation,
+) -> Result<(), Failure> {
+    let path = format!("/api/session/{}/agent", urlencoding(session_id));
+    let payload = serde_json::json!({ "agent": agent });
+    let response = exchange(
+        client,
+        post(&path, &payload),
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    read_json(response).await?;
+    Ok(())
+}
+
 /// `POST /api/session/:id/interrupt`: stop the running turn.
 pub async fn interrupt<'scope>(
     client: &Client<'scope>,

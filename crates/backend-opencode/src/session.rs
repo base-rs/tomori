@@ -136,6 +136,17 @@ impl Session for OpenCodeSession {
         }
     }
 
+    fn set_mode(&self, mode: &str) -> impl std::future::Future<Output = Result<()>> + Send {
+        let id = self.inner.id.clone();
+        let commands = self.inner.commands.clone();
+        let mode = mode.to_owned();
+        async move {
+            commands
+                .reply_with(move |reply| Command::SetMode { id, mode, reply })
+                .await
+        }
+    }
+
     fn interrupt(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
         let commands = self.inner.commands.clone();
