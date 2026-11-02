@@ -3,10 +3,14 @@
 
 //! Bonjour discovery of Tomori servers: DNS service discovery (RFC 6763) over multicast DNS (RFC 6762).
 //!
-//! A server [`advertise`]s an instance of the service type [`SERVICE_TYPE`] (`_tomori._tcp`) with two TXT keys:
+//! A server [`advertise`]s an instance of the service type [`SERVICE_TYPE`] (`_tomori._tcp`) with four TXT keys:
 //!
 //! - `protocol=<u32>`: the [`protocol::PROTOCOL_VERSION`] the server speaks.
 //! - `name=<display name>`: the name to show in a server list. The DNS-SD instance name normally equals it, but the instance may be renamed (`Name (2)`) to resolve a conflict on the network.
+//! - `spaces=<u32>`: how many spaces the server lists, closed ones included.
+//! - `participants=<u32>`: how many participants are connected, whether in a space or in the lobby.
+//!
+//! The counts are [`Counts`]; [`Advertisement::update`] re-announces them as they change. A browser reads a missing or malformed count as unknown, so servers from before the counts were added are still listed, with no counts.
 //!
 //! A client [`browse`]s and receives [`Event`]s from a plain blocking channel; no async runtime is needed. Servers whose protocol version differs from this build's are reported as [`Event::Incompatible`], never as [`Event::Found`]. [`Servers`] folds events into a list.
 //!
@@ -56,7 +60,7 @@ use std::fmt;
 
 pub use advertise::{Advertisement, advertise};
 pub use browse::{Browser, browse};
-pub use record::{Event, Server};
+pub use record::{Counts, Event, Server};
 pub use servers::Servers;
 pub use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 
@@ -68,6 +72,12 @@ pub const PROTOCOL_KEY: &str = "protocol";
 
 /// The TXT key holding the display name.
 pub const NAME_KEY: &str = "name";
+
+/// The TXT key holding the number of spaces as a decimal `u32`.
+pub const SPACES_KEY: &str = "spaces";
+
+/// The TXT key holding the number of connected participants as a decimal `u32`.
+pub const PARTICIPANTS_KEY: &str = "participants";
 
 /// A failure to start advertising or browsing, such as no usable network interface or socket.
 #[derive(Debug)]

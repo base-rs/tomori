@@ -38,7 +38,7 @@ pub use hub::CLOSED_SPACES;
 pub use offline::OfflineTranscriber;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
-pub use server::{DEFAULT_PARTICIPANT_RETENTION, Server, bind};
+pub use server::{COUNTS_INTERVAL, DEFAULT_PARTICIPANT_RETENTION, Server, bind};
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
 pub use voice::SpeechMode;
 pub use workspace::{
