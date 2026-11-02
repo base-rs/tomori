@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use backend::{
     AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Permission,
@@ -233,9 +233,10 @@ struct FakeSessionInner {
 }
 
 impl FakeSession {
-    fn ensure_current(&self) -> Result<()> {
-        if *self.inner.bound.lock().unwrap() == Some(self.handle.generation) {
-            Ok(())
+    fn current_binding(&self) -> Result<MutexGuard<'_, Option<u64>>> {
+        let binding = self.inner.bound.lock().unwrap();
+        if *binding == Some(self.handle.generation) {
+            Ok(binding)
         } else {
             Err(Error::new(
                 ErrorKind::Closed,
@@ -361,7 +362,7 @@ impl Session for FakeSession {
     }
 
     async fn snapshot(&self) -> Result<Snapshot> {
-        self.ensure_current()?;
+        let _binding = self.current_binding()?;
         if self.inner.snapshot_failure.load(Ordering::SeqCst) {
             return Err(Error::new(ErrorKind::Unavailable, "snapshot unavailable"));
         }
@@ -375,7 +376,7 @@ impl Session for FakeSession {
     }
 
     async fn send(&self, prompt: Prompt) -> Result<()> {
-        self.ensure_current()?;
+        let _binding = self.current_binding()?;
         if !self
             .inner
             .delivered
@@ -397,7 +398,7 @@ impl Session for FakeSession {
     }
 
     async fn decide(&self, permission: &str, decision: Decision) -> Result<()> {
-        self.ensure_current()?;
+        let _binding = self.current_binding()?;
         self.inner
             .log
             .lock()
@@ -411,7 +412,7 @@ impl Session for FakeSession {
     }
 
     async fn answer(&self, question: &str, answers: Vec<(String, AnswerValue)>) -> Result<()> {
-        self.ensure_current()?;
+        let _binding = self.current_binding()?;
         self.inner
             .log
             .lock()
@@ -425,7 +426,7 @@ impl Session for FakeSession {
     }
 
     async fn set_mode(&self, mode: &str) -> Result<()> {
-        self.ensure_current()?;
+        let _binding = self.current_binding()?;
         self.inner.log.lock().unwrap().modes.push(mode.to_owned());
         let modes = {
             let mut modes = self.inner.modes.lock().unwrap();
@@ -443,7 +444,7 @@ impl Session for FakeSession {
     }
 
     async fn interrupt(&self) -> Result<()> {
-        self.ensure_current()?;
+        let _binding = self.current_binding()?;
         self.inner.log.lock().unwrap().interrupts += 1;
         self.emit(Event::Idle);
         Ok(())

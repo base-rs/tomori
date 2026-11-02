@@ -410,11 +410,10 @@ fn a_fake_reattachment_preserves_pending_events_and_snapshot_requests() {
     };
     old.emit(Event::PermissionRequested(permission.clone()));
     let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    let snapshot = futures_lite::future::block_on(replacement.snapshot()).unwrap();
     assert_eq!(
-        futures_lite::future::block_on(replacement.snapshot())
-            .unwrap()
-            .permissions,
-        [permission.clone()]
+        snapshot.permissions.as_slice(),
+        std::slice::from_ref(&permission)
     );
     assert!(
         matches!(futures_lite::future::block_on(replacement.next_event()), Ok(Event::PermissionRequested(found)) if found == permission)

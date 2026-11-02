@@ -51,6 +51,21 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SNAPSHOTS: usize = 16;
 const MAX_RECONCILIATIONS: usize = 16;
+/// Bound worker identities without changing them, and bound display titles
+/// with a visible truncation marker.
+const MAX_WORKER_ID_BYTES: usize = 1024;
+const MAX_WORKER_TITLE_BYTES: usize = 1024;
+
+fn bounded_worker_title(title: &str) -> String {
+    if title.len() <= MAX_WORKER_TITLE_BYTES {
+        return title.to_owned();
+    }
+    let mut end = MAX_WORKER_TITLE_BYTES - '…'.len_utf8();
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &title[..end])
+}
 
 /// How many reconciliations list a session's agents again while OpenCode offers none.
 const LISTINGS: u8 = 30;
@@ -108,6 +123,7 @@ pub struct Events {
     pending_workers: Arc<Mutex<PendingWorkers>>,
     worker_incomplete: Arc<AtomicBool>,
     ordinary_incomplete: Arc<AtomicBool>,
+    consumer_started: Arc<AtomicBool>,
 }
 
 /// A session's event receiver and the identity of its specific registration.
@@ -119,6 +135,7 @@ pub(crate) struct RegistrationEvents {
     watermark: Arc<AtomicU64>,
     prefer_workers: Arc<AtomicBool>,
     ordinary_incomplete: Arc<AtomicBool>,
+    consumer_started: Arc<AtomicBool>,
     pub(crate) identity: Arc<AtomicU64>,
 }
 
@@ -152,6 +169,7 @@ impl RegistrationEvents {
     }
 
     pub(crate) async fn recv(&self) -> std::result::Result<QueuedEvent, async_channel::RecvError> {
+        self.consumer_started.store(true, Ordering::Release);
         match self.try_recv() {
             Ok(event) => return Ok(event),
             Err(async_channel::TryRecvError::Closed) => return Err(async_channel::RecvError),
@@ -185,6 +203,7 @@ impl Events {
         let watermark = Arc::new(AtomicU64::new(0));
         let pending = Arc::new(Mutex::new(PendingWorkers::default()));
         let ordinary_incomplete = Arc::new(AtomicBool::new(false));
+        let consumer_started = Arc::new(AtomicBool::new(false));
         (
             Self {
                 tx,
@@ -194,6 +213,7 @@ impl Events {
                 pending_workers: pending.clone(),
                 worker_incomplete: Arc::new(AtomicBool::new(false)),
                 ordinary_incomplete: ordinary_incomplete.clone(),
+                consumer_started: consumer_started.clone(),
             },
             RegistrationEvents {
                 receiver: rx,
@@ -202,6 +222,7 @@ impl Events {
                 watermark,
                 prefer_workers: Arc::new(AtomicBool::new(true)),
                 ordinary_incomplete,
+                consumer_started,
                 identity,
             },
         )
@@ -215,8 +236,7 @@ impl Events {
                 // Ordinary events cannot be reconstructed reliably. Closing
                 // the channel makes the loss visible instead of silently
                 // presenting an incomplete session as current.
-                self.ordinary_incomplete.store(true, Ordering::Release);
-                self.tx.close();
+                self.mark_ordinary_incomplete();
                 false
             }
             Err(async_channel::TrySendError::Closed(_)) => false,
@@ -226,6 +246,11 @@ impl Events {
     /// Retryable state events are allowed to wait for ordinary channel space.
     fn try_deliver_state(&self, event: Event) -> bool {
         self.tx.try_send(QueuedEvent::Ordinary(event)).is_ok()
+    }
+
+    fn mark_ordinary_incomplete(&self) {
+        self.ordinary_incomplete.store(true, Ordering::Release);
+        self.tx.close();
     }
 
     fn publish_worker_update(&self, update: PendingWorkerUpdate) -> bool {
@@ -384,15 +409,23 @@ impl Registration {
     }
 
     fn publish_modes(&mut self) {
-        self.modes_dirty = !self
-            .events
-            .try_deliver_state(Event::ModesChanged(self.modes.clone()));
+        self.modes_dirty = !self.deliver_state(Event::ModesChanged(self.modes.clone()));
+    }
+
+    fn deliver_state(&self, event: Event) -> bool {
+        let delivered = self.events.try_deliver_state(event);
+        if !delivered && !self.events.consumer_started.load(Ordering::Acquire) {
+            // A retry after snapshot acceptance is too late to make the
+            // initial busy/mode state safe. Refuse the bootstrap instead.
+            self.events.mark_ordinary_incomplete();
+        }
+        delivered
     }
 
     fn reconcile_running(&mut self, running: RunningState) {
         if self.running != running
             && let Some(event) = running.event()
-            && self.events.try_deliver_state(event)
+            && self.deliver_state(event)
         {
             self.running = running;
         }
@@ -418,6 +451,21 @@ impl Registration {
                 backend::ErrorKind::Unavailable,
                 "Worker observation exceeds the supported limit.",
             ));
+        }
+        for worker in workers.iter_mut() {
+            if worker.id.is_empty()
+                || worker.id.len() > MAX_WORKER_ID_BYTES
+                || worker
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| parent.is_empty() || parent.len() > MAX_WORKER_ID_BYTES)
+            {
+                return Err(backend::Error::new(
+                    backend::ErrorKind::Unavailable,
+                    "A worker identity exceeds the supported size.",
+                ));
+            }
+            worker.title = bounded_worker_title(&worker.title);
         }
         let discovering = self.discovering_workers();
         if discovering {
@@ -1128,7 +1176,7 @@ fn dispatch_events(event: &str, registrations: &mut HashMap<String, Registration
                 _ => None,
             };
             if let Some(running) = running {
-                if registration.events.try_deliver_state(event) {
+                if registration.deliver_state(event) {
                     registration.running = running;
                 }
             } else {
@@ -1168,6 +1216,18 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
         return;
     };
     for (root, registration) in registrations {
+        let parent = data.get("parentID").and_then(Value::as_str);
+        if child.len() > MAX_WORKER_ID_BYTES
+            || parent.is_some_and(|parent| parent.len() > MAX_WORKER_ID_BYTES)
+        {
+            let relevant = parent == Some(root.as_str())
+                || parent.is_some_and(|parent| registration.children.contains_key(parent))
+                || registration.children.contains_key(child);
+            if relevant {
+                registration.mark_workers_incomplete();
+            }
+            continue;
+        }
         let discovering = registration.discovering_workers();
         if !discovering {
             registration.clear_bootstrap_journals();
@@ -1195,7 +1255,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                         change.0 = Some(state);
                     }
                     if let Some(title) = title {
-                        change.1 = Some(title.to_owned());
+                        change.1 = Some(bounded_worker_title(title));
                     }
                 } else {
                     registration.mark_workers_incomplete();
@@ -1204,7 +1264,6 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
         }
         let changed = match kind {
             "session.created" => {
-                let parent = data.get("parentID").and_then(Value::as_str);
                 if child == root || parent == Some(child) {
                     false
                 } else if parent != Some(root.as_str())
@@ -1223,8 +1282,8 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                                     title: data
                                         .get("title")
                                         .and_then(Value::as_str)
-                                        .unwrap_or("worker")
-                                        .to_owned(),
+                                        .map(bounded_worker_title)
+                                        .unwrap_or_else(|| "worker".to_owned()),
                                     state: WorkerState::Unknown,
                                 },
                             );
@@ -1249,8 +1308,8 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                             title: data
                                 .get("title")
                                 .and_then(Value::as_str)
-                                .unwrap_or("worker")
-                                .to_owned(),
+                                .map(bounded_worker_title)
+                                .unwrap_or_else(|| "worker".to_owned()),
                             state: WorkerState::Unknown,
                         },
                     );
@@ -1278,9 +1337,14 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                 registration.children.get_mut(child),
                 data.get("title").and_then(Value::as_str),
             ) {
-                (Some(worker), Some(title)) if worker.title != title => {
-                    worker.title = title.to_owned();
-                    true
+                (Some(worker), Some(title)) => {
+                    let title = bounded_worker_title(title);
+                    if worker.title == title {
+                        false
+                    } else {
+                        worker.title = title;
+                        true
+                    }
                 }
                 _ => false,
             },
@@ -1795,6 +1859,59 @@ mod tests {
     }
 
     #[test]
+    fn live_worker_titles_are_utf8_bounded_and_oversized_ids_are_not_guessed() {
+        let mut registrations = HashMap::new();
+        let parent_events = insert_registration(
+            &mut registrations,
+            "parent".into(),
+            "/tmp",
+            Modes::default(),
+        );
+        let _other_events =
+            insert_registration(&mut registrations, "other".into(), "/tmp", Modes::default());
+        for id in ["parent", "other"] {
+            let registration = registrations.get_mut(id).unwrap();
+            registration.install_workers(&mut Vec::new()).unwrap();
+            registration
+                .events
+                .snapshot_reply(Snapshot::default())
+                .accept()
+                .unwrap();
+        }
+        let title = "é".repeat(MAX_WORKER_TITLE_BYTES);
+        apply_worker_event(
+            &json!({"type":"session.created","data":{"sessionID":"child","parentID":"parent","title":title}}),
+            &mut registrations,
+        );
+        let stored = &registrations["parent"].children["child"].title;
+        assert!(stored.len() <= MAX_WORKER_TITLE_BYTES && stored.ends_with('…'));
+        let oversized = "x".repeat(MAX_WORKER_ID_BYTES + 1);
+        apply_worker_event(
+            &json!({"type":"session.created","data":{"sessionID":oversized,"parentID":"parent"}}),
+            &mut registrations,
+        );
+        assert!(registrations["parent"].workers_incomplete);
+        assert!(!registrations["other"].workers_incomplete);
+        assert!(matches!(
+            parent_events.try_recv().unwrap().into_current(),
+            Some(Event::WorkersUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_snapshot_rejects_an_oversized_worker_identity() {
+        let (mut registration, _events) = Registration::new();
+        let mut workers = vec![Worker {
+            id: "x".repeat(MAX_WORKER_ID_BYTES + 1),
+            parent: Some("parent".into()),
+            title: "Worker".into(),
+            state: WorkerState::Running,
+        }];
+        assert!(registration.install_workers(&mut workers).is_err());
+        assert!(!registration.workers_ready);
+    }
+
+    #[test]
     fn completion_and_resumption_do_not_remove_the_child_but_deletion_does() {
         let mut registrations = registrations();
         registrations.get_mut("parent").unwrap().children.insert(
@@ -1897,6 +2014,16 @@ mod tests {
     #[test]
     fn mode_and_running_changes_retry_when_ordinary_events_are_full() {
         let (mut registration, events) = Registration::new();
+        let mut initial = Vec::new();
+        registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        let mut waiting = Box::pin(events.recv());
+        assert!(block_on(futures_lite::future::poll_once(waiting.as_mut())).is_none());
+        drop(waiting);
         registration.running = RunningState::Running;
         registration.modes.current = Some("plan".into());
         for _ in 0..1024 {
@@ -1917,6 +2044,65 @@ mod tests {
         assert!(matches!(
             events.try_recv().unwrap().into_current(),
             Some(Event::Idle)
+        ));
+    }
+
+    #[test]
+    fn a_lost_busy_or_mode_event_refuses_an_unaccepted_snapshot() {
+        for kind in ["busy", "mode"] {
+            let mut registrations = HashMap::new();
+            let events = insert_registration(
+                &mut registrations,
+                "parent".into(),
+                "/tmp",
+                Modes::default(),
+            );
+            let registration = registrations.get_mut("parent").unwrap();
+            let mut workers = Vec::new();
+            registration.install_workers(&mut workers).unwrap();
+            let snapshot = registration.events.snapshot_reply(Snapshot::default());
+            for _ in 0..1024 {
+                assert!(registration.events.deliver(Event::Busy));
+            }
+            let event = match kind {
+                "busy" => json!({"type":"session.execution.started","data":{"sessionID":"parent"}}),
+                "mode" => json!({"type":"session.agent.selected","data":{"sessionID":"parent","agent":"plan"}}),
+                _ => unreachable!(),
+            }.to_string();
+            dispatch_events(&event, &mut registrations);
+            assert!(snapshot.accept().is_err(), "{kind}");
+            assert!(matches!(
+                events.try_recv(),
+                Err(async_channel::TryRecvError::Closed)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_lost_state_event_after_snapshot_acceptance_closes_before_consumption() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(
+            &mut registrations,
+            "parent".into(),
+            "/tmp",
+            Modes::default(),
+        );
+        let registration = registrations.get_mut("parent").unwrap();
+        registration.install_workers(&mut Vec::new()).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        for _ in 0..1024 {
+            assert!(registration.events.deliver(Event::Busy));
+        }
+        let event =
+            json!({"type":"session.execution.started","data":{"sessionID":"parent"}}).to_string();
+        dispatch_events(&event, &mut registrations);
+        assert!(matches!(
+            events.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
         ));
     }
 
