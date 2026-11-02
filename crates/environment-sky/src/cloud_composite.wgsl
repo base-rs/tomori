@@ -10,7 +10,7 @@ struct Composite {
 fn composite_fragment(in: RayVertex) -> Composite {
     let direction = normalize(in.far - in.near);
     let interval = cloud_interval(in.near, direction);
-    if interval.y <= interval.x { discard; }
+    if interval.y <= interval.x || !sees_reveal(in.near, direction) { discard; }
     let color = textureSampleLevel(clouds, cloud_sampler, in.uv, 0.0);
     if color.a < 0.002 { discard; }
     let entry = in.near + direction * interval.x;

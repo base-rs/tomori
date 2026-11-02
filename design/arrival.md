@@ -14,6 +14,12 @@ Choosing a space and creating one happen in one view. Once connected, the partic
 
 Spaces are visually distinct from each other. Each space's object has its own appearance, at least a colour and a form, derived deterministically from the space's identifier. It therefore looks the same to every participant and on every visit, and different spaces very likely look different. It also shows the space's live status: its activity (idle, running, waiting or closed), how many participants it has, and its title. The approach to explore next, not yet a requirement, is that each environment has a preview mode: a small version of itself that it can render, which becomes the space's object. Spaces would then be recognised by how they look, using visual memory, rather than by reading names. Spaces that share an environment would still differ by their deterministic colour and form, which also remain the fallback for an environment without a preview.
 
+Moving between arrival's steps is animated, never a cut. Each transition eases in and out over roughly half a second to a second, can be interrupted by the next choice or by stepping back, and stepping back plays it in reverse:
+
+- Choosing a server: the chosen server glides to the centre of the view while the other servers shrink and fade away. Its spaces spread outward from it to their places, with the create object appearing among them.
+- The creation rings: each ring grows outward from the create object, and stepping back folds it back in.
+- Entering a space: the chosen space's object comes towards the participant while the other spaces recede. The space's environment then grows out from that object and wraps around the participant, replacing the grid. Leaving the space plays this in reverse: the environment shrinks back into the space's object and the grid returns.
+
 Arrival assumes no environment theme. Server objects, space objects and the swarm do not borrow the look of any one environment, such as the moonlit shrine in `crates/environment-sky`. Arrival takes place in the Minimal environment, the plain floor grid, which reads as a waiting area. Entering a space moves from the grid into that space's environment, which belongs to the space (see `environments.md`), and leaving a space returns to the grid.
 
 When creating a space bound to an existing agent session, the participant can tell the sessions apart without opening them. Each listed session shows, as far as its backend can report them:
@@ -27,7 +33,7 @@ Sessions are listed with the most recently active first. A backend that cannot r
 
 ## Rationale
 
-The user found the heads-up panel unintuitive for getting connected, and found the separate "no spaces, press Y" step to create a space a detour. They asked for servers and spaces to be shown in 3D, chosen by pointing with the controllers, with spaces visually distinct and eventually previewed. They asked that the swarm's cloud-to-eye formation be kept and carried through arrival, and that arrival not assume the shrine theme, because they intend to build different environments for different kinds of work. Picking up an existing session needs more context than its name. Stated by the user, speaking from the headset, in November 2026.
+The user found the heads-up panel unintuitive for getting connected, and found the separate "no spaces, press Y" step to create a space a detour. They asked for servers and spaces to be shown in 3D, chosen by pointing with the controllers, with spaces visually distinct and eventually previewed. They asked that the swarm's cloud-to-eye formation be kept and carried through arrival, and that arrival not assume the shrine theme, because they intend to build different environments for different kinds of work. Picking up an existing session needs more context than its name. Stated by the user, speaking from the headset, in November 2026. After trying the first pointing build, the user asked for better transitions between choosing a server, choosing a space and entering it, and agreed the transitions described above, also in November 2026.
 
 ## Scope
 
@@ -41,12 +47,13 @@ The headset client's flow from launch to joining a space (`crates/client-quest`)
 - Connect to a server with no spaces and confirm that the create object is shown directly. Connect to one with spaces and confirm that the create object sits among them in the same view.
 - Create a space with only the controllers' pointing and trigger: the backend, directory and, where offered, session and environment rings open in place in that order, stepping back returns to the previous ring, and a backend without attaching skips the session ring.
 - Test that a space's colour and form are a function of its identifier alone, and that the same space looks the same after reconnecting and to a second participant. Confirm that a change in a space's activity or participant count shows on its object.
+- On the headset, choose a server, open and step back through the creation rings, enter a space and leave it, and confirm that each change animates as described rather than cutting, that stepping back reverses it, and that a choice made mid-transition takes effect without waiting for it to finish. Test that each transition's progress is a function of elapsed time that reaches its end state, and that interrupting it continues from the current state without a jump.
 - Confirm that arrival shows the Minimal grid, that joining a space switches to that space's environment, and that leaving returns to the grid. Confirm that arrival's objects use none of Sky's meshes or materials.
 - Test the session listing for each backend that supports attaching: sessions are ordered by last activity, the reported fields match the agent's own session records (for Claude Code, its transcripts under `~/.claude/projects`; for OpenCode, its session API), and fields the backend can't report are absent rather than invented.
 
 Open questions, not yet decided:
 
 - The detailed look of server constellations: their size, colour, motion and spacing, and how the pour into the swarm is timed.
-- How the transition between the grid and a space's environment looks.
+- How an environment grows out of a space's object in detail, for example a sphere expanding from it or a fade, and how each environment takes part.
 - Whether environment previews work well enough to identify spaces, how they show spaces that share an environment, and what they cost on the headset with several spaces in view. `scene-modules.md` replicates a space's scene only to the clients in it, so a lobby preview needs either a summary the server makes for the lobby or replication to clients outside the space.
 - The detailed look and layout of the creation rings.

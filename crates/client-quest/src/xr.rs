@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::{
-    arrival, arrival_graphics,
+    arrival, arrival_graphics, arrival_motion,
     caption::Caption,
     controller,
     graphics::Renderer,
@@ -173,6 +173,7 @@ pub fn run(
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
     let mut arrival_time = 0.0_f32;
+    let mut motion = arrival_motion::Motion::default();
     let mut delegation_scene = crate::delegation::Scene::new();
     let mut workers = crate::delegation::Workers::default();
     let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
@@ -306,8 +307,6 @@ pub fn run(
             if choosing { 0.0 } else { right.x },
             if choosing { 0.0 } else { right.y },
         );
-        // Arrival and the lobby show the grid, and a space its own environment; no control switches it. See `design/environments.md`.
-        renderer.set_environment(conversation.environment());
         caption.set_text(&gpu.queue, &conversation.text());
         caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
         if reset {
@@ -377,21 +376,19 @@ pub fn run(
                     glam::Quat::from_array(pose.orientation),
                 )
             });
-        let mut scene = conversation
-            .arrival()
-            .map(|view| arrival::Scene::layout(&view));
-        let targets = scene
-            .as_ref()
-            .map(arrival::Scene::targets)
-            .unwrap_or_default();
-        let pointing = pointer.update(ray, controls.trigger, &targets);
+        // Arrival's objects move between its steps rather than cutting, and are pointed at where they are now. See `design/arrival.md`.
+        arrival_time += dt;
+        motion.update(&arrival_target(&conversation), arrival_time);
+        let mut scene = motion.scene(arrival_time);
+        let pointing = pointer.update(ray, controls.trigger, &scene.targets());
         if let Some(key) = &pointing.chosen {
             conversation.choose_object(key);
-            scene = conversation
-                .arrival()
-                .map(|view| arrival::Scene::layout(&view));
+            motion.update(&arrival_target(&conversation), arrival_time);
+            scene = motion.scene(arrival_time);
         }
-        arrival_time += dt;
+        let in_arrival = conversation.arrival().is_some();
+        // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
+        renderer.set_scenery(motion.scenery(arrival_time));
         swarm.step(dt, controller.filter(|_| pointing.attracting));
         renderer.update(
             &gpu.queue,
@@ -421,16 +418,18 @@ pub fn run(
                 current_workspace,
             );
         }
-        if let Some(scene) = &scene {
+        // Arrival's objects are still drawn as they leave on entering a space, but the ray only outside one.
+        if in_arrival || !scene.objects.is_empty() || scene.heading.is_some() {
             renderer.update_arrival(
                 &gpu.device,
                 &gpu.queue,
                 &arrival_graphics::Frame {
-                    scene,
+                    scene: &scene,
                     hovered: pointing.hit.as_ref().map(|hit| &hit.key),
                     ray: ray
                         .zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
-                        .map(|(ray, end)| (ray.origin, end)),
+                        .map(|(ray, end)| (ray.origin, end))
+                        .filter(|_| in_arrival),
                     time: arrival_time,
                 },
             );
@@ -455,7 +454,7 @@ pub fn run(
             &[view_projection(&views[0]), view_projection(&views[1])],
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
-            scene.is_none().then(|| (&caption, head_pose(&views))),
+            (!in_arrival).then(|| (&caption, head_pose(&views))),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
@@ -1182,6 +1181,14 @@ fn initial_scene_transform(views: &[xr::View]) -> Option<Mat4> {
         Quat::from_rotation_y(yaw),
         Vec3::new(eye.x, 0.0, eye.z),
     ))
+}
+
+/// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
+fn arrival_target(conversation: &crate::conversation::Conversation) -> arrival::Scene {
+    match conversation.arrival() {
+        Some(view) => arrival::Scene::layout(&view),
+        None => arrival::Scene::entered(conversation.entered(), conversation.environment()),
+    }
 }
 
 fn head_pose(views: &[xr::View]) -> Mat4 {

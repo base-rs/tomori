@@ -5,6 +5,7 @@
 //!
 //! This is free of rendering code. [`crate::conversation::Conversation::arrival`] describes what to show as a [`View`], [`Scene::layout`] places it in scene coordinates, and its [`Scene::targets`] are what the [`crate::pointing::Pointer`] points at. How each object looks is decided only by the renderer, from its [`Kind`], so the placeholder shapes can be replaced without touching this.
 use crate::{
+    environment::Environment,
     pointing::{Shape, Target},
     server_choice::Source,
 };
@@ -24,7 +25,11 @@ const ROW_STEP: f32 = 0.3;
 const ROW_CAPACITY: usize = 12;
 const ROW_RISE: f32 = 0.36;
 /// The create object stands nearer and lower than the spaces, at the front, so its rings open in place without covering them.
-const CREATE: Vec3 = Vec3::new(0.0, 0.95, -1.25);
+pub const CREATE: Vec3 = Vec3::new(0.0, 0.95, -1.25);
+/// The centre of the row, where a chosen server glides and its spaces spread from.
+pub const CENTRE: Vec3 = Vec3::new(0.0, ROW_HEIGHT, -ROW_DISTANCE);
+/// Where the space being joined comes to, near the participant, before its environment grows out of it.
+pub const APPROACH: Vec3 = Vec3::new(0.0, 1.4, -0.8);
 /// The connected server stands to the left, shown as chosen.
 const CONNECTED_ANGLE: f32 = -1.15;
 const CONNECTED_DISTANCE: f32 = 1.4;
@@ -44,8 +49,8 @@ pub const LABEL_COLUMNS: usize = 22;
 pub enum Key {
     /// A server in the list, by address.
     Server(String),
-    /// The server connected to, shown as chosen; choosing it returns to the servers.
-    Connected,
+    /// The server connected to, by address, shown as chosen; choosing it returns to the servers.
+    Connected(String),
     /// A space on the server, by identifier.
     Space(String),
     /// The object that creates a space. While its rings are open, choosing it steps back one ring.
@@ -134,6 +139,8 @@ pub struct View {
     pub items: Vec<Item>,
     /// The creation ring that is open, if any.
     pub ring: Option<Ring>,
+    /// The space being joined, which comes towards the participant while everything else recedes.
+    pub joining: Option<Key>,
 }
 
 /// How a label's lines line up with its anchor.
@@ -155,6 +162,8 @@ pub struct Label {
     pub align: Align,
     /// The size of one font pixel, in metres.
     pub pixel: f32,
+    /// How opaque it is, from 0 to 1, as it fades in or out with its object.
+    pub alpha: f32,
 }
 
 /// An arrival object, placed in the world.
@@ -169,20 +178,48 @@ pub struct Object {
     /// The label and detail in full, shown in the heading while the object is pointed at.
     pub description: String,
     pub selected: bool,
-    /// Shown faintly, behind an open ring.
-    pub dimmed: bool,
+    /// How faintly it is shown, from 0 to 1: 1 behind an open ring.
+    pub dim: f32,
+    /// How far it has appeared, from 0 to 1. Its size and label are already scaled by this.
+    pub presence: f32,
+    /// Whether it can be pointed at; an object on its way out can't.
+    pub choosable: bool,
+}
+
+/// Which step of arrival a scene shows, which decides how a change to it is animated.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Stage {
+    #[default]
+    Servers,
+    /// The spaces and the create object, with any creation ring.
+    Lobby,
+    /// A space is being joined.
+    Joining(Key),
+    /// Inside a space, which shows no arrival objects; `space` is `None` when it was not among them.
+    Entered {
+        space: Option<Key>,
+        environment: Environment,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     pub objects: Vec<Object>,
     pub heading: Option<Label>,
+    pub stage: Stage,
 }
 
 impl Scene {
     /// Place `view` in the world: the servers or spaces on a row in front of [`HOME`], the create object at the front, its open ring around it, and the connected server to the left.
     pub fn layout(view: &View) -> Self {
         let mut objects = Vec::new();
+        let stage = match &view.joining {
+            Some(key) if view.items.iter().any(|item| &item.key == key) => {
+                Stage::Joining(key.clone())
+            }
+            _ if view.connected.is_some() => Stage::Lobby,
+            _ => Stage::Servers,
+        };
         if let Some(item) = &view.connected {
             let position = on_arc(CONNECTED_ANGLE, CONNECTED_DISTANCE, CONNECTED_HEIGHT);
             objects.push(row_object(item, position, false));
@@ -211,6 +248,12 @@ impl Scene {
                 objects.extend(ring_objects(ring, CREATE));
             }
         }
+        // While a space is joined, only it remains, near the participant; the rest recede.
+        if let Stage::Joining(key) = &stage
+            && let Some(item) = view.items.iter().find(|item| &item.key == key)
+        {
+            objects = vec![row_object(item, APPROACH, false)];
+        }
         let mut lines = vec![clip(&view.heading, 40)];
         lines.extend(view.status.iter().map(|status| clip(status, 40)));
         Self {
@@ -220,14 +263,25 @@ impl Scene {
                 lines,
                 align: Align::Centre,
                 pixel: 0.0032,
+                alpha: 1.0,
             }),
+            stage,
         }
     }
 
-    /// What can be pointed at: every object, a little larger than it looks. The create object stands straight ahead, so a box fits its plus.
+    /// Inside a space: no objects, only what is needed to grow its environment out of its object.
+    pub fn entered(space: Option<Key>, environment: Environment) -> Self {
+        Self {
+            stage: Stage::Entered { space, environment },
+            ..Default::default()
+        }
+    }
+
+    /// What can be pointed at: every object that is choosable and at least half appeared, a little larger than it looks. The create object stands straight ahead, so a box fits its plus.
     pub fn targets(&self) -> Vec<Target<Key>> {
         self.objects
             .iter()
+            .filter(|object| object.choosable && object.presence >= 0.5)
             .map(|object| {
                 let reach = object.size * TARGET_MARGIN;
                 Target {
@@ -293,10 +347,13 @@ fn row_object(item: &Item, position: Vec3, dimmed: bool) -> Object {
             lines: lines(item),
             align: Align::Centre,
             pixel: 0.0026,
+            alpha: 1.0,
         },
         description: description(item),
         selected: item.selected,
-        dimmed,
+        dim: if dimmed { 1.0 } else { 0.0 },
+        presence: 1.0,
+        choosable: true,
     }
 }
 
@@ -335,10 +392,13 @@ fn ring_objects(ring: &Ring, centre: Vec3) -> Vec<Object> {
                     lines: lines(item),
                     align,
                     pixel: 0.0022,
+                    alpha: 1.0,
                 },
                 description: description(item),
                 selected: item.selected,
-                dimmed: false,
+                dim: 0.0,
+                presence: 1.0,
+                choosable: true,
             }
         })
         .collect()
@@ -408,9 +468,14 @@ mod tests {
         View {
             heading: "Studio".into(),
             status: None,
-            connected: Some(item(Key::Connected, Kind::Connected, "Studio")),
+            connected: Some(item(
+                Key::Connected("studio:8765".into()),
+                Kind::Connected,
+                "Studio",
+            )),
             items,
             ring,
+            joining: None,
         }
     }
 
@@ -478,7 +543,7 @@ mod tests {
     fn the_create_object_is_shown_directly_when_there_are_no_spaces() {
         let scene = Scene::layout(&lobby(0, None));
         let keys: Vec<_> = scene.objects.iter().map(|object| &object.key).collect();
-        assert_eq!(keys, [&Key::Connected, &Key::Create]);
+        assert_eq!(keys, [&Key::Connected("studio:8765".into()), &Key::Create]);
         let create = scene.object(&Key::Create).unwrap();
         assert_eq!(create.position, CREATE);
     }
@@ -506,9 +571,37 @@ mod tests {
                 .objects
                 .iter()
                 .filter(|object| matches!(object.key, Key::Space(_)))
-                .all(|object| object.dimmed)
+                .all(|object| object.dim == 1.0)
         );
-        assert!(!scene.object(&Key::Create).unwrap().dimmed);
+        assert_eq!(scene.object(&Key::Create).unwrap().dim, 0.0);
+    }
+
+    #[test]
+    fn a_space_being_joined_comes_close_and_the_rest_leave() {
+        let view = View {
+            joining: Some(Key::Space("space-1".into())),
+            ..lobby(3, None)
+        };
+        let scene = Scene::layout(&view);
+        assert_eq!(scene.stage, Stage::Joining(Key::Space("space-1".into())));
+        assert_eq!(scene.objects.len(), 1);
+        assert_eq!(scene.objects[0].position, APPROACH);
+        // A join for a space not shown leaves the lobby as it is.
+        let unknown = View {
+            joining: Some(Key::Space("elsewhere".into())),
+            ..lobby(3, None)
+        };
+        assert_eq!(Scene::layout(&unknown).stage, Stage::Lobby);
+        assert_eq!(Scene::layout(&unknown).objects.len(), 5);
+    }
+
+    #[test]
+    fn only_choosable_objects_that_have_mostly_appeared_are_targets() {
+        let mut scene = Scene::layout(&lobby(2, None));
+        let count = scene.targets().len();
+        scene.objects[0].choosable = false;
+        scene.objects[1].presence = 0.4;
+        assert_eq!(scene.targets().len(), count - 2);
     }
 
     #[test]
