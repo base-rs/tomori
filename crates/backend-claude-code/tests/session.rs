@@ -853,6 +853,112 @@ fn lists_and_attaches_sessions() {
     });
 }
 
+/// Copy a directory tree, for fixture session records.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn worker_states(workers: &[backend::Worker]) -> Vec<(&str, WorkerState)> {
+    workers
+        .iter()
+        .map(|worker| (worker.id.as_str(), worker.state))
+        .collect()
+}
+
+#[test]
+fn attaching_reports_recorded_workers_and_follows_their_resumes() {
+    run(|| async {
+        let fixture = Fixture::new("resume");
+        let directory = fixture.directory.display().to_string();
+        let canonical = fs::canonicalize(&fixture.directory).unwrap();
+        let name: String = canonical
+            .display()
+            .to_string()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        copy_tree(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/records"),
+            &fixture.directory.join("projects").join(name),
+        );
+
+        let session = fixture
+            .backend
+            .attach("5d1c3a52-7f0e-4c39-9a51-2b7f4c0d9e11", &directory)
+            .await
+            .unwrap();
+        // The records' workers, none of them running: the process that ran them has ended.
+        let snapshot = session.snapshot().await.unwrap();
+        assert_eq!(
+            worker_states(&snapshot.workers),
+            vec![
+                ("toolu_review", WorkerState::Completed),
+                ("toolu_implement", WorkerState::Stopped),
+                ("toolu_tests", WorkerState::Completed),
+                ("toolu_lint", WorkerState::Error),
+                ("toolu_nested", WorkerState::Stopped),
+            ]
+        );
+        assert_eq!(
+            snapshot.workers[4].parent.as_deref(),
+            Some("toolu_implement")
+        );
+
+        // A recorded worker resumed with `SendMessage` runs again, then finishes.
+        session
+            .send(prompt("one", "Resume the implementer."))
+            .await
+            .unwrap();
+        let mut changes = Vec::new();
+        while changes.len() < 2 {
+            if let Event::WorkersChanged { workers } = session.next_event().await.unwrap() {
+                changes.push(workers);
+            }
+        }
+        assert_eq!(changes[0][1].state, WorkerState::Running);
+        assert_eq!(changes[0].len(), 5);
+        assert_eq!(changes[1][1].state, WorkerState::Completed);
+
+        // A worker running when the process exits is not reported as running.
+        session
+            .send(prompt("two", "Resume the test writer."))
+            .await
+            .unwrap();
+        let events = events_until(&session, |event| matches!(event, Event::Closed { .. })).await;
+        let changes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::WorkersChanged { workers } => Some(workers),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0][2].state, WorkerState::Running);
+        assert_eq!(changes[1][2].state, WorkerState::Stopped);
+        assert!(matches!(
+            &events[events.len() - 2],
+            Event::WorkersChanged { .. }
+        ));
+        assert!(
+            session
+                .snapshot()
+                .await
+                .unwrap()
+                .workers
+                .iter()
+                .all(|worker| worker.state != WorkerState::Running)
+        );
+    });
+}
+
 /// Drives the installed `claude` with one trivial prompt. Run with `cargo test -p backend-claude-code -- --ignored`.
 #[test]
 #[ignore = "runs the real claude CLI and uses the API"]
