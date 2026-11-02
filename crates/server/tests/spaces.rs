@@ -62,7 +62,13 @@ fn listing_the_backend_sessions_returns_the_created_ones() {
         .map(|session| session.title.as_str())
         .collect();
     assert_eq!(titles, vec!["First", "Second"]);
-    assert!(sessions.iter().all(|session| session.directory == "/tmp"));
+    // Sessions report the canonical directory, which differs from `/tmp` where it is a symbolic link, as on macOS.
+    let tmp = std::fs::canonicalize("/tmp").unwrap();
+    assert!(
+        sessions
+            .iter()
+            .all(|session| std::path::Path::new(&session.directory) == tmp)
+    );
 
     // A directory that resolves, beneath a root, but holds no sessions lists none.
     let empty_dir =
