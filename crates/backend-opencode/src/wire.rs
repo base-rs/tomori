@@ -392,6 +392,25 @@ fn field_options(values: &[Value]) -> Vec<FieldOption> {
 
 /// A child session as a delegated worker.
 pub fn worker_from_session(info: &Value) -> Option<Worker> {
+    let time = info.get("time");
+    let busy = time
+        .and_then(|time| time.get("busy"))
+        .and_then(Value::as_u64);
+    let idle = time
+        .and_then(|time| time.get("idle"))
+        .and_then(Value::as_u64);
+    let outcome = match info.get("outcome").and_then(Value::as_str) {
+        Some("succeeded") => WorkerState::Completed,
+        Some("failed") => WorkerState::Error,
+        Some("interrupted") => WorkerState::Stopped,
+        _ => WorkerState::Running,
+    };
+    let state = match (busy, idle) {
+        (Some(busy), Some(idle)) if busy > idle => WorkerState::Running,
+        (Some(busy), Some(idle)) if busy == idle => WorkerState::Unknown,
+        (Some(_), None) => WorkerState::Running,
+        _ => outcome,
+    };
     Some(Worker {
         id: info.get("id")?.as_str()?.to_owned(),
         parent: info
@@ -403,12 +422,7 @@ pub fn worker_from_session(info: &Value) -> Option<Worker> {
             .and_then(Value::as_str)
             .unwrap_or("worker")
             .to_owned(),
-        state: match info.get("outcome").and_then(Value::as_str) {
-            Some("succeeded") => WorkerState::Completed,
-            Some("failed") => WorkerState::Error,
-            Some("interrupted") => WorkerState::Stopped,
-            _ => WorkerState::Running,
-        },
+        state,
     })
 }
 
@@ -479,6 +493,25 @@ pub fn agent_switched(value: &Value, session_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_child_is_not_mistaken_for_its_previous_outcome() {
+        let mut info = serde_json::json!({"id":"child", "outcome":"succeeded", "time":{"busy":101,"idle":100}});
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Running
+        );
+        info["time"]["busy"] = serde_json::json!(100);
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Unknown
+        );
+        info["time"]["busy"] = serde_json::json!(99);
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Completed
+        );
+    }
 
     fn event(
         value: &Value,

@@ -167,7 +167,18 @@ pub fn fit_state(state: &mut SpaceState) {
         }
         size -= shrink(text, size - SNAPSHOT_BUDGET);
     }
+    let mut marked_worker_truncation = false;
     while size > SNAPSHOT_BUDGET && !state.workers.is_empty() {
+        // Clients must not infer that omitted workers were deleted. Preserve
+        // any existing error; it already marks the projection as partial.
+        if !marked_worker_truncation {
+            state.workers_authoritative = Some(false);
+            if state.error.is_none() {
+                state.error = Some("Worker list truncated to fit the snapshot.".to_owned());
+            }
+            size = json_len(state);
+            marked_worker_truncation = true;
+        }
         let worker = state.workers.remove(0);
         size -= json_len(&worker) + 1;
     }
@@ -258,6 +269,37 @@ mod tests {
         assert!(size > SNAPSHOT_BUDGET - 1024, "{size}");
         assert_eq!(state.messages.len(), 1);
         assert!(state.messages[0].text.ends_with(TRUNCATED));
+    }
+
+    #[test]
+    fn a_trimmed_worker_list_is_marked_partial_without_overwriting_an_error() {
+        let workers: Vec<protocol::Worker> = (0..2000)
+            .map(|index| protocol::Worker {
+                id: format!("worker-{index}"),
+                parent: None,
+                title: "x".repeat(200),
+                state: protocol::WorkerState::Running,
+            })
+            .collect();
+        for error in [None, Some("Unrelated error".to_owned())] {
+            let mut state = SpaceState {
+                workers: workers.clone(),
+                error: error.clone(),
+                ..Default::default()
+            };
+            fit_state(&mut state);
+            assert!(json_len(&state) <= SNAPSHOT_BUDGET);
+            assert!(state.workers.len() < workers.len());
+            assert_eq!(state.workers_authoritative, Some(false));
+            assert_eq!(
+                state.error.as_deref(),
+                Some(
+                    error
+                        .as_deref()
+                        .unwrap_or("Worker list truncated to fit the snapshot.")
+                )
+            );
+        }
     }
 
     fn listing(count: usize) -> Vec<SpaceSummary> {

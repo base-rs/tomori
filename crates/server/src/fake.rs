@@ -38,6 +38,7 @@ pub struct FakeBackend {
 #[derive(Default)]
 struct FakeShared {
     manual: AtomicBool,
+    snapshot_failure: Arc<AtomicBool>,
     /// While set, session creation waits; see [`FakeBackend::hold_creation`].
     held: AtomicBool,
     released: event_listener::Event,
@@ -57,6 +58,11 @@ impl FakeBackend {
         let backend = Self::default();
         backend.shared.manual.store(true, Ordering::SeqCst);
         backend
+    }
+
+    /// Simulate an unavailable initial session snapshot.
+    pub fn fail_snapshots(&self, fail: bool) {
+        self.shared.snapshot_failure.store(fail, Ordering::SeqCst);
     }
 
     /// Make session creation wait until [`release_creation`](Self::release_creation), as a slow agent start would.
@@ -88,6 +94,7 @@ impl FakeBackend {
                 title: title.to_owned(),
                 directory: directory.to_owned(),
                 manual: self.shared.manual.load(Ordering::SeqCst),
+                snapshot_failure: self.shared.snapshot_failure.clone(),
                 sender,
                 receiver,
                 busy: AtomicBool::new(false),
@@ -173,6 +180,7 @@ struct FakeSessionInner {
     title: String,
     directory: String,
     manual: bool,
+    snapshot_failure: Arc<AtomicBool>,
     sender: async_channel::Sender<Event>,
     receiver: async_channel::Receiver<Event>,
     busy: AtomicBool,
@@ -267,6 +275,9 @@ impl Session for FakeSession {
     }
 
     async fn snapshot(&self) -> Result<Snapshot> {
+        if self.inner.snapshot_failure.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Unavailable, "snapshot unavailable"));
+        }
         Ok(Snapshot {
             busy: Some(self.is_busy()),
             modes: self.inner.modes.lock().unwrap().clone(),

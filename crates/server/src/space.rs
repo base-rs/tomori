@@ -43,6 +43,7 @@ pub struct SpaceModel {
     /// Questions whose answers have been sent to the backend but not yet confirmed.
     submitting: Vec<PendingQuestion>,
     workers: Vec<protocol::Worker>,
+    workers_authoritative: bool,
     attribution: bool,
     /// The modes the session offers and its current one, as the agent last reported them.
     modes: Modes,
@@ -174,6 +175,7 @@ impl SpaceModel {
                 .collect(),
             submitting: Vec::new(),
             workers,
+            workers_authoritative: true,
             attribution: true,
             modes: snapshot.modes,
             error: None,
@@ -374,6 +376,7 @@ impl SpaceModel {
                     .into_iter()
                     .map(|entry| worker(entry, &self.session))
                     .collect();
+                self.workers_authoritative = true;
             }
             Event::ModesChanged(modes) => self.modes = modes,
             Event::ModeRefused { mode, reason } => {
@@ -383,9 +386,13 @@ impl SpaceModel {
                     None => format!("The agent refused {name} mode."),
                 });
             }
-            Event::Error { message } => self.error = Some(message),
+            Event::Error { message } => {
+                self.error = Some(message);
+                self.workers_authoritative = false;
+            }
             Event::Closed { reason } => {
                 self.closed = true;
+                self.workers_authoritative = false;
                 self.busy = None;
                 self.error = Some(reason.unwrap_or_else(|| "The agent session ended.".to_owned()));
                 if let Some(prompt) = self.in_flight.take() {
@@ -610,6 +617,7 @@ impl SpaceModel {
                 .front()
                 .map(|pending| projection::question(&pending.question, &pending.answers)),
             workers: self.workers.clone(),
+            workers_authoritative: Some(self.workers_authoritative),
             presentations: Vec::new(),
             participants,
             attribution: self.attribution,
@@ -862,6 +870,22 @@ mod tests {
                 protocol::WorkerState::Error,
             ]
         );
+    }
+
+    #[test]
+    fn a_fresh_worker_update_does_not_clear_an_unrelated_space_error() {
+        let mut space = model();
+        space.apply(Event::Error {
+            message: "unrelated error".into(),
+        });
+        let uncertain = space.state(Vec::new());
+        assert_eq!(uncertain.workers_authoritative, Some(false));
+        space.apply(Event::WorkersChanged { workers: vec![] });
+        let current = space.state(Vec::new());
+        assert_eq!(current.workers_authoritative, Some(true));
+        assert_eq!(current.error.as_deref(), Some("unrelated error"));
+        space.apply(Event::Closed { reason: None });
+        assert_eq!(space.state(Vec::new()).workers_authoritative, Some(false));
     }
 
     #[test]

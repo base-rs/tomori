@@ -18,7 +18,12 @@ use serde_json::Value;
 use crate::endpoint::Resolved;
 use crate::wire::question_from_form;
 
+/// Bound the backend's worker cache. Exceeding it is a visible incomplete
+/// snapshot, never an authoritative truncated list.
+pub(crate) const MAX_TRACKED_WORKERS: usize = 4096;
+
 /// A failed call, with the HTTP status when the server answered.
+#[derive(Debug)]
 pub struct Failure {
     pub status: Option<u16>,
     pub message: String,
@@ -71,13 +76,15 @@ where
 
 /// Read a response body to the end, failing with the status when the server
 /// refused the call.
-async fn read_json(response: base_http::Response<ResponseBody>) -> Result<Value, Failure> {
+async fn read_json(
+    response: base_http::Response<ResponseBody>,
+    cancellation: &Cancellation,
+) -> Result<Value, Failure> {
     let status = response.status.as_u16();
     let mut body = response.body;
     let mut bytes = Vec::new();
-    let cancellation = Cancellation::new();
     loop {
-        let frame = body.read(&cancellation).await.map_err(|error| Failure {
+        let frame = body.read(cancellation).await.map_err(|error| Failure {
             status: Some(status),
             message: error.to_string(),
         })?;
@@ -149,7 +156,7 @@ pub async fn create_session<'scope>(
         cancellation,
     )
     .await?;
-    let value = read_json(response).await?;
+    let value = read_json(response, cancellation).await?;
     // The session record is nested under `data`, as with the list endpoint.
     Ok(value.get("data").cloned().unwrap_or(value))
 }
@@ -169,7 +176,7 @@ pub async fn list_sessions<'scope>(
         cancellation,
     )
     .await?;
-    let value = read_json(response).await?;
+    let value = read_json(response, cancellation).await?;
     Ok(value
         .get("data")
         .and_then(Value::as_array)
@@ -192,7 +199,7 @@ pub async fn session_info<'scope>(
         cancellation,
     )
     .await?;
-    let value = read_json(response).await?;
+    let value = read_json(response, cancellation).await?;
     // The session record is nested under `data`, as with the list endpoint.
     Ok(value.get("data").cloned().unwrap_or(value))
 }
@@ -226,7 +233,7 @@ pub async fn child_sessions<'scope>(
             cancellation,
         )
         .await?;
-        let value = read_json(response).await?;
+        let value = read_json(response, cancellation).await?;
         let page = value
             .get("data")
             .and_then(Value::as_array)
@@ -235,11 +242,20 @@ pub async fn child_sessions<'scope>(
                 message: "the server did not return a child session list".to_owned(),
             })?;
         for child in page {
+            if children.len() == MAX_TRACKED_WORKERS {
+                return Err(Failure {
+                    status: None,
+                    message: "the child session list exceeds the worker limit".to_owned(),
+                });
+            }
             let worker = crate::wire::worker_from_session(child).ok_or_else(|| Failure {
                 status: None,
                 message: "the server returned a child session without an identifier".to_owned(),
             })?;
-            if worker.id.is_empty() || worker.parent.as_deref() != Some(parent_id) {
+            if worker.id.is_empty()
+                || worker.parent.as_deref() != Some(parent_id)
+                || !valid_child_record(child)
+            {
                 return Err(Failure {
                     status: None,
                     message:
@@ -282,6 +298,74 @@ pub async fn child_sessions<'scope>(
     })
 }
 
+/// Discover descendants through direct-child pages. A repeated identity or a
+/// limit failure rejects the snapshot rather than returning a partial family.
+async fn session_family<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    cancellation: &Cancellation,
+) -> Result<Vec<Value>, Failure> {
+    let mut pending = std::collections::VecDeque::from([session_id.to_owned()]);
+    let mut seen = std::collections::HashSet::from([session_id.to_owned()]);
+    let mut family = Vec::new();
+    while let Some(parent) = pending.pop_front() {
+        for child in child_sessions(client, resolved, &parent, cancellation).await? {
+            let id = child
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("validated child identifier");
+            if !seen.insert(id.to_owned()) {
+                return Err(Failure {
+                    status: None,
+                    message: "the server returned a repeated or cyclic worker identity".into(),
+                });
+            }
+            if family.len() == MAX_TRACKED_WORKERS {
+                return Err(Failure {
+                    status: None,
+                    message: "the worker family exceeds the worker limit".into(),
+                });
+            }
+            pending.push_back(id.to_owned());
+            family.push(child);
+        }
+    }
+    Ok(family)
+}
+
+/// Required fields of OpenCode's Session.Info, checked before a record may
+/// participate in a worker snapshot. Extra fields are accepted for upgrades.
+fn valid_child_record(child: &Value) -> bool {
+    let tokens = child.get("tokens");
+    let cache = tokens.and_then(|tokens| tokens.get("cache"));
+    let time = child.get("time");
+    child
+        .get("projectID")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+        && child.get("cost").is_some_and(Value::is_number)
+        && ["input", "output", "reasoning"].iter().all(|key| {
+            tokens
+                .and_then(|tokens| tokens.get(*key))
+                .is_some_and(Value::is_number)
+        })
+        && ["read", "write"].iter().all(|key| {
+            cache
+                .and_then(|cache| cache.get(*key))
+                .is_some_and(Value::is_number)
+        })
+        && ["created", "updated"].iter().all(|key| {
+            time.and_then(|time| time.get(*key))
+                .is_some_and(Value::is_number)
+        })
+        && child
+            .get("location")
+            .and_then(|location| location.get("directory"))
+            .and_then(Value::as_str)
+            .is_some_and(|directory| !directory.is_empty())
+}
+
 /// `POST /api/session/:id/prompt`: deliver one user turn. `key` is the
 /// server's delivery key; it is sent to opencode as a `msg_`-prefixed id
 /// (which opencode requires) and recovered from the `inboxID` of the
@@ -314,7 +398,7 @@ pub async fn send_prompt<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await?;
+    read_json(response, cancellation).await?;
     Ok(())
 }
 
@@ -340,7 +424,7 @@ pub async fn list_agents<'scope>(
             cancellation,
         )
         .await?;
-        let value = read_json(response).await?;
+        let value = read_json(response, cancellation).await?;
         agents = value
             .get("data")
             .and_then(Value::as_array)
@@ -371,7 +455,7 @@ pub async fn switch_agent<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await?;
+    read_json(response, cancellation).await?;
     Ok(())
 }
 
@@ -390,7 +474,7 @@ pub async fn interrupt<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await?;
+    read_json(response, cancellation).await?;
     Ok(())
 }
 
@@ -409,12 +493,15 @@ pub async fn open_permissions<'scope>(
         cancellation,
     )
     .await?;
-    let value = read_json(response).await?;
-    Ok(value
+    let value = read_json(response, cancellation).await?;
+    value
         .get("data")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default())
+        .ok_or_else(|| Failure {
+            status: None,
+            message: "the server did not return a permission list".into(),
+        })
 }
 
 /// `POST /api/session/:id/permission/:requestID/reply`: answer a permission.
@@ -440,7 +527,7 @@ pub async fn reply_permission<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await?;
+    read_json(response, cancellation).await?;
     Ok(())
 }
 
@@ -459,12 +546,15 @@ pub async fn open_forms<'scope>(
         cancellation,
     )
     .await?;
-    let value = read_json(response).await?;
-    Ok(value
+    let value = read_json(response, cancellation).await?;
+    value
         .get("data")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default())
+        .ok_or_else(|| Failure {
+            status: None,
+            message: "the server did not return a form list".into(),
+        })
 }
 
 /// `POST /api/session/:id/form/:formID/reply`: answer a form.
@@ -489,7 +579,7 @@ pub async fn reply_form<'scope>(
         cancellation,
     )
     .await?;
-    read_json(response).await?;
+    read_json(response, cancellation).await?;
     Ok(())
 }
 
@@ -500,15 +590,74 @@ pub async fn session_messages<'scope>(
     session_id: &str,
     cancellation: &Cancellation,
 ) -> Result<Value, Failure> {
-    let path = format!("/api/session/{}/message", urlencoding(session_id));
-    let response = exchange(
-        client,
-        get(&path),
-        resolved.authorization_header().as_deref(),
-        cancellation,
-    )
-    .await?;
-    read_json(response).await
+    const MAX_PAGES: usize = 128;
+    let mut messages = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    let mut cursors = std::collections::HashSet::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let query = cursor.as_ref().map_or_else(
+            || "limit=100&order=asc".to_owned(),
+            |cursor| format!("limit=100&cursor={}", urlencoding(cursor)),
+        );
+        let path = format!("/api/session/{}/message?{query}", urlencoding(session_id));
+        let response = exchange(
+            client,
+            get(&path),
+            resolved.authorization_header().as_deref(),
+            cancellation,
+        )
+        .await?;
+        let value = read_json(response, cancellation).await?;
+        let page = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Failure {
+                status: None,
+                message: "the server did not return a message list".into(),
+            })?;
+        for message in page {
+            let id = message
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| Failure {
+                    status: None,
+                    message: "the server returned a message without an identifier".into(),
+                })?;
+            if !ids.insert(id.to_owned()) {
+                return Err(Failure {
+                    status: None,
+                    message: "the server repeated a message across pages".into(),
+                });
+            }
+            messages.push(message.clone());
+        }
+        let next = value
+            .get("cursor")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Failure {
+                status: None,
+                message: "the server did not return a message cursor".into(),
+            })?
+            .get("next");
+        match next {
+            None | Some(Value::Null) => return Ok(serde_json::json!({"data": messages})),
+            Some(Value::String(next)) if !next.is_empty() && cursors.insert(next.clone()) => {
+                cursor = Some(next.clone())
+            }
+            _ => {
+                return Err(Failure {
+                    status: None,
+                    message: "the server returned an invalid message cursor".into(),
+                });
+            }
+        }
+    }
+    Err(Failure {
+        status: None,
+        message: "the message list exceeds the page limit".into(),
+    })
 }
 
 /// The pieces of a session needed to reconstruct a [`backend::Snapshot`]:
@@ -557,6 +706,12 @@ impl SnapshotParts {
         // Validate the session exists before fetching its parts, and record
         // whether it is currently running a turn (time.busy after time.idle).
         let info = session_info(client, resolved, session_id, cancellation).await?;
+        if info.get("id").and_then(Value::as_str) != Some(session_id) {
+            return Err(Failure {
+                status: None,
+                message: "the server returned an invalid session record".into(),
+            });
+        }
         let busy = info
             .get("time")
             .and_then(|time| {
@@ -568,7 +723,39 @@ impl SnapshotParts {
         let messages = session_messages(client, resolved, session_id, cancellation).await?;
         let permissions = open_permissions(client, resolved, session_id, cancellation).await?;
         let forms = open_forms(client, resolved, session_id, cancellation).await?;
-        let children = child_sessions(client, resolved, session_id, cancellation).await?;
+        if permissions.len() > 1 || forms.len() > 1 {
+            return Err(Failure {
+                status: None,
+                message:
+                    "the snapshot contains more pending requests than the backend can represent"
+                        .into(),
+            });
+        }
+        if permissions.iter().any(|request| {
+            request.get("sessionID").and_then(Value::as_str) != Some(session_id)
+                || crate::wire::permission_from_request(request).is_none()
+                || !request.get("resources").is_some_and(Value::is_array)
+        }) {
+            return Err(Failure {
+                status: None,
+                message: "the server returned an invalid permission request".into(),
+            });
+        }
+        if forms.iter().any(|form| {
+            form.get("sessionID").and_then(Value::as_str) != Some(session_id)
+                || !form
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+                || form.get("title").and_then(Value::as_str).is_none()
+                || !form.get("fields").is_some_and(Value::is_array)
+        }) {
+            return Err(Failure {
+                status: None,
+                message: "the server returned an invalid form".into(),
+            });
+        }
+        let children = session_family(client, resolved, session_id, cancellation).await?;
         Ok(Self {
             messages,
             permissions,

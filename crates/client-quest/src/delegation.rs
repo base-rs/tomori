@@ -41,6 +41,9 @@ pub struct Workspace {
     pub nodes: Vec<Node>,
     pub presentations: Vec<Presentation>,
     pub error: Option<String>,
+    /// Worker-list freshness independent of unrelated space errors. Absent in
+    /// older space and spectator snapshots.
+    pub workers_authoritative: Option<bool>,
     pub truncated: bool,
     pub stale: bool,
 }
@@ -160,6 +163,7 @@ pub struct Workers {
     root: Option<String>,
     current: bool,
     error: Option<String>,
+    workers_authoritative: Option<bool>,
     workers: Vec<protocol::Worker>,
     workspace: Workspace,
 }
@@ -180,11 +184,13 @@ impl Workers {
                 if self.root.as_deref() != Some(space.id.as_str())
                     || self.current != current
                     || self.error != space.error
+                    || self.workers_authoritative != space.workers_authoritative
                     || self.workers != space.workers
                 {
                     self.root = Some(space.id.clone());
                     self.current = current;
                     self.error.clone_from(&space.error);
+                    self.workers_authoritative = space.workers_authoritative;
                     self.workers.clone_from(&space.workers);
                     self.workspace = Workspace::from_space(space, current);
                 }
@@ -234,6 +240,7 @@ impl Workspace {
                 }
                 error[..end].to_owned()
             }),
+            workers_authoritative: space.workers_authoritative,
             truncated,
             stale: !current,
         }
@@ -442,7 +449,11 @@ impl Scene {
         self.time += f64::from(dt);
         let valid = workspace.valid();
         let fresh = valid && !workspace.stale;
-        let trusted = fresh && workspace.error.is_none() && !workspace.truncated;
+        let trusted = fresh
+            && workspace
+                .workers_authoritative
+                .unwrap_or(workspace.error.is_none())
+            && !workspace.truncated;
         let launch_new = trusted && self.previous_trusted;
         if trusted {
             self.reconcile(root, &workspace.nodes, launch_new, None);
@@ -3465,6 +3476,37 @@ mod space_tests {
         assert!(workspace.error.as_ref().unwrap().len() <= 4096);
         show(&mut scene, &mut workers, Some((&errored, true)));
         assert!(scene.workers["a"].retired.is_none());
+    }
+
+    #[test]
+    fn worker_freshness_is_independent_of_an_unrelated_space_error() {
+        let mut state = space(vec![worker("a", None, WorkerState::Completed)]);
+        state.error = Some("unrelated agent error".into());
+        state.workers_authoritative = Some(true);
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        show(&mut scene, &mut workers, Some((&state, true)));
+        assert!(scene.workers.contains_key("a"));
+
+        // A partial list does not prove that the absent worker was deleted.
+        state.workers.clear();
+        state.workers_authoritative = Some(false);
+        show(&mut scene, &mut workers, Some((&state, true)));
+        assert!(scene.workers["a"].retired.is_none());
+        assert_eq!(
+            workers.update(Some((&state, true))).1.error.as_deref(),
+            Some("unrelated agent error")
+        );
+
+        // A later authoritative worker update may retire it even while the
+        // unrelated error remains visible; freshness alone changed here.
+        state.workers_authoritative = Some(true);
+        show(&mut scene, &mut workers, Some((&state, true)));
+        assert!(scene.workers["a"].retired.is_some());
+        assert_eq!(
+            workers.update(Some((&state, true))).1.error.as_deref(),
+            Some("unrelated agent error")
+        );
     }
 
     #[test]

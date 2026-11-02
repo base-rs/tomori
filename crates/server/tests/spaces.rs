@@ -137,6 +137,54 @@ fn pair(server: &TestServer) -> (TestClient, TestClient, String) {
 }
 
 #[test]
+fn a_failed_initial_snapshot_opens_no_space_and_a_retry_succeeds() {
+    let backend = FakeBackend::manual();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let original = ada.create_space("Existing");
+    let existing = backend.started()[0].clone();
+    backend.fail_snapshots(true);
+
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::CreateSpace {
+        title: "Unavailable".into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: None,
+    });
+    let error = bob.error();
+    assert!(error.contains("initial session state"), "{error}");
+    assert!(error.contains("retry"), "{error}");
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        if backend
+            .started()
+            .get(1)
+            .is_some_and(|session| session.log().closed)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failed handle was not closed"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!existing.log().closed);
+    bob.send(&ClientMessage::ListSpaces);
+    let spaces = bob.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => Some(spaces.clone()),
+        _ => None,
+    });
+    assert_eq!(spaces.len(), 1);
+    assert_eq!(spaces[0].id, original.id);
+    backend.fail_snapshots(false);
+    let retried = bob.create_space("Retried");
+    assert_eq!(retried.title, "Retried");
+    assert!(!existing.log().closed);
+}
+
+#[test]
 fn workers_started_by_the_session_have_no_parent() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");
@@ -165,6 +213,38 @@ fn workers_started_by_the_session_have_no_parent() {
         parents,
         [("lead", None), ("helper", Some("lead")), ("orphan", None)]
     );
+}
+
+#[test]
+fn worker_freshness_is_shared_without_clearing_an_unrelated_error() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (mut ada, mut bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::WorkersChanged {
+        workers: vec![Worker {
+            id: "child".into(),
+            parent: Some(session.id()),
+            title: "Child".into(),
+            state: WorkerState::Completed,
+        }],
+    });
+    for client in [&mut ada, &mut bob] {
+        let state = client.space(|state| state.workers.len() == 1);
+        assert_eq!(state.workers_authoritative, Some(true));
+    }
+    session.emit(Event::Error {
+        message: "unrelated error".into(),
+    });
+    for client in [&mut ada, &mut bob] {
+        let state = client.space(|state| state.error.as_deref() == Some("unrelated error"));
+        assert_eq!(state.workers_authoritative, Some(false));
+    }
+    session.emit(Event::WorkersChanged { workers: vec![] });
+    for client in [&mut ada, &mut bob] {
+        let state = client
+            .space(|state| state.workers.is_empty() && state.workers_authoritative == Some(true));
+        assert_eq!(state.error.as_deref(), Some("unrelated error"));
+    }
 }
 
 #[test]

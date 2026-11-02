@@ -68,6 +68,11 @@ pub struct SpaceState {
     pub approval: Option<Approval>,
     pub question: Option<Question>,
     pub workers: Vec<Worker>,
+    /// Whether absence from this list is evidence that a previously observed
+    /// worker was removed. It does not assert that every worker was discovered.
+    /// Absent when sent by an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_authoritative: Option<bool>,
     pub presentations: Vec<Presentation>,
     pub participants: Vec<Participant>,
     pub attribution: bool,
@@ -283,6 +288,27 @@ mod tests {
         let mode: Mode =
             serde_json::from_value(serde_json::json!({"id": "plan", "name": "Plan"})).unwrap();
         assert_eq!(mode.description, None);
+    }
+
+    #[test]
+    fn worker_completeness_is_optional_for_older_servers() {
+        let legacy = serde_json::to_value(SpaceState::default()).unwrap();
+        assert!(legacy.get("workers_authoritative").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(legacy)
+                .unwrap()
+                .workers_authoritative,
+            None
+        );
+        for complete in [true, false] {
+            let state = SpaceState {
+                workers_authoritative: Some(complete),
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&state).unwrap();
+            assert_eq!(json["workers_authoritative"], complete);
+            assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+        }
     }
 
     #[test]

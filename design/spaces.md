@@ -14,6 +14,10 @@ A participant who disconnects leaves their space but keeps their identity and au
 
 Shared space state is held by the server and is the same for every participant: the conversation, the input queue, pending approvals and questions (including partially answered forms), delegated workers, the session's mode and the modes it offers (see `agent-backends.md`), presentation cards and worker visibility. A delegated worker names the worker that delegated to it as its parent; a worker the space's own agent session started has no parent, so clients can arrange workers without knowing the backend's session identifier. Per-participant state is limited to presence, local presentation choices such as mute or paging, and the participant's own in-progress recording.
 
+If the initial session snapshot cannot be read, the server refuses to open the space, reports a retryable error to its creator, and closes the backend handle. It does not delete an attached agent session. This avoids presenting incomplete conversation, permission or worker state as current.
+
+Worker-list authority is reported independently from unrelated space errors: when the server says omissions are authoritative, a client may retire a previously observed worker even if another error remains visible. An incomplete list, including one trimmed to fit the snapshot budget, never authorizes a departure. Older servers without this indication retain the earlier conservative error-based behavior.
+
 When participants act concurrently:
 
 - The first decision on a pending approval or question resolves it. Later decisions on the same request are rejected without effect, and every participant observes the resolution.
@@ -27,11 +31,15 @@ When participants act concurrently:
 
 Several people should be able to share one conversational workspace with one coordinating agent, and move between separate workspaces. Agreed in the October 2026 design discussion for replacing the Node bridge.
 
+In November 2026 the user chose to refuse and retry an initial snapshot failure rather than open an incomplete space while attempting recovery.
+
 ## Scope
 
 The server's space registry, the client protocol for joining and leaving spaces, the input queue, and approval and question handling. How spaces persist across server restarts is not yet decided.
 
 ## Validation
+
+- Test that an initial snapshot failure opens no space, reports a retryable error, closes only the failed handle and allows a later retry; an already running space remains unaffected.
 
 - Inspect the space model: a space has exactly one session binding, and per-space stores are keyed by space.
 - Test two participants in one space: both observe the same conversation, queue and pending requests; concurrent decisions on one approval result in exactly one decision reaching the backend. Test two parallel approvals: both are presented in turn and both decisions reach the backend in order.
