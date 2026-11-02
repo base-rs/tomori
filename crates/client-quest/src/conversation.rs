@@ -1125,10 +1125,12 @@ impl Conversation {
     /// Ending the utterance failed, so its words were not sent: stop showing
     /// them as on their way, and report why.
     pub fn utterance_not_sent(&mut self, error: impl Into<String>) {
+        // A later utterance may already be queued behind this end: cancel it
+        // as any capture failure does, before clearing what is on its way.
+        self.microphone_failed(error);
         if matches!(self.talk, Some(Talk::Sending { .. })) {
             self.talk = None;
         }
-        self.microphone_failed(error);
     }
 
     /// How long X has been held, while recording.
@@ -3354,6 +3356,26 @@ mod tests {
             "{}",
             conversation.text()
         );
+    }
+
+    #[test]
+    fn a_failed_end_also_withdraws_a_later_utterance_queued_behind_it() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        // A second press and release land before the first end is performed.
+        conversation.talk(true);
+        conversation.talk(false);
+        assert!(matches!(
+            conversation.next_action(),
+            Some(Action::EndUtterance)
+        ));
+        conversation.utterance_not_sent("Microphone lost audio; not sent.");
+        assert!(conversation.talk.is_none());
+        // The second utterance never began, so nothing of it is performed.
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
     }
 
     #[test]
