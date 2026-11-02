@@ -34,6 +34,15 @@ pub const FIELD_BYTES: usize = 1024;
 /// Longest identifier a client names in a join, decision or answer, in bytes: a space, request, question, option or field. Longer ones cannot match anything the server presented.
 pub const IDENTIFIER_BYTES: usize = 1024;
 
+/// The most modes a space offers; an agent offering more has the rest left out.
+pub const MODES: usize = 16;
+
+/// Longest mode name shared in a snapshot, in bytes. Longer names are cut.
+pub const MODE_NAME_BYTES: usize = 64;
+
+/// Longest mode description shared in a snapshot, in bytes. Longer descriptions are cut.
+pub const MODE_DESCRIPTION_BYTES: usize = 256;
+
 /// Longest transcript that can be queued, in bytes. Partial transcripts are cut to this length.
 pub const QUEUED_TEXT_BYTES: usize = 4096;
 

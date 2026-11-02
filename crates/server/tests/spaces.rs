@@ -735,6 +735,59 @@ fn a_question_is_answered_by_any_participant() {
 }
 
 #[test]
+fn any_participant_switches_the_mode_once_the_agent_confirms_it() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    let mut bob = server.connect("bob", "Bob");
+    let space = ada.create_space("Modes").id;
+    let state = join(&mut bob, &space, 2);
+    let session = server.backend.started()[0].clone();
+    let offered: Vec<&str> = state.modes.iter().map(|mode| mode.id.as_str()).collect();
+    assert_eq!(offered, ["default", "plan"]);
+    assert_eq!(state.mode.as_deref(), Some("default"));
+
+    // Bob did not create the space, but may still switch it.
+    bob.send(&ClientMessage::SetMode {
+        mode: "plan".to_owned(),
+    });
+    ada.space(|state| state.mode.as_deref() == Some("plan"));
+    assert_eq!(session.log().modes, ["plan"]);
+
+    // A mode the space does not offer never reaches the agent.
+    bob.send(&ClientMessage::SetMode {
+        mode: "bypassPermissions".to_owned(),
+    });
+    assert_eq!(bob.error(), "The agent does not offer that mode.");
+    bob.send(&ClientMessage::SetMode {
+        mode: "x".repeat(2000),
+    });
+    assert!(bob.error().contains("mode is too long"));
+    assert_eq!(session.log().modes, ["plan"]);
+
+    // A refusal is shared with the space, and the mode stays as the agent last reported it.
+    session.emit(Event::ModeRefused {
+        mode: "default".to_owned(),
+        reason: Some("not now".to_owned()),
+    });
+    let state = ada.space(|state| state.error.is_some());
+    assert_eq!(
+        state.error.as_deref(),
+        Some("The agent refused default mode: not now")
+    );
+    assert_eq!(state.mode.as_deref(), Some("plan"));
+}
+
+#[test]
+fn a_lobby_participant_cannot_switch_a_mode() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::SetMode {
+        mode: "plan".to_owned(),
+    });
+    assert_eq!(ada.error(), "Join a space first.");
+}
+
+#[test]
 fn attribution_can_be_turned_off_per_space() {
     let server = TestServer::start();
     let (mut ada, bob, _) = pair(&server);
