@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use base_scheduler::Cancellation;
-use base_scheduler_direct::DirectScheduler;
+use base_scheduler_native::{NativeOptions, NativeScheduler};
 use protocol::{AudioFrame, ClientMessage};
 
 use crate::outbox::{FailedUtterance, Membership, Outbox};
@@ -120,7 +120,12 @@ pub struct Client {
 impl Client {
     /// Start connecting in the background. Fails only if the connection thread or its scheduler cannot be created; connection failures are reported as [`ConnectionState::Disconnected`] and retried.
     pub fn connect(options: Options) -> io::Result<Self> {
-        let scheduler = DirectScheduler::new(Default::default())?;
+        let scheduler = NativeScheduler::with_options(NativeOptions {
+            workers: 1,
+            threads: 2,
+            capacity: 64,
+            ..Default::default()
+        })?;
         let shared = Arc::new(Shared {
             outbox: Outbox::new(
                 options.outgoing_audio_limit,
