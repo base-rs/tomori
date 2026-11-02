@@ -234,6 +234,57 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
 }
 
 #[test]
+fn opted_in_microphone_does_not_resume_while_the_application_is_stalled() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let mut options = options(server.address);
+    options.microphone_rearm_on_disconnect = true;
+    let client = Client::connect(options).unwrap();
+    assert_eq!(wait_connected(&client), 1);
+    client.send(join("alpha")).unwrap();
+    wait_for_space(&client, "alpha");
+    client
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    let sender = client.sender();
+    let generation = sender.connection_generation();
+    assert!(sender.connection_is_current(generation));
+    assert!(sender.arm_microphone(generation));
+    client.send_audio(audio(1)).unwrap();
+    client.send(kick()).unwrap();
+
+    // Do not drain connection events: simulate an application/render stall
+    // spanning both disconnection and reconnection.
+    let deadline = Instant::now() + TIMEOUT;
+    while !matches!(client.state(), ConnectionState::Connected { source: 2, .. }) {
+        assert!(Instant::now() < deadline, "client did not reconnect");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(client.sender().membership().gate, Gate::Off);
+    assert!(!sender.connection_is_current(generation));
+    assert!(!sender.arm_microphone(generation));
+    client.send_audio(audio(2)).unwrap();
+    client.send(ClientMessage::ListSpaces).unwrap();
+    wait_for(&client, |event| {
+        matches!(event, Event::Message(ServerMessage::Spaces { .. }))
+    });
+    assert!(!server.received(2).contains(&Received::Audio(2)));
+
+    assert!(sender.arm_microphone(sender.connection_generation()));
+    client
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    client.send_audio(audio(3)).unwrap();
+    let deadline = Instant::now() + TIMEOUT;
+    while !server.received(2).contains(&Received::Audio(3)) {
+        assert!(
+            Instant::now() < deadline,
+            "explicitly rearmed audio was not sent"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn retries_until_the_server_is_listening() {
     // Reserve a port, then release it so nothing is listening.
     let address = TcpListener::bind(localhost())

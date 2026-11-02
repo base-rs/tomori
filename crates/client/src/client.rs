@@ -71,7 +71,7 @@ impl Sender {
         Ok(())
     }
 
-    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`protocol::Gate::Off`] are ignored.
+    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`protocol::Gate::Off`] are ignored. When [`Options::microphone_rearm_on_disconnect`] is set, audio is also dropped after a disconnect until explicitly rearmed.
     pub fn send_audio(&self, frame: AudioFrame) -> Result<(), SendError> {
         let failed = self.shared.outbox.send_audio(frame)?;
         self.shared.report(failed);
@@ -89,6 +89,23 @@ impl Sender {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Identify the current connection for a capture that must stop if it ends.
+    pub fn connection_generation(&self) -> u64 {
+        self.shared.outbox.connection_generation()
+    }
+
+    /// Whether this is still the connection identified by `generation`.
+    pub fn connection_is_current(&self, generation: u64) -> bool {
+        self.shared.outbox.connection_is_current(generation)
+    }
+
+    /// Explicitly activate microphone audio for the identified connection.
+    /// When [`Options::microphone_rearm_on_disconnect`] is set, returns false
+    /// if that connection has ended. Without the option, only closure fails.
+    pub fn arm_microphone(&self, generation: u64) -> bool {
+        self.shared.outbox.arm_microphone(generation)
     }
 
     /// The space and gate restored after reconnecting.
@@ -130,6 +147,9 @@ impl Client {
             events: Events::new(),
             closing: Cancellation::new(),
         });
+        if options.microphone_rearm_on_disconnect {
+            shared.outbox.require_microphone_rearm();
+        }
         let (audio_sender, audio): (SyncSender<AudioFrame>, _) =
             mpsc::sync_channel(options.incoming_audio_limit.max(1));
         let thread_shared = shared.clone();

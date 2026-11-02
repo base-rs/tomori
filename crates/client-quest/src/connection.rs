@@ -15,7 +15,7 @@ use client::{
     Client, ConnectionState, Event, Microphone, Options, discovery,
     playback::{MixerOptions, Player, PlayerControl},
 };
-use protocol::{ClientMessage, Pose, ServerMessage};
+use protocol::{ClientMessage, Gate, Pose, ServerMessage};
 use std::{
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
@@ -52,12 +52,14 @@ pub struct Connection {
 /// A hook that renders the other participants' presence reports, which the conversation ignores.
 type PresenceHook = Box<dyn FnMut(&ServerMessage) + Send>;
 
-/// Push-to-talk audio, from the platform microphone through the client's [`Microphone`]. The microphone is open only while recording.
+/// Live and push-to-talk audio through the client's [`Microphone`].
 struct Voice {
     capture: Box<dyn Capture>,
     /// Shared with the capture thread.
     shared: Arc<Mutex<Captured>>,
     recording: Option<Recording>,
+    live: bool,
+    generation: Option<u64>,
 }
 
 #[derive(Default)]
@@ -73,11 +75,28 @@ impl Voice {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn begin(&mut self, client: &Client, utterance: String) -> Result<(), String> {
-        self.recording = None;
+    fn open(&mut self, client: &Client, live: bool, generation: u64) -> Result<(), String> {
+        // Never rearm a new connection while an old capture callback could
+        // still be in flight. Its recording must be stopped and joined first.
+        if self.recording.is_some() && self.generation != Some(generation) {
+            return Err("Connection lost; microphone stopped.".into());
+        }
+        if !client.sender().arm_microphone(generation) {
+            return Err("Connection lost; microphone stopped.".into());
+        }
+        if self.recording.is_some() {
+            return Ok(());
+        }
         match self.capture.permit()? {
             true => {}
-            false => return Err("Allow the microphone, then hold X again.".into()),
+            false => {
+                return Err(if live {
+                    "Allow the microphone, then squeeze the left grip again."
+                } else {
+                    "Allow the microphone, then hold X again."
+                }
+                .into());
+            }
         }
         self.lock().failure = None;
         let shared = self.shared.clone();
@@ -94,39 +113,132 @@ impl Voice {
             let mut captured = shared.lock().unwrap_or_else(PoisonError::into_inner);
             captured.failure.get_or_insert(error);
         });
-        let recording = self.capture.open(samples, failed)?;
+        let sender = client.sender();
+        let recording = if live {
+            self.capture.open_live(
+                samples,
+                failed,
+                Box::new(move || sender.connection_is_current(generation)),
+            )?
+        } else {
+            self.capture.open(samples, failed)?
+        };
         let mut captured = self.lock();
         let microphone = match captured.microphone.take() {
             Some(microphone) if microphone.sample_rate() == recording.sample_rate => microphone,
             _ => Microphone::new(client.sender(), recording.sample_rate),
         };
-        let microphone = captured.microphone.insert(microphone);
-        microphone
-            .begin(utterance)
-            .map_err(|error| format!("Cannot send: {error}"))?;
+        captured.microphone = Some(microphone);
         drop(captured);
         self.recording = Some(recording);
+        self.generation = Some(generation);
+        Ok(())
+    }
+
+    fn start_live(&mut self, client: &Client, generation: u64) -> Result<(), String> {
+        self.open(client, true, generation)?;
+        let result = self
+            .lock()
+            .microphone
+            .as_mut()
+            .unwrap()
+            .set_gate(Gate::Live);
+        if let Err(error) = result {
+            self.recording = None;
+            return Err(format!("Cannot send: {error}"));
+        }
+        self.live = true;
+        Ok(())
+    }
+
+    fn stop_live(&mut self) -> Result<(), String> {
+        self.live = false;
+        let talking = self.talking();
+        if let Some(microphone) = self.lock().microphone.as_mut() {
+            microphone
+                .set_gate(Gate::Off)
+                .map_err(|error| format!("Cannot send: {error}"))?;
+        }
+        if !talking {
+            self.recording = None;
+        }
+        Ok(())
+    }
+
+    fn talking(&self) -> bool {
+        self.lock()
+            .microphone
+            .as_ref()
+            .is_some_and(|microphone| microphone.utterance().is_some())
+    }
+
+    fn begin(&mut self, client: &Client, utterance: String, generation: u64) -> Result<(), String> {
+        let resume_live = self.live && self.recording.is_some();
+        if resume_live {
+            if self.generation != Some(generation) || !client.sender().arm_microphone(generation) {
+                return Err("Connection lost; microphone stopped.".into());
+            }
+            // Finish the in-flight live read before changing its gate: samples
+            // captured before X must never be transcribed for the agent.
+            self.recording = None;
+            if let Some(error) = self.lock().failure.take() {
+                return Err(error);
+            }
+        } else {
+            self.open(client, false, generation)?;
+        }
+        let result = self.lock().microphone.as_mut().unwrap().begin(utterance);
+        if let Err(error) = result {
+            self.recording = None;
+            return Err(format!("Cannot send: {error}"));
+        }
+        if resume_live && let Err(error) = self.open(client, true, generation) {
+            if let Some(microphone) = self.lock().microphone.as_mut() {
+                let _ = microphone.cancel();
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
     /// Close the microphone, after which every captured sample has been passed on, then end or cancel the utterance.
-    fn finish(&mut self, send: bool) -> Result<(), String> {
+    fn finish(&mut self, client: Option<&Client>, send: bool) -> Result<(), String> {
+        let resume_live = self.live;
+        let generation = self.generation;
+        // Join the capture thread before changing the gate or checking for
+        // failure; no in-flight read may become the next mode's audio.
         self.recording = None;
         let mut captured = self.lock();
+        let failure = if send { captured.failure.take() } else { None };
         let Some(microphone) = captured.microphone.as_mut() else {
-            return Ok(());
+            return failure.map_or(Ok(()), Err);
         };
+        if let Some(error) = failure {
+            microphone
+                .cancel()
+                .map_err(|error| format!("Cannot cancel: {error}"))?;
+            return Err(error);
+        }
         let result = if send {
             microphone.end()
         } else {
             microphone.cancel()
         };
-        result.map_err(|error| format!("Cannot send: {error}"))
+        result.map_err(|error| format!("Cannot send: {error}"))?;
+        drop(captured);
+        if resume_live {
+            let client = client.ok_or("Connection lost; live microphone stopped.")?;
+            let generation = generation.ok_or("Connection lost; live microphone stopped.")?;
+            self.open(client, true, generation)?;
+        }
+        Ok(())
     }
 
     /// Close the microphone and forget the utterance the server has already ended.
     fn abandon(&mut self) -> Result<(), String> {
-        self.recording = None;
+        if !self.live {
+            self.recording = None;
+        }
         let mut captured = self.lock();
         let Some(microphone) = captured.microphone.as_mut() else {
             return Ok(());
@@ -139,6 +251,8 @@ impl Voice {
     /// The client is going away: close the microphone and forget it.
     fn reset(&mut self) {
         self.recording = None;
+        self.live = false;
+        self.generation = None;
         self.lock().microphone = None;
     }
 
@@ -299,6 +413,8 @@ impl Connection {
                 capture,
                 shared: Arc::default(),
                 recording: None,
+                live: false,
+                generation: None,
             },
             speaker: Speaker::new(playback),
             presence: None,
@@ -346,10 +462,22 @@ impl Connection {
 
     /// Run once per frame. Browsing, and the multicast lock it needs, stop while unfocused.
     pub fn poll(&mut self, focused: bool, conversation: &mut Conversation) {
-        self.perform(conversation);
+        if !focused {
+            conversation.stop_live();
+            conversation.stop_talking();
+            // Stop the capture thread before processing any queued end or
+            // cancellation; focus loss must not deliver another live buffer.
+            self.voice.recording = None;
+        }
+        if let Some(error) = self.voice.failure() {
+            conversation.microphone_failed(error);
+        }
         self.browse(focused && conversation.is_browsing(), conversation);
         while let Some(event) = self.client.as_ref().and_then(Client::try_event) {
             let connected = matches!(event, Event::State(ConnectionState::Connected { .. }));
+            if connected && let Some(client) = self.client.as_ref() {
+                conversation.set_capture_generation(client.sender().connection_generation());
+            }
             if connected
                 && let Some(instance) = conversation.server().and_then(|c| c.instance.as_deref())
             {
@@ -394,22 +522,23 @@ impl Connection {
         {
             conversation.fail(error);
         }
-        // Nothing plays while the microphone records, so that playback cannot be transcribed. See `design/live-audio.md`.
+        // Silence only during push-to-talk, not while talking to the space.
         if let Some(control) = self.speaker.control() {
-            control.set_silenced(self.voice.recording.is_some());
+            control.set_silenced(self.voice.talking());
         }
     }
 
     fn perform(&mut self, conversation: &mut Conversation) {
-        for action in conversation.take_actions() {
+        while let Some(action) = conversation.next_action() {
             match action {
                 Action::Connect(choice) => {
                     self.disconnect();
-                    let options = Options::new(
+                    let mut options = Options::new(
                         choice.address,
                         &self.identity.participant,
                         &self.identity.name,
                     );
+                    options.microphone_rearm_on_disconnect = true;
                     match Client::connect(options) {
                         Ok(mut client) => {
                             self.speaker.attach(&mut client);
@@ -435,13 +564,13 @@ impl Connection {
                     }
                     None => conversation.fail("Not connected."),
                 },
-                Action::BeginUtterance(utterance) => {
+                Action::BeginUtterance(utterance, generation) => {
                     // Silence the speaker before the microphone opens.
                     if let Some(control) = self.speaker.control() {
                         control.set_silenced(true);
                     }
                     let begun = match &self.client {
-                        Some(client) => self.voice.begin(client, utterance),
+                        Some(client) => self.voice.begin(client, utterance, generation),
                         None => Err("Not connected.".into()),
                     };
                     if let Err(error) = begun {
@@ -451,18 +580,34 @@ impl Connection {
                     }
                 }
                 Action::EndUtterance => {
-                    if let Err(error) = self.voice.finish(true) {
-                        conversation.fail(error);
+                    if let Err(error) = self.voice.finish(self.client.as_ref(), true) {
+                        conversation.microphone_failed(error);
                     }
                 }
                 Action::CancelUtterance => {
-                    if let Err(error) = self.voice.finish(false) {
+                    if let Err(error) = self.voice.finish(self.client.as_ref(), false) {
                         conversation.fail(error);
                     }
                 }
                 Action::AbandonUtterance => {
                     if let Err(error) = self.voice.abandon() {
                         conversation.fail(error);
+                    }
+                }
+                Action::StartLive(generation) => {
+                    let result = match &self.client {
+                        Some(client) => self.voice.start_live(client, generation),
+                        None => Err("Not connected.".into()),
+                    };
+                    if let Err(error) = result {
+                        self.voice.recording = None;
+                        conversation.microphone_failed(error);
+                    }
+                }
+                Action::StopLive => {
+                    if let Err(error) = self.voice.stop_live() {
+                        self.voice.recording = None;
+                        conversation.microphone_failed(error);
                     }
                 }
             }
@@ -539,7 +684,7 @@ impl Drop for Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::{Failed, Samples};
+    use crate::capture::{Active, Failed, Samples};
     use std::{
         sync::atomic::{AtomicBool, AtomicU32, Ordering},
         thread::JoinHandle,
@@ -593,6 +738,15 @@ mod tests {
                 },
             ))
         }
+
+        fn open_live(
+            &mut self,
+            samples: Samples,
+            failed: Failed,
+            _active: Active,
+        ) -> Result<Recording, String> {
+            self.open(samples, failed)
+        }
     }
 
     fn voice(rate: &Arc<AtomicU32>, permitted: bool, fail: Option<&str>) -> Voice {
@@ -604,6 +758,8 @@ mod tests {
             }),
             shared: Arc::default(),
             recording: None,
+            live: false,
+            generation: None,
         }
     }
 
@@ -625,19 +781,19 @@ mod tests {
         let client = client();
         let rate = Arc::new(AtomicU32::new(16_000));
         let mut voice = voice(&rate, true, None);
-        voice.begin(&client, "u1".into()).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(utterance(&voice).as_deref(), Some("u1"));
-        voice.finish(true).unwrap();
+        voice.finish(Some(&client), true).unwrap();
         assert!(voice.recording.is_none());
         assert_eq!(utterance(&voice), None);
 
-        voice.begin(&client, "u2".into()).unwrap();
+        voice.begin(&client, "u2".into(), 0).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         voice.abandon().unwrap();
         assert_eq!(utterance(&voice), None);
 
-        voice.begin(&client, "u3".into()).unwrap();
+        voice.begin(&client, "u3".into(), 0).unwrap();
         voice.reset();
         assert!(voice.lock().microphone.is_none());
         client.close();
@@ -648,13 +804,13 @@ mod tests {
         let client = client();
         let rate = Arc::new(AtomicU32::new(16_000));
         let mut voice = voice(&rate, true, None);
-        voice.begin(&client, "u1".into()).unwrap();
-        voice.finish(false).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        voice.finish(Some(&client), false).unwrap();
         rate.store(48_000, Ordering::Relaxed);
-        voice.begin(&client, "u2".into()).unwrap();
+        voice.begin(&client, "u2".into(), 0).unwrap();
         let sample_rate = voice.lock().microphone.as_ref().unwrap().sample_rate();
         assert_eq!(sample_rate, 48_000);
-        voice.finish(false).unwrap();
+        voice.finish(Some(&client), false).unwrap();
         client.close();
     }
 
@@ -663,10 +819,58 @@ mod tests {
         let client = client();
         let rate = Arc::new(AtomicU32::new(16_000));
         let mut voice = voice(&rate, false, None);
-        let error = voice.begin(&client, "u1".into()).unwrap_err();
+        let error = voice.begin(&client, "u1".into(), 0).unwrap_err();
         assert!(error.contains("Allow the microphone"), "{error}");
         assert!(voice.recording.is_none());
         assert_eq!(utterance(&voice), None);
+        client.close();
+    }
+
+    #[test]
+    fn live_microphone_resumes_after_agent_and_can_be_muted_during_it() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut voice = voice(&rate, true, None);
+        voice.start_live(&client, 0).unwrap();
+        assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Live);
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        assert!(voice.talking());
+        assert_eq!(
+            voice.lock().microphone.as_ref().unwrap().gate(),
+            Gate::Agent
+        );
+        voice.finish(Some(&client), true).unwrap();
+        assert!(voice.recording.is_some());
+        assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Live);
+        voice.begin(&client, "u2".into(), 0).unwrap();
+        voice.stop_live().unwrap();
+        assert_eq!(
+            voice.lock().microphone.as_ref().unwrap().gate(),
+            Gate::Agent
+        );
+        voice.finish(Some(&client), true).unwrap();
+        assert!(voice.recording.is_none());
+        assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Off);
+        client.close();
+    }
+
+    #[test]
+    fn live_microphone_stops_and_permission_is_required() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut denied = voice(&rate, false, None);
+        assert!(
+            denied
+                .start_live(&client, 0)
+                .unwrap_err()
+                .contains("left grip")
+        );
+        assert!(denied.recording.is_none());
+        let mut voice = voice(&rate, true, None);
+        voice.start_live(&client, 0).unwrap();
+        voice.stop_live().unwrap();
+        assert!(voice.recording.is_none());
+        assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Off);
         client.close();
     }
 
@@ -675,7 +879,7 @@ mod tests {
         let client = client();
         let rate = Arc::new(AtomicU32::new(16_000));
         let mut voice = voice(&rate, true, Some("The microphone failed."));
-        voice.begin(&client, "u1".into()).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let failure = loop {
             if let Some(failure) = voice.failure() {
@@ -685,12 +889,144 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         };
         assert_eq!(failure, "The microphone failed.");
-        voice.finish(false).unwrap();
+        voice.finish(Some(&client), false).unwrap();
 
         // Closed before it is noticed: nothing is reported once the recording has ended.
-        voice.begin(&client, "u2".into()).unwrap();
-        voice.finish(false).unwrap();
+        voice.begin(&client, "u2".into(), 0).unwrap();
+        voice.finish(Some(&client), false).unwrap();
         assert_eq!(voice.failure(), None);
+        client.close();
+    }
+
+    #[test]
+    fn failure_before_end_cancels_the_utterance_and_keeps_the_microphone() {
+        let client = client();
+        let rate = Arc::new(AtomicU32::new(16_000));
+        let mut voice = voice(&rate, true, None);
+        voice.start_live(&client, 0).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        voice.lock().failure = Some("capture failed".into());
+        assert_eq!(
+            voice.finish(Some(&client), true).unwrap_err(),
+            "capture failed"
+        );
+        assert_eq!(utterance(&voice), None);
+        assert!(voice.lock().microphone.is_some());
+        voice.stop_live().unwrap();
+        client.close();
+    }
+
+    #[test]
+    fn live_and_agent_capture_threads_stop_before_the_gate_changes() {
+        struct BoundaryCapture {
+            shared: Arc<Mutex<Captured>>,
+            closed_gates: Arc<Mutex<Vec<Gate>>>,
+        }
+        impl Capture for BoundaryCapture {
+            fn open(&mut self, _samples: Samples, _failed: Failed) -> Result<Recording, String> {
+                let stop = Arc::new(AtomicBool::new(false));
+                let thread_stop = stop.clone();
+                let shared = self.shared.clone();
+                let closed_gates = self.closed_gates.clone();
+                let thread = std::thread::spawn(move || {
+                    while !thread_stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let gate = shared.lock().unwrap().microphone.as_ref().unwrap().gate();
+                    closed_gates.lock().unwrap().push(gate);
+                });
+                Ok(Recording::new(
+                    16_000,
+                    Worker {
+                        stop,
+                        thread: Some(thread),
+                    },
+                ))
+            }
+            fn open_live(
+                &mut self,
+                samples: Samples,
+                failed: Failed,
+                _active: Active,
+            ) -> Result<Recording, String> {
+                self.open(samples, failed)
+            }
+        }
+        let client = client();
+        let shared = Arc::new(Mutex::new(Captured::default()));
+        let closed_gates = Arc::new(Mutex::new(Vec::new()));
+        let mut voice = Voice {
+            capture: Box::new(BoundaryCapture {
+                shared: shared.clone(),
+                closed_gates: closed_gates.clone(),
+            }),
+            shared,
+            recording: None,
+            live: false,
+            generation: None,
+        };
+        voice.start_live(&client, 0).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        voice.finish(Some(&client), true).unwrap();
+        voice.stop_live().unwrap();
+        assert_eq!(
+            *closed_gates.lock().unwrap(),
+            [Gate::Live, Gate::Agent, Gate::Off]
+        );
+        client.close();
+    }
+
+    #[test]
+    fn failure_reported_during_capture_shutdown_cancels_the_agent_utterance() {
+        struct FailureOnStop(Arc<AtomicU32>);
+        impl Capture for FailureOnStop {
+            fn open(&mut self, _samples: Samples, failed: Failed) -> Result<Recording, String> {
+                let attempt = self.0.fetch_add(1, Ordering::Relaxed);
+                let stop = Arc::new(AtomicBool::new(false));
+                let thread_stop = stop.clone();
+                let thread = std::thread::spawn(move || {
+                    while !thread_stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if attempt == 1 {
+                        failed("read failed while stopping".into());
+                    }
+                });
+                Ok(Recording::new(
+                    16_000,
+                    Worker {
+                        stop,
+                        thread: Some(thread),
+                    },
+                ))
+            }
+            fn open_live(
+                &mut self,
+                samples: Samples,
+                failed: Failed,
+                _active: Active,
+            ) -> Result<Recording, String> {
+                self.open(samples, failed)
+            }
+        }
+        let client = client();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let mut voice = Voice {
+            capture: Box::new(FailureOnStop(attempts.clone())),
+            shared: Arc::default(),
+            recording: None,
+            live: false,
+            generation: None,
+        };
+        voice.start_live(&client, 0).unwrap();
+        voice.begin(&client, "u1".into(), 0).unwrap();
+        assert_eq!(
+            voice.finish(Some(&client), true).unwrap_err(),
+            "read failed while stopping"
+        );
+        assert_eq!(utterance(&voice), None);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        voice.stop_live().unwrap();
         client.close();
     }
 

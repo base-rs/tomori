@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The platform microphone, opened only while push-to-talk is held. See `design/live-audio.md`.
+//! The platform microphone, opened for live audio or push-to-talk. See `design/live-audio.md`.
 //!
 //! Capture hands mono samples to a callback on its own thread; [`crate::connection::Connection`] passes them to the client's [`client::Microphone`], which frames and sends them.
 
@@ -10,6 +10,9 @@ pub type Samples = Box<dyn FnMut(&[f32]) + Send>;
 
 /// Told, from any thread, why capture stopped early.
 pub type Failed = Box<dyn Fn(String) + Send + Sync>;
+
+/// Whether the connection on which live capture started is still usable.
+pub type Active = Box<dyn Fn() -> bool + Send>;
 
 /// Capture in progress, stopped when dropped. Samples already delivered are not lost.
 pub struct Recording {
@@ -35,6 +38,18 @@ pub trait Capture {
 
     /// Start capturing at a rate between 8 and 48 kHz, which the protocol carries.
     fn open(&mut self, samples: Samples, failed: Failed) -> Result<Recording, String>;
+
+    /// Capture for an open microphone, stopping when its connection is lost.
+    /// Platforms must opt in with a capture implementation that can stop on
+    /// the capture thread, even if the application thread is stalled.
+    fn open_live(
+        &mut self,
+        _samples: Samples,
+        _failed: Failed,
+        _active: Active,
+    ) -> Result<Recording, String> {
+        Err("Live microphone is not available on this platform.".into())
+    }
 }
 
 /// Average interleaved channels into mono.
@@ -148,7 +163,7 @@ pub use android::Android;
 /// AAudio, at the 16 kHz the recognizer uses, after asking for `RECORD_AUDIO`.
 #[cfg(target_os = "android")]
 mod android {
-    use super::{Capture, Failed, Recording, Samples};
+    use super::{Active, Capture, Failed, Recording, Samples};
     use ndk::audio::{
         AudioDirection, AudioFormat, AudioInputPreset, AudioSharingMode, AudioStreamBuilder,
     };
@@ -192,12 +207,38 @@ mod android {
 
         /// The stream opens on the capture thread, so that the frame does not wait for it; failing to open is reported through `failed`.
         fn open(&mut self, samples: Samples, failed: Failed) -> Result<Recording, String> {
+            self.start(samples, failed, AudioInputPreset::VoiceRecognition, None)
+        }
+
+        fn open_live(
+            &mut self,
+            samples: Samples,
+            failed: Failed,
+            active: Active,
+        ) -> Result<Recording, String> {
+            self.start(
+                samples,
+                failed,
+                AudioInputPreset::VoiceCommunication,
+                Some(active),
+            )
+        }
+    }
+
+    impl Android {
+        fn start(
+            &mut self,
+            samples: Samples,
+            failed: Failed,
+            preset: AudioInputPreset,
+            active: Option<Active>,
+        ) -> Result<Recording, String> {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = stop.clone();
             let thread = std::thread::Builder::new()
                 .name("tomori-microphone".into())
                 .spawn(move || {
-                    if let Err(error) = capture(samples, &thread_stop) {
+                    if let Err(error) = capture(samples, &thread_stop, preset, active) {
                         failed(error);
                     }
                 })
@@ -227,7 +268,15 @@ mod android {
         }
     }
 
-    fn capture(mut samples: Samples, stop: &AtomicBool) -> Result<(), String> {
+    fn capture(
+        mut samples: Samples,
+        stop: &AtomicBool,
+        preset: AudioInputPreset,
+        active: Option<Active>,
+    ) -> Result<(), String> {
+        if active.as_ref().is_some_and(|active| !active()) {
+            return Err("Connection lost; live microphone stopped.".into());
+        }
         // Shared mode supports Android's resampler, so ask for the recognizer's 16 kHz mono directly.
         let stream = AudioStreamBuilder::new()
             .and_then(|builder| {
@@ -237,7 +286,7 @@ mod android {
                     .channel_count(1)
                     .sample_rate(SAMPLE_RATE as i32)
                     .format(AudioFormat::PCM_Float)
-                    .input_preset(AudioInputPreset::VoiceRecognition)
+                    .input_preset(preset)
                     .open_stream()
             })
             .map_err(|error| format!("Cannot open the microphone: {error}"))?;
@@ -255,12 +304,19 @@ mod android {
         let mut buffer = [0.0_f32; (SAMPLE_RATE / 50) as usize];
         let mut result = Ok(());
         while result.is_ok() && !stop.load(Ordering::Relaxed) {
+            if active.as_ref().is_some_and(|active| !active()) {
+                result = Err("Connection lost; live microphone stopped.".into());
+                break;
+            }
             // SAFETY: `buffer` holds `buffer.len()` samples of the negotiated mono float format, and only this thread uses the stream.
             let read = unsafe {
                 stream.read(buffer.as_mut_ptr().cast(), buffer.len() as i32, 100_000_000)
             };
-            result = frame_count(read.map_err(i32::from), buffer.len())
-                .map(|count| samples(&buffer[..count]));
+            result = frame_count(read.map_err(i32::from), buffer.len()).map(|count| {
+                if !stop.load(Ordering::Relaxed) && active.as_ref().is_none_or(|active| active()) {
+                    samples(&buffer[..count]);
+                }
+            });
         }
         let _ = stream.request_stop();
         log::info!("Microphone closed");
@@ -285,7 +341,7 @@ mod android {
 
 #[cfg(test)]
 mod tests {
-    use super::downmix;
+    use super::{Active, Capture, Failed, Recording, Samples, downmix};
 
     #[test]
     fn downmixes_interleaved_channels() {
@@ -294,5 +350,21 @@ mod tests {
         assert_eq!(mono, [0.5, 0.5, -0.75]);
         downmix(&[0.25, 0.75], 1, &mut mono);
         assert_eq!(mono, [0.25, 0.75]);
+    }
+
+    #[test]
+    fn platforms_without_independently_stoppable_live_capture_refuse_it() {
+        struct Unsupported;
+        impl Capture for Unsupported {
+            fn open(&mut self, _samples: Samples, _failed: Failed) -> Result<Recording, String> {
+                panic!("unsupported live capture must not open the microphone")
+            }
+        }
+        let active: Active = Box::new(|| true);
+        let error = match Unsupported.open_live(Box::new(|_| {}), Box::new(|_| {}), active) {
+            Ok(_) => panic!("live capture unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(error.contains("not available"));
     }
 }
