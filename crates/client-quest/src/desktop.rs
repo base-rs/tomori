@@ -298,7 +298,7 @@ impl State {
         };
         let renderer = Renderer::new(&device, &queue, render_format, render_width, render_height);
         let spectator = match (spectator, feed) {
-            (true, Some(feed)) => Some(SpectatorView::new(&device, render_format, feed)),
+            (true, Some(feed)) => Some(SpectatorView::new(feed)),
             _ => None,
         };
         log::info!(

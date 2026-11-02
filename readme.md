@@ -236,16 +236,11 @@ it starts, and replies are only shown.
 
 ## PC spectator and live audio (prototype)
 
-The headset doesn't publish its scene or audio for now; this section describes
-the PC side, which shows “Waiting for Quest” until publishing returns through
-the server.
-
-The Quest remains the simulation authority for now. It sends its head/view,
-controller, agent positions, chat panel, and recording indicator to the PC bridge
-at up to **20 updates per second**. The desktop renders a read-only, headset-
-following mono view; it is a separate render, not a pixel-perfect Quest cast.
-It shows “Waiting for Quest” after updates stop. No OBS or YouTube stream starts
-automatically.
+The spectator joins the same server and space as the headset and renders a
+read-only view from a participant's relayed head, controller and hand presence.
+It renders the shared worker state and simulates its own swarm from the space's
+activity; it is not a pixel-perfect Quest cast. The headset's HUD is not shown.
+No OBS or YouTube stream starts automatically.
 
 Both tracked controller grip poses are rendered using the bundled, MIT-licensed
 WebXR Quest Touch Plus models (see `crates/client-quest/assets/controllers/`). If the Quest runtime
@@ -256,13 +251,12 @@ Controller textures are supported for embedded PNG/JPEG and Basis Universal
 KTX2; button animation is not yet implemented. When `XR_EXT_hand_tracking` is
 available and hand tracking is enabled on the Quest, tracked hands are shown
 as a simple joint-and-bone skeleton rather than a skinned hand mesh. Hand
-gestures do not replace the existing controller bindings. The local bridge
-forwards controller poses and tracked joint positions to the spectator at the
-same up-to-20-Hz scene-state rate; it does not persist them.
+gestures do not replace the existing controller bindings. The server relays
+controller poses and tracked joint positions to the other space participants.
 
 ```sh
-bash scripts/opencode-bridge.sh       # keep running; requires USB/adb reverse
-cargo run -p client-quest -- --spectator # PC window; capture this in OBS
+cargo run -p client-quest -- discover --server 127.0.0.1:8765
+cargo run -p client-quest -- --spectator --server 127.0.0.1:8765 --space SPACE_ID
 ```
 
 The spectator requests a **1920×1080 physical-pixel** content area at startup,
@@ -272,30 +266,26 @@ Press **Esc** to close it. Resizing larger changes the render resolution. On a
 window; the compositor may also constrain sizes on smaller or scaled displays.
 Check the actual size in the startup log and OBS preview.
 
-In OBS, add the spectator window as a window/screen capture. Add a **Media
-Source** for `http://127.0.0.1:8765/spectator/audio.wav`: uncheck “Local File”,
-use the URL as the input, and specify `wav` as the input format if required.
-The live 16 kHz mono stream mixes the headset microphone and assistant speech;
-it emits silence when neither is active. Avoid capturing the same audio a second
-time through desktop audio. Preview and adjust OBS audio/video sync before going
-live. The first stream connection may buffer; reconnect the Media Source after
-restarting the bridge.
+In OBS, add the spectator window as a window/screen capture. The spectator
+plays participant audio and agent speech through the PC's default audio output;
+capture that output separately if you want audio. Avoid capturing the same sound
+twice, and preview audio/video synchronization before going live.
 
 ### Experimental direct PipeWire video (Linux)
 
-Instead of capturing a window, run `cargo run -p client-quest -- --spectator-pipewire`. It
+Instead of capturing a window, run `cargo run -p client-quest -- --spectator-pipewire --server 127.0.0.1:8765 --space SPACE_ID`. It
 publishes `Tomori-Spectator` (`tomori-spectator`) **without
 creating a window or display surface**. Press **Ctrl-C** to stop it. For an
 optional window showing the same direct output, use
-`cargo run -p client-quest -- --spectator-pipewire-preview` instead; Escape closes that window
+`cargo run -p client-quest -- --spectator-pipewire-preview --server 127.0.0.1:8765 --space SPACE_ID` instead; Escape closes that window
 and stops its output. Run only one direct-output spectator at a time.
 
-Both modes render to a fixed **3840×2160 RGBA** texture at up to 30 fps. The
-optional preview window requests 1920×1080 and scales the 4K image; the
+Both modes render to a fixed **1920×1080 RGBA** texture at up to 30 fps. The
+optional preview window requests 1920×1080; the
 `--spectator` window-capture fallback still renders at its actual window size.
-The Quest still provides scene updates at
-up to 20 Hz. Audio continues to use the bridge URLs above; video alone is sent
-through PipeWire. Any local client with PipeWire access may be able to view it.
+The Quest reports presence through the server. Audio plays through the spectator's
+desktop output; the PipeWire node carries video only. Any local client with
+PipeWire access may be able to view it.
 
 This prototype requires `gst-launch-1.0`, GStreamer's `fdsrc` and
 `rawvideoparse` elements, and the PipeWire GStreamer plugin. It performs an
@@ -305,9 +295,8 @@ dropped under load. A slow or absent consumer may briefly see older queued frame
 when it reconnects. If GStreamer fails, the headless process exits with an error;
 in preview mode the window stays open but the video source stops. Restart the
 spectator to retry.
-Each uncompressed 4K frame is about 31.6 MiB, so readback and memory-copy costs
-are significantly higher than at 1080p. A sustained 30 fps is not guaranteed;
-check performance and latency in the real OBS preview.
+Each uncompressed 1080p frame is about 7.9 MiB. A sustained 30 fps is not
+guaranteed; check performance and latency in the real preview.
 
 The built-in OBS PipeWire screen capture is not the same as a generic PipeWire
 video input. The [ioquatix fork of `obs-pwvideo`](https://github.com/ioquatix/obs-pwvideo/tree/discover-video-source-nodes)
@@ -359,15 +348,22 @@ be restarted to load a different plugin; do not restart during a stream. Verify
 the live preview, performance and audio/video sync before going live. Keep
 `--spectator` and window capture as the fallback.
 
-For separate OBS volume controls, use `/spectator/microphone.wav` and
+### Legacy PC bridge audio (not used by server clients)
+
+The following feeds and helper belong to the older PC bridge. The current
+server-connected headset and spectator do not publish audio to them; use the
+spectator's desktop audio output instead. These notes are retained only for
+the legacy bridge.
+
+For separate legacy OBS volume controls, use `/spectator/microphone.wav` and
 `/spectator/agent.wav` as two Media Sources instead of the mixed `audio.wav`.
 All three are live 16 kHz mono streams on the same loopback bridge; don't add
 both the mixed stream and the individual streams or the sound will be doubled.
 
 ### Experimental PipeWire/PulseAudio inputs (Linux)
 
-As an alternative to the OBS Media Sources, keep the bridge running and start
-the audio helper in a separate terminal:
+For the legacy bridge only, as an alternative to its OBS Media Sources, keep
+that bridge running and start the audio helper in a separate terminal:
 
 ```sh
 node bridge/pipewire-audio.mjs
