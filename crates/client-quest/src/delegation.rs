@@ -62,6 +62,8 @@ pub enum State {
     Idle,
     Completed,
     Error,
+    /// Ended before it finished without failing; it may be resumed.
+    Stopped,
     #[default]
     Unknown,
 }
@@ -217,6 +219,7 @@ impl Workspace {
                     protocol::WorkerState::Idle => State::Idle,
                     protocol::WorkerState::Completed => State::Completed,
                     protocol::WorkerState::Error => State::Error,
+                    protocol::WorkerState::Stopped => State::Stopped,
                     protocol::WorkerState::Unknown => State::Unknown,
                 },
             });
@@ -1109,6 +1112,7 @@ fn palette(state: State) -> Vec3 {
         State::Idle => Vec3::new(0.35, 0.65, 0.65),
         State::Completed => Vec3::new(0.30, 0.85, 0.52),
         State::Error => Vec3::new(1.00, 0.25, 0.20),
+        State::Stopped => Vec3::new(0.62, 0.52, 0.42),
         State::Unknown => Vec3::new(0.50, 0.55, 0.65),
     }
 }
@@ -1120,6 +1124,7 @@ fn flock_offset(i: usize, seed: f32, time: f64, state: State) -> Vec3 {
         State::Idle => (Vec3::new(0.12, 0.09, 0.09), 0.15),
         State::Completed => (Vec3::new(0.105, 0.08, 0.075), 0.08),
         State::Error => (Vec3::new(0.14, 0.13, 0.10), 0.48),
+        State::Stopped => (Vec3::new(0.11, 0.08, 0.09), 0.05),
         State::Unknown => (Vec3::new(0.13, 0.10, 0.13), 0.12),
     };
     let y = 1.0 - 2.0 * (i as f32 + 0.5) / PARTICLES as f32;
@@ -1629,6 +1634,7 @@ mod tests {
             State::Idle,
             State::Completed,
             State::Error,
+            State::Stopped,
             State::Unknown,
         ];
         for from in states {
@@ -3377,6 +3383,7 @@ mod space_tests {
             (WorkerState::Idle, State::Idle),
             (WorkerState::Completed, State::Completed),
             (WorkerState::Error, State::Error),
+            (WorkerState::Stopped, State::Stopped),
             (WorkerState::Unknown, State::Unknown),
         ] {
             let workspace = Workspace::from_space(&space(vec![worker("a", None, from)]), true);
