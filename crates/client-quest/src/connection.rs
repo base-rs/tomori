@@ -164,6 +164,13 @@ impl Voice {
         Ok(())
     }
 
+    /// Ask for the microphone ahead of its first use, so that the platform's
+    /// request does not interrupt the first recording. Opening the microphone
+    /// still checks, and explains how to allow it if it was refused.
+    fn request_permission(&mut self) -> Result<bool, String> {
+        self.capture.request()
+    }
+
     fn start_live(&mut self, client: &Client, generation: u64) -> Result<(), String> {
         self.open(client, true, generation)?;
         let result = self
@@ -450,6 +457,15 @@ impl Connection {
             },
             speaker: Speaker::new(playback),
             presence: None,
+        }
+    }
+
+    /// Ask for microphone access once the headset can show the request.
+    pub fn request_microphone(&mut self) {
+        match self.voice.request_permission() {
+            Ok(true) => log::info!("Microphone access is allowed."),
+            Ok(false) => log::info!("Asked for microphone access."),
+            Err(error) => log::warn!("{error}"),
         }
     }
 
@@ -747,6 +763,10 @@ mod tests {
             Ok(self.permitted)
         }
 
+        fn request(&mut self) -> Result<bool, String> {
+            Ok(self.permitted)
+        }
+
         fn open(&mut self, mut samples: Samples, failed: Failed) -> Result<Recording, String> {
             let stop = Arc::new(AtomicBool::new(false));
             let fail = self.fail.clone();
@@ -903,6 +923,47 @@ mod tests {
         voice.stop_live().unwrap();
         assert!(voice.recording.is_none());
         assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Off);
+        client.close();
+    }
+
+    #[test]
+    fn microphone_access_is_requested_early_without_using_up_the_recording_request() {
+        /// Records which permission calls were made, granting only once asked at recording.
+        struct Asking(Arc<Mutex<Vec<&'static str>>>);
+        impl Capture for Asking {
+            fn permit(&mut self) -> Result<bool, String> {
+                self.0.lock().unwrap().push("permit");
+                Ok(false)
+            }
+            fn request(&mut self) -> Result<bool, String> {
+                self.0.lock().unwrap().push("request");
+                Ok(false)
+            }
+            fn open(&mut self, _samples: Samples, _failed: Failed) -> Result<Recording, String> {
+                panic!("opened without permission")
+            }
+        }
+        let client = client();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut voice = Voice {
+            capture: Box::new(Asking(calls.clone())),
+            shared: Arc::new(Mutex::new(Captured::default())),
+            recording: None,
+            live: false,
+            generation: None,
+        };
+        assert_eq!(voice.request_permission(), Ok(false));
+        // Asking opens nothing.
+        assert!(voice.recording.is_none());
+        assert!(voice.lock().microphone.is_none());
+        // The first recording still makes its own request.
+        assert!(
+            voice
+                .begin(&client, "u1".into(), 0)
+                .unwrap_err()
+                .contains("hold X again")
+        );
+        assert_eq!(*calls.lock().unwrap(), ["request", "permit"]);
         client.close();
     }
 

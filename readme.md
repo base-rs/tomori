@@ -225,8 +225,9 @@ and a **REC** timer above it counts up. Release **X** to send; the server
 finishes the transcript and queues it like typed input, where **B** can still
 cancel it.
 Releasing X returns to live audio if it was enabled; otherwise the microphone is
-off, and the panel says **Mic off**. The first attempt to enable the microphone
-asks for permission; allow it and use the control again. If it was denied, allow
+off, and the panel says **Mic off**. Tomori asks for microphone access when it
+starts, so that the request does not interrupt your first recording; if you
+dismiss it, the first use of the microphone asks again. If it was denied, allow
 the microphone for Tomori in the headset's Settings.
 
 If anything stops the words reaching the agent intact, such as lost audio, a

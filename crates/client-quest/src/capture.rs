@@ -36,6 +36,13 @@ pub trait Capture {
         Ok(true)
     }
 
+    /// Ask for permission ahead of the first recording, without using up the
+    /// request [`Self::permit`] makes, so that a dismissed request is asked
+    /// again when the participant first uses the microphone.
+    fn request(&mut self) -> Result<bool, String> {
+        Ok(true)
+    }
+
     /// Start capturing at a rate between 8 and 48 kHz, which the protocol carries.
     fn open(&mut self, samples: Samples, failed: Failed) -> Result<Recording, String>;
 
@@ -310,6 +317,7 @@ mod android {
     pub struct Android {
         android: Arc<crate::android::Android>,
         requested: bool,
+        requested_early: bool,
     }
 
     impl Android {
@@ -317,6 +325,7 @@ mod android {
             Self {
                 android,
                 requested: false,
+                requested_early: false,
             }
         }
     }
@@ -333,6 +342,12 @@ mod android {
                 return Err("Allow the microphone for Tomori in Settings.".into());
             }
             Ok(granted)
+        }
+
+        fn request(&mut self) -> Result<bool, String> {
+            self.android
+                .check_or_request("android.permission.RECORD_AUDIO", &mut self.requested_early)
+                .map_err(|error| format!("Cannot ask for the microphone: {error:#}"))
         }
 
         /// The stream opens on the capture thread, so that the frame does not wait for it; failing to open is reported through `failed`.

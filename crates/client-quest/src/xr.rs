@@ -171,6 +171,9 @@ pub fn run(
     let mut was_talking = false;
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     let mut talk_blocked = false;
+    // Ask for the microphone when the session first has focus, where the
+    // headset can show the request, instead of on the first recording.
+    let mut microphone_requested = false;
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
     let mut arrival_time = 0.0_f32;
@@ -206,6 +209,10 @@ pub fn run(
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
+                    if focused && !microphone_requested {
+                        microphone_requested = true;
+                        connection.request_microphone();
+                    }
                     match state {
                         xr::SessionState::READY => {
                             session.begin(STEREO)?;
