@@ -13,7 +13,11 @@ use base_http::{
 };
 use base_http_client::{Client, ResponseBody};
 use base_scheduler::Cancellation;
+use futures_lite::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::endpoint::Resolved;
 use crate::wire::question_from_form;
@@ -23,6 +27,9 @@ use crate::wire::question_from_form;
 pub(crate) const MAX_TRACKED_WORKERS: usize = 4096;
 /// A single agent response must not grow without bound while it is read.
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
+/// Bound the aggregate size of records retained for a worker family.
+const MAX_WORKER_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+type ChildListRequest<'a> = Pin<Box<dyn Future<Output = Result<Vec<Value>, Failure>> + 'a>>;
 
 /// A failed call, with the HTTP status when the server answered.
 #[derive(Debug)]
@@ -229,6 +236,7 @@ pub async fn child_sessions<'scope>(
     let mut children = Vec::new();
     let mut ids = std::collections::HashSet::new();
     let mut cursors = std::collections::HashSet::new();
+    let mut child_bytes = 0usize;
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
         let mut path = format!(
@@ -267,7 +275,7 @@ pub async fn child_sessions<'scope>(
             })?;
             if worker.id.is_empty()
                 || worker.parent.as_deref() != Some(parent_id)
-                || !valid_child_record(child)
+                || !valid_session_record(child)
             {
                 return Err(Failure {
                     status: None,
@@ -282,6 +290,7 @@ pub async fn child_sessions<'scope>(
                     message: "the server repeated a child session across pages".to_owned(),
                 });
             }
+            add_worker_record_size(&mut child_bytes, child)?;
             children.push(child.clone());
         }
         let next = value
@@ -319,11 +328,25 @@ async fn session_family<'scope>(
     session_id: &str,
     cancellation: &Cancellation,
 ) -> Result<Vec<Value>, Failure> {
+    const MAX_IN_FLIGHT: usize = 8;
     let mut pending = std::collections::VecDeque::from([session_id.to_owned()]);
     let mut seen = std::collections::HashSet::from([session_id.to_owned()]);
     let mut family = Vec::new();
-    while let Some(parent) = pending.pop_front() {
-        for child in child_sessions(client, resolved, &parent, cancellation).await? {
+    let mut family_bytes = 0usize;
+    let mut requests: FuturesUnordered<ChildListRequest<'_>> = FuturesUnordered::new();
+    while !pending.is_empty() || !requests.is_empty() {
+        while requests.len() < MAX_IN_FLIGHT {
+            let Some(parent) = pending.pop_front() else {
+                break;
+            };
+            requests.push(Box::pin(async move {
+                child_sessions(client, resolved, &parent, cancellation).await
+            }));
+        }
+        let Some(children) = requests.next().await else {
+            break;
+        };
+        for child in children? {
             let id = child
                 .get("id")
                 .and_then(Value::as_str)
@@ -340,6 +363,7 @@ async fn session_family<'scope>(
                     message: "the worker family exceeds the worker limit".into(),
                 });
             }
+            add_worker_record_size(&mut family_bytes, &child)?;
             pending.push_back(id.to_owned());
             family.push(child);
         }
@@ -347,9 +371,26 @@ async fn session_family<'scope>(
     Ok(family)
 }
 
-/// Required fields of OpenCode's Session.Info, checked before a record may
-/// participate in a worker snapshot. Extra fields are accepted for upgrades.
-fn valid_child_record(child: &Value) -> bool {
+fn add_worker_record_size(total: &mut usize, child: &Value) -> Result<(), Failure> {
+    let size = serde_json::to_vec(child)
+        .map_err(|error| Failure {
+            status: None,
+            message: format!("could not size a child session: {error}"),
+        })?
+        .len();
+    let next = total.saturating_add(size);
+    if next > MAX_WORKER_SNAPSHOT_BYTES {
+        return Err(Failure {
+            status: None,
+            message: "the worker family exceeds the supported snapshot size".into(),
+        });
+    }
+    *total = next;
+    Ok(())
+}
+
+/// Required fields of OpenCode's Session.Info. Extra fields are accepted for upgrades.
+fn valid_session_record(child: &Value) -> bool {
     let tokens = child.get("tokens");
     let cache = tokens.and_then(|tokens| tokens.get("cache"));
     let time = child.get("time");
@@ -371,6 +412,18 @@ fn valid_child_record(child: &Value) -> bool {
         && ["created", "updated"].iter().all(|key| {
             time.and_then(|time| time.get(*key))
                 .is_some_and(Value::is_number)
+        })
+        && ["busy", "idle"].iter().all(|key| {
+            time.and_then(|time| time.get(*key))
+                .is_none_or(Value::is_number)
+        })
+        && child.get("title").is_none_or(Value::is_string)
+        && child.get("parentID").is_none_or(Value::is_string)
+        && child.get("outcome").is_none_or(|outcome| {
+            matches!(
+                outcome.as_str(),
+                Some("succeeded" | "failed" | "interrupted")
+            )
         })
         && child
             .get("location")
@@ -596,7 +649,7 @@ pub async fn reply_form<'scope>(
     Ok(())
 }
 
-/// `GET /api/session/:id/message`: the session's messages, for a snapshot.
+/// `GET /api/session/:id/message`: bounded recent conversation history.
 pub async fn session_messages<'scope>(
     client: &Client<'scope>,
     resolved: &Resolved,
@@ -604,13 +657,17 @@ pub async fn session_messages<'scope>(
     cancellation: &Cancellation,
 ) -> Result<Value, Failure> {
     const MAX_PAGES: usize = 128;
+    const MAX_MESSAGES: usize = 100;
+    const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_MESSAGE_ID_BYTES: usize = 1024;
     let mut messages = Vec::new();
+    let mut message_bytes = 0usize;
     let mut ids = std::collections::HashSet::new();
     let mut cursors = std::collections::HashSet::new();
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
         let query = cursor.as_ref().map_or_else(
-            || "limit=100&order=asc".to_owned(),
+            || "limit=100&order=desc".to_owned(),
             |cursor| format!("limit=100&cursor={}", urlencoding(cursor)),
         );
         let path = format!("/api/session/{}/message?{query}", urlencoding(session_id));
@@ -629,14 +686,33 @@ pub async fn session_messages<'scope>(
                 status: None,
                 message: "the server did not return a message list".into(),
             })?;
+        let next = value
+            .get("cursor")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Failure {
+                status: None,
+                message: "the server did not return a message cursor".into(),
+            })?
+            .get("next");
+        let valid_next = match next {
+            None | Some(Value::Null) => true,
+            Some(Value::String(next)) => !next.is_empty(),
+            _ => false,
+        };
+        if !valid_next {
+            return Err(Failure {
+                status: None,
+                message: "the server returned an invalid message cursor".into(),
+            });
+        }
         for message in page {
             let id = message
                 .get("id")
                 .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
+                .filter(|id| !id.is_empty() && id.len() <= MAX_MESSAGE_ID_BYTES)
                 .ok_or_else(|| Failure {
                     status: None,
-                    message: "the server returned a message without an identifier".into(),
+                    message: "the server returned a message without a supported identifier".into(),
                 })?;
             if !ids.insert(id.to_owned()) {
                 return Err(Failure {
@@ -650,18 +726,28 @@ pub async fn session_messages<'scope>(
                     message: "the server returned an invalid session message".into(),
                 });
             }
-            messages.push(message.clone());
+            if matches!(
+                message.get("type").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) {
+                let size = serde_json::to_vec(message)
+                    .map_err(|error| Failure {
+                        status: None,
+                        message: format!("could not size a session message: {error}"),
+                    })?
+                    .len();
+                if !messages.is_empty() && message_bytes.saturating_add(size) > MAX_MESSAGE_BYTES {
+                    return Ok(finish_messages(messages));
+                }
+                message_bytes = message_bytes.saturating_add(size);
+                messages.push(message.clone());
+                if messages.len() == MAX_MESSAGES {
+                    return Ok(finish_messages(messages));
+                }
+            }
         }
-        let next = value
-            .get("cursor")
-            .and_then(Value::as_object)
-            .ok_or_else(|| Failure {
-                status: None,
-                message: "the server did not return a message cursor".into(),
-            })?
-            .get("next");
         match next {
-            None | Some(Value::Null) => return Ok(serde_json::json!({"data": messages})),
+            None | Some(Value::Null) => return Ok(finish_messages(messages)),
             Some(Value::String(next)) if !next.is_empty() && cursors.insert(next.clone()) => {
                 cursor = Some(next.clone())
             }
@@ -673,10 +759,14 @@ pub async fn session_messages<'scope>(
             }
         }
     }
-    Err(Failure {
-        status: None,
-        message: "the message list exceeds the page limit".into(),
-    })
+    // Older history is intentionally omitted, as the server retains a
+    // bounded recent conversation rather than every historical message.
+    Ok(finish_messages(messages))
+}
+
+fn finish_messages(mut messages: Vec<Value>) -> Value {
+    messages.reverse();
+    serde_json::json!({"data": messages})
 }
 
 /// Conversation messages must be readable; known non-conversation messages
@@ -759,7 +849,9 @@ impl SnapshotParts {
         // Validate the session exists before fetching its parts, and record
         // whether it is currently running a turn (time.busy after time.idle).
         let info = session_info(client, resolved, session_id, cancellation).await?;
-        if info.get("id").and_then(Value::as_str) != Some(session_id) {
+        if info.get("id").and_then(Value::as_str) != Some(session_id)
+            || !valid_session_record(&info)
+        {
             return Err(Failure {
                 status: None,
                 message: "the server returned an invalid session record".into(),
@@ -804,10 +896,7 @@ impl SnapshotParts {
                     .is_some_and(|fields| {
                         !fields.is_empty()
                             && fields.iter().all(|field| {
-                                field
-                                    .get("key")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|key| !key.is_empty())
+                                field.get("key").and_then(Value::as_str).is_some()
                                     && field
                                         .get("type")
                                         .and_then(Value::as_str)
@@ -849,7 +938,7 @@ fn running_from_record(info: &Value) -> Option<bool> {
     let time = info.get("time")?.as_object()?;
     let timestamp = |key| match time.get(key) {
         None => Some(None),
-        Some(value) => value.as_u64().map(Some),
+        Some(value) => value.as_f64().map(Some),
     };
     match (timestamp("busy")?, timestamp("idle")?) {
         (Some(busy), Some(idle)) => Some(busy > idle),
@@ -887,6 +976,17 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_worker_records_are_bounded_without_partial_success() {
+        let child = json!({"id":"child"});
+        let size = serde_json::to_vec(&child).unwrap().len();
+        let mut total = MAX_WORKER_SNAPSHOT_BYTES - size;
+        assert!(add_worker_record_size(&mut total, &child).is_ok());
+        assert_eq!(total, MAX_WORKER_SNAPSHOT_BYTES);
+        assert!(add_worker_record_size(&mut total, &child).is_err());
+        assert_eq!(total, MAX_WORKER_SNAPSHOT_BYTES);
+    }
+
+    #[test]
     fn snapshot_message_validation_rejects_missing_required_content() {
         assert!(valid_snapshot_message(
             &json!({"type":"user","text":"hello"})
@@ -910,6 +1010,10 @@ mod tests {
     fn session_running_state_handles_a_first_turn_without_idle_timestamp() {
         assert_eq!(
             running_from_record(&json!({"time":{"busy":10}})),
+            Some(true)
+        );
+        assert_eq!(
+            running_from_record(&json!({"time":{"busy":10.5,"idle":10.25}})),
             Some(true)
         );
         assert_eq!(

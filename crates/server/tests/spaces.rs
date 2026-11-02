@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{
-    AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question, Session, Worker,
-    WorkerState,
+    AnswerValue, Backend, Event, Field, FieldKind, FieldOption, Permission, Question, Session,
+    SessionSpec, Worker, WorkerState,
 };
 use protocol::{
     Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState,
@@ -267,6 +267,102 @@ fn a_snapshot_failure_releases_the_only_space_slot_before_retry() {
     assert!(backend.started()[0].log().closed);
     backend.fail_snapshots(false);
     assert_eq!(ada.create_space("Retried").title, "Retried");
+}
+
+#[test]
+fn duplicate_attachment_does_not_close_the_existing_space() {
+    let backend = FakeBackend::manual();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Existing");
+    let existing = backend.started()[0].clone();
+    backend.fail_snapshots(true);
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::CreateSpace {
+        title: "Duplicate".into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: Some(existing.id()),
+        environment: None,
+    });
+    assert!(bob.error().contains("already attached"));
+    assert!(!existing.log().closed);
+    existing.emit(Event::Busy);
+    assert_eq!(
+        ada.space(|state| state.activity == Activity::Running).title,
+        "Existing"
+    );
+}
+
+#[test]
+fn a_failed_snapshot_of_an_attached_session_can_be_retried() {
+    let backend = FakeBackend::manual();
+    let detached = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = detached.id();
+    futures_lite::future::block_on(detached.close()).unwrap();
+    backend.fail_snapshots(true);
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let request = |title: &str| ClientMessage::CreateSpace {
+        title: title.into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: Some(id.clone()),
+        environment: None,
+    };
+    ada.send(&request("Failed"));
+    assert!(ada.error().contains("initial session state"));
+    backend.fail_snapshots(false);
+    ada.send(&request("Retried"));
+    assert_eq!(
+        ada.space(|state| state.title == "Retried").activity,
+        Activity::Idle
+    );
+}
+
+#[test]
+fn closing_a_fake_handle_still_reports_closed_once() {
+    let backend = FakeBackend::manual();
+    let session = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    futures_lite::future::block_on(session.close()).unwrap();
+    assert!(matches!(
+        futures_lite::future::block_on(session.next_event()),
+        Ok(Event::Closed { .. })
+    ));
+    assert!(
+        matches!(futures_lite::future::block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Closed)
+    );
+}
+
+#[test]
+fn closing_an_old_fake_handle_cannot_close_a_reattachment() {
+    let backend = FakeBackend::manual();
+    let old = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = old.id();
+    futures_lite::future::block_on(old.close()).unwrap();
+    let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    futures_lite::future::block_on(old.close()).unwrap();
+    assert!(futures_lite::future::block_on(replacement.snapshot()).is_ok());
+    assert!(
+        matches!(futures_lite::future::block_on(old.snapshot()), Err(error) if error.kind == backend::ErrorKind::Closed)
+    );
+    replacement.emit(Event::Busy);
+    assert!(matches!(
+        futures_lite::future::block_on(replacement.next_event()),
+        Ok(Event::Busy)
+    ));
 }
 
 #[test]

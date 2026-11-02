@@ -400,10 +400,10 @@ pub fn worker_from_session(info: &Value) -> Option<Worker> {
     let time = info.get("time");
     let busy = time
         .and_then(|time| time.get("busy"))
-        .and_then(Value::as_u64);
+        .and_then(Value::as_f64);
     let idle = time
         .and_then(|time| time.get("idle"))
-        .and_then(Value::as_u64);
+        .and_then(Value::as_f64);
     let outcome = match info.get("outcome").and_then(Value::as_str) {
         Some("succeeded") => WorkerState::Completed,
         Some("failed") => WorkerState::Error,

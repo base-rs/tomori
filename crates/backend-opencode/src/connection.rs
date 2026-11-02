@@ -107,6 +107,7 @@ pub struct Events {
     worker_watermark: Arc<AtomicU64>,
     pending_workers: Arc<Mutex<PendingWorkers>>,
     worker_incomplete: Arc<AtomicBool>,
+    ordinary_incomplete: Arc<AtomicBool>,
 }
 
 /// A session's event receiver and the identity of its specific registration.
@@ -117,6 +118,7 @@ pub(crate) struct RegistrationEvents {
     pending: Arc<Mutex<PendingWorkers>>,
     watermark: Arc<AtomicU64>,
     prefer_workers: Arc<AtomicBool>,
+    ordinary_incomplete: Arc<AtomicBool>,
     pub(crate) identity: Arc<AtomicU64>,
 }
 
@@ -129,6 +131,9 @@ impl RegistrationEvents {
     }
 
     fn try_recv(&self) -> std::result::Result<QueuedEvent, async_channel::TryRecvError> {
+        if self.ordinary_incomplete.load(Ordering::Acquire) {
+            return Err(async_channel::TryRecvError::Closed);
+        }
         let prefer_worker = self.prefer_workers.fetch_xor(true, Ordering::Relaxed);
         if prefer_worker && self.worker_receiver.try_recv().is_ok() {
             return Ok(self.worker_event());
@@ -152,13 +157,18 @@ impl RegistrationEvents {
             Err(async_channel::TryRecvError::Closed) => return Err(async_channel::RecvError),
             Err(async_channel::TryRecvError::Empty) => {}
         }
-        futures_lite::future::race(self.receiver.recv(), async {
+        let result = futures_lite::future::race(self.receiver.recv(), async {
             self.worker_receiver
                 .recv()
                 .await
                 .map(|()| self.worker_event())
         })
-        .await
+        .await;
+        if self.ordinary_incomplete.load(Ordering::Acquire) {
+            Err(async_channel::RecvError)
+        } else {
+            result
+        }
     }
 
     #[cfg(test)]
@@ -174,6 +184,7 @@ impl Events {
         let identity = Arc::new(AtomicU64::new(0));
         let watermark = Arc::new(AtomicU64::new(0));
         let pending = Arc::new(Mutex::new(PendingWorkers::default()));
+        let ordinary_incomplete = Arc::new(AtomicBool::new(false));
         (
             Self {
                 tx,
@@ -182,6 +193,7 @@ impl Events {
                 worker_watermark: watermark.clone(),
                 pending_workers: pending.clone(),
                 worker_incomplete: Arc::new(AtomicBool::new(false)),
+                ordinary_incomplete: ordinary_incomplete.clone(),
             },
             RegistrationEvents {
                 receiver: rx,
@@ -189,6 +201,7 @@ impl Events {
                 pending,
                 watermark,
                 prefer_workers: Arc::new(AtomicBool::new(true)),
+                ordinary_incomplete,
                 identity,
             },
         )
@@ -202,6 +215,7 @@ impl Events {
                 // Ordinary events cannot be reconstructed reliably. Closing
                 // the channel makes the loss visible instead of silently
                 // presenting an incomplete session as current.
+                self.ordinary_incomplete.store(true, Ordering::Release);
                 self.tx.close();
                 false
             }
@@ -254,6 +268,7 @@ impl Events {
             epoch: self.worker_epoch.load(Ordering::Acquire),
             watermark: self.worker_watermark.clone(),
             worker_incomplete: self.worker_incomplete.clone(),
+            ordinary_incomplete: self.ordinary_incomplete.clone(),
         }
     }
 }
@@ -570,10 +585,17 @@ pub(crate) struct SnapshotReply {
     epoch: u64,
     watermark: Arc<AtomicU64>,
     worker_incomplete: Arc<AtomicBool>,
+    ordinary_incomplete: Arc<AtomicBool>,
 }
 
 impl SnapshotReply {
     pub(crate) fn accept(self) -> backend::Result<Snapshot> {
+        if self.ordinary_incomplete.load(Ordering::Acquire) {
+            return Err(backend::Error::new(
+                backend::ErrorKind::Unavailable,
+                "Session events were lost while reading the initial state.",
+            ));
+        }
         if self.worker_incomplete.load(Ordering::Acquire) {
             return Err(backend::Error::new(
                 backend::ErrorKind::Unavailable,
@@ -1798,22 +1820,36 @@ mod tests {
     #[test]
     fn a_lost_ordinary_event_closes_the_channel_visibly() {
         let (events, receiver) = Events::new();
+        let snapshot = events.snapshot_reply(Snapshot::default());
         for _ in 0..1024 {
             assert!(events.deliver(Event::Busy));
         }
         assert!(!events.deliver(Event::Error {
             message: "could not deliver".into()
         }));
-        for _ in 0..1024 {
-            assert!(matches!(
-                receiver.try_recv().unwrap().into_current(),
-                Some(Event::Busy)
-            ));
-        }
+        assert!(snapshot.accept().is_err());
         assert!(matches!(
             receiver.try_recv(),
             Err(async_channel::TryRecvError::Closed)
         ));
+    }
+
+    #[test]
+    fn ordinary_event_loss_after_snapshot_is_reported_without_draining_stale_events() {
+        use backend::Session;
+        let (events, receiver) = Events::new();
+        events.snapshot_reply(Snapshot::default()).accept().unwrap();
+        for _ in 0..1024 {
+            assert!(events.deliver(Event::Busy));
+        }
+        assert!(!events.deliver(Event::Error {
+            message: "lost".into()
+        }));
+        let (commands, _receiver) = Commands::new();
+        let session = crate::session::OpenCodeSession::new("parent".into(), receiver, commands);
+        assert!(
+            matches!(block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Unavailable)
+        );
     }
 
     #[test]
@@ -2529,6 +2565,16 @@ mod tests {
                             } else {
                                 let body = if path.starts_with("/api/agent?") {
                                     r#"{"data":[]}"#.to_owned()
+                                } else if path.starts_with("/api/session?parentID=wide&") {
+                                    let children: Vec<_> = (0..60).map(|index| json!({
+                                        "id": format!("wide-child-{index}"), "parentID":"wide", "projectID":"p", "cost":0,
+                                        "tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},
+                                        "time":{"created":1,"updated":1}, "location":{"directory":"/tmp"}
+                                    })).collect();
+                                    json!({"data":children,"cursor":{"next":null}}).to_string()
+                                } else if path.starts_with("/api/session?parentID=wide-child-") {
+                                    std::thread::sleep(Duration::from_millis(100));
+                                    r#"{"data":[],"cursor":{"next":null}}"#.to_owned()
                                 } else if path.starts_with("/api/session?parentID=family&")
                                     || path.starts_with("/api/session?parentID=child&")
                                 {
@@ -2540,12 +2586,18 @@ mod tests {
                                     json!({"data":[{"id":id,"parentID":parent,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1,"updated":1},"location":{"directory":"/tmp"}}],"cursor":{"next":null}}).to_string()
                                 } else if path.starts_with("/api/session?parentID=") {
                                     r#"{"data":[],"cursor":{"next":null}}"#.to_owned()
-                                } else if path == "/api/session/fast/message?limit=100&order=asc" {
-                                    r#"{"data":[{"id":"first","type":"user","text":"First"}],"cursor":{"next":"next+page"}}"#.to_owned()
+                                } else if path == "/api/session/fast/message?limit=100&order=desc" {
+                                    r#"{"data":[{"id":"second","type":"user","text":"Second"}],"cursor":{"next":"next+page"}}"#.to_owned()
+                                } else if path == "/api/session/long/message?limit=100&order=desc" {
+                                    let messages: Vec<_> = (0..100).map(|index| json!({
+                                        "id":format!("message-{index:03}"), "type":"user", "text":format!("Message {index}")
+                                    })).collect();
+                                    json!({"data":messages,"cursor":{"next":"older-page"}})
+                                        .to_string()
                                 } else if path
                                     == "/api/session/fast/message?limit=100&cursor=next%2Bpage"
                                 {
-                                    r#"{"data":[{"id":"second","type":"user","text":"Second"}],"cursor":{"next":null}}"#.to_owned()
+                                    r#"{"data":[{"id":"first","type":"user","text":"First"}],"cursor":{"next":null}}"#.to_owned()
                                 } else if path.starts_with("/api/session/duplicate/message?") {
                                     r#"{"data":[{"id":"same","type":"user","text":"a"},{"id":"same","type":"user","text":"b"}],"cursor":{"next":null}}"#.to_owned()
                                 } else if path.starts_with("/api/session/bad-message/message?") {
@@ -2562,12 +2614,14 @@ mod tests {
                                 } else if path == "/api/session/multi/permission" {
                                     r#"{"data":[{"id":"p1","sessionID":"multi","action":"read","resources":[]},{"id":"p2","sessionID":"multi","action":"write","resources":[]}]}"#.to_owned()
                                 } else if path == "/api/session/multi/form" {
-                                    r#"{"data":[{"id":"q1","sessionID":"multi","title":"First","fields":[{"key":"a","type":"string"}]},{"id":"q2","sessionID":"multi","title":"Second","fields":[{"key":"b","type":"string"}]}]}"#.to_owned()
+                                    r#"{"data":[{"id":"q1","sessionID":"multi","title":"First","fields":[{"key":"a","type":"string"}]},{"id":"q2","sessionID":"multi","title":"Second","fields":[{"key":"","type":"string"}]}]}"#.to_owned()
                                 } else if path.ends_with("/permission") || path.ends_with("/form") {
                                     r#"{"data":[]}"#.to_owned()
+                                } else if path == "/api/session/bad-record" {
+                                    r#"{"data":{"id":"bad-record","location":{"directory":"/tmp"},"time":{}}}"#.to_owned()
                                 } else if path.starts_with("/api/session/") {
                                     let id = path.trim_start_matches("/api/session/");
-                                    json!({"data":{"id":id,"location":{"directory":"/tmp"},"time":{"busy":0,"idle":0}}}).to_string()
+                                    json!({"data":{"id":id,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":0,"idle":0}}}).to_string()
                                 } else {
                                     panic!("unexpected path: {path}");
                                 };
@@ -2643,6 +2697,7 @@ mod tests {
             "bad-form",
             "bad-field",
             "bad-message",
+            "bad-record",
             "duplicate",
         ] {
             let events = attach(id);
@@ -2692,7 +2747,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["q1", "q2"]
         );
+        assert_eq!(multi.questions[1].fields[0].key, "");
         close("multi", &multi_events);
+        // A session with additional older history is attachable: only the
+        // recent bounded window is needed by the server's conversation model.
+        let long_events = attach("long");
+        let (long_reply, long_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "long".into(),
+                identity: long_events.identity.clone(),
+                reply: long_reply,
+            })
+            .unwrap();
+        let long = block_on(long_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
+        assert_eq!(long.messages.len(), 100);
+        assert_eq!(long.messages.first().unwrap().id, "message-099");
+        assert_eq!(long.messages.last().unwrap().id, "message-000");
+        close("long", &long_events);
+        // A wide family with modest per-request latency must fit within the
+        // deadline; serial leaf traversal would take more than five seconds.
+        let wide_events = attach("wide");
+        let (wide_reply, wide_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "wide".into(),
+                identity: wide_events.identity.clone(),
+                reply: wide_reply,
+            })
+            .unwrap();
+        let wide = block_on(wide_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
+        assert_eq!(wide.workers.len(), 60);
+        close("wide", &wide_events);
         let family_events = attach("family");
         let (family_reply, family_wait) = async_channel::bounded(1);
         commands
@@ -2809,10 +2905,19 @@ mod tests {
         );
         close("slow", &slow_events);
         assert!(block_on(slow_wait.recv()).unwrap().is_err());
-        assert!(matches!(
-            slow_events.try_recv().unwrap().into_current(),
-            Some(Event::Closed { .. })
-        ));
+        let closed_rx = slow_events.clone();
+        let (closed_tx, closed_wait) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(event) = block_on(closed_rx.recv()) {
+                if matches!(event.into_current(), Some(Event::Closed { .. })) {
+                    let _ = closed_tx.send(());
+                    return;
+                }
+            }
+        });
+        closed_wait
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the closed registration was not reported");
         stall_reconcile.store(false, Ordering::Release);
         event_tx
             .send(json!({"type":"session.deleted","data":{"sessionID":"child"}}).to_string())
