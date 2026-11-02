@@ -366,6 +366,62 @@ fn closing_an_old_fake_handle_cannot_close_a_reattachment() {
 }
 
 #[test]
+fn a_stale_fake_waiter_cannot_consume_reattachment_events() {
+    let backend = FakeBackend::manual();
+    let old = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = old.id();
+    let mut waiting = Box::pin(old.next_event());
+    assert!(
+        futures_lite::future::block_on(futures_lite::future::poll_once(waiting.as_mut())).is_none()
+    );
+    futures_lite::future::block_on(old.close()).unwrap();
+    let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    replacement.emit(Event::Busy);
+    assert!(matches!(
+        futures_lite::future::block_on(waiting),
+        Ok(Event::Closed { .. })
+    ));
+    assert!(matches!(
+        futures_lite::future::block_on(replacement.next_event()),
+        Ok(Event::Busy)
+    ));
+}
+
+#[test]
+fn a_fake_reattachment_preserves_pending_events_and_snapshot_requests() {
+    let backend = FakeBackend::manual();
+    let old = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = old.id();
+    futures_lite::future::block_on(old.close()).unwrap();
+    let permission = Permission {
+        id: "pending".into(),
+        tool: "Read".into(),
+        input: serde_json::Value::Null,
+        description: None,
+        options: Vec::new(),
+    };
+    old.emit(Event::PermissionRequested(permission.clone()));
+    let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    assert_eq!(
+        futures_lite::future::block_on(replacement.snapshot())
+            .unwrap()
+            .permissions,
+        [permission.clone()]
+    );
+    assert!(
+        matches!(futures_lite::future::block_on(replacement.next_event()), Ok(Event::PermissionRequested(found)) if found == permission)
+    );
+}
+
+#[test]
 fn workers_started_by_the_session_have_no_parent() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");

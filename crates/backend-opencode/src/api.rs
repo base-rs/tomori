@@ -224,6 +224,42 @@ pub async fn session_info<'scope>(
     Ok(value.get("data").cloned().unwrap_or(value))
 }
 
+/// Process-owned active session drains. An ID in this map is positive,
+/// point-in-time evidence that the OpenCode process is running it.
+pub async fn active_sessions<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    cancellation: &Cancellation,
+) -> Result<std::collections::HashSet<String>, Failure> {
+    let response = exchange(
+        client,
+        get("/api/session/active"),
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    parse_active_sessions(&read_json(response, cancellation).await?)
+}
+
+fn parse_active_sessions(value: &Value) -> Result<std::collections::HashSet<String>, Failure> {
+    let sessions = value
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Failure {
+            status: None,
+            message: "the server did not return active sessions".into(),
+        })?;
+    if sessions.iter().any(|(id, state)| {
+        id.is_empty() || state.get("type").and_then(Value::as_str) != Some("running")
+    }) {
+        return Err(Failure {
+            status: None,
+            message: "the server returned an invalid active session".into(),
+        });
+    }
+    Ok(sessions.keys().cloned().collect())
+}
+
 /// `GET /api/session?parentID=`: the children of a session.
 pub async fn child_sessions<'scope>(
     client: &Client<'scope>,
@@ -815,6 +851,9 @@ pub struct SnapshotParts {
     /// Whether the session is currently running a turn, derived from the
     /// session record's `time.busy` / `time.idle` timestamps.
     pub busy: bool,
+    /// Child sessions may be background drains, whose absence from the active
+    /// endpoint does not by itself establish that they are idle.
+    pub has_parent: bool,
 }
 
 impl SnapshotParts {
@@ -916,6 +955,7 @@ impl SnapshotParts {
             forms,
             children,
             busy,
+            has_parent: info.get("parentID").is_some(),
         })
     }
 }
@@ -929,7 +969,15 @@ pub async fn session_running<'scope>(
     cancellation: &Cancellation,
 ) -> Result<Option<bool>, Failure> {
     let info = session_info(client, resolved, session_id, cancellation).await?;
-    let running = running_from_record(&info);
+    if !valid_session_record(&info) {
+        return Ok(None);
+    }
+    let active = active_sessions(client, resolved, cancellation).await.ok();
+    let running = match active {
+        Some(active) if active.contains(session_id) => Some(true),
+        Some(_) if info.get("parentID").is_none() => Some(false),
+        _ => running_from_record(&info),
+    };
     Ok(running)
 }
 
@@ -1026,5 +1074,13 @@ mod tests {
             None
         );
         assert_eq!(running_from_record(&json!({})), None);
+    }
+
+    #[test]
+    fn active_session_map_requires_valid_running_records() {
+        let active = parse_active_sessions(&json!({"data":{"ses_a":{"type":"running"}}})).unwrap();
+        assert!(active.contains("ses_a"));
+        assert!(parse_active_sessions(&json!({"data":[]})).is_err());
+        assert!(parse_active_sessions(&json!({"data":{"ses_a":{"type":"idle"}}})).is_err());
     }
 }

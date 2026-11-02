@@ -856,7 +856,7 @@ async fn service<S: Timers>(
                                 let resolved = &resolved;
                                 snapshots.push(Box::pin(async move {
                                     let result = futures_lite::future::race(
-                                        async { snapshot(client, resolved, &id, modes, &local_cancel).await.map_err(map_failure) },
+                                        async { snapshot(client, resolved, &id, modes, &local_cancel, timers).await.map_err(map_failure) },
                                         async {
                                             let timer = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
                                             Err(backend::Error::new(backend::ErrorKind::Unavailable, format!("Snapshot timed out or was cancelled: {timer:?}")))
@@ -1598,22 +1598,64 @@ async fn handle_command(
     }
 }
 
-async fn snapshot(
+async fn snapshot<S: Timers>(
     client: &Client<'_>,
     resolved: &Resolved,
     id: &str,
     modes: Modes,
     cancellation: &Cancellation,
+    timers: &S,
 ) -> std::result::Result<Snapshot, Failure> {
-    let parts = api::SnapshotParts::fetch(client, resolved, id, cancellation).await?;
+    let active_cancel = cancellation.child();
+    let lookup = async {
+        let active = futures_lite::future::race(
+            async {
+                api::active_sessions(client, resolved, &active_cancel)
+                    .await
+                    .ok()
+            },
+            async {
+                let _ = timers.sleep(Duration::from_secs(1), &active_cancel).await;
+                None
+            },
+        )
+        .await;
+        active_cancel.cancel();
+        active
+    };
+    let (parts, active) = futures_lite::future::zip(
+        api::SnapshotParts::fetch(client, resolved, id, cancellation),
+        lookup,
+    )
+    .await;
+    let parts = parts?;
     let messages = snapshot_messages(&parts.messages);
+    let busy = match &active {
+        Some(active) if active.contains(id) => true,
+        Some(_) if !parts.has_parent => false,
+        _ => parts.busy,
+    };
+    let mut workers = parts.workers();
+    for worker in &mut workers {
+        if active
+            .as_ref()
+            .is_some_and(|active| active.contains(&worker.id))
+        {
+            worker.state = WorkerState::Running;
+        } else if worker.state == WorkerState::Running {
+            // Timestamps persist across process restarts, and a background
+            // child may be absent from the foreground-drain listing. Without
+            // positive evidence, retain the worker but do not claim it runs.
+            worker.state = WorkerState::Unknown;
+        }
+    }
     Ok(Snapshot {
         modes,
-        busy: Some(parts.busy),
+        busy: Some(busy),
         messages,
         permissions: parts.permissions(),
         questions: parts.questions(),
-        workers: parts.workers(),
+        workers,
     })
 }
 
@@ -2565,6 +2607,8 @@ mod tests {
                             } else {
                                 let body = if path.starts_with("/api/agent?") {
                                     r#"{"data":[]}"#.to_owned()
+                                } else if path == "/api/session/active" {
+                                    r#"{"data":{"child":{"type":"running"}}}"#.to_owned()
                                 } else if path.starts_with("/api/session?parentID=wide&") {
                                     let children: Vec<_> = (0..60).map(|index| json!({
                                         "id": format!("wide-child-{index}"), "parentID":"wide", "projectID":"p", "cost":0,
@@ -2575,6 +2619,8 @@ mod tests {
                                 } else if path.starts_with("/api/session?parentID=wide-child-") {
                                     std::thread::sleep(Duration::from_millis(100));
                                     r#"{"data":[],"cursor":{"next":null}}"#.to_owned()
+                                } else if path.starts_with("/api/session?parentID=stale&") {
+                                    json!({"data":[{"id":"stale-child","parentID":"stale","projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"outcome":"succeeded","time":{"created":1,"updated":1,"busy":20,"idle":10},"location":{"directory":"/tmp"}}],"cursor":{"next":null}}).to_string()
                                 } else if path.starts_with("/api/session?parentID=family&")
                                     || path.starts_with("/api/session?parentID=child&")
                                 {
@@ -2619,6 +2665,8 @@ mod tests {
                                     r#"{"data":[]}"#.to_owned()
                                 } else if path == "/api/session/bad-record" {
                                     r#"{"data":{"id":"bad-record","location":{"directory":"/tmp"},"time":{}}}"#.to_owned()
+                                } else if path == "/api/session/stale" {
+                                    json!({"data":{"id":"stale","projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":20,"idle":10}}}).to_string()
                                 } else if path.starts_with("/api/session/") {
                                     let id = path.trim_start_matches("/api/session/");
                                     json!({"data":{"id":id,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":0,"idle":0}}}).to_string()
@@ -2815,7 +2863,34 @@ mod tests {
                 .as_deref(),
             Some("child")
         );
+        assert_eq!(
+            family
+                .workers
+                .iter()
+                .find(|worker| worker.id == "child")
+                .unwrap()
+                .state,
+            WorkerState::Running
+        );
         close("family", &family_events);
+        let stale_events = attach("stale");
+        let (stale_reply, stale_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "stale".into(),
+                identity: stale_events.identity.clone(),
+                reply: stale_reply,
+            })
+            .unwrap();
+        let stale = block_on(stale_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
+        assert_eq!(stale.busy, Some(false));
+        assert_eq!(stale.workers[0].state, WorkerState::Unknown);
+        close("stale", &stale_events);
         let (fast_reply, fast_wait) = async_channel::bounded(1);
         commands
             .tx()
