@@ -1,7 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{caption::Caption, controller, graphics::Renderer, hands, swarm::Swarm, vulkan::Gpu};
+use crate::{
+    arrival, arrival_graphics,
+    caption::Caption,
+    controller,
+    graphics::Renderer,
+    hands,
+    pointing::{Pointer, Ray},
+    swarm::Swarm,
+    vulkan::Gpu,
+};
 use anyhow::{Context, Result, ensure};
 use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
@@ -162,6 +171,8 @@ pub fn run(
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     let mut talk_blocked = false;
     let mut signals = crate::interaction::Signals::default();
+    let mut pointer = Pointer::<arrival::Key>::default();
+    let mut arrival_time = 0.0_f32;
     #[cfg(target_os = "android")]
     let mut delegation_scene = crate::delegation::Scene::new();
     #[cfg(target_os = "android")]
@@ -169,7 +180,7 @@ pub fn run(
     #[cfg(target_os = "android")]
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
     log::info!(
-        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: attract; A: choose or reset.",
+        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose or reset.",
         images.len()
     );
     'main: loop {
@@ -189,6 +200,7 @@ pub fn run(
                         was_talking = false;
                         talk_blocked = true;
                         conversation.stop_talking();
+                        pointer.release();
                         #[cfg(target_os = "android")]
                         presentation_navigation.release();
                     }
@@ -231,6 +243,7 @@ pub fn run(
             was_talking = false;
             talk_blocked = true;
             conversation.stop_talking();
+            pointer.release();
             #[cfg(target_os = "android")]
             presentation_navigation.release();
         }
@@ -359,7 +372,32 @@ pub fn run(
         } else {
             [None, None]
         };
-        swarm.step(dt, controller.filter(|_| controls.attracting));
+        // Outside a space, arrival's objects are pointed at with the right controller's aim ray. A trigger pull that begins on one of them chooses it; any other pull attracts the swarm, as it does inside a space, where there is nothing to point at.
+        let ray = controls
+            .aim
+            .and_then(|pose| scene_anchor.to_scene_pose(pose))
+            .and_then(|pose| {
+                Ray::from_pose(
+                    Vec3::from_array(pose.position),
+                    glam::Quat::from_array(pose.orientation),
+                )
+            });
+        let mut scene = conversation
+            .arrival()
+            .map(|view| arrival::Scene::layout(&view));
+        let targets = scene
+            .as_ref()
+            .map(arrival::Scene::targets)
+            .unwrap_or_default();
+        let pointing = pointer.update(ray, controls.trigger, &targets);
+        if let Some(key) = &pointing.chosen {
+            conversation.choose_object(key);
+            scene = conversation
+                .arrival()
+                .map(|view| arrival::Scene::layout(&view));
+        }
+        arrival_time += dt;
+        swarm.step(dt, controller.filter(|_| pointing.attracting));
         renderer.update(
             &gpu.queue,
             &swarm,
@@ -370,7 +408,7 @@ pub fn run(
             } else {
                 controller
             },
-            controls.attracting,
+            pointing.attracting,
         );
         // Workers arrive with the space state once the scene reads it.
         #[cfg(target_os = "android")]
@@ -391,6 +429,20 @@ pub fn run(
                 current_workspace,
             );
         }
+        if let Some(scene) = &scene {
+            renderer.update_arrival(
+                &gpu.device,
+                &gpu.queue,
+                &arrival_graphics::Frame {
+                    scene,
+                    hovered: pointing.hit.as_ref().map(|hit| &hit.key),
+                    ray: ray
+                        .zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
+                        .map(|(ray, end)| (ray.origin, end)),
+                    time: arrival_time,
+                },
+            );
+        }
         renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
@@ -400,7 +452,8 @@ pub fn run(
             &images[image].views,
             &[view_projection(&views[0]), view_projection(&views[1])],
             scene_anchor.transform(),
-            Some((&caption, head_pose(&views))),
+            // Arrival is shown in the world, with its own labels, rather than on the panel.
+            scene.is_none().then(|| (&caption, head_pose(&views))),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
@@ -699,6 +752,9 @@ struct Input {
     grip: xr::Action<xr::Posef>,
     left_grip_space: xr::Space,
     left_grip: xr::Action<xr::Posef>,
+    /// The right controller's pointing pose, whose forward axis is the ray.
+    aim_space: xr::Space,
+    aim: xr::Action<xr::Posef>,
     trigger: xr::Action<f32>,
     reset: xr::Action<bool>,
     talk: xr::Action<bool>,
@@ -735,7 +791,10 @@ struct ActionInputs {
 struct Controls {
     controller: Option<Vec3>,
     controller_poses: [Option<xr::Posef>; 2],
-    attracting: bool,
+    /// The right controller's aim pose, while tracked.
+    aim: Option<xr::Posef>,
+    /// The trigger's value, while its action is active; the pointer decides whether a pull attracts or chooses.
+    trigger: Option<f32>,
     reset: bool,
     talk: bool,
     talk_active: bool,
@@ -763,7 +822,10 @@ impl Controls {
             }
         };
         Self {
-            attracting: actions.trigger.is_active && actions.trigger.current_state > 0.2,
+            trigger: actions
+                .trigger
+                .is_active
+                .then_some(actions.trigger.current_state),
             reset: pressed(actions.reset),
             talk: held(actions.talk),
             talk_active: actions.talk.is_active,
@@ -817,7 +879,8 @@ impl Input {
         let set = instance.create_action_set("swarm", "Swarm", 0)?;
         let grip = set.create_action::<xr::Posef>("right_grip", "Right controller", &[])?;
         let left_grip = set.create_action::<xr::Posef>("left_grip_pose", "Left controller", &[])?;
-        let trigger = set.create_action::<f32>("attract", "Attract agents", &[])?;
+        let aim = set.create_action::<xr::Posef>("right_aim", "Point", &[])?;
+        let trigger = set.create_action::<f32>("attract", "Attract agents or choose", &[])?;
         let reset = set.create_action::<bool>("reset", "Reset swarm", &[])?;
         let talk = set.create_action::<bool>("talk", "Hold to speak", &[])?;
         let back = set.create_action::<bool>("chat_back", "Back or deny", &[])?;
@@ -844,6 +907,10 @@ impl Input {
                 xr::Binding::new(
                     &left_grip,
                     instance.string_to_path("/user/hand/left/input/grip/pose")?,
+                ),
+                xr::Binding::new(
+                    &aim,
+                    instance.string_to_path("/user/hand/right/input/aim/pose")?,
                 ),
                 xr::Binding::new(
                     &trigger,
@@ -891,11 +958,14 @@ impl Input {
         let grip_space = grip.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
         let left_grip_space =
             left_grip.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
+        let aim_space = aim.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
         Ok(Self {
             grip_space,
             grip,
             left_grip_space,
             left_grip,
+            aim_space,
+            aim,
             trigger,
             reset,
             talk,
@@ -991,6 +1061,17 @@ impl Input {
             }
         }
         controls.set_locations(locations);
+        // Pointing is optional: an aim pose that cannot be located only hides the ray.
+        controls.aim = locate(&self.aim, &self.aim_space)
+            .ok()
+            .flatten()
+            .filter(|location| {
+                location.location_flags.contains(
+                    xr::SpaceLocationFlags::POSITION_VALID
+                        | xr::SpaceLocationFlags::ORIENTATION_VALID,
+                )
+            })
+            .map(|location| location.pose);
         // State-change-only and rate-limited: enough to distinguish an absent
         // model from a runtime action/profile switch during a headset check.
         let diagnostic = (
@@ -1224,7 +1305,7 @@ mod tests {
         ] {
             let mut controls = Controls::from_actions(actions(true, true, true), true);
             controls.set_locations(locations);
-            assert!(controls.talk && controls.attracting);
+            assert!(controls.talk && controls.trigger == Some(1.0));
             assert_press_edges(&controls, true);
             assert_eq!(controls.audience_grip, 1.0);
             assert_eq!(controls.navigation.x, 0.8);
@@ -1273,7 +1354,7 @@ mod tests {
             // Deliberately stale held/changed values: neither a disconnected
             // controller nor an unfocused session may keep recording alive.
             let controls = Controls::from_actions(actions(true, active, true), focused);
-            assert!(!controls.talk && !controls.attracting);
+            assert!(!controls.talk && controls.trigger.is_none());
             assert!(!controls.talk_active);
             assert_press_edges(&controls, false);
             assert_eq!(controls.audience_grip, 0.0);

@@ -15,7 +15,9 @@ you say and queues it, and the agent's replies are spoken. Sky is an early envir
 Private workspace memory and session state are not included in this public
 source repository.
 
-- **Right trigger:** attract the swarm to the right controller (orange cube).
+- **Right trigger:** outside a space, choose what the right controller's ray
+  points at; a pull that starts away from every object, or any pull inside a
+  space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
 - **Hold Meta button:** Quest's system recenter brings the swarm in front of you.
   A short press opens the system menu. No artificial camera movement.
@@ -73,9 +75,10 @@ bash scripts/fetch-sherpa-onnx.sh
 cargo run -p server --bin tomori-server -- --backend claude-code
 ```
 
-The headset joins existing spaces but can't create them yet, so create one from
-the PC with the example client: give it the server's address, then type
-`create` with the backend and a directory beneath a workspace root.
+The headset creates spaces with its **New space** object (see
+[Controls](#controls)). To create one from the PC instead, use the example
+client: give it the server's address, then type `create` with the backend and a
+directory beneath a workspace root.
 
 ```sh
 cargo run -p client --example connect -- 127.0.0.1:8765
@@ -97,12 +100,26 @@ selection first.
 
 ### Controls
 
-- **Servers:** flick the left stick up/down to choose; **A** connects; **Y**
-  searches again. A server with an incompatible protocol is listed with its
-  version but can't be chosen.
-- **Spaces:** flick the left stick up/down to choose; **A** joins; **B** returns
-  to the servers, or first dismisses an error or a note that a space has ended;
-  **Y** lists again.
+Before you join a space, servers, spaces and the **New space** object stand in
+the world in front of you, each labelled. Point the right controller at one:
+its ray turns cyan and the object is highlighted, with its full label above the
+row. Pull the right trigger to choose it. Choosing happens once per pull, and
+only for a pull that starts on an object, so a pull that starts elsewhere still
+attracts the swarm, even if the ray then crosses an object. The stick and
+buttons do the same, and the object they select is underlined.
+
+- **Servers:** point and pull, or flick the left stick up/down and press **A**,
+  to connect; **Y** searches again. A server with an incompatible protocol is
+  shown, grey, with its version, but can't be chosen.
+- **Spaces:** the spaces and the **New space** object are shown together; with
+  no spaces, only **New space** is. Choose a space to join it. Choose the
+  connected server, on the left, or press **B**, to return to the servers; **B**
+  first dismisses an error or a note that a space has ended. **Y** lists again.
+- **New space:** choosing it opens rings of choices around it, one at a time:
+  the backend, then the folder, then, for a backend that can attach, a new
+  session or one of its existing sessions in that folder. **B**, or choosing the
+  centre object again, steps back to the previous ring. **Y** lists the sessions
+  again.
 - **In a space:** flick the left stick up/down to page through text and
   left/right to move between messages; the queue follows the last message.
   **Y** fetches the space again.

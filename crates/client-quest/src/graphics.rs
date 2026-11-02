@@ -40,7 +40,14 @@ impl Default for Instance {
     }
 }
 
-const MAX_INSTANCES: usize = AGENT_COUNT + 160 + crate::delegation::MAX_CUBES;
+// Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm.
+const MAX_INSTANCES: usize = AGENT_COUNT
+    + 160
+    + if crate::delegation::MAX_CUBES > crate::arrival_graphics::MAX_CUBES {
+        crate::delegation::MAX_CUBES
+    } else {
+        crate::arrival_graphics::MAX_CUBES
+    };
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 6 => Float32x3, 7 => Float32x3];
@@ -70,6 +77,7 @@ pub struct Renderer {
     caption_offset: f32,
     base_scene_len: usize,
     workspace: crate::workspace_graphics::WorkspaceGraphics,
+    arrival: crate::arrival_graphics::ArrivalLabels,
 }
 
 impl Renderer {
@@ -181,6 +189,7 @@ impl Renderer {
         let controllers = Controllers::new(device, queue, format, &camera_layout);
         let workspace =
             crate::workspace_graphics::WorkspaceGraphics::new(device, format, &camera_layout);
+        let arrival = crate::arrival_graphics::ArrivalLabels::new(device, format, &camera_layout);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::Minimal,
@@ -197,6 +206,7 @@ impl Renderer {
             caption_offset: 0.0,
             base_scene_len: 0,
             workspace,
+            arrival,
         }
     }
 
@@ -247,6 +257,7 @@ impl Renderer {
     ) {
         self.scene.clear();
         self.workspace.hide();
+        self.arrival.hide();
         // Keep the debug console, but move it below the conversational body.
         self.caption_offset = if swarm.visual.mode == Mode::Neutral {
             0.0
@@ -310,6 +321,36 @@ impl Renderer {
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
         self.workspace.update(device, queue, workspace, stations);
+    }
+
+    /// Append the arrival scene, the pointing ray and the labels anchored to its objects, after the swarm and floor. Call after `update`, instead of `update_workspace`.
+    pub fn update_arrival(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &crate::arrival_graphics::Frame,
+    ) {
+        self.scene.truncate(self.base_scene_len);
+        // Unlike workspace cubes, these are made here, so the ray and threads may be longer than a metre.
+        let finite = |values: &[f32]| values.iter().all(|v| v.is_finite());
+        for cube in crate::arrival_graphics::cubes(frame) {
+            if self.scene.len() < MAX_INSTANCES
+                && finite(&cube.position)
+                && finite(&cube.scale)
+                && finite(&cube.orientation)
+            {
+                self.scene.push(Instance {
+                    position: cube.position,
+                    scale: cube.scale,
+                    color: cube.color,
+                    basis: glam::Mat3::from_quat(glam::Quat::from_array(cube.orientation))
+                        .to_cols_array_2d(),
+                });
+            }
+        }
+        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
+        self.arrival
+            .update(device, queue, frame.scene, frame.hovered);
     }
 
     /// Zero-based page, applied by the next `update_workspace` call.
@@ -418,6 +459,7 @@ impl Renderer {
                 &self.camera_bindings[eye],
                 matrices[eye] * scene_to_space,
             );
+            self.arrival.draw(&mut pass, &self.camera_bindings[eye]);
             drop(pass);
             if let Some((caption, head)) = caption {
                 let head =
@@ -1378,6 +1420,191 @@ mod tests {
                 }
             }
             if let (Some(sheet), Some(path)) = (sheet, preview_path) {
+                sheet.save(path).unwrap();
+            }
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(scope.pop().await.is_none());
+        });
+    }
+
+    /// Set `TOMORI_ARRIVAL_PREVIEW` to a PNG path to save what this renders.
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    fn arrival_renders_objects_ray_and_world_labels() {
+        use crate::arrival::{Item, Key, Kind, Ring, Scene, Step, View};
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 480;
+        pollster::block_on(async {
+            // Metal only when built with `--features wgpu/metal`, to preview on a Mac.
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("arrival test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(
+                &device,
+                &queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                WIDTH,
+                HEIGHT,
+            );
+            renderer.set_environment(Environment::Minimal);
+            let swarm = Swarm::new();
+            let eye = glam::Vec3::new(0.0, 1.6, 0.0);
+            let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                * Mat4::look_at_rh(eye, glam::Vec3::new(0.0, 1.25, -1.6), glam::Vec3::Y);
+            // A closer look at the rings, as the headset's resolution would show them.
+            let close = Mat4::perspective_rh(0.5, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                * Mat4::look_at_rh(eye, glam::Vec3::new(0.0, 1.0, -1.25), glam::Vec3::Y);
+            let capture = |renderer: &Renderer, matrix: Mat4| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    None,
+                );
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("arrival test readback"),
+                    size: (WIDTH * HEIGHT * 4) as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(WIDTH * 4),
+                            rows_per_image: Some(HEIGHT),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = tx.send(result);
+                    });
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                buffer.unmap();
+                data
+            };
+            let space = |id: &str, title: &str, activity, participants| Item {
+                key: Key::Space(id.into()),
+                kind: Kind::Space {
+                    activity,
+                    participants,
+                    hue: crate::arrival::hue(id),
+                },
+                label: title.into(),
+                detail: Some(format!("{activity:?}").to_lowercase()),
+                selected: false,
+            };
+            let create = |open| Item {
+                key: Key::Create,
+                kind: Kind::Create { open },
+                label: "New space".into(),
+                detail: None,
+                selected: false,
+            };
+            let connected = Some(Item {
+                key: Key::Connected,
+                kind: Kind::Connected,
+                label: "studio.local".into(),
+                detail: Some("connected".into()),
+                selected: false,
+            });
+            let spaces = vec![
+                space("a1", "Tomori", protocol::Activity::Running, 2),
+                space("b2", "Fantail", protocol::Activity::Idle, 0),
+                space("c3", "Notes", protocol::Activity::Waiting, 1),
+                space("d4", "Old review", protocol::Activity::Closed, 0),
+            ];
+            let choosing = View {
+                heading: "Spaces on studio.local".into(),
+                connected: connected.clone(),
+                items: spaces.iter().cloned().chain([create(false)]).collect(),
+                ..Default::default()
+            };
+            let backend = |name: &str| Item {
+                key: Key::Backend(name.into()),
+                kind: Kind::Choice,
+                label: name.into(),
+                detail: None,
+                selected: name == "claude-code",
+            };
+            let creating = View {
+                heading: "Choose a backend".into(),
+                connected,
+                items: spaces.into_iter().chain([create(true)]).collect(),
+                ring: Some(Ring {
+                    step: Step::Backend,
+                    items: ["claude-code", "opencode", "codex", "echo"]
+                        .map(backend)
+                        .into(),
+                }),
+                ..Default::default()
+            };
+            renderer.update(&queue, &swarm, None, false);
+            let bare = capture(&renderer, matrix);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            for (row, (view, hovered, matrix)) in [
+                (&choosing, Key::Space("a1".into()), matrix),
+                (&creating, Key::Backend("opencode".into()), matrix),
+                (&creating, Key::Backend("opencode".into()), close),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let scene = Scene::layout(view);
+                let target = scene.object(&hovered).unwrap().position;
+                let origin = glam::Vec3::new(0.22, 1.1, -0.35);
+                renderer.update(&queue, &swarm, None, false);
+                renderer.update_arrival(
+                    &device,
+                    &queue,
+                    &crate::arrival_graphics::Frame {
+                        scene: &scene,
+                        hovered: Some(&hovered),
+                        ray: Some((origin, target)),
+                        time: 1.0,
+                    },
+                );
+                let image = capture(&renderer, matrix);
+                assert_ne!(image, bare, "arrival must draw over the bare scene");
+                image::imageops::replace(
+                    &mut sheet,
+                    &image::RgbaImage::from_raw(WIDTH, HEIGHT, image).unwrap(),
+                    0,
+                    (row as u32 * HEIGHT).into(),
+                );
+            }
+            if let Ok(path) = std::env::var("TOMORI_ARRIVAL_PREVIEW") {
                 sheet.save(path).unwrap();
             }
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();

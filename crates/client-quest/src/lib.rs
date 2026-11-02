@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "android")]
 mod android;
+mod arrival;
+mod arrival_graphics;
 mod caption;
 mod capture;
 mod connection;
@@ -25,6 +27,7 @@ mod interaction;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
 mod playback;
+mod pointing;
 mod server_choice;
 #[cfg(not(target_os = "android"))]
 mod spectator;
