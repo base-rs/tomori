@@ -1509,10 +1509,10 @@ mod tests {
             let swarm = Swarm::new();
             let eye = glam::Vec3::new(0.0, 1.6, 0.0);
             let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(eye, glam::Vec3::new(0.0, 1.25, -1.6), glam::Vec3::Y);
+                * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
             // A closer look at the rings, as the headset's resolution would show them.
-            let close = Mat4::perspective_rh(0.5, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(eye, glam::Vec3::new(0.0, 1.0, -1.25), glam::Vec3::Y);
+            let close = Mat4::perspective_rh(0.75, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                * Mat4::look_at_rh(eye, crate::arrival::CREATE, glam::Vec3::Y);
             let capture = |renderer: &Renderer, matrix: Mat4| {
                 renderer.render(
                     &device,
