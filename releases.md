@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The headset logs much less to logcat, so connections, joins, utterances and errors stay in its buffer for many minutes. It logs its first submitted frame and then a frame count and rate once a minute instead of every 720 frames. Swarm interaction modes, pending reference-space changes and controller pose changes are logged only at debug. Repeated recenters are logged at info at most once a minute, and live microphone overruns at most once every 30 seconds, with the overruns counted in between. Speaker underruns on the desktop are logged only at debug.
 - Offer only top-level OpenCode sessions when attaching a space, not subagents' child sessions or archived sessions.
 - The server, client and OpenCode backend use the Native scheduler instead of the Direct scheduler. An idle server no longer wakes every 2 ms to retry its sockets, and accepting connections can no longer stall on macOS once the Direct blocking pool stops waking its workers.
 - Track OpenCode child lifecycle events so deleted workers animate their return without mistaking completion or partial lists for deletion.
