@@ -1098,7 +1098,12 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
-            ClientMessage::Presence { head, left, right } => {
+            ClientMessage::Presence {
+                head,
+                left,
+                right,
+                hands,
+            } => {
                 let Some(space) = space.and_then(|space| state.space(space)) else {
                     return;
                 };
@@ -1112,6 +1117,7 @@ impl Hub {
                                 head,
                                 left,
                                 right,
+                                hands,
                             },
                         );
                     }

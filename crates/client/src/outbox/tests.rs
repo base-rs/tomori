@@ -70,6 +70,7 @@ fn presence(x: f32) -> ClientMessage {
         },
         left: None,
         right: None,
+        hands: None,
     }
 }
 

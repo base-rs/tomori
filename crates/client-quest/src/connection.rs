@@ -4,7 +4,9 @@
 //! Carries out the [`Conversation`]'s actions: owns the server connection, the microphone and the speaker, and browses for servers while the server list shows.
 use crate::{
     capture::{Capture, Recording},
+    controller,
     conversation::{Action, Conversation},
+    hands,
     identity::{Identity, Store},
     playback::{Playback, Speaking},
     server_choice::{self, Choice, Source},
@@ -13,7 +15,7 @@ use client::{
     Client, ConnectionState, Event, Microphone, Options, discovery,
     playback::{MixerOptions, Player, PlayerControl},
 };
-use protocol::ServerMessage;
+use protocol::{ClientMessage, Pose, ServerMessage};
 use std::{
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
@@ -294,6 +296,39 @@ impl Connection {
                 recording: None,
             },
             speaker: Speaker::new(playback),
+        }
+    }
+
+    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays them to the other participants.
+    pub fn send_presence(
+        &mut self,
+        head: controller::Pose,
+        left: Option<controller::Pose>,
+        right: Option<controller::Pose>,
+        hands: [Option<hands::Hand>; 2],
+    ) {
+        if self.client.is_none() {
+            return;
+        }
+        let message = ClientMessage::Presence {
+            head: Pose {
+                position: head.position,
+                orientation: head.orientation,
+            },
+            left: left.map(|pose| Pose {
+                position: pose.position,
+                orientation: pose.orientation,
+            }),
+            right: right.map(|pose| Pose {
+                position: pose.position,
+                orientation: pose.orientation,
+            }),
+            hands: Some(hands),
+        };
+        if let Some(client) = &self.client {
+            if let Err(error) = client.send(message) {
+                log::debug!("Cannot send presence: {error}");
+            }
         }
     }
 

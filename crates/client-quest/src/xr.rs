@@ -391,6 +391,11 @@ pub fn run(
             );
         }
         renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
+        // Report this participant's head, controllers and hands to the server, in
+        // the space's scene coordinates, so the others in the space can render them.
+        if let Some(head) = scene_anchor.to_scene_transform(head_pose(&views)) {
+            connection.send_presence(head, controller_poses[controller::LEFT], controller_poses[controller::RIGHT], tracked_hands);
+        }
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
         let submission = renderer.render(
@@ -1087,6 +1092,12 @@ impl SceneAnchor {
         pose.valid()
             .then(|| self.transform().inverse() * pose.transform())
             .and_then(controller::Pose::from_transform)
+    }
+
+    /// A reference-space transform, such as the head, as a validated pose in the space's scene coordinates.
+    fn to_scene_transform(&self, transform: Mat4) -> Option<controller::Pose> {
+        let reference = controller::Pose::from_transform(transform)?;
+        controller::Pose::from_transform(self.transform().inverse() * reference.transform())
     }
 }
 
