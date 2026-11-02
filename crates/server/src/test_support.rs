@@ -249,7 +249,6 @@ impl TestClient {
             protocol: PROTOCOL_VERSION,
             participant: participant.to_owned(),
             name: name.to_owned(),
-            credentials: None,
         });
         self.source = self.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),

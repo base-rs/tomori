@@ -12,7 +12,8 @@ use std::{
 
 /// The server's limit on a display name, in bytes.
 const NAME_BYTES: usize = 64;
-const PARTICIPANT_FILE: &str = "participant";
+/// Identities stored before protocol 2, in the file `participant`, were sent to other clients and may be recorded in agent sessions, so they are never reused; see `design/security.md`.
+const PARTICIPANT_FILE: &str = "participant-2";
 const SERVER_FILE: &str = "server";
 
 /// Settings given when the app starts, which take precedence over the defaults.
@@ -223,6 +224,18 @@ mod tests {
         let replaced = store.participant();
         assert_ne!(replaced, first);
         assert!(valid_participant(&replaced));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_identity_from_before_protocol_2_is_not_reused() {
+        let directory = directory("legacy");
+        fs::create_dir_all(&directory).unwrap();
+        let legacy = "0123456789abcdef0123456789abcdef";
+        fs::write(directory.join("participant"), legacy).unwrap();
+        let participant = Store::new(Some(directory.clone())).participant();
+        assert_ne!(participant, legacy);
+        assert!(valid_participant(&participant));
         fs::remove_dir_all(directory).unwrap();
     }
 

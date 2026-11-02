@@ -40,14 +40,8 @@ impl InputQueue {
             .map(|(_, text)| text.as_str())
     }
 
-    /// Add an entry for the participant `participant`, shown as spoken by `speaker`. Returns false if an entry with this key was queued recently, in which case nothing changes.
-    pub fn push(
-        &mut self,
-        key: String,
-        participant: String,
-        speaker: String,
-        text: String,
-    ) -> bool {
+    /// Add an entry for the participant numbered `source`, shown as spoken by `speaker`. Returns false if an entry with this key was queued recently, in which case nothing changes.
+    pub fn push(&mut self, key: String, source: u32, speaker: String, text: String) -> bool {
         if self.queued_text(&key).is_some() {
             return false;
         }
@@ -57,7 +51,7 @@ impl InputQueue {
         self.recent.push_back((key.clone(), text.clone()));
         self.entries.push(QueueEntry {
             id: key,
-            participant,
+            source,
             speaker,
             text,
             state: QueueState::Queued,
@@ -147,9 +141,9 @@ mod tests {
     #[test]
     fn entries_are_delivered_one_at_a_time_in_order() {
         let mut queue = InputQueue::default();
-        assert!(queue.push("a".into(), "ada".into(), "Ada".into(), "first".into()));
-        assert!(queue.push("b".into(), "bob".into(), "Bob".into(), "second".into()));
-        assert!(!queue.push("a".into(), "ada".into(), "Ada".into(), "again".into()));
+        assert!(queue.push("a".into(), 1, "Ada".into(), "first".into()));
+        assert!(queue.push("b".into(), 2, "Bob".into(), "second".into()));
+        assert!(!queue.push("a".into(), 1, "Ada".into(), "again".into()));
         assert_eq!(queue.begin_next().unwrap().id, "a");
         assert!(queue.begin_next().is_none());
         assert_eq!(
@@ -168,13 +162,13 @@ mod tests {
         let mut queue = InputQueue::default();
         for index in 0..20 {
             let key = format!("k{index}");
-            queue.push(key.clone(), "ada".into(), "Ada".into(), "text".into());
+            queue.push(key.clone(), 1, "Ada".into(), "text".into());
             queue.begin_next();
             queue.finish(&key, QueueState::Delivered);
         }
         assert_eq!(queue.entries().len(), FINISHED_LIMIT);
         assert_eq!(queue.entries()[0].id, "k12");
-        assert!(!queue.push("k19".into(), "ada".into(), "Ada".into(), "text".into()));
+        assert!(!queue.push("k19".into(), 1, "Ada".into(), "text".into()));
     }
 
     #[test]
@@ -182,12 +176,7 @@ mod tests {
         let mut queue = InputQueue::default();
         for index in 0..RECENT_KEYS * 4 {
             let key = format!("k{index}");
-            assert!(queue.push(
-                key.clone(),
-                "ada".into(),
-                "Ada".into(),
-                format!("text {index}")
-            ));
+            assert!(queue.push(key.clone(), 1, "Ada".into(), format!("text {index}")));
             queue.begin_next();
             queue.finish(&key, QueueState::Delivered);
         }

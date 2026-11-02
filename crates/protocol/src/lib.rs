@@ -27,7 +27,7 @@ pub use space::{
 };
 
 /// The protocol version sent in [`ClientMessage::Hello`] and [`ServerMessage::Welcome`].
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The HTTP path that clients use to open their connection.
 pub const CONNECT_PATH: &str = "/connect";

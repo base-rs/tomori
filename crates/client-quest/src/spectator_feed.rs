@@ -113,7 +113,7 @@ impl Feed {
         };
         let store = Store::new(None);
         let identity = Identity::new(&store, crate::identity::host_name().as_deref(), overrides);
-        let mut conversation = Conversation::new(&identity.participant, &identity.name);
+        let mut conversation = Conversation::new(&identity.name);
 
         // The connection enqueues a `Connect` action when a server is given,
         // so it must be created before `join_space` queues a `Send(Join)`:

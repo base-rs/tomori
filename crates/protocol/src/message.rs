@@ -33,13 +33,10 @@ pub enum ClientMessage {
     /// The first message on every connection.
     Hello {
         protocol: u32,
-        /// A stable identity chosen by the client, so a reconnect is recognized as the same participant.
+        /// A stable identity chosen by the client, so a reconnect is recognized as the same participant. A secret of the device: the server never sends it to other clients. See `design/security.md`.
         participant: String,
         /// The display name used for speaker attribution.
         name: String,
-        /// Reserved for future authentication. Ignored by servers that do not authenticate.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        credentials: Option<String>,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
@@ -369,17 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn hello_credentials_are_optional() {
-        let message: ClientMessage = serde_json::from_str(
-            r#"{"type": "hello", "protocol": 1, "participant": "p", "name": "Ada"}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            message,
-            ClientMessage::Hello {
-                credentials: None,
-                ..
-            }
-        ));
+    fn hello_carries_no_credentials() {
+        // Credentials belong on the HTTP request that opens the connection; see `design/security.md`.
+        let hello = ClientMessage::Hello {
+            protocol: 2,
+            participant: "p".into(),
+            name: "Ada".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&hello).unwrap(),
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"})
+        );
     }
 }

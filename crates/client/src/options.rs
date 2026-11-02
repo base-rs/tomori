@@ -12,11 +12,10 @@ use crate::Backoff;
 pub struct Options {
     /// `host:port`, or a host alone for [`protocol::DEFAULT_PORT`]. Resolved again on every connection attempt.
     pub address: String,
-    /// A stable identity, so the server recognizes a reconnect as the same participant.
+    /// A stable identity, so the server recognizes a reconnect as the same participant. A secret of this device, which the server never sends to other clients.
     pub participant: String,
     /// The display name used for speaker attribution.
     pub name: String,
-    pub credentials: Option<String>,
     pub backoff: Backoff,
     /// The limit for establishing the connection and for receiving the server's Welcome.
     pub connect_timeout: Duration,
@@ -45,7 +44,6 @@ impl Options {
             address: address.into(),
             participant: participant.into(),
             name: name.into(),
-            credentials: None,
             backoff: Backoff::default(),
             connect_timeout: Duration::from_secs(5),
             close_timeout: Duration::from_secs(1),

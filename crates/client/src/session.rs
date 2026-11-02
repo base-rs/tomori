@@ -194,7 +194,6 @@ async fn exchange(
             protocol: PROTOCOL_VERSION,
             participant: options.participant.clone(),
             name: options.name.clone(),
-            credentials: options.credentials.clone(),
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {

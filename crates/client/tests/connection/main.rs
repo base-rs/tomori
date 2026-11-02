@@ -372,7 +372,7 @@ fn reports_incompatible_servers() {
     let client = Client::connect(options(server.address)).unwrap();
     assert!(matches!(
         wait_disconnected(&client),
-        Disconnect::Protocol(error) if error.contains("protocol 2")
+        Disconnect::Protocol(error) if error.contains(&format!("protocol {}", protocol::PROTOCOL_VERSION + 1))
     ));
 
     let server = MiniServer::start(localhost(), Mode::Unavailable);

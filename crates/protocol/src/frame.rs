@@ -212,7 +212,6 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             participant: "quest-1".into(),
             name: "Samuel".into(),
-            credentials: None,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,

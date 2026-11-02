@@ -214,6 +214,8 @@ struct SpaceRecord {
 /// An utterance whose transcript has not been reported yet.
 struct UtteranceRecord {
     participant: String,
+    /// The participant's number, their public handle, which keys their queued input.
+    source: u32,
     client: String,
     space: String,
 }
@@ -388,7 +390,6 @@ impl HubState {
             .filter_map(|id| {
                 let record = self.participants.get(id)?;
                 Some(Participant {
-                    id: id.clone(),
                     name: record.name.clone(),
                     source: record.source,
                 })
@@ -1020,6 +1021,7 @@ impl Hub {
                     id,
                     UtteranceRecord {
                         participant: participant.to_owned(),
+                        source: state.participants[participant].source,
                         client: utterance.clone(),
                         space,
                     },
@@ -1325,13 +1327,8 @@ impl Hub {
             return;
         };
         let text = text.trim();
-        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. The participant's length comes first, so that no two participants' utterances share a key whatever their identifiers contain.
-        let key = format!(
-            "{}:{}/{}",
-            record.participant.len(),
-            record.participant,
-            record.client
-        );
+        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
+        let key = format!("{}/{}", record.source, record.client);
         if let Some(queued) = state
             .space(&record.space)
             .and_then(|space| space.model.queued_text(&key))
@@ -1382,10 +1379,9 @@ impl Hub {
         }
         let speaker = state.participants[&record.participant].name.clone();
         if let Some(space) = state.space_mut(&record.space) {
-            let queued =
-                space
-                    .model
-                    .enqueue(key, record.participant.clone(), speaker, text.to_owned());
+            let queued = space
+                .model
+                .enqueue(key, record.source, speaker, text.to_owned());
             debug_assert!(queued, "repeats are acknowledged above");
         }
         state.send(
@@ -1778,7 +1774,6 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 participant: participant.to_owned(),
                 name: participant.to_owned(),
-                credentials: None,
             },
         );
         connection

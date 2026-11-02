@@ -110,7 +110,7 @@ fn desktop_connection(
 ) -> (conversation::Conversation, connection::Connection) {
     let store = identity::Store::new(None);
     let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
-    let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
+    let mut conversation = conversation::Conversation::new(&identity.name);
     let connection = connection::Connection::new(
         identity,
         store,
@@ -299,7 +299,7 @@ fn android_connection(
     });
     let store = identity::Store::new(android.data());
     let identity = identity::Identity::new(&store, device.as_deref(), overrides);
-    let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
+    let mut conversation = conversation::Conversation::new(&identity.name);
     let capture = Box::new(capture::Android::new(android.clone()));
     let multicast = Box::new(android::MulticastLock::new(android));
     let playback = Box::new(playback::Android);

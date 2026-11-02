@@ -306,7 +306,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
     });
     assert_eq!(state.queue[0].text, "run the tests");
     assert_eq!(state.queue[0].speaker, "Ada");
-    assert_eq!(state.queue[0].participant, "ada");
+    assert_eq!(state.queue[0].source, ada.source);
     let session = server.backend.started()[0].clone();
     assert_eq!(session.log().prompts[0].text, "Ada: run the tests");
 
@@ -384,7 +384,12 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
     assert_eq!(heard.gate, Gate::Agent);
     let state = bob.space(|state| !state.queue.is_empty());
     assert_eq!(state.queue[0].text, "run the tests");
-    assert_eq!(state.queue[0].participant, "ada");
+    let ada_source = state
+        .participants
+        .iter()
+        .find(|participant| participant.name == "Ada")
+        .map(|participant| participant.source);
+    assert_eq!(Some(state.queue[0].source), ada_source);
     ada.close();
 }
 
@@ -604,7 +609,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
     assert_eq!(transcript(&mut bob, "b1"), "run the tests");
     let state = ada.space(|state| !state.queue.is_empty());
     assert_eq!(state.queue.len(), 1);
-    assert_eq!(state.queue[0].participant, "bob");
+    assert_eq!(state.queue[0].source, bob.source);
 }
 
 #[test]

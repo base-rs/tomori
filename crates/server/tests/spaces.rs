@@ -9,7 +9,7 @@ use backend::{
     SessionSpec, Worker, WorkerState,
 };
 use protocol::{
-    Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState,
+    Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState, Role,
     ServerMessage, SpaceState,
 };
 use server::Server;
@@ -25,6 +25,90 @@ fn errors_within(client: &TestClient, window: Duration) -> Vec<String> {
         }
     }
     errors
+}
+
+#[test]
+fn participant_identities_are_never_sent_to_other_clients() {
+    // An identity is what lets a reconnect take over a participant's connection, so no message to another client may carry it, including the identifiers of queued entries. See `design/security.md`.
+    const ADA: &str = "ada-identity-7f3a";
+    const BOB: &str = "bob-identity-91c2";
+    /// Wait for `select` on `client`'s messages, checking that each leaves out `other`'s identity.
+    fn checked<T>(
+        client: &TestClient,
+        other: &str,
+        mut select: impl FnMut(&ServerMessage) -> Option<T>,
+    ) -> T {
+        client.wait_for(|message| {
+            let json = serde_json::to_string(message).unwrap();
+            assert!(!json.contains(other), "{json}");
+            select(message)
+        })
+    }
+
+    let server = TestServer::start();
+    let mut ada = server.connect(ADA, "Ada");
+    let space = ada.create_space("Secrets").id;
+    let mut bob = server.connect(BOB, "Bob");
+    bob.send(&ClientMessage::Join { space });
+    // Both are in the space before either speaks, so each receives the other's presence.
+    for (client, other) in [(&ada, BOB), (&bob, ADA)] {
+        checked(client, other, |message| match message {
+            ServerMessage::Space { state } if state.participants.len() == 2 => Some(()),
+            _ => None,
+        });
+    }
+    let head = Pose {
+        position: [0.0, 1.6, 0.0],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+    };
+    for (client, utterance) in [(&mut ada, "u1"), (&mut bob, "u2")] {
+        client.say(utterance, "hello");
+        client.send(&ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+        });
+    }
+
+    let mut expected = [ada.source, bob.source];
+    expected.sort_unstable();
+    for (client, other, other_source) in [(&ada, BOB, bob.source), (&bob, ADA, ada.source)] {
+        // Until both utterances have been delivered to the agent, whose user messages are named by the queue's keys, and the other participant's presence has arrived.
+        let mut presence = false;
+        let state = checked(client, other, |message| match message {
+            ServerMessage::Presence { source, .. } if *source == other_source => {
+                presence = true;
+                None
+            }
+            ServerMessage::Space { state }
+                if presence
+                    && state.queue.len() == 2
+                    && state
+                        .queue
+                        .iter()
+                        .all(|entry| entry.state == QueueState::Delivered)
+                    && state
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .count()
+                        == 2 =>
+            {
+                Some(state.clone())
+            }
+            _ => None,
+        });
+        // Nor anything sent after it.
+        while let Some(message) = client.next_message(Duration::from_millis(200)) {
+            let json = serde_json::to_string(&message).unwrap();
+            assert!(!json.contains(other), "{json}");
+        }
+        // Each entry names its speaker by participant number instead. The two utterances are transcribed concurrently, so either may be queued first.
+        let mut sources: Vec<u32> = state.queue.iter().map(|entry| entry.source).collect();
+        sources.sort_unstable();
+        assert_eq!(sources, expected);
+    }
 }
 
 #[test]
@@ -50,7 +134,6 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         protocol: protocol::PROTOCOL_VERSION,
         participant: "ada".into(),
         name: "Ada".into(),
-        credentials: None,
     });
     let offered = ada.wait_for(|message| match message {
         ServerMessage::Welcome { environments, .. } => Some(environments.clone()),
@@ -517,8 +600,8 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
         .clone();
     assert_eq!(entry.state, QueueState::Queued);
     assert_eq!(entry.text, "second");
-    // Entries carry the speaker's participant identity, so Bob's client can recognize its own.
-    assert_eq!(entry.participant, "bob");
+    // Entries carry the speaker's participant number, so Bob's client can recognize its own.
+    assert_eq!(entry.source, bob.source);
 
     // Ada cancels Bob's queued entry; both see it go.
     ada.send(&ClientMessage::CancelQueued {
@@ -1293,7 +1376,7 @@ fn reconnecting_keeps_the_identity_and_rejoins_the_space() {
     let ada_entries = state
         .participants
         .iter()
-        .filter(|participant| participant.id == "ada")
+        .filter(|participant| participant.source == ada.source)
         .count();
     assert_eq!(ada_entries, 1);
 }

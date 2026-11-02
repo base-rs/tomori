@@ -163,9 +163,8 @@ pub enum QueueState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub id: String,
-    /// The speaker's participant identity, so a client can recognize its own entries. Absent from older servers.
-    #[serde(default)]
-    pub participant: String,
+    /// The speaker's participant number, their public handle, so a client can recognize its own entries by the `source` in its `Welcome`. A participant's identity is never sent to other clients; see `design/security.md`.
+    pub source: u32,
     /// The speaker's display name.
     pub speaker: String,
     pub text: String,
@@ -254,9 +253,8 @@ pub struct Presentation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Participant {
-    pub id: String,
     pub name: String,
-    /// The number used as the audio frame source for this participant.
+    /// The participant's number: their public handle, and the source of their audio frames. A participant's identity is never sent to other clients; see `design/security.md`.
     pub source: u32,
 }
 
@@ -348,19 +346,6 @@ mod tests {
         let json = serde_json::to_value(&approval).unwrap();
         assert_eq!(json["options"][0]["id"], "suggestions");
         assert_eq!(serde_json::from_value::<Approval>(json).unwrap(), approval);
-    }
-
-    #[test]
-    fn queue_entries_from_older_servers_have_no_participant() {
-        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
-            "id": "e1",
-            "speaker": "Ada",
-            "text": "run the tests",
-            "state": "queued",
-        }))
-        .unwrap();
-        assert_eq!(entry.participant, "");
-        assert_eq!(entry.speaker, "Ada");
     }
 
     #[test]
