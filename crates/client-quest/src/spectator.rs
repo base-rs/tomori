@@ -1,16 +1,12 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Read-only projection of the Quest's actual scene, received from the PC bridge. The headset stopped publishing
-//! frames when it moved to the server, so the PC view waits until publishing returns there.
+//! The spectator frame, produced by [`crate::spectator_feed::Feed`] from a live
+//! connection to a space: the followed participant's point of view, the workers
+//! in the scene, and the caption.
 use serde::{Deserialize, Serialize};
-use std::{
-    sync::mpsc::{self, Receiver},
-    time::Duration,
-};
 
 pub const AGENTS: usize = crate::swarm::AGENT_COUNT;
-pub const VIDEO_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Frame {
@@ -82,39 +78,6 @@ impl Frame {
                 .chain(self.controller.iter().flatten())
                 .all(|v| v.is_finite())
     }
-}
-
-pub fn receive_frames() -> Receiver<Frame> {
-    let (sender, receiver) = mpsc::sync_channel(2);
-    let port = std::env::var("TOMORI_BRIDGE_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .filter(|port| *port != 0)
-        .unwrap_or(8765);
-    let url = format!("http://127.0.0.1:{port}/spectator/frame");
-    std::thread::Builder::new()
-        .name("spectator-receive".into())
-        .spawn(move || {
-            let client = ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_millis(400))
-                .timeout_read(Duration::from_millis(400))
-                .build();
-            loop {
-                if let Ok(response) = client.get(&url).call()
-                    && let Ok(frame) = response.into_json::<Frame>()
-                    && frame.valid()
-                    && matches!(
-                        sender.try_send(frame),
-                        Err(mpsc::TrySendError::Disconnected(_))
-                    )
-                {
-                    break;
-                }
-                std::thread::sleep(VIDEO_INTERVAL);
-            }
-        })
-        .expect("start spectator receiver");
-    receiver
 }
 
 #[cfg(test)]

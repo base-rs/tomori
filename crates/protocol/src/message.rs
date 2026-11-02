@@ -96,6 +96,9 @@ pub enum ClientMessage {
         left: Option<Pose>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         right: Option<Pose>,
+        /// Tracked hand skeletons, left then right. Absent from older clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hands: Option<[Option<crate::presence::Hand>; 2]>,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -163,6 +166,9 @@ pub enum ServerMessage {
         left: Option<Pose>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         right: Option<Pose>,
+        /// The participant's tracked hand skeletons, left then right. Absent from older servers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hands: Option<[Option<crate::presence::Hand>; 2]>,
     },
     /// A request could not be completed. The connection stays open.
     Error {
