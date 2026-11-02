@@ -182,14 +182,25 @@ pub async fn create_session<'scope>(
     Ok(value.get("data").cloned().unwrap_or(value))
 }
 
-/// `GET /api/session?directory=`: the existing sessions in a directory.
+/// The listing of sessions a participant can attach to: the directory's own
+/// top-level, unarchived sessions. Subagents' child sessions are workers of
+/// their parent, not conversations to join.
+fn session_list_path(directory: &str) -> String {
+    format!(
+        "/api/session?directory={}&parentID=null&archived=false",
+        urlencoding(directory)
+    )
+}
+
+/// `GET /api/session?directory=&parentID=null&archived=false`: the existing
+/// top-level, unarchived sessions in a directory.
 pub async fn list_sessions<'scope>(
     client: &Client<'scope>,
     resolved: &Resolved,
     directory: &str,
     cancellation: &Cancellation,
 ) -> Result<Vec<Value>, Failure> {
-    let path = format!("/api/session?directory={}", urlencoding(directory));
+    let path = session_list_path(directory);
     let response = exchange(
         client,
         get(&path),
@@ -1050,6 +1061,14 @@ fn urlencoding(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_listing_asks_for_top_level_unarchived_sessions() {
+        assert_eq!(
+            session_list_path("/home/a b"),
+            "/api/session?directory=%2Fhome%2Fa%20b&parentID=null&archived=false"
+        );
+    }
 
     #[test]
     fn response_bytes_are_bounded_without_truncating_valid_json() {
