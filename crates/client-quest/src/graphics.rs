@@ -40,9 +40,9 @@ impl Default for Instance {
     }
 }
 
-// Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm.
+// Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm. The grid takes up to twice its lines while an environment grows through it.
 const MAX_INSTANCES: usize = AGENT_COUNT
-    + 160
+    + 210
     + if crate::delegation::MAX_CUBES > crate::arrival_graphics::MAX_CUBES {
         crate::delegation::MAX_CUBES
     } else {
@@ -64,6 +64,8 @@ fn oriented_shader() -> String {
 
 pub struct Renderer {
     environment: Environment,
+    /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
+    reveal: Option<crate::arrival_motion::Sphere>,
     sky: environment_sky::Sky,
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
@@ -193,6 +195,7 @@ impl Renderer {
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::Minimal,
+            reveal: None,
             sky: environment_sky::Sky::new(device, queue, format, width, height),
             pipeline,
             vertices,
@@ -248,6 +251,14 @@ impl Renderer {
         self.environment = environment;
     }
 
+    /// The environment and, while it grows out of a space's object or shrinks back into it, the sphere it fills, with the grid outside. See `design/arrival.md`.
+    pub fn set_scenery(&mut self, scenery: crate::arrival_motion::Scenery) {
+        self.environment = scenery.environment;
+        self.reveal = scenery.reveal;
+        self.sky
+            .set_reveal(scenery.reveal.map(|sphere| (sphere.centre, sphere.radius)));
+    }
+
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -265,8 +276,8 @@ impl Renderer {
             -0.4
         };
         swarm_instances(swarm, &mut self.scene);
-        if self.environment == Environment::Minimal {
-            minimal_floor(&mut self.scene);
+        if self.environment == Environment::Minimal || self.reveal.is_some() {
+            minimal_floor(&mut self.scene, self.reveal);
         }
         // Keep the coordinator's orientation ring in both environments.
         for n in 0..40 {
@@ -471,8 +482,33 @@ impl Renderer {
     }
 }
 
-fn minimal_floor(scene: &mut Vec<Instance>) {
+/// The parts of the line from `start` to `end` outside the gap from `centre - half` to `centre + half`.
+fn outside(start: f32, end: f32, gap: Option<(f32, f32)>) -> impl Iterator<Item = (f32, f32)> {
+    let parts = match gap {
+        Some((centre, half)) => [
+            (start, (centre - half).min(end)),
+            ((centre + half).max(start), end),
+        ],
+        None => [(start, end), (end, end)],
+    };
+    parts.into_iter().filter(|(a, b)| b - a > 1e-4)
+}
+
+/// The grid, without the part inside `reveal`, where a space's environment is growing. The sphere meets the floor in a circle, which each line skips by its chord, so this costs nothing on the GPU.
+fn minimal_floor(scene: &mut Vec<Instance>, reveal: Option<crate::arrival_motion::Sphere>) {
     // Original stationary grid retained as a regression/comfort baseline.
+    let circle = reveal.and_then(|sphere| {
+        let squared = sphere.radius * sphere.radius - sphere.centre.y * sphere.centre.y;
+        (squared > 0.0).then(|| (sphere.centre.x, sphere.centre.z, squared))
+    });
+    // The gap a line `offset` from the circle's centre crosses, as its centre and half chord along the line.
+    let gap = |offset: f32, along: f32| {
+        circle.and_then(|(_, _, squared)| {
+            let half = squared - offset * offset;
+            (half > 0.0).then(|| (along, half.sqrt()))
+        })
+    };
+    let (cx, cz) = circle.map_or((0.0, 0.0), |(x, z, _)| (x, z));
     for n in -10..=10 {
         let f = n as f32 * 0.5;
         let color = if n == 0 {
@@ -480,18 +516,22 @@ fn minimal_floor(scene: &mut Vec<Instance>) {
         } else {
             [0.025, 0.065, 0.09]
         };
-        scene.push(Instance {
-            position: [f, 0.0, -2.5],
-            scale: [0.008, 0.004, 10.0],
-            color,
-            ..Default::default()
-        });
-        scene.push(Instance {
-            position: [0.0, 0.0, f - 2.5],
-            scale: [10.0, 0.004, 0.008],
-            color,
-            ..Default::default()
-        });
+        for (a, b) in outside(-7.5, 2.5, gap(f - cx, cz)) {
+            scene.push(Instance {
+                position: [f, 0.0, (a + b) * 0.5],
+                scale: [0.008, 0.004, b - a],
+                color,
+                ..Default::default()
+            });
+        }
+        for (a, b) in outside(-5.0, 5.0, gap(f - 2.5 - cz, cx)) {
+            scene.push(Instance {
+                position: [(a + b) * 0.5, 0.0, f - 2.5],
+                scale: [b - a, 0.004, 0.008],
+                color,
+                ..Default::default()
+            });
+        }
     }
 }
 
@@ -1728,6 +1768,49 @@ mod tests {
             assert!(error_scope.pop().await.is_none());
         });
     }
+    #[test]
+    fn the_grid_gives_way_inside_a_growing_environment() {
+        use crate::arrival_motion::Sphere;
+        let mut whole = Vec::new();
+        minimal_floor(&mut whole, None);
+        assert_eq!(whole.len(), 42);
+        // A sphere that doesn't reach the floor leaves it whole.
+        let mut grid = Vec::new();
+        let high = Sphere {
+            centre: glam::Vec3::new(0.0, 1.4, -0.8),
+            radius: 1.0,
+        };
+        minimal_floor(&mut grid, Some(high));
+        assert_eq!(grid.len(), 42);
+        let wide = Sphere {
+            radius: 3.0,
+            ..high
+        };
+        let mut grid = Vec::new();
+        minimal_floor(&mut grid, Some(wide));
+        assert!(grid.len() > 42 && grid.len() <= 84);
+        let floor = (wide.radius * wide.radius - wide.centre.y * wide.centre.y).sqrt();
+        for instance in &grid {
+            let centre = glam::Vec3::from_array(instance.position);
+            let half = glam::Vec3::from_array(instance.scale) * 0.5;
+            // Neither end of a segment lies inside the circle where the sphere meets the floor.
+            for end in [centre - half, centre + half] {
+                let offset = glam::Vec2::new(end.x - wide.centre.x, end.z - wide.centre.z);
+                assert!(offset.length() > floor - 0.01, "{end}");
+            }
+        }
+        // Once the sphere covers the grid, none of it is left.
+        let mut grid = Vec::new();
+        minimal_floor(
+            &mut grid,
+            Some(Sphere {
+                radius: 20.0,
+                ..high
+            }),
+        );
+        assert!(grid.is_empty());
+    }
+
     #[test]
     fn worker_instance_rotates_scaled_vertices_and_normals_and_rejects_bad_quaternions() {
         let rotation = glam::Quat::from_euler(glam::EulerRot::YXZ, 0.7, 0.2, -0.15);

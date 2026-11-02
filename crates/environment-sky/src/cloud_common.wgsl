@@ -1,8 +1,19 @@
 struct Camera {
     view_projection: mat4x4<f32>,
     inverse_view_projection: mat4x4<f32>,
+    // Centre and radius of the sphere Sky is drawn inside; a negative radius fills the world.
+    reveal: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// Whether a ray from `origin` along unit `direction` meets the reveal sphere; clouds, like the sky, are seen through it.
+fn sees_reveal(origin: vec3<f32>, direction: vec3<f32>) -> bool {
+    if camera.reveal.w < 0.0 { return true; }
+    let offset = origin - camera.reveal.xyz;
+    let b = dot(offset, direction);
+    let c = dot(offset, offset) - camera.reveal.w * camera.reveal.w;
+    return c <= 0.0 || (b <= 0.0 && b * b >= c);
+}
 
 struct RayVertex {
     @builtin(position) position: vec4<f32>,
