@@ -273,6 +273,8 @@ fn opted_in_microphone_does_not_resume_while_the_application_is_stalled() {
     client
         .send(ClientMessage::Gate { gate: Gate::Live })
         .unwrap();
+    // A capture still bound to the old connection cannot use the new arming.
+    sender.send_audio_for(audio(4), Some(generation)).unwrap();
     client.send_audio(audio(3)).unwrap();
     let deadline = Instant::now() + TIMEOUT;
     while !server.received(2).contains(&Received::Audio(3)) {
@@ -282,6 +284,9 @@ fn opted_in_microphone_does_not_resume_while_the_application_is_stalled() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Frames are sent in order, so the earlier old-connection frame would
+    // have arrived before this one.
+    assert!(!server.received(2).contains(&Received::Audio(4)));
 }
 
 #[test]

@@ -73,7 +73,16 @@ impl Sender {
 
     /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`protocol::Gate::Off`] are ignored. When [`Options::microphone_rearm_on_disconnect`] is set, audio is also dropped after a disconnect until explicitly rearmed.
     pub fn send_audio(&self, frame: AudioFrame) -> Result<(), SendError> {
-        let failed = self.shared.outbox.send_audio(frame)?;
+        self.send_audio_for(frame, None)
+    }
+
+    /// Queue a microphone frame captured for the connection identified by `generation` (see [`Self::connection_generation`]), as [`Self::send_audio`] does, but drop it unless that connection is still current.
+    pub fn send_audio_for(
+        &self,
+        frame: AudioFrame,
+        generation: Option<u64>,
+    ) -> Result<(), SendError> {
+        let failed = self.shared.outbox.send_audio_for(frame, generation)?;
         self.shared.report(failed);
         Ok(())
     }

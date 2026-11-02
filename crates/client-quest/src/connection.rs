@@ -98,11 +98,23 @@ impl Voice {
                 .into());
             }
         }
-        self.lock().failure = None;
+        {
+            let mut captured = self.lock();
+            captured.failure = None;
+            // Bind before the device opens, so the first samples are already
+            // tied to this connection.
+            if let Some(microphone) = captured.microphone.as_mut() {
+                microphone.bind_connection(generation);
+            }
+        }
         let shared = self.shared.clone();
         let samples = Box::new(move |samples: &[f32]| {
             let mut captured = shared.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(microphone) = captured.microphone.as_mut() {
+            // A capture only feeds a microphone bound to its own connection;
+            // the outbox drops its frames once that connection has ended.
+            if let Some(microphone) = captured.microphone.as_mut()
+                && microphone.connection() == Some(generation)
+            {
                 // Only fails once the client is closed, when nothing more can be sent.
                 let _ = microphone.push_float(samples);
             }
@@ -124,10 +136,11 @@ impl Voice {
             self.capture.open(samples, failed)?
         };
         let mut captured = self.lock();
-        let microphone = match captured.microphone.take() {
+        let mut microphone = match captured.microphone.take() {
             Some(microphone) if microphone.sample_rate() == recording.sample_rate => microphone,
             _ => Microphone::new(client.sender(), recording.sample_rate),
         };
+        microphone.bind_connection(generation);
         captured.microphone = Some(microphone);
         drop(captured);
         self.recording = Some(recording);

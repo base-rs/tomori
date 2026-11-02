@@ -14,6 +14,10 @@ Push-to-talk audio is not a separate upload path. Only `agent` audio is transcri
 
 Live audio is explicitly toggled and off by default. The Quest left grip toggles it, and the panel shows when the microphone is live. Holding X temporarily switches to the agent gate; releasing X returns to the previous live setting. Losing headset focus, disconnecting, leaving the space, or a microphone failure stops live capture; it does not resume without another explicit toggle. Platforms without a capture implementation that can stop independently of the render thread refuse live capture rather than leave a microphone open after disconnection.
 
+Captured audio belongs to the connection it was captured for. A client binds each capture to its connection and never sends that capture's audio on a later connection, even after the microphone is rearmed for it; reconnecting does not reopen the microphone. A connection that ends before or while the device opens never starts live capture, and once it has ended no further captured sample is sent.
+
+Push-to-talk captures up to the moment the participant releases it: every sample the device captured before release, including a read in progress and the device's own buffer, is sent before the utterance ends. If that audio cannot be read intact, the utterance fails visibly rather than being transcribed short.
+
 Each client mixes every incoming participant stream together with the space's agent speech stream into a single output.
 
 What a participant records never plays back to them, through any gate. The server never relays a participant's audio to that participant, and a client also discards any audio attributed to its own participant number, in case a server does. The agent's speech is not the participant's own audio: its reply to a question they asked plays to them like everyone else.
@@ -51,6 +55,7 @@ Client audio capture and playback, the microphone gate, server routing and the s
 - Test that a missing `agent` frame fails the utterance visibly instead of producing a partial transcript.
 - Test that agent speech is sent at its playback rate rather than as fast as it is synthesized, that a participant joining mid-segment receives the rest of it, and that a backlog of participant audio on a connection does not displace agent frames.
 - On a headset and a desktop, confirm that agent speech and other participants playing through the speakers are not transcribed from the local microphone while push-to-talk is held.
+- Test, with a scripted capture device, that a disconnect before or while it opens never starts it, that a disconnect during a read delivers nothing further, that a release during a read delivers that read and the device's remaining buffer including a final partial frame, and that a failed final read fails the utterance. Test that audio bound to an ended connection is not sent on a later, rearmed connection.
 - Test live-to-agent-to-live switching and that focus loss, disconnect, leaving the space and capture failure stop live audio. On Quest, test for speaker-to-microphone feedback with two participants before relying on echo cancellation.
 
 Latency targets for participant-to-participant audio are not yet agreed.

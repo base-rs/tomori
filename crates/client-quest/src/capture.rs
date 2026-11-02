@@ -67,6 +67,108 @@ fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
     );
 }
 
+/// A pull-based input stream, such as AAudio's. Separated from the device so
+/// that the capture boundary can be tested deterministically.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+trait InputStream {
+    fn start(&mut self) -> Result<(), String>;
+    /// Read up to `buffer.len()` samples, waiting at most `timeout_ns`; zero
+    /// returns only what the device has already captured.
+    fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String>;
+    fn stop(&mut self);
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const CONNECTION_LOST: &str = "Connection lost; live microphone stopped.";
+
+/// How long one read may wait for audio, so that stop and disconnection are
+/// noticed promptly.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const READ_TIMEOUT_NS: i64 = 100_000_000;
+
+/// The most non-blocking reads made to collect what the device had already
+/// captured when capture was stopped; a well-behaved device runs dry first.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const MAX_DRAIN_READS: usize = 64;
+
+/// Capture until `stop` is set or, for live audio, `active` reports that the
+/// connection ended.
+///
+/// The capture boundary is the moment `stop` is observed. Every sample the
+/// device captured before it is delivered: a read in flight when stop is set,
+/// then what the device already holds, read without waiting, including a final
+/// partial frame. If that cannot be read intact, capture fails, so the
+/// utterance is cancelled visibly instead of being sent short.
+///
+/// A connection that ended before or while the device opened never starts
+/// the stream, and no sample is delivered once `active` reports false. A
+/// disconnection racing the start itself stops the stream before any read.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn run_capture<S: InputStream>(
+    open: impl FnOnce() -> Result<S, String>,
+    samples: &mut dyn FnMut(&[f32]),
+    stop: &std::sync::atomic::AtomicBool,
+    active: Option<&Active>,
+    buffer: &mut [f32],
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let current = || active.is_none_or(|active| active());
+    if !current() {
+        return Err(CONNECTION_LOST.into());
+    }
+    let mut stream = open()?;
+    // Opening the device can take a while; the connection may have ended.
+    if !current() {
+        return Err(CONNECTION_LOST.into());
+    }
+    if stop.load(Ordering::Acquire) {
+        // Released before capture began: nothing was captured.
+        return Ok(());
+    }
+    stream.start()?;
+    let result = loop {
+        if !current() {
+            break Err(CONNECTION_LOST.into());
+        }
+        if stop.load(Ordering::Acquire) {
+            break drain(&mut stream, samples, &current, buffer);
+        }
+        match stream.read(buffer, READ_TIMEOUT_NS) {
+            // A successful read was captured before stop was observed, so it
+            // is delivered even if stop was set while it was in flight.
+            Ok(count) => {
+                if current() {
+                    samples(&buffer[..count]);
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    stream.stop();
+    result
+}
+
+/// Deliver what the device captured before the boundary, without waiting.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn drain<S: InputStream>(
+    stream: &mut S,
+    samples: &mut dyn FnMut(&[f32]),
+    current: &dyn Fn() -> bool,
+    buffer: &mut [f32],
+) -> Result<(), String> {
+    for _ in 0..MAX_DRAIN_READS {
+        let count = stream.read(buffer, 0)?;
+        if count == 0 {
+            return Ok(());
+        }
+        if !current() {
+            return Err(CONNECTION_LOST.into());
+        }
+        samples(&buffer[..count]);
+    }
+    Err("The microphone kept delivering audio after it was stopped.".into())
+}
+
 #[cfg(not(target_os = "android"))]
 pub use desktop::Desktop;
 
@@ -163,9 +265,10 @@ pub use android::Android;
 /// AAudio, at the 16 kHz the recognizer uses, after asking for `RECORD_AUDIO`.
 #[cfg(target_os = "android")]
 mod android {
-    use super::{Active, Capture, Failed, Recording, Samples};
+    use super::{Active, Capture, Failed, InputStream, Recording, Samples, run_capture};
     use ndk::audio::{
-        AudioDirection, AudioFormat, AudioInputPreset, AudioSharingMode, AudioStreamBuilder,
+        AudioDirection, AudioFormat, AudioInputPreset, AudioSharingMode, AudioStream,
+        AudioStreamBuilder,
     };
     use std::{
         sync::{
@@ -261,7 +364,7 @@ mod android {
 
     impl Drop for Worker {
         fn drop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
+            self.stop.store(true, Ordering::Release);
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
@@ -274,53 +377,57 @@ mod android {
         preset: AudioInputPreset,
         active: Option<Active>,
     ) -> Result<(), String> {
-        if active.as_ref().is_some_and(|active| !active()) {
-            return Err("Connection lost; live microphone stopped.".into());
-        }
         // Shared mode supports Android's resampler, so ask for the recognizer's 16 kHz mono directly.
-        let stream = AudioStreamBuilder::new()
-            .and_then(|builder| {
-                builder
-                    .direction(AudioDirection::Input)
-                    .sharing_mode(AudioSharingMode::Shared)
-                    .channel_count(1)
-                    .sample_rate(SAMPLE_RATE as i32)
-                    .format(AudioFormat::PCM_Float)
-                    .input_preset(preset)
-                    .open_stream()
-            })
-            .map_err(|error| format!("Cannot open the microphone: {error}"))?;
-        if stream.sample_rate() != SAMPLE_RATE as i32
-            || stream.channel_count() != 1
-            || stream.format() != AudioFormat::PCM_Float
-        {
-            return Err("The microphone opened in an unexpected format.".into());
-        }
-        stream
-            .request_start()
-            .map_err(|error| format!("Cannot start the microphone: {error}"))?;
-        log::info!("Microphone opened (16 kHz mono)");
+        let open = || {
+            let stream = AudioStreamBuilder::new()
+                .and_then(|builder| {
+                    builder
+                        .direction(AudioDirection::Input)
+                        .sharing_mode(AudioSharingMode::Shared)
+                        .channel_count(1)
+                        .sample_rate(SAMPLE_RATE as i32)
+                        .format(AudioFormat::PCM_Float)
+                        .input_preset(preset)
+                        .open_stream()
+                })
+                .map_err(|error| format!("Cannot open the microphone: {error}"))?;
+            if stream.sample_rate() != SAMPLE_RATE as i32
+                || stream.channel_count() != 1
+                || stream.format() != AudioFormat::PCM_Float
+            {
+                return Err("The microphone opened in an unexpected format.".into());
+            }
+            Ok(Input(stream))
+        };
         // 20 ms reads, one outgoing frame each.
         let mut buffer = [0.0_f32; (SAMPLE_RATE / 50) as usize];
-        let mut result = Ok(());
-        while result.is_ok() && !stop.load(Ordering::Relaxed) {
-            if active.as_ref().is_some_and(|active| !active()) {
-                result = Err("Connection lost; live microphone stopped.".into());
-                break;
-            }
-            // SAFETY: `buffer` holds `buffer.len()` samples of the negotiated mono float format, and only this thread uses the stream.
-            let read = unsafe {
-                stream.read(buffer.as_mut_ptr().cast(), buffer.len() as i32, 100_000_000)
-            };
-            result = frame_count(read.map_err(i32::from), buffer.len()).map(|count| {
-                if !stop.load(Ordering::Relaxed) && active.as_ref().is_none_or(|active| active()) {
-                    samples(&buffer[..count]);
-                }
-            });
-        }
-        let _ = stream.request_stop();
+        log::info!("Microphone opening (16 kHz mono)");
+        let result = run_capture(open, &mut *samples, stop, active.as_ref(), &mut buffer);
         log::info!("Microphone closed");
         result
+    }
+
+    struct Input(AudioStream);
+
+    impl InputStream for Input {
+        fn start(&mut self) -> Result<(), String> {
+            self.0
+                .request_start()
+                .map_err(|error| format!("Cannot start the microphone: {error}"))
+        }
+
+        fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String> {
+            // SAFETY: `buffer` holds `buffer.len()` samples of the negotiated mono float format, and only this thread uses the stream.
+            let read = unsafe {
+                self.0
+                    .read(buffer.as_mut_ptr().cast(), buffer.len() as i32, timeout_ns)
+            };
+            frame_count(read.map_err(i32::from), buffer.len())
+        }
+
+        fn stop(&mut self) {
+            let _ = self.0.request_stop();
+        }
     }
 
     /// The samples read. ndk 0.9 returns a positive count from `AAudioStream_read` as an error code, so only negative values are errors.
@@ -341,7 +448,240 @@ mod android {
 
 #[cfg(test)]
 mod tests {
-    use super::{Active, Capture, Failed, Recording, Samples, downmix};
+    use super::{
+        Active, CONNECTION_LOST, Capture, Failed, InputStream, MAX_DRAIN_READS, Recording, Samples,
+        downmix, run_capture,
+    };
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// One scripted device step, run by a read.
+    enum Step {
+        /// A read that returns these samples, after running a side effect
+        /// that happens while the read is in flight.
+        Read(Vec<f32>, Box<dyn FnOnce()>),
+        Fail,
+    }
+
+    #[derive(Default)]
+    struct Log {
+        started: bool,
+        stopped: bool,
+        blocking_reads: usize,
+        drain_reads: usize,
+    }
+
+    struct Fake {
+        steps: VecDeque<Step>,
+        /// What the device already holds when read without waiting.
+        buffered: VecDeque<Result<Vec<f32>, ()>>,
+        log: Rc<RefCell<Log>>,
+    }
+
+    impl InputStream for Fake {
+        fn start(&mut self) -> Result<(), String> {
+            self.log.borrow_mut().started = true;
+            Ok(())
+        }
+
+        fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String> {
+            let next = if timeout_ns == 0 {
+                self.log.borrow_mut().drain_reads += 1;
+                match self.buffered.pop_front() {
+                    None => return Ok(0),
+                    Some(Err(())) => return Err("drain failed".into()),
+                    Some(Ok(samples)) => samples,
+                }
+            } else {
+                self.log.borrow_mut().blocking_reads += 1;
+                match self.steps.pop_front().expect("unexpected read") {
+                    Step::Read(samples, during) => {
+                        during();
+                        samples
+                    }
+                    Step::Fail => return Err("read failed".into()),
+                }
+            };
+            buffer[..next.len()].copy_from_slice(&next);
+            Ok(next.len())
+        }
+
+        fn stop(&mut self) {
+            self.log.borrow_mut().stopped = true;
+        }
+    }
+
+    fn fake(steps: Vec<Step>, buffered: Vec<Result<Vec<f32>, ()>>) -> (Fake, Rc<RefCell<Log>>) {
+        let log = Rc::new(RefCell::new(Log::default()));
+        let fake = Fake {
+            steps: steps.into(),
+            buffered: buffered.into(),
+            log: log.clone(),
+        };
+        (fake, log)
+    }
+
+    fn run(
+        fake: Fake,
+        stop: &Arc<AtomicBool>,
+        active: Option<&Active>,
+        during_open: impl FnOnce(),
+    ) -> (Result<(), String>, Vec<f32>) {
+        let mut delivered = Vec::new();
+        let mut buffer = [0.0_f32; 8];
+        let result = run_capture(
+            || {
+                during_open();
+                Ok(fake)
+            },
+            &mut |samples: &[f32]| delivered.extend_from_slice(samples),
+            stop,
+            active,
+            &mut buffer,
+        );
+        (result, delivered)
+    }
+
+    #[test]
+    fn a_disconnect_while_the_device_opens_never_starts_the_stream() {
+        let connected = Arc::new(AtomicBool::new(true));
+        let current = connected.clone();
+        let active: Active = Box::new(move || current.load(Ordering::SeqCst));
+        let (device, log) = fake(vec![], vec![]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (result, delivered) = run(device, &stop, Some(&active), || {
+            connected.store(false, Ordering::SeqCst)
+        });
+        assert_eq!(result.unwrap_err(), CONNECTION_LOST);
+        assert!(delivered.is_empty());
+        assert!(!log.borrow().started);
+    }
+
+    #[test]
+    fn a_disconnect_before_opening_never_opens_the_device() {
+        let active: Active = Box::new(|| false);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut opened = false;
+        let result = run_capture::<Fake>(
+            || {
+                opened = true;
+                unreachable!()
+            },
+            &mut |_| panic!("delivered"),
+            &stop,
+            Some(&active),
+            &mut [0.0; 8],
+        );
+        assert_eq!(result.unwrap_err(), CONNECTION_LOST);
+        assert!(!opened);
+    }
+
+    #[test]
+    fn a_disconnect_during_a_read_drops_that_read_and_stops() {
+        let connected = Arc::new(AtomicBool::new(true));
+        let current = connected.clone();
+        let active: Active = Box::new(move || current.load(Ordering::SeqCst));
+        let lost = connected.clone();
+        let (device, log) = fake(
+            vec![
+                Step::Read(vec![0.1; 4], Box::new(|| {})),
+                Step::Read(
+                    vec![0.2; 4],
+                    Box::new(move || lost.store(false, Ordering::SeqCst)),
+                ),
+            ],
+            vec![Ok(vec![0.3; 4])],
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let (result, delivered) = run(device, &stop, Some(&active), || {});
+        assert_eq!(result.unwrap_err(), CONNECTION_LOST);
+        assert_eq!(delivered, vec![0.1; 4]);
+        let log = log.borrow();
+        assert!(log.stopped);
+        assert_eq!(log.drain_reads, 0);
+    }
+
+    #[test]
+    fn release_during_a_read_delivers_it_and_what_the_device_already_holds() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let release = stop.clone();
+        let (device, log) = fake(
+            vec![
+                Step::Read(vec![0.1; 8], Box::new(|| {})),
+                // Push-to-talk is released while this read is in flight.
+                Step::Read(
+                    vec![0.2; 8],
+                    Box::new(move || release.store(true, Ordering::Release)),
+                ),
+            ],
+            // The device held one full and one partial frame at release.
+            vec![Ok(vec![0.3; 8]), Ok(vec![0.4; 3])],
+        );
+        let (result, delivered) = run(device, &stop, None, || {});
+        result.unwrap();
+        let mut expected = vec![0.1; 8];
+        expected.extend([0.2; 8]);
+        expected.extend([0.3; 8]);
+        expected.extend([0.4; 3]);
+        assert_eq!(delivered, expected);
+        let log = log.borrow();
+        assert!(log.stopped);
+        assert_eq!(log.blocking_reads, 2);
+        assert_eq!(log.drain_reads, 3);
+    }
+
+    #[test]
+    fn a_failed_final_read_fails_capture_instead_of_ending_short() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let release = stop.clone();
+        let (device, _log) = fake(
+            vec![Step::Read(
+                vec![0.1; 8],
+                Box::new(move || release.store(true, Ordering::Release)),
+            )],
+            vec![Ok(vec![0.2; 2]), Err(())],
+        );
+        let (result, delivered) = run(device, &stop, None, || {});
+        assert_eq!(result.unwrap_err(), "drain failed");
+        // What was delivered is still pre-boundary audio; the caller cancels
+        // the utterance on failure rather than ending it.
+        assert_eq!(delivered.len(), 10);
+
+        let (device, log) = fake(vec![Step::Fail], vec![]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (result, delivered) = run(device, &stop, None, || {});
+        assert_eq!(result.unwrap_err(), "read failed");
+        assert!(delivered.is_empty());
+        assert!(log.borrow().stopped);
+    }
+
+    #[test]
+    fn a_device_that_never_runs_dry_fails_capture() {
+        let stop = Arc::new(AtomicBool::new(true));
+        let endless = (0..=MAX_DRAIN_READS).map(|_| Ok(vec![0.0; 1])).collect();
+        let (device, _log) = fake(vec![], endless);
+        // Stop before the first read still starts nothing.
+        let (result, delivered) = run(device, &stop, None, || {});
+        result.unwrap();
+        assert!(delivered.is_empty());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let release = stop.clone();
+        let endless = (0..=MAX_DRAIN_READS).map(|_| Ok(vec![0.0; 1])).collect();
+        let (device, _log) = fake(
+            vec![Step::Read(
+                vec![],
+                Box::new(move || release.store(true, Ordering::Release)),
+            )],
+            endless,
+        );
+        let (result, delivered) = run(device, &stop, None, || {});
+        assert!(result.unwrap_err().contains("kept delivering"));
+        assert_eq!(delivered.len(), MAX_DRAIN_READS);
+    }
 
     #[test]
     fn downmixes_interleaved_channels() {

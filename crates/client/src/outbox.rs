@@ -374,13 +374,34 @@ impl Outbox {
         None
     }
 
-    /// Queue a microphone frame. Returns the utterance that failed because its audio could not be queued, if any.
+    /// Queue a microphone frame for whichever connection is current.
+    #[cfg(test)]
     pub fn send_audio(&self, frame: AudioFrame) -> Result<Option<FailedUtterance>, SendError> {
+        self.send_audio_for(frame, None)
+    }
+
+    /// Queue a microphone frame. Returns the utterance that failed because its audio could not be queued, if any.
+    ///
+    /// With `generation`, the frame was captured for the connection it identifies,
+    /// and is dropped unless that connection is still the current one. The check
+    /// shares the lock that ends a connection, so a frame captured before a
+    /// disconnect can never be sent on a later connection.
+    pub fn send_audio_for(
+        &self,
+        frame: AudioFrame,
+        generation: Option<u64>,
+    ) -> Result<Option<FailedUtterance>, SendError> {
         let mut state = self.lock();
         if state.closed {
             return Err(SendError::Closed);
         }
         if frame.gate == Gate::Off {
+            return Ok(None);
+        }
+        if generation
+            .is_some_and(|generation| !state.connected || state.connection_generation != generation)
+        {
+            state.dropped_audio += 1;
             return Ok(None);
         }
         if state.require_microphone_rearm && !state.microphone_armed {
