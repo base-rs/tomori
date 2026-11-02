@@ -12,13 +12,16 @@ use glam::Vec3;
 
 /// Choosing a server, or returning to the servers, in seconds.
 pub const SERVER: f32 = 1.0;
+/// How long of that the chosen server takes to glide to the centre, and when its spaces start to spread from it; they start just before it settles, while it is barely moving.
+const GLIDE: f32 = SERVER * 0.6;
+const SPREAD_DELAY: f32 = SERVER * 0.5;
 /// Opening, changing or folding a creation ring.
 pub const RING: f32 = 0.6;
 /// The space being joined coming towards the participant, and everything else receding.
 pub const APPROACH_TIME: f32 = 0.6;
 /// A space's environment growing out of its object and around the participant, or shrinking back into it.
 pub const REVEAL: f32 = 1.0;
-/// Anything else, such as a space appearing in the list or moving along the row as others come and go.
+/// Anything else, such as a space appearing in the list or moving round the orbit as others come and go.
 pub const SETTLE: f32 = 0.5;
 
 /// The environment's sphere grows from about an object's size until it is beyond Sky's farthest scenery and clouds, when it is drawn whole.
@@ -39,6 +42,16 @@ fn ease(t: f32) -> f32 {
 pub trait Blend: Copy {
     fn blend(self, other: Self, t: f32) -> Self;
     fn near(self, other: Self) -> bool;
+}
+
+impl Blend for Vec3 {
+    fn blend(self, other: Self, t: f32) -> Self {
+        self.lerp(other, t)
+    }
+
+    fn near(self, other: Self) -> bool {
+        self.distance(other) < EPSILON
+    }
 }
 
 impl Blend for f32 {
@@ -237,6 +250,8 @@ pub struct Motion {
     /// The last heading shown, kept while it fades out.
     heading: Option<Label>,
     heading_presence: Track<f32>,
+    /// The heading moves as the objects beneath it do, between the row of servers and above the orbit.
+    heading_anchor: Option<Track<Vec3>>,
     environment: Environment,
     centre: Vec3,
     reveal: Track<f32>,
@@ -249,6 +264,7 @@ impl Default for Motion {
             target: None,
             heading: None,
             heading_presence: Track::at(0.0),
+            heading_anchor: None,
             environment: Environment::Minimal,
             centre: APPROACH,
             reveal: Track::at(0.0),
@@ -300,7 +316,6 @@ impl Motion {
                 after,
                 object,
                 &identity,
-                existing.is_some(),
                 entered.as_ref(),
                 self.centre,
                 wait,
@@ -332,6 +347,10 @@ impl Motion {
         }
         self.entries = entries;
         if let Some(heading) = &target.heading {
+            match &mut self.heading_anchor {
+                Some(track) => track.retarget(now, heading.anchor, None, 0.0, SERVER),
+                None => self.heading_anchor = Some(Track::at(heading.anchor)),
+            }
             self.heading = Some(heading.clone());
         }
         let shown = if target.heading.is_some() { 1.0 } else { 0.0 };
@@ -381,6 +400,9 @@ impl Motion {
                 .clone()
                 .filter(|_| alpha > 0.0)
                 .map(|heading| Label {
+                    anchor: self
+                        .heading_anchor
+                        .map_or(heading.anchor, |track| track.value(now)),
                     alpha: heading.alpha * alpha,
                     ..heading
                 }),
@@ -415,6 +437,7 @@ impl Motion {
     #[cfg(test)]
     pub fn moving(&self, now: f32) -> bool {
         self.entries.iter().any(|entry| now < entry.track.end())
+            || self.heading_anchor.is_some_and(|track| now < track.end())
             || now < self.reveal.end()
             || now < self.heading_presence.end()
     }
@@ -447,7 +470,6 @@ fn arriving(
     after: &Stage,
     object: &Object,
     identity: &Key,
-    shown: bool,
     entered: Option<&Key>,
     centre: Vec3,
     wait: f32,
@@ -455,11 +477,6 @@ fn arriving(
 ) -> Plan {
     let position = object.position;
     let dim = object.dim;
-    let gliding = Pose {
-        position: CENTRE,
-        presence: 1.0,
-        dim: 0.0,
-    };
     match (before, after) {
         // Leaving a space: its environment shrinks back into its object, which then returns to its place as the rest come back.
         (Some(Stage::Entered { .. }), _) if Some(identity) == entered => Plan {
@@ -477,26 +494,19 @@ fn arriving(
             wait * 0.6 + SERVER * 0.4,
             SERVER * 0.6,
         ),
-        // The chosen server glides through the centre of the view to its place at the side; its spaces spread out from the centre once it is there.
+        // The chosen server glides straight to the centre of the view, where it stays; its spaces spread out from it once it is there, so nothing crosses its path.
         (Some(Stage::Servers), Stage::Lobby | Stage::Joining(_)) => match object.kind {
-            Kind::Connected => Plan {
-                pose: Pose::hidden(CENTRE, 0.0),
-                via: Some(gliding),
-                delay: 0.0,
-                duration: SERVER,
-            },
-            _ => Plan::new(Pose::hidden(CENTRE, dim), SERVER * 0.45, SERVER * 0.55),
+            Kind::Connected => Plan::new(Pose::hidden(CENTRE, 0.0), 0.0, GLIDE),
+            _ => Plan::new(
+                Pose::hidden(CENTRE, dim),
+                SPREAD_DELAY,
+                SERVER - SPREAD_DELAY,
+            ),
         },
-        // Back to the servers: the reverse, the connected server gliding back through the centre while the others grow again.
-        (Some(Stage::Lobby | Stage::Joining(_)), Stage::Servers) => match object.kind {
-            Kind::Server { .. } if shown => Plan {
-                pose: Pose::hidden(position, dim),
-                via: Some(gliding),
-                delay: 0.0,
-                duration: SERVER,
-            },
-            _ => Plan::new(Pose::hidden(position, dim), SERVER * 0.4, SERVER * 0.6),
-        },
+        // Back to the servers: the reverse. Once the spaces have folded in, the connected server glides straight back to its place while the others grow again.
+        (Some(Stage::Lobby | Stage::Joining(_)), Stage::Servers) => {
+            Plan::new(Pose::hidden(position, dim), SERVER - GLIDE, GLIDE)
+        }
         (_, Stage::Joining(key)) if key == &object.key => {
             Plan::new(Pose::hidden(position, dim), 0.0, APPROACH_TIME)
         }
@@ -528,10 +538,10 @@ fn leaving(
     match (before, after) {
         // The other servers shrink and fade where they are.
         (Some(Stage::Servers), Stage::Lobby | Stage::Joining(_)) => {
-            Plan::new(Pose::hidden(position, dim), 0.0, SERVER * 0.6)
+            Plan::new(Pose::hidden(position, dim), 0.0, GLIDE)
         }
-        // Back to the servers, the spaces fold into the centre, where the server they spread from passes.
-        (_, Stage::Servers) => Plan::new(Pose::hidden(CENTRE, dim), 0.0, SERVER * 0.55),
+        // Back to the servers, the spaces fold into the connected server at the centre before it leaves.
+        (_, Stage::Servers) => Plan::new(Pose::hidden(CENTRE, dim), 0.0, SERVER - SPREAD_DELAY),
         // The space entered shrinks into its environment as that starts to grow.
         (
             _,
@@ -606,7 +616,7 @@ mod tests {
     fn lobby_view(ring: Option<Ring>) -> View {
         View {
             heading: "Spaces on a".into(),
-            connected: Some(item(Key::Connected("b:1".into()), Kind::Connected)),
+            connected: Some(item(Key::Connected("c:1".into()), Kind::Connected)),
             items: vec![
                 space("one"),
                 space("two"),
@@ -793,36 +803,102 @@ mod tests {
         assert_eq!(motion.scenery(now).environment, Environment::Minimal);
     }
 
+    /// Step from `now` towards `target` frame by frame for `duration`, giving each frame's scene.
+    fn frames(motion: &mut Motion, target: &Scene, now: f32, duration: f32) -> Vec<Scene> {
+        let mut scenes = Vec::new();
+        let mut time = now;
+        while time < now + duration {
+            motion.update(target, time);
+            scenes.push(motion.scene(time));
+            time += FRAME;
+        }
+        scenes
+    }
+
+    fn spaces(scene: &Scene) -> impl Iterator<Item = &Object> {
+        scene
+            .objects
+            .iter()
+            .filter(|object| matches!(object.kind, Kind::Space { .. } | Kind::Create { .. }))
+    }
+
     #[test]
-    fn choosing_a_server_glides_it_through_the_centre_and_spreads_its_spaces() {
+    fn choosing_a_server_glides_it_straight_to_the_centre_and_spreads_its_spaces() {
         let mut motion = Motion::default();
         let now = settle(&mut motion, &servers(), 0.0);
         let chosen = servers()
-            .object(&Key::Server("b:1".into()))
+            .object(&Key::Server("c:1".into()))
             .unwrap()
             .position;
-        motion.update(&lobby(), now);
-        // Midway, the chosen server is at the centre and the others are fading.
-        let middle = motion.scene(now + SERVER * 0.5);
-        let connected = middle.object(&Key::Connected("b:1".into())).unwrap();
-        assert!(connected.position.distance(CENTRE) < 1e-4);
-        let other = middle.object(&Key::Server("a:1".into()));
-        assert!(other.is_none_or(|other| other.presence < 0.5 && !other.choosable));
-        // Its spaces start at the centre, small.
-        let early = motion.scene(now + SERVER * 0.55);
-        let one = early.object(&Key::Space("one".into())).unwrap();
-        assert!(one.presence < 0.2);
-        assert!(one.position.distance(CENTRE) < 0.1);
-        // At the start, the connected server is where it was chosen.
-        assert!(
-            motion
-                .scene(now)
-                .object(&Key::Connected("b:1".into()))
-                .unwrap()
-                .position
-                .distance(chosen)
-                < 1e-4
+        assert!(chosen.distance(CENTRE) > 0.3);
+        let key = Key::Connected("c:1".into());
+        let scenes = frames(&mut motion, &lobby(), now, SERVER + FRAME);
+        let mut last = chosen.distance(CENTRE);
+        let mut spread = std::collections::HashMap::new();
+        for scene in &scenes {
+            // The server only ever gets closer to the centre, along the straight line from where it was chosen.
+            let server = scene.object(&key).unwrap().position;
+            let distance = server.distance(CENTRE);
+            assert!(distance <= last + 1e-5, "{distance} after {last}");
+            let along = (CENTRE - chosen).normalize();
+            assert!((server - chosen).reject_from(along).length() < 1e-4);
+            last = distance;
+            for object in spaces(scene) {
+                // Its spaces appear only once it has all but arrived, start at the centre, and only move outwards.
+                assert!(
+                    distance < 0.05,
+                    "{:?} spreads before the server arrives",
+                    object.key
+                );
+                let out = object.position.distance(CENTRE);
+                let previous = spread.insert(object.key.clone(), out).unwrap_or(0.0);
+                assert!(out >= previous - 1e-5);
+            }
+            // The others fade where they are and can't be chosen.
+            if let Some(other) = scene.object(&Key::Server("a:1".into())) {
+                assert!(!other.choosable);
+            }
+        }
+        assert_eq!(scenes[0].object(&key).unwrap().position, chosen);
+        let first = scenes
+            .iter()
+            .find_map(|scene| spaces(scene).next().map(|object| object.position))
+            .unwrap();
+        assert!(first.distance(CENTRE) < 0.01);
+        assert_matches(&motion.scene(now + SERVER), &lobby());
+    }
+
+    #[test]
+    fn returning_to_the_servers_folds_the_spaces_in_before_the_server_leaves() {
+        let mut motion = Motion::default();
+        let mut now = settle(&mut motion, &servers(), 0.0);
+        now = settle(&mut motion, &lobby(), now);
+        // Choosing the connected server at the centre is what returns to the servers.
+        assert_eq!(
+            choose(&motion.scene(now), CENTRE),
+            Some(Key::Connected("c:1".into()))
         );
+        let key = Key::Server("c:1".into());
+        let scenes = frames(&mut motion, &servers(), now, SERVER + FRAME);
+        let mut last = 0.0;
+        let mut folding = std::collections::HashMap::new();
+        for scene in &scenes {
+            let server = scene
+                .object(&key)
+                .or_else(|| scene.object(&Key::Connected("c:1".into())))
+                .unwrap()
+                .position;
+            let distance = server.distance(CENTRE);
+            assert!(distance >= last - 1e-5);
+            last = distance;
+            for object in spaces(scene) {
+                assert!(distance < 0.05, "{:?} is still out", object.key);
+                let out = object.position.distance(CENTRE);
+                let previous = folding.insert(object.key.clone(), out).unwrap_or(f32::MAX);
+                assert!(out <= previous + 1e-5);
+            }
+        }
+        assert_matches(&motion.scene(now + SERVER), &servers());
     }
 
     #[test]
@@ -1000,12 +1076,12 @@ mod tests {
         let mut motion = Motion::default();
         let now = settle(&mut motion, &servers(), 0.0);
         motion.update(&lobby(), now);
-        let key = Key::Connected("b:1".into());
-        let middle = motion.scene(now + SERVER * 0.5);
-        // The chosen server is pointed at where it is now, at the centre, and not where it was laid out.
-        assert_eq!(choose(&middle, CENTRE), Some(key.clone()));
-        let laid_out = lobby().object(&key).unwrap().position;
-        assert_ne!(choose(&middle, laid_out), Some(key.clone()));
+        let key = Key::Connected("c:1".into());
+        let middle = motion.scene(now + GLIDE * 0.5);
+        // The chosen server is pointed at where it is now, on its way, and not where it is going.
+        let position = middle.object(&key).unwrap().position;
+        assert_eq!(choose(&middle, position), Some(key.clone()));
+        assert_ne!(choose(&middle, CENTRE), Some(key.clone()));
         // A server fading out can't be chosen, even where it still shows.
         let fading = motion.scene(now + SERVER * 0.1);
         let other = fading.object(&Key::Server("a:1".into())).unwrap();
