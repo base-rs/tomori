@@ -7,6 +7,7 @@ use crate::{
     controller,
     graphics::Renderer,
     hands,
+    log_cadence::{self, Cadence},
     pointing::{Pointer, Ray},
     swarm::Swarm,
     vulkan::Gpu,
@@ -23,6 +24,8 @@ use std::{
 
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
+/// How often an applied recenter is logged at info, when the runtime repeats them.
+const RECENTER_LOG: Duration = Duration::from_secs(60);
 
 pub fn run(
     platform: &impl xr::PlatformInfo,
@@ -165,6 +168,7 @@ pub fn run(
     let mut focused = false;
     let mut last_frame = Instant::now();
     let mut frames = 0_u64;
+    let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
     let mut stick_latched = false;
     let mut audience_toggle = LiveGrip::default();
     let mut choice_latched = false;
@@ -238,7 +242,8 @@ pub fn run(
                     if change.session() == session.as_raw()
                         && change.reference_space_type() == space_type =>
                 {
-                    log::info!(
+                    // Applying the change is logged; the runtime can repeat it.
+                    log::debug!(
                         "Reference space change pending at {:?}",
                         change.change_time()
                     );
@@ -367,8 +372,9 @@ pub fn run(
                 },
                 dt,
             );
+            // Follows the agent's activity, which can change many times a minute.
             if visual.mode != swarm.visual.mode {
-                log::info!(
+                log::debug!(
                     "Swarm interaction: {:?}, session_working={}",
                     visual.mode,
                     visual.working
@@ -516,8 +522,16 @@ pub fn run(
                 .views(&projection_views)],
         )?;
         frames += 1;
-        if frames == 1 || frames.is_multiple_of(720) {
-            log::info!("Submitted stereo frame {frames}");
+        // Once at the first frame, then a summary at most once a minute: per-frame lines would push lifecycle events out of logcat within minutes.
+        if let Some(due) = frame_log.record(Instant::now()) {
+            match due.rate() {
+                None => log::info!("Submitted first stereo frame"),
+                Some(rate) => log::info!(
+                    "Submitted {frames} stereo frames; {} in the last {:.0} s ({rate:.1} fps)",
+                    due.skipped + 1,
+                    due.elapsed.unwrap_or_default().as_secs_f64()
+                ),
+            }
         }
     }
     if running && session.request_exit().is_ok() {
@@ -1126,6 +1140,8 @@ impl Input {
             .map(|location| location.pose);
         // State-change-only and rate-limited: enough to distinguish an absent
         // model from a runtime action/profile switch during a headset check.
+        // Debug only: poses come and go whenever a controller is put down or
+        // hands replace it, while profile changes are logged at info.
         let diagnostic = (
             controls.talk_active,
             controls.controller_poses.map(|pose| pose.is_some()),
@@ -1133,7 +1149,7 @@ impl Input {
         if self.diagnostic_state != Some(diagnostic)
             && self.last_diagnostic.elapsed() >= Duration::from_secs(1)
         {
-            log::info!(
+            log::debug!(
                 "Controller input: X action active={}, drawable poses left/right={:?}",
                 diagnostic.0,
                 diagnostic.1
@@ -1150,6 +1166,7 @@ impl Input {
 struct SceneAnchor {
     scene_to_space: Option<Mat4>,
     pending: Vec<xr::Time>,
+    recenter_log: Cadence,
 }
 
 impl SceneAnchor {
@@ -1157,6 +1174,7 @@ impl SceneAnchor {
         Self {
             scene_to_space: None,
             pending: Vec::new(),
+            recenter_log: Cadence::new(RECENTER_LOG),
         }
     }
 
@@ -1176,7 +1194,15 @@ impl SceneAnchor {
             // current forward direction. Reset the startup offset so the
             // existing swarm appears in front, without resetting its state.
             self.scene_to_space = Some(Mat4::IDENTITY);
-            log::info!("Applied OpenXR recenter at display time {display_time:?}");
+            // The runtime can repeat reference-space changes; log at most one a minute at info.
+            match self.recenter_log.record(Instant::now()) {
+                Some(due) if due.skipped > 0 => log::info!(
+                    "Applied OpenXR recenter at display time {display_time:?}, and {} more since the last logged",
+                    due.skipped
+                ),
+                Some(_) => log::info!("Applied OpenXR recenter at display time {display_time:?}"),
+                None => log::debug!("Applied OpenXR recenter at display time {display_time:?}"),
+            }
         } else if self.scene_to_space.is_none() {
             self.scene_to_space = initial_scene_transform(views);
             if self.scene_to_space.is_some() {
@@ -1475,7 +1501,7 @@ mod tests {
             Mat4::from_rotation_translation(Quat::from_rotation_y(0.7), Vec3::new(1.0, 0.0, -2.0));
         let anchor = SceneAnchor {
             scene_to_space: Some(scene_to_space),
-            pending: Vec::new(),
+            ..SceneAnchor::new()
         };
         let q = Quat::from_rotation_x(0.4) * Quat::from_rotation_y(-0.2);
         let pose = xr::Posef {
