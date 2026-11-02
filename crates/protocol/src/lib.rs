@@ -19,9 +19,9 @@ pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{ClientMessage, Decision, Pose, ServerMessage};
 pub use space::{
-    Activity, Approval, ApprovalOption, BackendInfo, Message, Participant, Presentation,
-    PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary, SpaceState,
-    SpaceSummary, Worker, WorkerState, WorkspaceRoot,
+    Activity, Approval, ApprovalOption, BackendInfo, EnvironmentInfo, Message, Participant,
+    Presentation, PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary,
+    SpaceState, SpaceSummary, Worker, WorkerState, WorkspaceRoot,
 };
 
 /// The protocol version sent in [`ClientMessage::Hello`] and [`ServerMessage::Welcome`].

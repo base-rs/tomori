@@ -6,13 +6,14 @@
 //! This is pure state. It applies [`client::Event`]s and controller input, and queues [`Action`]s for [`crate::connection::Connection`] to carry out, so nothing here touches the network.
 use crate::{
     caption::{COLUMNS, ROWS, wrapped_lines},
+    environment::Environment,
     interaction::SessionActivity,
     server_choice::{self, Choice},
 };
 use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
-    Activity, BackendInfo, ClientMessage, Decision, QueueState, Role, ServerMessage,
-    SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    Activity, BackendInfo, ClientMessage, Decision, EnvironmentInfo, QueueState, Role,
+    ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
 };
 use std::{
     sync::Arc,
@@ -72,7 +73,7 @@ pub enum Mode {
     Space,
 }
 
-/// The lobby's create-and-attach walk, taken one list at a time: the spaces, the choices menu, then a backend, a directory and, when attaching, a session.
+/// The lobby's create-and-attach walk, taken one list at a time: the spaces, the choices menu, then a backend, a directory, when attaching a session, and an environment when the server offers more than one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LobbyStep {
     /// Show the spaces, with the choices menu opened from here.
@@ -89,6 +90,8 @@ enum LobbyStep {
     AttachDirectory,
     /// Attach to an existing session: choose one of the backend's sessions.
     AttachSession,
+    /// Create or attach: choose the environment the space is bound to. Skipped when the server offers only one.
+    Environment,
 }
 
 pub struct Conversation {
@@ -135,12 +138,16 @@ pub struct Conversation {
     backends: Vec<BackendInfo>,
     /// The directories a space may run in, offered so the client can choose without typing a path.
     roots: Vec<WorkspaceRoot>,
+    /// The environments a space may be bound to, offered when creating one.
+    environments: Vec<EnvironmentInfo>,
     /// The answer to [`ClientMessage::ListSessions`], shown at the attach-session step.
     sessions: Vec<SessionSummary>,
     /// The backend chosen on the create/attach walk, kept until the directory is chosen.
     menu_backend: Option<String>,
     /// The directory chosen on the create/attach walk, kept until the action completes.
     menu_directory: Option<String>,
+    /// The `CreateSpace` waiting at the environment step for its environment.
+    menu_create: Option<ClientMessage>,
     error: Option<String>,
     actions: Vec<Action>,
     /// The last body paginated, since the panel is drawn every frame.
@@ -190,9 +197,11 @@ impl Conversation {
             menu: 0,
             backends: Vec::new(),
             roots: Vec::new(),
+            environments: Vec::new(),
             sessions: Vec::new(),
             menu_backend: None,
             menu_directory: None,
+            menu_create: None,
             error: None,
             actions: Vec::new(),
             paged: None,
@@ -274,6 +283,7 @@ impl Conversation {
         self.close_menu();
         self.backends.clear();
         self.roots.clear();
+        self.environments.clear();
         self.mode = Mode::Lobby;
         self.error = None;
         self.notice = None;
@@ -323,6 +333,7 @@ impl Conversation {
             server,
             backends,
             roots,
+            environments,
             ..
         } = &state
         {
@@ -330,6 +341,7 @@ impl Conversation {
             self.error = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
+            self.environments = environments.clone();
             match self.mode {
                 // A space joined meanwhile is restored by the client, and the server sends its state.
                 Mode::Lobby => self.list(),
@@ -536,6 +548,7 @@ impl Conversation {
             LobbyStep::NewDirectory | LobbyStep::AttachDirectory => self.roots.len(),
             LobbyStep::AttachBackend => self.backends.iter().filter(|b| b.attach).count(),
             LobbyStep::AttachSession => self.sessions.len(),
+            LobbyStep::Environment => self.environments.len(),
         }
     }
 
@@ -551,6 +564,39 @@ impl Conversation {
         self.sessions.clear();
         self.menu_backend = None;
         self.menu_directory = None;
+        self.menu_create = None;
+    }
+
+    /// Send `create`, bound to the only environment the server offers, or ask which one when it offers several. A server that offers none predates environments, and binds its own.
+    fn create(&mut self, create: ClientMessage) {
+        self.joining = None;
+        if self.environments.len() > 1 {
+            self.menu = 0;
+            self.step = LobbyStep::Environment;
+            self.menu_create = Some(create);
+            return;
+        }
+        let only = self.environments.first().map(|offered| offered.id.clone());
+        self.send(with_environment(create, only));
+        self.close_menu();
+    }
+
+    /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment. See `design/environments.md`.
+    pub fn environment(&self) -> Environment {
+        match &self.space {
+            Some(space) if self.mode == Mode::Space => {
+                Environment::for_space(&space.environment).unwrap_or(Environment::Minimal)
+            }
+            _ => Environment::Minimal,
+        }
+    }
+
+    /// The joined space's environment, when this build cannot draw it and shows the grid instead.
+    fn missing_environment(&self) -> Option<&str> {
+        self.space
+            .as_ref()
+            .filter(|space| Environment::for_space(&space.environment).is_none())
+            .map(|space| space.environment.as_str())
     }
 
     /// A title for a space the client creates, from the backend and the chosen root, since the headset cannot type one.
@@ -688,14 +734,13 @@ impl Conversation {
                             return false;
                         };
                         let title = self.lobby_title();
-                        self.send(ClientMessage::CreateSpace {
+                        self.create(ClientMessage::CreateSpace {
                             title,
                             backend,
                             directory,
                             session: None,
+                            environment: None,
                         });
-                        self.joining = None;
-                        self.close_menu();
                     }
                     LobbyStep::AttachBackend => {
                         let backends = self.attachable_backends();
@@ -730,13 +775,26 @@ impl Conversation {
                             return false;
                         };
                         let title = session.title.clone();
-                        self.send(ClientMessage::CreateSpace {
+                        let session = Some(session.id.clone());
+                        self.create(ClientMessage::CreateSpace {
                             title,
                             backend,
                             directory,
-                            session: Some(session.id.clone()),
+                            session,
+                            environment: None,
                         });
-                        self.joining = None;
+                    }
+                    LobbyStep::Environment => {
+                        let Some(environment) = self
+                            .environments
+                            .get(self.menu)
+                            .map(|offered| offered.id.clone())
+                        else {
+                            return false;
+                        };
+                        if let Some(create) = self.menu_create.take() {
+                            self.send(with_environment(create, Some(environment)));
+                        }
                         self.close_menu();
                     }
                 }
@@ -781,10 +839,12 @@ impl Conversation {
                     | LobbyStep::NewDirectory
                     | LobbyStep::AttachBackend
                     | LobbyStep::AttachDirectory
-                    | LobbyStep::AttachSession => {
+                    | LobbyStep::AttachSession
+                    | LobbyStep::Environment => {
                         self.step = LobbyStep::Actions;
                         self.menu = 0;
                         self.sessions.clear();
+                        self.menu_create = None;
                     }
                     // The choices menu returns to the spaces.
                     LobbyStep::Actions => self.close_menu(),
@@ -848,7 +908,8 @@ impl Conversation {
                 | LobbyStep::NewBackend
                 | LobbyStep::NewDirectory
                 | LobbyStep::AttachBackend
-                | LobbyStep::AttachDirectory => self.list(),
+                | LobbyStep::AttachDirectory
+                | LobbyStep::Environment => self.list(),
                 // The session list is fetched again from the backend.
                 LobbyStep::AttachSession => {
                     if let (Some(backend), Some(directory)) =
@@ -1101,6 +1162,7 @@ impl Conversation {
             LobbyStep::AttachBackend => "ATTACH: BACKEND",
             LobbyStep::AttachDirectory => "ATTACH: FOLDER",
             LobbyStep::AttachSession => "ATTACH: SESSION",
+            LobbyStep::Environment => "PICK AN ENVIRONMENT",
             LobbyStep::Spaces => unreachable!(),
         };
         let count = self.step_list(step);
@@ -1135,6 +1197,7 @@ impl Conversation {
                         "No sessions here.".into()
                     }
                     LobbyStep::AttachSession => "Attach to one of the sessions below.".into(),
+                    LobbyStep::Environment => "The space keeps it for everyone.".into(),
                     LobbyStep::Spaces => unreachable!(),
                 },
             }
@@ -1193,6 +1256,11 @@ impl Conversation {
                         session.title.clone()
                     }
                 })
+                .collect(),
+            LobbyStep::Environment => self
+                .environments
+                .iter()
+                .map(|offered| offered.label.clone())
                 .collect(),
             LobbyStep::Spaces => Vec::new(),
         }
@@ -1308,6 +1376,12 @@ impl Conversation {
         let status = talking.or_else(|| self.status()).unwrap_or_else(|| {
             if let Some(error) = &space.error {
                 format!("ERROR: {error}")
+            } else if let Some(missing) = self.missing_environment() {
+                // The grid is shown instead, never another environment.
+                match missing {
+                    "" => "The server named no environment.".into(),
+                    missing => format!("Unknown environment: {missing}"),
+                }
             } else if let Some(entry) = self.own_queued() {
                 format!("Queued: {}", entry.text)
             } else {
@@ -1360,6 +1434,14 @@ impl Conversation {
         lines.push(footer.into());
         lines
     }
+}
+
+/// `create`, a `CreateSpace`, bound to `chosen`.
+fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> ClientMessage {
+    if let ClientMessage::CreateSpace { environment, .. } = &mut create {
+        *environment = chosen;
+    }
+    create
 }
 
 /// Messages, then the queue when it has entries.
@@ -1450,7 +1532,16 @@ mod tests {
             server: "studio".into(),
             backends,
             roots,
+            environments: sky(),
         })
+    }
+
+    /// The environments today's server offers.
+    fn sky() -> Vec<EnvironmentInfo> {
+        vec![EnvironmentInfo {
+            id: "sky".into(),
+            label: "Sky".into(),
+        }]
     }
 
     /// A backend list for the menu tests.
@@ -1491,6 +1582,7 @@ mod tests {
             title: "Tomori".into(),
             backend: "claude-code".into(),
             directory: "/work/tomori".into(),
+            environment: "sky".into(),
             activity: Activity::Idle,
             participants: vec![Participant {
                 id: "p".into(),
@@ -1601,6 +1693,7 @@ mod tests {
                 title: "Tomori".into(),
                 backend: "claude-code".into(),
                 directory: "/work/tomori".into(),
+                environment: "sky".into(),
                 activity: Activity::Running,
                 participants: 2,
             }],
@@ -1646,6 +1739,7 @@ mod tests {
                 backend: "fake".into(),
                 directory: "/work/tomori".into(),
                 session: None,
+                environment: Some("sky".into()),
             }]
         );
         // Back to the spaces, having made the choice.
@@ -1702,9 +1796,132 @@ mod tests {
                 backend: "fake".into(),
                 directory: "/work/tomori".into(),
                 session: Some("ses_1".into()),
+                environment: Some("sky".into()),
             }]
         );
         assert!(conversation.text().contains("SPACES"));
+    }
+
+    /// Walk the create menu in the lobby to the folder, then choose it.
+    fn create_in(conversation: &mut Conversation) {
+        conversation.refresh();
+        conversation.accept();
+        conversation.accept();
+        conversation.accept();
+    }
+
+    #[test]
+    fn several_environments_are_chosen_after_the_folder() {
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            backends: backends(),
+            roots: roots(),
+            environments: vec![
+                EnvironmentInfo {
+                    id: "sky".into(),
+                    label: "Sky".into(),
+                },
+                EnvironmentInfo {
+                    id: "observe".into(),
+                    label: "Observe".into(),
+                },
+            ],
+        }));
+        conversation.take_actions();
+        create_in(&mut conversation);
+        assert!(sent(&mut conversation).is_empty());
+        let text = conversation.text();
+        assert!(text.contains("PICK AN ENVIRONMENT 1/2"), "{text}");
+        assert!(text.contains("> Sky") && text.contains("Observe"), "{text}");
+        assert_fits(&mut conversation);
+
+        // B steps back without creating anything; walking again offers the choice again.
+        conversation.back();
+        assert!(conversation.text().contains("NEW SPACE"));
+        assert!(sent(&mut conversation).is_empty());
+        conversation.back();
+        create_in(&mut conversation);
+        conversation.navigate(0, 1);
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CreateSpace {
+                title: "fake in tomori".into(),
+                backend: "fake".into(),
+                directory: "/work/tomori".into(),
+                session: None,
+                environment: Some("observe".into()),
+            }]
+        );
+        assert!(conversation.text().contains("SPACES"));
+    }
+
+    #[test]
+    fn a_server_offering_no_environments_binds_its_own() {
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            backends: backends(),
+            roots: roots(),
+            environments: vec![],
+        }));
+        conversation.take_actions();
+        create_in(&mut conversation);
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace {
+                environment: None,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn arrival_and_the_lobby_use_the_grid_and_a_space_its_environment() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        // Leaving returns to the grid at once, before the server confirms.
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        // Returning to the servers keeps the grid.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Servers);
+        assert_eq!(conversation.environment(), Environment::Minimal);
+    }
+
+    #[test]
+    fn a_space_in_an_unknown_environment_shows_the_grid_and_names_it() {
+        let mut conversation = joined(|state| state.environment = "observe".into());
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        let text = conversation.text();
+        assert!(text.contains("Unknown environment: observe"), "{text}");
+        assert_fits(&mut conversation);
+        // An older server names none.
+        conversation.apply(space(|state| state.environment = String::new()));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert!(
+            conversation
+                .text()
+                .contains("The server named no environment.")
+        );
+        // A known one is drawn, and the notice goes.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        assert!(!conversation.text().contains("environment"));
     }
 
     #[test]
@@ -2022,6 +2239,7 @@ mod tests {
                 title: "Tomori".into(),
                 backend: "claude-code".into(),
                 directory: "/work/tomori".into(),
+                environment: "sky".into(),
                 activity: Activity::Idle,
                 participants: 0,
             }],
@@ -2243,6 +2461,7 @@ mod tests {
                     title: long.clone(),
                     backend: "claude-code".into(),
                     directory: "/".into(),
+                    environment: "sky".into(),
                     activity: Activity::Unknown,
                     participants: 0,
                 })
