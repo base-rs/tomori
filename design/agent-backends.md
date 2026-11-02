@@ -6,6 +6,8 @@ This describes the target design for the Rust server that replaces `bridge/`, an
 
 Each agent integration (currently OpenCode and Claude Code) is a separate workspace crate implementing a backend-neutral interface. Backends report structured facts: messages and their parts, text deltas, tool activity, permission requests, questions with structured fields, delegated workers and busy/idle state. A delegated worker names the worker that started it as its parent, or no parent when the session itself started it, so that a change of the agent's own session identifier cannot leave workers pointing at it. They do not produce headset UI text, prompts or voice-answer parsing; the server derives those from the structured facts.
 
+The server is authoritative for a space's delegated workers: the workers it reports, and their states, match what the agent is actually doing, so every client can trust them. A worker is reported as running whenever the agent is running it, however it started, including when the agent resumes a worker that had finished, such as Claude Code continuing a subagent through `SendMessage`. When a backend attaches to a session that already has workers, such as after the server restarts, it reports them from the agent's own session records, with their last known states. A worker that was running in an agent process that has since ended, including one that ended with the server, is not reported as running. When a space's agent process exits, the workers it was running stop being reported as running.
+
 Reasoning — an agent's thinking, before its answer — is reported as a part of the message it belongs to, and never as a text delta. The speech stream reads only the text the agent said out loud; reasoning is transcript material, not speech. A backend whose stream carries a reasoning or thinking delta drops it at the wire: collecting it into the message's parts is enough, and surfacing it would speak the agent's private stream aloud, back to back with its answer.
 
 Session identities are opaque and namespaced by backend. Clients and the wire protocol do not depend on a backend's identifier format.
@@ -28,6 +30,8 @@ Tomori must support multiple agent systems without coupling the protocol, server
 
 Answering the same request repeatedly from a headset is tedious, so participants may grant standing permissions, but only in the way the agent's own interface does: a user who knows what "don't ask again" means in the terminal gets the same result in Tomori, and Tomori adds no permission path of its own to review. Agreed with the user in October 2026, on the condition that it works the same way as the terminal interface.
 
+Participants watch workers to see what the agent is doing on their behalf. In November 2026 a subagent resumed after a server restart was running but not shown, and the user asked for the server to be authoritative about running subagents, so that the state is always accurate for clients.
+
 ## Scope
 
 The backend interface crate, every backend crate, and the server code that consumes them. The standing option requirement also covers the protocol and clients that present approval options and send decisions.
@@ -37,6 +41,7 @@ The backend interface crate, every backend crate, and the server code that consu
 - Inspect the dependency graph: the protocol, client and headset crates do not depend on any backend crate, and backends do not depend on the server.
 - Inspect backend outputs: no user-facing prompt strings or answer parsing in backend crates.
 - Test each backend against a recorded or simulated agent stream, including permissions, questions, workers and a turn that streams text deltas.
+- Test each backend's workers against recorded streams and session records: a worker resumed after finishing is reported as running again and then finishes; attaching to a session reports the workers its records show; a worker left running by an ended agent process, and the workers running when a space's agent process exits, are not reported as running. For Claude Code, record the stream of a `SendMessage` that resumes a subagent and its completion notification, and re-check when the supported Claude Code version changes.
 - Confirm that no backend issues periodic snapshot requests while a session is attached; the only periodic check is the running-state reconciliation against the session record, and it reports nothing while the record agrees with the state last reported.
 - Confirm that permission decisions only reach a backend in response to an explicit participant action.
 - Inspect the server and backends: no code writes agent settings files, and a standing grant reaches the agent only as the agent's own answer to the request, such as Claude Code's `updatedPermissions`.
