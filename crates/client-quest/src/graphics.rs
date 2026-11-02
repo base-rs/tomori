@@ -246,7 +246,8 @@ impl Renderer {
     }
 
     /// Does not modify simulation, worker placement, input or conversation state.
-    /// The next `update` rebuilds only the presentation instances.
+    /// The next `update` rebuilds only the presentation instances. The headset uses [`Renderer::set_scenery`] instead.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn set_environment(&mut self, environment: Environment) {
         self.environment = environment;
     }
@@ -334,14 +335,13 @@ impl Renderer {
         self.workspace.update(device, queue, workspace, stations);
     }
 
-    /// Append the arrival scene, the pointing ray and the labels anchored to its objects, after the swarm and floor. Call after `update`, instead of `update_workspace`.
+    /// Append the arrival scene, the pointing ray and the labels anchored to its objects, after the swarm, floor and any workspace cubes, which a space's arrival may still be leaving. Call after `update` and `update_workspace`.
     pub fn update_arrival(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &crate::arrival_graphics::Frame,
     ) {
-        self.scene.truncate(self.base_scene_len);
         // Unlike workspace cubes, these are made here, so the ray and threads may be longer than a metre.
         let finite = |values: &[f32]| values.iter().all(|v| v.is_finite());
         for cube in crate::arrival_graphics::cubes(frame) {
@@ -499,7 +499,7 @@ fn minimal_floor(scene: &mut Vec<Instance>, reveal: Option<crate::arrival_motion
     // Original stationary grid retained as a regression/comfort baseline.
     let circle = reveal.and_then(|sphere| {
         let squared = sphere.radius * sphere.radius - sphere.centre.y * sphere.centre.y;
-        (squared > 0.0).then(|| (sphere.centre.x, sphere.centre.z, squared))
+        (squared > 0.0).then_some((sphere.centre.x, sphere.centre.z, squared))
     });
     // The gap a line `offset` from the circle's centre crosses, as its centre and half chord along the line.
     let gap = |offset: f32, along: f32| {
