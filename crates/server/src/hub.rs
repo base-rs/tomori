@@ -48,6 +48,11 @@ pub enum SpaceCommand {
         answers: Vec<(String, AnswerValue)>,
         participant: String,
     },
+    /// Switch the session to `mode`, which the space offers. The space's mode changes when the agent confirms it.
+    SetMode {
+        mode: String,
+        participant: String,
+    },
     Close,
 }
 
@@ -1134,6 +1139,30 @@ impl Hub {
                     .set_attribution(enabled);
                 state.touch_space(&space);
             }
+            ClientMessage::SetMode { mode } => {
+                if let Err(error) = limits::check(&mode, limits::IDENTIFIER_BYTES, "mode") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                if record.model.is_closed() {
+                    state.error(participant, "The agent session has stopped.");
+                } else if !record.model.offers_mode(&mode) {
+                    state.error(participant, "The agent does not offer that mode.");
+                } else if record
+                    .commands
+                    .try_send(SpaceCommand::SetMode {
+                        mode,
+                        participant: participant.to_owned(),
+                    })
+                    .is_err()
+                {
+                    state.error(participant, "The agent session has stopped.");
+                }
+            }
         }
     }
 
@@ -1540,6 +1569,24 @@ impl Hub {
             format!("The answer was not accepted: {}", error.message),
         );
         state.touch_space(space);
+    }
+
+    /// The agent answered a participant's mode switch. A switch it accepted is shared when it confirms the mode.
+    pub(crate) fn space_mode_set(
+        &self,
+        space: &str,
+        participant: &str,
+        result: backend::Result<()>,
+    ) {
+        if let Err(error) = result {
+            let state = self.lock();
+            if state.space(space).is_some() {
+                state.error(
+                    participant,
+                    format!("The mode was not changed: {}", error.message),
+                );
+            }
+        }
     }
 
     /// The driver stopped: the session produces no more events.

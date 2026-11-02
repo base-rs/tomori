@@ -21,7 +21,7 @@ pub use keepalive::Keepalive;
 pub use message::{ClientMessage, Decision, Pose, ServerMessage};
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{
-    Activity, Approval, ApprovalOption, BackendInfo, Message, Participant, Presentation,
+    Activity, Approval, ApprovalOption, BackendInfo, Message, Mode, Participant, Presentation,
     PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary, SpaceState,
     SpaceSummary, Worker, WorkerState, WorkspaceRoot,
 };

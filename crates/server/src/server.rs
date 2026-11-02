@@ -848,6 +848,10 @@ async fn drive(
                     let result = session.answer(&question, answers).await;
                     hub.space_answered(space, &question, &participant, result);
                 }
+                SpaceCommand::SetMode { mode, participant } => {
+                    let result = session.set_mode(&mode).await;
+                    hub.space_mode_set(space, &participant, result);
+                }
                 SpaceCommand::Close => break,
             }
         }

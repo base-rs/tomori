@@ -12,7 +12,6 @@ use serde_json::Value;
 
 use crate::process::{Output, Process};
 use crate::protocol::State;
-use crate::workers::Workers;
 
 /// Everything [`Session::next_event`](backend::Session::next_event) waits on, in arrival order.
 enum Input {
@@ -40,12 +39,7 @@ pub struct ClaudeCodeSession {
 }
 
 impl ClaudeCodeSession {
-    pub(crate) fn spawn(
-        command: Command,
-        session: String,
-        grace: Duration,
-        workers: Workers,
-    ) -> Result<Self> {
+    pub(crate) fn spawn(command: Command, mut state: State, grace: Duration) -> Result<Self> {
         let (sender, input) = async_channel::unbounded();
         let local = sender.clone();
         let process = Process::spawn(command, grace, move |output| {
@@ -58,7 +52,6 @@ impl ClaudeCodeSession {
             )
         })?;
 
-        let mut state = State::attached(session, workers);
         process.write(state.control_request("initialize").to_string());
 
         Ok(Self {
@@ -186,6 +179,13 @@ impl backend::Session for ClaudeCodeSession {
     async fn interrupt(&self) -> Result<()> {
         self.ensure_open()?;
         let request = self.state.lock().unwrap().control_request("interrupt");
+        self.write(request);
+        Ok(())
+    }
+
+    async fn set_mode(&self, mode: &str) -> Result<()> {
+        self.ensure_open()?;
+        let request = self.state.lock().unwrap().set_mode(mode)?;
         self.write(request);
         Ok(())
     }
