@@ -287,6 +287,9 @@ The Quest reports presence through the server. Audio plays through the spectator
 desktop output; the PipeWire node carries video only. Any local client with
 PipeWire access may be able to view it.
 
+For the direct virtual camera and microphone used to share this view in a Slack
+Huddle without OBS, see [the Linux setup notes](docs/slack-huddle.md).
+
 This prototype requires `gst-launch-1.0`, GStreamer's `fdsrc` and
 `rawvideoparse` elements, and the PipeWire GStreamer plugin. It performs an
 asynchronous GPU-to-CPU readback and copies through a GStreamer subprocess; it is
