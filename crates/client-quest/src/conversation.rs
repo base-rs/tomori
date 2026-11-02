@@ -5,14 +5,16 @@
 //!
 //! This is pure state. It applies [`client::Event`]s and controller input, and queues [`Action`]s for [`crate::connection::Connection`] to carry out, so nothing here touches the network.
 use crate::{
+    arrival,
     caption::{COLUMNS, ROWS, wrapped_lines},
+    environment::Environment,
     interaction::SessionActivity,
     server_choice::{self, Choice},
 };
 use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
-    Activity, BackendInfo, ClientMessage, Decision, QueueState, Role, ServerMessage,
-    SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    Activity, BackendInfo, ClientMessage, Decision, EnvironmentInfo, QueueState, Role,
+    ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
 };
 use std::{
     sync::Arc,
@@ -72,23 +74,31 @@ pub enum Mode {
     Space,
 }
 
-/// The lobby's create-and-attach walk, taken one list at a time: the spaces, the choices menu, then a backend, a directory and, when attaching, a session.
+/// The lobby: the spaces and the create object, then the creation rings opened from it, one at a time. See `design/arrival.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LobbyStep {
-    /// Show the spaces, with the choices menu opened from here.
+    /// The spaces, followed by the create object.
     Spaces,
-    /// The choices: create a space, attach to an existing session, or refresh.
-    Actions,
-    /// Create a new space: choose a backend.
-    NewBackend,
-    /// Create a new space: choose a directory.
-    NewDirectory,
-    /// Attach to an existing session: choose a backend.
-    AttachBackend,
-    /// Attach to an existing session: choose a directory.
-    AttachDirectory,
-    /// Attach to an existing session: choose one of the backend's sessions.
-    AttachSession,
+    /// Creating a space: choose a backend.
+    Backend,
+    /// Creating a space: choose a directory.
+    Directory,
+    /// Creating a space with a backend that can attach: a new session, or one of the backend's existing sessions in the directory.
+    Session,
+    /// Creating a space: choose the environment it is bound to. Only when the server offers more than one.
+    Environment,
+}
+
+impl LobbyStep {
+    fn ring(self) -> Option<arrival::Step> {
+        match self {
+            LobbyStep::Spaces => None,
+            LobbyStep::Backend => Some(arrival::Step::Backend),
+            LobbyStep::Directory => Some(arrival::Step::Directory),
+            LobbyStep::Session => Some(arrival::Step::Session),
+            LobbyStep::Environment => Some(arrival::Step::Environment),
+        }
+    }
 }
 
 pub struct Conversation {
@@ -109,6 +119,7 @@ pub struct Conversation {
     state: Option<ConnectionState>,
     spaces: Vec<SpaceSummary>,
     listed: bool,
+    /// The selected space; one past the last is the create object.
     selected: usize,
     joining: Option<String>,
     /// Space updates sent before the server handled our leave are ignored until it confirms.
@@ -127,20 +138,24 @@ pub struct Conversation {
     notice: Option<String>,
     /// Shown in the lobby after a space you were in or joining has gone, until dismissed with B or another choice.
     ended: Option<String>,
-    /// Which list the lobby is walking: the spaces themselves, or the create/attach menu.
+    /// Which list the lobby shows: the spaces, or one of the creation rings.
     step: LobbyStep,
-    /// The selection within the current lobby menu step's list.
+    /// The selection within the open creation ring.
     menu: usize,
-    /// The server's backends, so the menu offers only what attaches.
+    /// The server's backends, so the session ring is offered only for those that attach.
     backends: Vec<BackendInfo>,
     /// The directories a space may run in, offered so the client can choose without typing a path.
     roots: Vec<WorkspaceRoot>,
-    /// The answer to [`ClientMessage::ListSessions`], shown at the attach-session step.
+    /// The answer to [`ClientMessage::ListSessions`], shown on the session ring after "New session".
     sessions: Vec<SessionSummary>,
-    /// The backend chosen on the create/attach walk, kept until the directory is chosen.
+    /// The environments a space may be bound to, offered on the environment ring when there are several.
+    environments: Vec<EnvironmentInfo>,
+    /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
-    /// The directory chosen on the create/attach walk, kept until the action completes.
+    /// The directory chosen on the directory ring, kept until the space is created.
     menu_directory: Option<String>,
+    /// The `CreateSpace` waiting at the environment step for its environment.
+    menu_create: Option<ClientMessage>,
     error: Option<String>,
     actions: Vec<Action>,
     /// The last body paginated, since the panel is drawn every frame.
@@ -190,9 +205,11 @@ impl Conversation {
             menu: 0,
             backends: Vec::new(),
             roots: Vec::new(),
+            environments: Vec::new(),
             sessions: Vec::new(),
             menu_backend: None,
             menu_directory: None,
+            menu_create: None,
             error: None,
             actions: Vec::new(),
             paged: None,
@@ -209,6 +226,7 @@ impl Conversation {
     }
 
     /// The current panel: the server list, the lobby, or a space.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -274,6 +292,7 @@ impl Conversation {
         self.close_menu();
         self.backends.clear();
         self.roots.clear();
+        self.environments.clear();
         self.mode = Mode::Lobby;
         self.error = None;
         self.notice = None;
@@ -281,6 +300,7 @@ impl Conversation {
     }
 
     /// Join `space` by id, as the lobby's accept does, for a client that takes the space as an argument rather than choosing it in the list.
+    #[cfg(not(target_os = "android"))]
     pub fn join_space(&mut self, space: impl Into<String>) {
         let space = space.into();
         self.joining = Some(space.clone());
@@ -333,6 +353,7 @@ impl Conversation {
             server,
             backends,
             roots,
+            environments,
             ..
         } = &state
         {
@@ -340,6 +361,7 @@ impl Conversation {
             self.error = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
+            self.environments = environments.clone();
             match self.mode {
                 // A space joined meanwhile is restored by the client, and the server sends its state.
                 Mode::Lobby => self.list(),
@@ -355,18 +377,24 @@ impl Conversation {
         match message {
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
-                self.selected = selected
-                    .and_then(|id| spaces.iter().position(|space| &space.id == id))
-                    .unwrap_or(0);
+                self.selected = if self.listed && self.selected == self.spaces.len() {
+                    // The create object stays selected, after however many spaces there now are.
+                    spaces.len()
+                } else {
+                    selected
+                        .and_then(|id| spaces.iter().position(|space| &space.id == id))
+                        .unwrap_or(0)
+                };
                 self.spaces = spaces;
                 self.listed = true;
             }
             ServerMessage::Space { state } => self.update_space(*state),
-            // The answer to a session list, shown at the attach step.
+            // The answer to a session list, shown on the session ring after "New session".
             ServerMessage::Sessions { sessions } => {
-                self.sessions = sessions;
-                self.menu = 0;
-                if self.step != LobbyStep::AttachSession {
+                if self.step == LobbyStep::Session {
+                    self.sessions = sessions;
+                    self.menu = self.menu.min(self.sessions.len());
+                } else {
                     self.error = Some("Too late to show those sessions.".into());
                 }
             }
@@ -534,33 +562,116 @@ impl Conversation {
         self.actions.push(Action::Send(message));
     }
 
-    /// The choices the lobby offers when the menu is opened: create, attach, refresh.
-    const LOBBY_ACTIONS: usize = 3;
-
-    /// The number of rows in the list shown at `step`, so the stick stays in view.
+    /// The number of entries in the list shown at `step`, so the stick stays on one of them.
     fn step_list(&self, step: LobbyStep) -> usize {
         match step {
-            LobbyStep::Spaces => self.spaces.len(),
-            LobbyStep::Actions => Self::LOBBY_ACTIONS,
-            LobbyStep::NewBackend => self.backends.len(),
-            LobbyStep::NewDirectory | LobbyStep::AttachDirectory => self.roots.len(),
-            LobbyStep::AttachBackend => self.backends.iter().filter(|b| b.attach).count(),
-            LobbyStep::AttachSession => self.sessions.len(),
+            // The spaces, then the create object.
+            LobbyStep::Spaces => self.spaces.len() + 1,
+            LobbyStep::Backend => self.backends.len(),
+            LobbyStep::Directory => self.roots.len(),
+            // "New session", then the existing sessions.
+            LobbyStep::Session => self.sessions.len() + 1,
+            LobbyStep::Environment => self.environments.len(),
         }
     }
 
-    /// The backends that can list existing sessions, in the order the menu shows them.
-    fn attachable_backends(&self) -> Vec<&BackendInfo> {
-        self.backends.iter().filter(|b| b.attach).collect()
+    /// Whether the chosen backend can attach to an existing session, so that the session ring is offered.
+    fn attaches(&self) -> bool {
+        self.backends
+            .iter()
+            .any(|backend| Some(&backend.name) == self.menu_backend.as_ref() && backend.attach)
     }
 
-    /// Close the create/attach walk, back to the spaces, forgetting its choices.
+    /// Close the creation rings, back to the spaces with the create object selected, forgetting their choices.
     fn close_menu(&mut self) {
+        if self.step != LobbyStep::Spaces {
+            self.selected = self.spaces.len();
+        }
         self.step = LobbyStep::Spaces;
         self.menu = 0;
         self.sessions.clear();
         self.menu_backend = None;
         self.menu_directory = None;
+        self.menu_create = None;
+    }
+
+    /// Send `create`, bound to the only environment the server offers, or ask which one when it offers several. A server that offers none predates environments, and binds its own.
+    fn submit(&mut self, create: ClientMessage) {
+        self.joining = None;
+        if self.environments.len() > 1 {
+            self.menu = 0;
+            self.step = LobbyStep::Environment;
+            self.menu_create = Some(create);
+            return;
+        }
+        let only = self.environments.first().map(|offered| offered.id.clone());
+        self.send(with_environment(create, only));
+        self.close_menu();
+    }
+
+    /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment. See `design/environments.md`.
+    pub fn environment(&self) -> Environment {
+        match &self.space {
+            Some(space) if self.mode == Mode::Space => {
+                Environment::for_space(&space.environment).unwrap_or(Environment::Minimal)
+            }
+            _ => Environment::Minimal,
+        }
+    }
+
+    /// The joined space's environment, when this build cannot draw it and shows the grid instead.
+    fn missing_environment(&self) -> Option<&str> {
+        self.space
+            .as_ref()
+            .filter(|space| Environment::for_space(&space.environment).is_none())
+            .map(|space| space.environment.as_str())
+    }
+
+    /// Open the first creation ring.
+    fn open_menu(&mut self) {
+        self.close_menu();
+        self.step = LobbyStep::Backend;
+    }
+
+    /// Step back to the previous creation ring, selecting what was chosen on it, or close the rings from the first.
+    fn back_ring(&mut self) {
+        match self.step {
+            LobbyStep::Spaces => {}
+            LobbyStep::Backend => self.close_menu(),
+            LobbyStep::Directory => {
+                self.step = LobbyStep::Backend;
+                self.menu = self
+                    .backends
+                    .iter()
+                    .position(|backend| Some(&backend.name) == self.menu_backend.as_ref())
+                    .unwrap_or(0);
+                self.menu_backend = None;
+            }
+            LobbyStep::Session => {
+                self.step = LobbyStep::Directory;
+                self.menu = self
+                    .roots
+                    .iter()
+                    .position(|root| Some(&root.path) == self.menu_directory.as_ref())
+                    .unwrap_or(0);
+                self.menu_directory = None;
+                self.sessions.clear();
+            }
+            LobbyStep::Environment => {
+                self.menu_create = None;
+                if self.attaches() {
+                    self.step = LobbyStep::Session;
+                    self.menu = 0;
+                } else {
+                    self.step = LobbyStep::Directory;
+                    self.menu = self
+                        .roots
+                        .iter()
+                        .position(|root| Some(&root.path) == self.menu_directory.as_ref())
+                        .unwrap_or(0);
+                }
+            }
+        }
     }
 
     /// A title for a space the client creates, from the backend and the chosen root, since the headset cannot type one.
@@ -568,10 +679,48 @@ impl Conversation {
         let backend = self.menu_backend.as_deref().unwrap_or("agent");
         let label = self
             .roots
-            .get(self.menu)
+            .iter()
+            .find(|root| Some(&root.path) == self.menu_directory.as_ref())
             .map(|root| root.label.as_str())
             .unwrap_or("");
         format!("{backend} in {label}")
+    }
+
+    /// Create the space chosen on the rings, bound to `session` if one was chosen, then choose its environment if the server offers more than one.
+    fn create(&mut self, session: Option<SessionSummary>) {
+        let (Some(backend), Some(directory)) =
+            (self.menu_backend.clone(), self.menu_directory.clone())
+        else {
+            return;
+        };
+        let title = match &session {
+            Some(session) if !session.title.trim().is_empty() => session.title.clone(),
+            _ => self.lobby_title(),
+        };
+        let create = ClientMessage::CreateSpace {
+            title,
+            backend,
+            directory,
+            session: session.map(|session| session.id),
+            environment: None,
+        };
+        self.submit(create);
+    }
+
+    /// Return to the server list, closing the connection.
+    fn leave_server(&mut self) {
+        self.actions.push(Action::Disconnect);
+        self.connected = None;
+        self.state = None;
+        self.spaces.clear();
+        self.listed = false;
+        self.close_space();
+        self.close_menu();
+        self.talk = None;
+        self.leaving = false;
+        self.error = None;
+        self.ended = None;
+        self.mode = Mode::Servers;
     }
 
     /// The pending approval that a press would decide, if any.
@@ -602,7 +751,7 @@ impl Conversation {
             }
             Mode::Lobby => match self.step {
                 LobbyStep::Spaces => {
-                    self.selected = shift(self.selected, vertical, self.spaces.len())
+                    self.selected = shift(self.selected, vertical, self.step_list(self.step))
                 }
                 step => self.menu = shift(self.menu, vertical, self.step_list(step)),
             },
@@ -654,8 +803,8 @@ impl Conversation {
             }
             Mode::Lobby => {
                 match self.step {
-                    LobbyStep::Spaces => {
-                        if let Some(space) = self.spaces.get(self.selected) {
+                    LobbyStep::Spaces => match self.spaces.get(self.selected) {
+                        Some(space) => {
                             let space = space.id.clone();
                             self.joining = Some(space.clone());
                             self.leaving = false;
@@ -663,91 +812,50 @@ impl Conversation {
                             self.ended = None;
                             self.send(ClientMessage::Join { space });
                         }
-                    }
-                    LobbyStep::Actions => {
-                        self.sessions.clear();
-                        self.menu_backend = None;
-                        self.menu_directory = None;
-                        match self.menu {
-                            // Create a new space: choose a backend.
-                            0 => self.step = LobbyStep::NewBackend,
-                            // Attach to an existing session: choose a backend.
-                            1 => self.step = LobbyStep::AttachBackend,
-                            // Refresh the spaces and show them.
-                            _ => {
-                                self.step = LobbyStep::Spaces;
-                                self.list();
-                            }
+                        // The create object opens its first ring.
+                        None => {
+                            self.ended = None;
+                            self.open_menu();
                         }
-                        self.menu = 0;
-                    }
-                    LobbyStep::NewBackend => {
+                    },
+                    LobbyStep::Backend => {
                         if let Some(backend) = self.backends.get(self.menu) {
                             self.menu_backend = Some(backend.name.clone());
                             self.menu = 0;
-                            self.step = LobbyStep::NewDirectory;
+                            self.step = LobbyStep::Directory;
                         }
                     }
-                    LobbyStep::NewDirectory => {
-                        let Some(directory) =
-                            self.roots.get(self.menu).map(|root| root.path.clone())
-                        else {
-                            return false;
-                        };
-                        let Some(backend) = self.menu_backend.clone() else {
-                            return false;
-                        };
-                        let title = self.lobby_title();
-                        self.send(ClientMessage::CreateSpace {
-                            title,
-                            backend,
-                            directory,
-                            session: None,
-                        });
-                        self.joining = None;
-                        self.close_menu();
-                    }
-                    LobbyStep::AttachBackend => {
-                        let backends = self.attachable_backends();
-                        if let Some(backend) = backends.get(self.menu) {
-                            self.menu_backend = Some(backend.name.clone());
-                            self.menu = 0;
-                            self.step = LobbyStep::AttachDirectory;
+                    LobbyStep::Directory => {
+                        if let Some(root) = self.roots.get(self.menu) {
+                            self.menu_directory = Some(root.path.clone());
+                            if self.attaches() {
+                                self.menu = 0;
+                                self.step = LobbyStep::Session;
+                                self.list_sessions();
+                            } else {
+                                self.create(None);
+                            }
                         }
                     }
-                    LobbyStep::AttachDirectory => {
-                        let Some(directory) =
-                            self.roots.get(self.menu).map(|root| root.path.clone())
-                        else {
-                            return false;
-                        };
-                        let Some(backend) = self.menu_backend.clone() else {
-                            return false;
-                        };
-                        self.menu_directory = Some(directory.clone());
-                        self.menu = 0;
-                        self.step = LobbyStep::AttachSession;
-                        self.send(ClientMessage::ListSessions { backend, directory });
+                    LobbyStep::Session => {
+                        let session = self
+                            .menu
+                            .checked_sub(1)
+                            .and_then(|index| self.sessions.get(index))
+                            .cloned();
+                        self.create(session);
                     }
-                    LobbyStep::AttachSession => {
-                        let Some(session) = self.sessions.get(self.menu) else {
-                            return false;
-                        };
-                        let Some(backend) = self.menu_backend.clone() else {
-                            return false;
-                        };
-                        let Some(directory) = self.menu_directory.clone() else {
-                            return false;
-                        };
-                        let title = session.title.clone();
-                        self.send(ClientMessage::CreateSpace {
-                            title,
-                            backend,
-                            directory,
-                            session: Some(session.id.clone()),
-                        });
-                        self.joining = None;
-                        self.close_menu();
+                    LobbyStep::Environment => {
+                        let environment = self
+                            .environments
+                            .get(self.menu)
+                            .map(|offered| offered.id.clone());
+                        if let (Some(environment), Some(create)) =
+                            (environment, self.menu_create.take())
+                        {
+                            self.send(with_environment(create, Some(environment)));
+                            self.close_menu();
+                        }
                     }
                 }
                 false
@@ -784,36 +892,9 @@ impl Conversation {
                 self.error = None;
                 self.ended = None;
             }
-            Mode::Lobby => {
-                match self.step {
-                    // The deeper steps return to the choices menu.
-                    LobbyStep::NewBackend
-                    | LobbyStep::NewDirectory
-                    | LobbyStep::AttachBackend
-                    | LobbyStep::AttachDirectory
-                    | LobbyStep::AttachSession => {
-                        self.step = LobbyStep::Actions;
-                        self.menu = 0;
-                        self.sessions.clear();
-                    }
-                    // The choices menu returns to the spaces.
-                    LobbyStep::Actions => self.close_menu(),
-                    // At the spaces: nothing to return from, so go to the server list.
-                    LobbyStep::Spaces => {
-                        self.actions.push(Action::Disconnect);
-                        self.connected = None;
-                        self.state = None;
-                        self.spaces.clear();
-                        self.listed = false;
-                        self.close_space();
-                        self.talk = None;
-                        self.leaving = false;
-                        self.error = None;
-                        self.ended = None;
-                        self.mode = Mode::Servers;
-                    }
-                }
-            }
+            // At the spaces there is nothing to return from, so go to the server list.
+            Mode::Lobby if self.step == LobbyStep::Spaces => self.leave_server(),
+            Mode::Lobby => self.back_ring(),
             Mode::Space => {
                 let pending = self
                     .space
@@ -842,31 +923,26 @@ impl Conversation {
         }
     }
 
-    /// Y: browse again, open the create/attach menu, refresh the list being walked, or in a space step to the agent's next mode, as its terminal key does. A space whose agent offers no modes fetches its state again instead.
+    /// Ask the chosen backend for its sessions in the chosen directory.
+    fn list_sessions(&mut self) {
+        if let (Some(backend), Some(directory)) =
+            (self.menu_backend.clone(), self.menu_directory.clone())
+        {
+            self.send(ClientMessage::ListSessions { backend, directory });
+        }
+    }
+
+    /// Y: browse again, refresh the spaces or the sessions being shown, or in a space step to the agent's next mode, as its terminal key does. A space whose agent offers no modes fetches its state again instead.
     pub fn refresh(&mut self) {
         self.error = None;
         match self.mode {
             Mode::Servers => self.actions.push(Action::Rescan),
             Mode::Lobby => match self.step {
-                // From the spaces, open the choices menu.
-                LobbyStep::Spaces => {
-                    self.menu = 0;
-                    self.step = LobbyStep::Actions;
-                }
-                // The choices and the create walk refresh the spaces.
-                LobbyStep::Actions
-                | LobbyStep::NewBackend
-                | LobbyStep::NewDirectory
-                | LobbyStep::AttachBackend
-                | LobbyStep::AttachDirectory => self.list(),
-                // The session list is fetched again from the backend.
-                LobbyStep::AttachSession => {
-                    if let (Some(backend), Some(directory)) =
-                        (self.menu_backend.clone(), self.menu_directory.clone())
-                    {
-                        self.send(ClientMessage::ListSessions { backend, directory });
-                    }
-                }
+                LobbyStep::Session => self.list_sessions(),
+                LobbyStep::Spaces
+                | LobbyStep::Backend
+                | LobbyStep::Directory
+                | LobbyStep::Environment => self.list(),
             },
             Mode::Space => {
                 let Some(space) = &self.space else {
@@ -1040,7 +1116,11 @@ impl Conversation {
         for (index, choice) in self.servers.iter().enumerate().skip(start).take(rows) {
             let marker = if index == self.server { '>' } else { ' ' };
             lines.push(short(&match &choice.unavailable {
-                None => format!("{marker} {} {}", choice.label, choice.address),
+                // A row has no room for both, and the counts say more about a discovered server than its address.
+                None => match choice.counts() {
+                    Some(counts) => format!("{marker} {} ({counts})", choice.label),
+                    None => format!("{marker} {} {}", choice.label, choice.address),
+                },
                 Some(reason) => format!("{marker} ({} - {reason})", choice.label),
             }));
         }
@@ -1067,7 +1147,6 @@ impl Conversation {
             .connected
             .as_ref()
             .map_or("server", |choice| choice.label.as_str());
-        let can_act = !self.backends.is_empty() || !self.roots.is_empty();
         let mut lines = vec![short(&format!(
             "{server} | SPACES {}/{}",
             (self.selected + 1).min(self.spaces.len()),
@@ -1083,50 +1162,72 @@ impl Conversation {
                     } else if !self.listed {
                         "Listing spaces...".into()
                     } else if self.spaces.is_empty() {
-                        "No spaces yet.".into()
+                        "No spaces yet; create one.".into()
                     } else {
                         format!("You are {}.", self.name)
                     }
                 }),
         ));
         let rows = ROWS - 3;
-        let start = window(self.selected, self.spaces.len(), rows);
-        for (index, space) in self.spaces.iter().enumerate().skip(start).take(rows) {
+        // The spaces, then the create object.
+        let entries = self
+            .spaces
+            .iter()
+            .map(|space| {
+                format!(
+                    "{} [{}{}]",
+                    space.title,
+                    activity_label(space.activity),
+                    match space.participants {
+                        0 => String::new(),
+                        count => format!(", {count} here"),
+                    }
+                )
+            })
+            .chain(["+ New space".to_owned()]);
+        let start = window(self.selected, self.step_list(LobbyStep::Spaces), rows);
+        for (index, entry) in entries.enumerate().skip(start).take(rows) {
             let marker = if index == self.selected { '>' } else { ' ' };
-            lines.push(short(&format!(
-                "{marker} {} [{}{}]",
-                space.title,
-                activity_label(space.activity),
-                match space.participants {
-                    0 => String::new(),
-                    count => format!(", {count} here"),
-                }
-            )));
+            lines.push(short(&format!("{marker} {entry}")));
         }
         while lines.len() < ROWS - 1 {
             lines.push(String::new());
         }
-        if self.dismissable() {
-            lines.push("A join | B dismiss | Y new space".into());
+        lines.push(if self.dismissable() {
+            "A choose | B dismiss | Y refresh".into()
         } else {
-            lines.push(if can_act {
-                "A join | B servers | Y new or attach".into()
-            } else {
-                "A join | B servers | Y refresh".into()
-            });
-        }
+            "A choose | B servers | Y refresh".into()
+        });
         lines
     }
 
-    /// The create/attach walk at one of its list steps.
+    /// What the open creation ring needs said: what is missing when it is empty, since the headset cannot type, or what it is for.
+    fn ring_hint(&self, step: LobbyStep) -> &'static str {
+        match step {
+            LobbyStep::Backend if self.backends.is_empty() => {
+                "The server has no backends; ask on the PC."
+            }
+            LobbyStep::Directory if self.roots.is_empty() => {
+                "The server offers no folders; ask on the PC."
+            }
+            LobbyStep::Backend => "The agent that runs in the space.",
+            LobbyStep::Directory => "The folder the agent works in.",
+            LobbyStep::Session if self.sessions.is_empty() => {
+                "Start a new session; none listed yet."
+            }
+            LobbyStep::Session => "A new session, or attach to an existing one.",
+            LobbyStep::Environment => "Where the space takes place, for everyone in it.",
+            LobbyStep::Spaces => "",
+        }
+    }
+
+    /// The creation rings, as a list, at one of their steps.
     fn menu_text(&self, step: LobbyStep) -> Vec<String> {
         let label = match step {
-            LobbyStep::Actions => "NEW SPACE",
-            LobbyStep::NewBackend => "PICK A BACKEND",
-            LobbyStep::NewDirectory => "PICK A FOLDER",
-            LobbyStep::AttachBackend => "ATTACH: BACKEND",
-            LobbyStep::AttachDirectory => "ATTACH: FOLDER",
-            LobbyStep::AttachSession => "ATTACH: SESSION",
+            LobbyStep::Backend => "NEW SPACE: BACKEND",
+            LobbyStep::Directory => "NEW SPACE: FOLDER",
+            LobbyStep::Session => "NEW SPACE: SESSION",
+            LobbyStep::Environment => "NEW SPACE: ENVIRONMENT",
             LobbyStep::Spaces => unreachable!(),
         };
         let count = self.step_list(step);
@@ -1135,92 +1236,249 @@ impl Conversation {
             (self.menu + 1).min(count),
             count
         ))];
-        lines.push(short(&self.status().unwrap_or_else(|| {
-            // An empty list tells the participant what is missing, since the headset cannot type.
-            let empty = match step {
-                LobbyStep::NewBackend if self.backends.is_empty() => {
-                    Some("The server has no backends; ask on the PC.")
-                }
-                LobbyStep::NewDirectory | LobbyStep::AttachDirectory if self.roots.is_empty() => {
-                    Some("The server offers no folders; ask on the PC.")
-                }
-                LobbyStep::AttachBackend if self.attachable_backends().is_empty() => {
-                    Some("No backend can attach to existing sessions.")
-                }
-                _ => None,
-            };
-            match empty {
-                Some(hint) => hint.to_owned(),
-                None => match step {
-                    LobbyStep::Actions => "Choose one.".into(),
-                    LobbyStep::NewBackend => "A new session runs in the chosen folder.".into(),
-                    LobbyStep::NewDirectory => "New sessions start here.".into(),
-                    LobbyStep::AttachBackend => "Pick the backend the session came from.".into(),
-                    LobbyStep::AttachDirectory => "Sessions are listed per folder.".into(),
-                    LobbyStep::AttachSession if self.sessions.is_empty() => {
-                        "No sessions here.".into()
-                    }
-                    LobbyStep::AttachSession => "Attach to one of the sessions below.".into(),
-                    LobbyStep::Spaces => unreachable!(),
-                },
-            }
-        })));
+        lines.push(short(
+            &self
+                .status()
+                .unwrap_or_else(|| self.ring_hint(step).to_owned()),
+        ));
         let rows = ROWS - 3;
         let start = window(self.menu, count, rows);
-        for (index, item) in self
-            .menu_items(step)
-            .into_iter()
-            .enumerate()
-            .skip(start)
-            .take(rows)
-        {
-            let marker = if index == self.menu { '>' } else { ' ' };
-            lines.push(short(&format!("{marker} {item}")));
+        for item in self.ring_items(step).into_iter().skip(start).take(rows) {
+            let marker = if item.selected { '>' } else { ' ' };
+            lines.push(short(&format!("{marker} {}", item.label)));
         }
         while lines.len() < ROWS - 1 {
             lines.push(String::new());
         }
         lines.push(if self.dismissable() {
-            "A choose | B dismiss | Y back".into()
+            "A choose | B dismiss | Y refresh".into()
         } else {
             "A choose | B back | Y refresh".into()
         });
         lines
     }
 
-    /// The rows shown at `step`, as display strings.
-    fn menu_items(&self, step: LobbyStep) -> Vec<String> {
-        match step {
-            LobbyStep::Actions => vec![
-                "Create a space".into(),
-                "Attach to an existing session".into(),
-                "Refresh the spaces".into(),
-            ],
-            LobbyStep::NewBackend => self
+    /// The choices on the ring at `step`, with the stick's selection marked.
+    fn ring_items(&self, step: LobbyStep) -> Vec<arrival::Item> {
+        let choice = |key, label: &str, detail: Option<&str>| arrival::Item {
+            key,
+            kind: arrival::Kind::Choice,
+            label: label.to_owned(),
+            detail: detail.map(str::to_owned),
+            selected: false,
+        };
+        let mut items: Vec<_> = match step {
+            LobbyStep::Spaces => Vec::new(),
+            LobbyStep::Backend => self
                 .backends
                 .iter()
-                .map(|backend| backend.name.clone())
-                .collect(),
-            LobbyStep::NewDirectory | LobbyStep::AttachDirectory => {
-                self.roots.iter().map(|root| root.label.clone()).collect()
-            }
-            LobbyStep::AttachBackend => self
-                .attachable_backends()
-                .into_iter()
-                .map(|backend| backend.name.clone())
-                .collect(),
-            LobbyStep::AttachSession => self
-                .sessions
-                .iter()
-                .map(|session| {
-                    if session.title.trim().is_empty() {
-                        session.id.clone()
-                    } else {
-                        session.title.clone()
-                    }
+                .map(|backend| {
+                    choice(
+                        arrival::Key::Backend(backend.name.clone()),
+                        &backend.name,
+                        backend.attach.then_some("can attach"),
+                    )
                 })
                 .collect(),
-            LobbyStep::Spaces => Vec::new(),
+            LobbyStep::Directory => self
+                .roots
+                .iter()
+                .map(|root| {
+                    choice(
+                        arrival::Key::Directory(root.path.clone()),
+                        &root.label,
+                        None,
+                    )
+                })
+                .collect(),
+            LobbyStep::Session => {
+                std::iter::once(choice(arrival::Key::Session(None), "New session", None))
+                    .chain(self.sessions.iter().map(|session| {
+                        let title = if session.title.trim().is_empty() {
+                            &session.id
+                        } else {
+                            &session.title
+                        };
+                        choice(arrival::Key::Session(Some(session.id.clone())), title, None)
+                    }))
+                    .collect()
+            }
+            LobbyStep::Environment => self
+                .environments
+                .iter()
+                .map(|offered| {
+                    choice(
+                        arrival::Key::Environment(offered.id.clone()),
+                        &offered.label,
+                        None,
+                    )
+                })
+                .collect(),
+        };
+        if let Some(item) = items.get_mut(self.menu) {
+            item.selected = true;
+        }
+        items
+    }
+
+    /// What the headset shows as objects in the world, outside a space. See `design/arrival.md`.
+    pub fn arrival(&self) -> Option<arrival::View> {
+        match self.mode {
+            Mode::Space => None,
+            Mode::Servers => Some(arrival::View {
+                heading: "Choose a server".into(),
+                status: Some(
+                    self.error
+                        .clone()
+                        .unwrap_or_else(|| "Searching the network...".into()),
+                ),
+                connected: None,
+                items: self
+                    .servers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, choice)| arrival::Item {
+                        key: arrival::Key::Server(choice.address.clone()),
+                        kind: arrival::Kind::Server {
+                            source: choice.source,
+                            available: choice.is_available(),
+                        },
+                        label: choice.label.clone(),
+                        detail: Some(
+                            choice
+                                .unavailable
+                                .clone()
+                                .or_else(|| choice.counts())
+                                .unwrap_or_else(|| choice.address.clone()),
+                        ),
+                        selected: index == self.server,
+                    })
+                    .collect(),
+                ring: None,
+                joining: None,
+            }),
+            Mode::Lobby => {
+                let server = self
+                    .connected
+                    .as_ref()
+                    .map_or("server", |choice| choice.label.as_str());
+                let ring = self.step.ring();
+                let spaces = self.step == LobbyStep::Spaces;
+                let status = self.status().or_else(|| self.ended.clone()).or_else(|| {
+                    if self.joining.is_some() {
+                        Some("Joining...".into())
+                    } else if !self.listed {
+                        Some("Listing spaces...".into())
+                    } else if !spaces {
+                        Some(self.ring_hint(self.step).into())
+                    } else if self.spaces.is_empty() {
+                        Some("No spaces yet; create one.".into())
+                    } else {
+                        None
+                    }
+                });
+                let items = self
+                    .spaces
+                    .iter()
+                    .enumerate()
+                    .map(|(index, space)| arrival::Item {
+                        key: arrival::Key::Space(space.id.clone()),
+                        kind: arrival::Kind::Space {
+                            activity: space.activity,
+                            participants: space.participants,
+                            hue: arrival::hue(&space.id),
+                        },
+                        label: space.title.clone(),
+                        detail: Some(activity_label(space.activity).into()),
+                        selected: spaces && index == self.selected,
+                    })
+                    .chain([arrival::Item {
+                        key: arrival::Key::Create,
+                        kind: arrival::Kind::Create { open: !spaces },
+                        label: if spaces { "New space" } else { "Back" }.into(),
+                        detail: None,
+                        selected: spaces && self.selected >= self.spaces.len(),
+                    }])
+                    .collect();
+                Some(arrival::View {
+                    heading: match ring {
+                        Some(step) => step.title().into(),
+                        None => format!("Spaces on {server}"),
+                    },
+                    status,
+                    connected: self.connected.as_ref().map(|choice| arrival::Item {
+                        key: arrival::Key::Connected(choice.address.clone()),
+                        kind: arrival::Kind::Connected,
+                        label: choice.label.clone(),
+                        detail: Some("Choose to change".into()),
+                        selected: false,
+                    }),
+                    items,
+                    ring: ring.map(|step| arrival::Ring {
+                        step,
+                        items: self.ring_items(self.step),
+                    }),
+                    joining: self
+                        .joining
+                        .as_ref()
+                        .map(|space| arrival::Key::Space(space.clone())),
+                })
+            }
+        }
+    }
+
+    /// The space joined, as the arrival object it was chosen from, so that its environment grows out of that object.
+    pub fn entered(&self) -> Option<arrival::Key> {
+        self.space
+            .as_ref()
+            .filter(|_| self.mode == Mode::Space)
+            .map(|space| arrival::Key::Space(space.id.clone()))
+    }
+
+    /// Choose an arrival object, as by pointing at it and pulling the trigger.
+    pub fn choose_object(&mut self, key: &arrival::Key) {
+        match (self.mode, key) {
+            (Mode::Servers, arrival::Key::Server(address)) => {
+                if let Some(index) = self
+                    .servers
+                    .iter()
+                    .position(|choice| &choice.address == address)
+                {
+                    self.server = index;
+                    self.chosen = true;
+                    self.missing = None;
+                    self.accept();
+                }
+            }
+            (Mode::Lobby, arrival::Key::Connected(_)) => self.leave_server(),
+            (Mode::Lobby, arrival::Key::Space(id)) => {
+                if let Some(index) = self.spaces.iter().position(|space| &space.id == id) {
+                    self.close_menu();
+                    self.selected = index;
+                    self.accept();
+                }
+            }
+            (Mode::Lobby, arrival::Key::Create) => {
+                self.error = None;
+                if self.step == LobbyStep::Spaces {
+                    self.selected = self.spaces.len();
+                    self.accept();
+                } else {
+                    self.back_ring();
+                }
+            }
+            (Mode::Lobby, key) => {
+                let position = self
+                    .ring_items(self.step)
+                    .iter()
+                    .position(|item| &item.key == key);
+                if let Some(index) = position {
+                    self.error = None;
+                    self.menu = index;
+                    self.accept();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1334,6 +1592,12 @@ impl Conversation {
         let status = talking.or_else(|| self.status()).unwrap_or_else(|| {
             if let Some(error) = &space.error {
                 format!("ERROR: {error}")
+            } else if let Some(missing) = self.missing_environment() {
+                // The grid is shown instead, never another environment.
+                match missing {
+                    "" => "The server named no environment.".into(),
+                    missing => format!("Unknown environment: {missing}"),
+                }
             } else if let Some(entry) = self.own_queued() {
                 format!("Queued: {}", entry.text)
             } else {
@@ -1396,6 +1660,14 @@ impl Conversation {
         lines.push(footer.into());
         lines
     }
+}
+
+/// `create`, a `CreateSpace`, bound to `chosen`.
+fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> ClientMessage {
+    if let ClientMessage::CreateSpace { environment, .. } = &mut create {
+        *environment = chosen;
+    }
+    create
 }
 
 /// Messages, then the queue when it has entries.
@@ -1486,7 +1758,16 @@ mod tests {
             server: "studio".into(),
             backends,
             roots,
+            environments: sky(),
         })
+    }
+
+    /// The environments today's server offers.
+    fn sky() -> Vec<EnvironmentInfo> {
+        vec![EnvironmentInfo {
+            id: "sky".into(),
+            label: "Sky".into(),
+        }]
     }
 
     /// A backend list for the menu tests.
@@ -1527,6 +1808,7 @@ mod tests {
             title: "Tomori".into(),
             backend: "claude-code".into(),
             directory: "/work/tomori".into(),
+            environment: "sky".into(),
             activity: Activity::Idle,
             participants: vec![Participant {
                 id: "p".into(),
@@ -1637,6 +1919,7 @@ mod tests {
                 title: "Tomori".into(),
                 backend: "claude-code".into(),
                 directory: "/work/tomori".into(),
+                environment: "sky".into(),
                 activity: Activity::Running,
                 participants: 2,
             }],
@@ -1654,67 +1937,24 @@ mod tests {
         assert_eq!(conversation.mode(), Mode::Space);
     }
 
-    #[test]
-    fn the_lobby_menu_creates_a_space() {
-        let mut conversation = in_lobby(backends(), roots());
-        assert_eq!(conversation.mode(), Mode::Lobby);
-
-        // Y opens the choices; A on “Create a space” walks backend, then directory.
-        conversation.refresh();
-        assert!(conversation.text().contains("Create a space"));
-        assert!(
-            conversation
-                .text()
-                .contains("Attach to an existing session")
-        );
-        conversation.navigate(0, 0);
-        assert!(!conversation.accept());
-        assert!(conversation.text().contains("PICK A BACKEND"));
-
-        conversation.accept();
-        assert!(conversation.text().contains("PICK A FOLDER"));
-        conversation.accept();
-        let sent = sent(&mut conversation);
-        assert_eq!(
-            sent,
-            [ClientMessage::CreateSpace {
-                title: "fake in tomori".into(),
-                backend: "fake".into(),
-                directory: "/work/tomori".into(),
-                session: None,
-            }]
-        );
-        // Back to the spaces, having made the choice.
-        assert!(matches!(conversation.mode(), Mode::Lobby));
-        assert!(conversation.text().contains("SPACES"));
+    fn listed(conversation: &mut Conversation, spaces: Vec<SpaceSummary>) {
+        conversation.apply(Event::Message(ServerMessage::Spaces { spaces }));
     }
 
-    #[test]
-    fn the_lobby_menu_attaches_to_an_existing_session() {
-        let mut conversation = in_lobby(backends(), roots());
-        conversation.refresh();
-        // “Create a space”, then “Attach to an existing session”.
-        conversation.navigate(0, 1);
-        conversation.accept();
-        assert!(conversation.text().contains("ATTACH: BACKEND"));
-        // Only the attaching backend is offered.
-        assert!(conversation.text().contains("> fake"));
-        assert!(!conversation.text().contains("> plain"));
+    fn summary(id: &str, title: &str) -> SpaceSummary {
+        SpaceSummary {
+            id: id.into(),
+            title: title.into(),
+            backend: "fake".into(),
+            directory: "/work/tomori".into(),
+            activity: Activity::Idle,
+            participants: 1,
+            environment: "sky".into(),
+        }
+    }
 
-        conversation.accept();
-        assert!(conversation.text().contains("ATTACH: FOLDER"));
-        conversation.accept();
-        // The folder choice asks the backend to list its sessions there.
-        assert_eq!(
-            sent(&mut conversation),
-            [ClientMessage::ListSessions {
-                backend: "fake".into(),
-                directory: "/work/tomori".into(),
-            }]
-        );
-        assert!(conversation.text().contains("ATTACH: SESSION"));
-        // The session list arrives and is shown by title.
-        conversation.apply(Event::Message(ServerMessage::Sessions {
+    fn sessions() -> Event {
+        Event::Message(ServerMessage::Sessions {
             sessions: vec![
                 protocol::SessionSummary {
                     id: "ses_1".into(),
@@ -1727,20 +1967,398 @@ mod tests {
                     directory: "/work/tomori".into(),
                 },
             ],
-        }));
+        })
+    }
 
-        conversation.accept();
-        let sent = sent(&mut conversation);
+    fn keys(items: &[arrival::Item]) -> Vec<arrival::Key> {
+        items.iter().map(|item| item.key.clone()).collect()
+    }
+
+    #[test]
+    fn the_create_object_is_shown_directly_when_there_are_no_spaces() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![]);
+        let view = conversation.arrival().unwrap();
+        assert_eq!(keys(&view.items), [arrival::Key::Create]);
+        assert!(view.items[0].selected);
+        assert_eq!(view.ring, None);
+        assert_eq!(view.status.as_deref(), Some("No spaces yet; create one."));
+        assert!(conversation.text().contains("> + New space"));
+        assert_fits(&mut conversation);
+
+        // With spaces, it sits after them in the same view.
+        listed(&mut conversation, vec![summary("one", "One")]);
+        let view = conversation.arrival().unwrap();
         assert_eq!(
-            sent,
+            keys(&view.items),
+            [arrival::Key::Space("one".into()), arrival::Key::Create]
+        );
+        // The create object stays selected as the spaces change.
+        assert!(view.items[1].selected);
+    }
+
+    #[test]
+    fn the_stick_creates_a_space_and_a_backend_without_attaching_skips_the_session_ring() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![]);
+        // A on the create object opens the backend ring in place.
+        assert!(!conversation.accept());
+        assert!(conversation.text().contains("NEW SPACE: BACKEND"));
+        assert_fits(&mut conversation);
+        let view = conversation.arrival().unwrap();
+        let ring = view.ring.unwrap();
+        assert_eq!(ring.step, arrival::Step::Backend);
+        assert_eq!(
+            keys(&ring.items),
+            [
+                arrival::Key::Backend("fake".into()),
+                arrival::Key::Backend("plain".into())
+            ]
+        );
+        assert_eq!(view.items, conversation.arrival().unwrap().items);
+        assert_eq!(
+            view.items.last().unwrap().kind,
+            arrival::Kind::Create { open: true }
+        );
+
+        conversation.navigate(0, 1);
+        conversation.accept();
+        assert!(conversation.text().contains("NEW SPACE: FOLDER"));
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CreateSpace {
+                title: "plain in tomori".into(),
+                backend: "plain".into(),
+                directory: "/work/tomori".into(),
+                session: None,
+                environment: Some("sky".into()),
+            }]
+        );
+        // Back at the spaces, with the rings closed.
+        let view = conversation.arrival().unwrap();
+        assert_eq!(view.ring, None);
+        assert!(conversation.text().contains("SPACES"));
+    }
+
+    #[test]
+    fn pointing_creates_a_space_attached_to_an_existing_session() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![summary("one", "One")]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        // The backend attaches, so its sessions in the folder are asked for and the session ring opens.
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::ListSessions {
+                backend: "fake".into(),
+                directory: "/work/tomori".into(),
+            }]
+        );
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        assert_eq!(ring.step, arrival::Step::Session);
+        assert_eq!(keys(&ring.items), [arrival::Key::Session(None)]);
+        conversation.apply(sessions());
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        assert_eq!(ring.items.len(), 3);
+        assert_eq!(ring.items[1].label, "Tomori opencode support");
+        assert!(conversation.text().contains("NEW SPACE: SESSION"));
+        assert_fits(&mut conversation);
+
+        conversation.choose_object(&arrival::Key::Session(Some("ses_1".into())));
+        assert_eq!(
+            sent(&mut conversation),
             [ClientMessage::CreateSpace {
                 title: "Tomori opencode support".into(),
                 backend: "fake".into(),
                 directory: "/work/tomori".into(),
                 session: Some("ses_1".into()),
+                environment: Some("sky".into()),
+            }]
+        );
+        assert_eq!(conversation.arrival().unwrap().ring, None);
+    }
+
+    #[test]
+    fn a_new_session_is_offered_first_on_the_session_ring() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![]);
+        conversation.accept();
+        conversation.accept();
+        conversation.accept();
+        conversation.apply(sessions());
+        conversation.take_actions();
+        assert!(conversation.text().contains("> New session"));
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CreateSpace {
+                title: "fake in tomori".into(),
+                backend: "fake".into(),
+                directory: "/work/tomori".into(),
+                session: None,
+                environment: Some("sky".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn stepping_back_returns_to_the_previous_ring() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![summary("one", "One")]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        conversation.apply(sessions());
+        let step = |conversation: &Conversation| {
+            conversation.arrival().unwrap().ring.map(|ring| {
+                (
+                    ring.step,
+                    keys(
+                        &ring
+                            .items
+                            .into_iter()
+                            .filter(|item| item.selected)
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            })
+        };
+        // B steps back, with what was chosen there selected.
+        conversation.back();
+        assert_eq!(
+            step(&conversation),
+            Some((
+                arrival::Step::Directory,
+                vec![arrival::Key::Directory("/work/tomori".into())]
+            ))
+        );
+        // So does choosing the create object while its rings are open.
+        conversation.choose_object(&arrival::Key::Create);
+        assert_eq!(
+            step(&conversation),
+            Some((
+                arrival::Step::Backend,
+                vec![arrival::Key::Backend("fake".into())]
+            ))
+        );
+        conversation.back();
+        assert_eq!(step(&conversation), None);
+        conversation.take_actions();
+        // From the spaces, B returns to the servers.
+        conversation.back();
+        assert_eq!(conversation.take_actions(), [Action::Disconnect]);
+        assert_eq!(conversation.mode(), Mode::Servers);
+    }
+
+    #[test]
+    fn pointing_chooses_servers_spaces_and_the_connected_server() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        let mut old = Choice::new("Old", "10.0.0.3:8765", Source::Discovered);
+        old.unavailable = Some("protocol 2, needs 1".into());
+        let studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
+        conversation.set_servers(vec![
+            old,
+            studio.clone(),
+            Choice::new("USB", USB, Source::Usb),
+        ]);
+        let view = conversation.arrival().unwrap();
+        assert_eq!(view.items.len(), 3);
+        assert_eq!(
+            view.items[0].kind,
+            arrival::Kind::Server {
+                source: Source::Discovered,
+                available: false
+            }
+        );
+        // An incompatible server is shown but can't be chosen.
+        conversation.choose_object(&arrival::Key::Server("10.0.0.3:8765".into()));
+        assert!(conversation.take_actions().is_empty());
+        assert!(
+            conversation
+                .arrival()
+                .unwrap()
+                .status
+                .unwrap()
+                .contains("Cannot join Old")
+        );
+        conversation.choose_object(&arrival::Key::Server("10.0.0.1:8765".into()));
+        assert_eq!(conversation.take_actions(), [Action::Connect(studio)]);
+        conversation.apply(connected());
+        listed(
+            &mut conversation,
+            vec![summary("one", "One"), summary("two", "Two")],
+        );
+        conversation.take_actions();
+        let view = conversation.arrival().unwrap();
+        assert_eq!(view.connected.unwrap().label, "Studio");
+        assert_eq!(view.heading, "Spaces on Studio");
+
+        conversation.choose_object(&arrival::Key::Space("two".into()));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: "two".into()
+            }]
+        );
+        // The connected server returns to the servers.
+        conversation.choose_object(&arrival::Key::Connected("10.0.0.1:8765".into()));
+        assert_eq!(conversation.take_actions(), [Action::Disconnect]);
+        assert!(conversation.is_browsing());
+    }
+
+    #[test]
+    fn a_ring_key_from_another_ring_is_ignored() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![]);
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        assert_eq!(conversation.arrival().unwrap().ring, None);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        assert_eq!(
+            conversation.arrival().unwrap().ring.unwrap().step,
+            arrival::Step::Backend
+        );
+        assert!(sent(&mut conversation).is_empty());
+    }
+
+    /// Walk the creation rings from the create object, choosing the first backend, the first folder and a new session.
+    fn create_in(conversation: &mut Conversation) {
+        listed(conversation, vec![]);
+        conversation.accept();
+        conversation.accept();
+        conversation.accept();
+        conversation.apply(sessions());
+        conversation.take_actions();
+        conversation.accept();
+    }
+
+    #[test]
+    fn several_environments_are_chosen_after_the_folder() {
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            backends: backends(),
+            roots: roots(),
+            environments: vec![
+                EnvironmentInfo {
+                    id: "sky".into(),
+                    label: "Sky".into(),
+                },
+                EnvironmentInfo {
+                    id: "observe".into(),
+                    label: "Observe".into(),
+                },
+            ],
+        }));
+        conversation.take_actions();
+        create_in(&mut conversation);
+        assert!(sent(&mut conversation).is_empty());
+        let text = conversation.text();
+        assert!(text.contains("NEW SPACE: ENVIRONMENT 1/2"), "{text}");
+        assert!(text.contains("> Sky") && text.contains("Observe"), "{text}");
+        assert_fits(&mut conversation);
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        assert_eq!(ring.step, arrival::Step::Environment);
+
+        // B steps back to the session ring without creating anything; choosing again offers the environments again.
+        conversation.back();
+        assert!(conversation.text().contains("NEW SPACE: SESSION"));
+        assert!(sent(&mut conversation).is_empty());
+        conversation.accept();
+        conversation.choose_object(&arrival::Key::Environment("observe".into()));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CreateSpace {
+                title: "fake in tomori".into(),
+                backend: "fake".into(),
+                directory: "/work/tomori".into(),
+                session: None,
+                environment: Some("observe".into()),
             }]
         );
         assert!(conversation.text().contains("SPACES"));
+    }
+
+    #[test]
+    fn a_server_offering_no_environments_binds_its_own() {
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            backends: backends(),
+            roots: roots(),
+            environments: vec![],
+        }));
+        conversation.take_actions();
+        create_in(&mut conversation);
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace {
+                environment: None,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn arrival_and_the_lobby_use_the_grid_and_a_space_its_environment() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        // Leaving returns to the grid at once, before the server confirms.
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        // Returning to the servers keeps the grid.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Servers);
+        assert_eq!(conversation.environment(), Environment::Minimal);
+    }
+
+    #[test]
+    fn a_space_in_an_unknown_environment_shows_the_grid_and_names_it() {
+        let mut conversation = joined(|state| state.environment = "observe".into());
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        let text = conversation.text();
+        assert!(text.contains("Unknown environment: observe"), "{text}");
+        assert_fits(&mut conversation);
+        // An older server names none.
+        conversation.apply(space(|state| state.environment = String::new()));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert!(
+            conversation
+                .text()
+                .contains("The server named no environment.")
+        );
+        // A known one is drawn, and the notice goes.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        assert!(!conversation.text().contains("environment"));
+    }
+
+    #[test]
+    fn the_server_list_shows_advertised_counts() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        let mut studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
+        studio.spaces = Some(2);
+        studio.participants = Some(1);
+        let usb = Choice::new("USB", "127.0.0.1:8765", Source::Usb);
+        conversation.set_servers(vec![studio, usb]);
+        let text = conversation.text();
+        assert!(text.contains("> Studio (2 spaces, 1 person)\n"), "{text}");
+        assert!(text.contains("\nUSB 127.0.0.1:8765\n"), "{text}");
     }
 
     #[test]
@@ -2085,6 +2703,7 @@ mod tests {
                 title: "Tomori".into(),
                 backend: "claude-code".into(),
                 directory: "/work/tomori".into(),
+                environment: "sky".into(),
                 activity: Activity::Idle,
                 participants: 0,
             }],
@@ -2306,6 +2925,7 @@ mod tests {
                     title: long.clone(),
                     backend: "claude-code".into(),
                     directory: "/".into(),
+                    environment: "sky".into(),
                     activity: Activity::Unknown,
                     participants: 0,
                 })

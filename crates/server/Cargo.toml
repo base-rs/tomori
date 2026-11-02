@@ -17,6 +17,10 @@ name = "connection"
 required-features = ["fake"]
 
 [[test]]
+name = "counts"
+required-features = ["fake"]
+
+[[test]]
 name = "limits"
 required-features = ["fake"]
 

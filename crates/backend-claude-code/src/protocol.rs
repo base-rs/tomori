@@ -234,14 +234,22 @@ impl State {
         Snapshot {
             busy: Some(self.busy),
             messages: self.messages.clone(),
-            permission: self.pending.iter().find_map(|(_, pending)| match pending {
-                Pending::Permission { permission, .. } => Some(permission.clone()),
-                Pending::Question { .. } => None,
-            }),
-            question: self.pending.iter().find_map(|(_, pending)| match pending {
-                Pending::Question { question, .. } => Some(question.clone()),
-                Pending::Permission { .. } => None,
-            }),
+            permissions: self
+                .pending
+                .iter()
+                .filter_map(|(_, pending)| match pending {
+                    Pending::Permission { permission, .. } => Some(permission.clone()),
+                    Pending::Question { .. } => None,
+                })
+                .collect(),
+            questions: self
+                .pending
+                .iter()
+                .filter_map(|(_, pending)| match pending {
+                    Pending::Question { question, .. } => Some(question.clone()),
+                    Pending::Permission { .. } => None,
+                })
+                .collect(),
             workers: self.workers.list().to_vec(),
             modes: self.modes(),
         }
@@ -1439,7 +1447,7 @@ mod tests {
                 id: "perm-1".into()
             }]
         );
-        assert_eq!(state.snapshot().permission, None);
+        assert!(state.snapshot().permissions.is_empty());
         assert_eq!(
             state
                 .decide("perm-1", Decision::AllowOnce)

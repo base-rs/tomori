@@ -367,7 +367,7 @@ fn denies_a_permission() {
             }]
         );
         assert_eq!(
-            session.snapshot().await.unwrap().permission.as_ref(),
+            session.snapshot().await.unwrap().permissions.first(),
             Some(permission)
         );
 
@@ -392,7 +392,7 @@ fn denies_a_permission() {
             id: "toolu_011Ui67Q2wPbtCsQNBUvsanY".into(),
             error: Some("The user denied this request.".into()),
         }));
-        assert_eq!(session.snapshot().await.unwrap().permission, None);
+        assert!(session.snapshot().await.unwrap().permissions.is_empty());
 
         close(&session).await;
 
@@ -510,7 +510,7 @@ fn answers_a_question() {
         );
         assert_eq!(question.fields[1].kind, FieldKind::MultipleChoice);
         assert_eq!(
-            session.snapshot().await.unwrap().question.as_ref(),
+            session.snapshot().await.unwrap().questions.first(),
             Some(question)
         );
 

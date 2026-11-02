@@ -53,6 +53,7 @@ fn create(client: &mut TestClient, title: &str, directory: &str, session: Option
         backend: "fake".to_owned(),
         directory: directory.to_owned(),
         session: session.map(str::to_owned),
+        environment: None,
     });
 }
 

@@ -1,7 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{caption::Caption, controller, graphics::Renderer, hands, swarm::Swarm, vulkan::Gpu};
+use crate::{
+    arrival, arrival_graphics, arrival_motion,
+    caption::Caption,
+    controller,
+    graphics::Renderer,
+    hands,
+    pointing::{Pointer, Ray},
+    swarm::Swarm,
+    vulkan::Gpu,
+};
 use anyhow::{Context, Result, ensure};
 use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
@@ -157,18 +166,20 @@ pub fn run(
     let mut last_frame = Instant::now();
     let mut frames = 0_u64;
     let mut stick_latched = false;
-    let mut environment_latched = false;
     let mut choice_latched = false;
     let mut was_talking = false;
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     let mut talk_blocked = false;
     let mut signals = crate::interaction::Signals::default();
+    let mut pointer = Pointer::<arrival::Key>::default();
+    let mut arrival_time = 0.0_f32;
+    let mut motion = arrival_motion::Motion::default();
     let mut delegation_scene = crate::delegation::Scene::new();
     let mut workers = crate::delegation::Workers::default();
     let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
     log::info!(
-        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: attract; A: choose or reset.",
+        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose or reset.",
         images.len()
     );
     'main: loop {
@@ -184,11 +195,11 @@ pub fn run(
                         // Do not lose a real focus-loss transition if the
                         // runtime also queues a refocus in this poll batch.
                         stick_latched = false;
-                        environment_latched = false;
                         choice_latched = false;
                         was_talking = false;
                         talk_blocked = true;
                         conversation.stop_talking();
+                        pointer.release();
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
@@ -226,11 +237,11 @@ pub fn run(
         connection.poll(focused && running, &mut conversation);
         if !focused || !running {
             stick_latched = false;
-            environment_latched = false;
             choice_latched = false;
             was_talking = false;
             talk_blocked = true;
             conversation.stop_talking();
+            pointer.release();
             presentation_navigation.release();
         }
         if !running {
@@ -248,12 +259,6 @@ pub fn run(
         // Only actual session focus loss cancels an utterance; an X release
         // while still focused must finalize/send it instead.
         let mut controls = input.sample_actions(&session, focused)?;
-        let environment_pressed = controls.environment_grip > 0.75;
-        if environment_pressed && !environment_latched {
-            renderer.set_environment(renderer.environment().next());
-            log::info!("Environment: {:?}", renderer.environment());
-        }
-        environment_latched = environment_pressed;
         let stick = controls.navigation;
         let moving = stick.x.abs() > 0.6 || stick.y.abs() > 0.6;
         let navigate = moving && !stick_latched;
@@ -361,7 +366,30 @@ pub fn run(
         } else {
             [None, None]
         };
-        swarm.step(dt, controller.filter(|_| controls.attracting));
+        // Outside a space, arrival's objects are pointed at with the right controller's aim ray. A trigger pull that begins on one of them chooses it; any other pull attracts the swarm, as it does inside a space, where there is nothing to point at.
+        let ray = controls
+            .aim
+            .and_then(|pose| scene_anchor.to_scene_pose(pose))
+            .and_then(|pose| {
+                Ray::from_pose(
+                    Vec3::from_array(pose.position),
+                    glam::Quat::from_array(pose.orientation),
+                )
+            });
+        // Arrival's objects move between its steps rather than cutting, and are pointed at where they are now. See `design/arrival.md`.
+        arrival_time += dt;
+        motion.update(&arrival_target(&conversation), arrival_time);
+        let mut scene = motion.scene(arrival_time);
+        let pointing = pointer.update(ray, controls.trigger, &scene.targets());
+        if let Some(key) = &pointing.chosen {
+            conversation.choose_object(key);
+            motion.update(&arrival_target(&conversation), arrival_time);
+            scene = motion.scene(arrival_time);
+        }
+        let in_arrival = conversation.arrival().is_some();
+        // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
+        renderer.set_scenery(motion.scenery(arrival_time));
+        swarm.step(dt, controller.filter(|_| pointing.attracting));
         renderer.update(
             &gpu.queue,
             &swarm,
@@ -372,7 +400,7 @@ pub fn run(
             } else {
                 controller
             },
-            controls.attracting,
+            pointing.attracting,
         );
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {
@@ -388,6 +416,22 @@ pub fn run(
                 delegation_scene.cubes(),
                 delegation_scene.stations(),
                 current_workspace,
+            );
+        }
+        // Arrival's objects are still drawn as they leave on entering a space, but the ray only outside one.
+        if in_arrival || !scene.objects.is_empty() || scene.heading.is_some() {
+            renderer.update_arrival(
+                &gpu.device,
+                &gpu.queue,
+                &arrival_graphics::Frame {
+                    scene: &scene,
+                    hovered: pointing.hit.as_ref().map(|hit| &hit.key),
+                    ray: ray
+                        .zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
+                        .map(|(ray, end)| (ray.origin, end))
+                        .filter(|_| in_arrival),
+                    time: arrival_time,
+                },
             );
         }
         renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
@@ -409,7 +453,8 @@ pub fn run(
             &images[image].views,
             &[view_projection(&views[0]), view_projection(&views[1])],
             scene_anchor.transform(),
-            Some((&caption, head_pose(&views))),
+            // Arrival is shown in the world, with its own labels, rather than on the panel.
+            (!in_arrival).then(|| (&caption, head_pose(&views))),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
@@ -708,6 +753,9 @@ struct Input {
     grip: xr::Action<xr::Posef>,
     left_grip_space: xr::Space,
     left_grip: xr::Action<xr::Posef>,
+    /// The right controller's pointing pose, whose forward axis is the ray.
+    aim_space: xr::Space,
+    aim: xr::Action<xr::Posef>,
     trigger: xr::Action<f32>,
     reset: xr::Action<bool>,
     talk: xr::Action<bool>,
@@ -718,7 +766,6 @@ struct Input {
     sound_toggle: xr::Action<bool>,
     replay: xr::Action<bool>,
     audience_grip: xr::Action<f32>,
-    environment_grip: xr::Action<f32>,
     set: xr::ActionSet,
     hand_paths: [xr::Path; 2],
     location_errors: [Option<xr::sys::Result>; 2],
@@ -739,14 +786,16 @@ struct ActionInputs {
     sound_toggle: xr::ActionState<bool>,
     replay: xr::ActionState<bool>,
     audience_grip: xr::ActionState<f32>,
-    environment_grip: xr::ActionState<f32>,
 }
 
 #[derive(Default)]
 struct Controls {
     controller: Option<Vec3>,
     controller_poses: [Option<xr::Posef>; 2],
-    attracting: bool,
+    /// The right controller's aim pose, while tracked.
+    aim: Option<xr::Posef>,
+    /// The trigger's value, while its action is active; the pointer decides whether a pull attracts or chooses.
+    trigger: Option<f32>,
     reset: bool,
     talk: bool,
     talk_active: bool,
@@ -757,7 +806,6 @@ struct Controls {
     sound_toggle: bool,
     replay: bool,
     audience_grip: f32,
-    environment_grip: f32,
 }
 
 impl Controls {
@@ -775,7 +823,10 @@ impl Controls {
             }
         };
         Self {
-            attracting: actions.trigger.is_active && actions.trigger.current_state > 0.2,
+            trigger: actions
+                .trigger
+                .is_active
+                .then_some(actions.trigger.current_state),
             reset: pressed(actions.reset),
             talk: held(actions.talk),
             talk_active: actions.talk.is_active,
@@ -787,11 +838,6 @@ impl Controls {
             replay: pressed(actions.replay),
             audience_grip: if actions.audience_grip.is_active {
                 actions.audience_grip.current_state
-            } else {
-                0.0
-            },
-            environment_grip: if actions.environment_grip.is_active {
-                actions.environment_grip.current_state
             } else {
                 0.0
             },
@@ -834,7 +880,8 @@ impl Input {
         let set = instance.create_action_set("swarm", "Swarm", 0)?;
         let grip = set.create_action::<xr::Posef>("right_grip", "Right controller", &[])?;
         let left_grip = set.create_action::<xr::Posef>("left_grip_pose", "Left controller", &[])?;
-        let trigger = set.create_action::<f32>("attract", "Attract agents", &[])?;
+        let aim = set.create_action::<xr::Posef>("right_aim", "Point", &[])?;
+        let trigger = set.create_action::<f32>("attract", "Attract agents or choose", &[])?;
         let reset = set.create_action::<bool>("reset", "Reset swarm", &[])?;
         let talk = set.create_action::<bool>("talk", "Hold to speak", &[])?;
         let back = set.create_action::<bool>("chat_back", "Back or deny", &[])?;
@@ -851,8 +898,6 @@ impl Input {
         let replay = set.create_action::<bool>("replay", "Replay spoken reply", &[])?;
         let audience_grip =
             set.create_action::<f32>("audience_mic", "Toggle live audience microphone", &[])?;
-        let environment_grip =
-            set.create_action::<f32>("environment", "Switch environment", &[])?;
         instance.suggest_interaction_profile_bindings(
             instance.string_to_path("/interaction_profiles/oculus/touch_controller")?,
             &[
@@ -863,6 +908,10 @@ impl Input {
                 xr::Binding::new(
                     &left_grip,
                     instance.string_to_path("/user/hand/left/input/grip/pose")?,
+                ),
+                xr::Binding::new(
+                    &aim,
+                    instance.string_to_path("/user/hand/right/input/aim/pose")?,
                 ),
                 xr::Binding::new(
                     &trigger,
@@ -904,21 +953,20 @@ impl Input {
                     &audience_grip,
                     instance.string_to_path("/user/hand/left/input/squeeze/value")?,
                 ),
-                xr::Binding::new(
-                    &environment_grip,
-                    instance.string_to_path("/user/hand/right/input/squeeze/value")?,
-                ),
             ],
         )?;
         session.attach_action_sets(&[&set])?;
         let grip_space = grip.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
         let left_grip_space =
             left_grip.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
+        let aim_space = aim.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?;
         Ok(Self {
             grip_space,
             grip,
             left_grip_space,
             left_grip,
+            aim_space,
+            aim,
             trigger,
             reset,
             talk,
@@ -929,7 +977,6 @@ impl Input {
             sound_toggle,
             replay,
             audience_grip,
-            environment_grip,
             set,
             hand_paths: [
                 instance.string_to_path("/user/hand/left")?,
@@ -978,7 +1025,6 @@ impl Input {
                 sound_toggle: self.sound_toggle.state(session, xr::Path::NULL)?,
                 replay: self.replay.state(session, xr::Path::NULL)?,
                 audience_grip: self.audience_grip.state(session, xr::Path::NULL)?,
-                environment_grip: self.environment_grip.state(session, xr::Path::NULL)?,
             },
             focused,
         ))
@@ -1016,6 +1062,17 @@ impl Input {
             }
         }
         controls.set_locations(locations);
+        // Pointing is optional: an aim pose that cannot be located only hides the ray.
+        controls.aim = locate(&self.aim, &self.aim_space)
+            .ok()
+            .flatten()
+            .filter(|location| {
+                location.location_flags.contains(
+                    xr::SpaceLocationFlags::POSITION_VALID
+                        | xr::SpaceLocationFlags::ORIENTATION_VALID,
+                )
+            })
+            .map(|location| location.pose);
         // State-change-only and rate-limited: enough to distinguish an absent
         // model from a runtime action/profile switch during a headset check.
         let diagnostic = (
@@ -1126,6 +1183,14 @@ fn initial_scene_transform(views: &[xr::View]) -> Option<Mat4> {
     ))
 }
 
+/// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
+fn arrival_target(conversation: &crate::conversation::Conversation) -> arrival::Scene {
+    match conversation.arrival() {
+        Some(view) => arrival::Scene::layout(&view),
+        None => arrival::Scene::entered(conversation.entered(), conversation.environment()),
+    }
+}
+
 fn head_pose(views: &[xr::View]) -> Mat4 {
     let left = views[0].pose.position;
     let right = views[1].pose.position;
@@ -1193,7 +1258,6 @@ mod tests {
             sound_toggle: action(held, active, changed),
             replay: action(held, active, changed),
             audience_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
-            environment_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
         }
     }
 
@@ -1237,7 +1301,6 @@ mod tests {
             controls.set_locations(locations);
             assert_eq!(controls.talk, held);
             assert_eq!(controls.audience_grip, if held { 1.0 } else { 0.0 });
-            assert_eq!(controls.environment_grip, if held { 1.0 } else { 0.0 });
             assert_press_edges(&controls, held && changed);
         }
     }
@@ -1257,7 +1320,7 @@ mod tests {
         ] {
             let mut controls = Controls::from_actions(actions(true, true, true), true);
             controls.set_locations(locations);
-            assert!(controls.talk && controls.attracting);
+            assert!(controls.talk && controls.trigger == Some(1.0));
             assert_press_edges(&controls, true);
             assert_eq!(controls.audience_grip, 1.0);
             assert_eq!(controls.navigation.x, 0.8);
@@ -1306,11 +1369,10 @@ mod tests {
             // Deliberately stale held/changed values: neither a disconnected
             // controller nor an unfocused session may keep recording alive.
             let controls = Controls::from_actions(actions(true, active, true), focused);
-            assert!(!controls.talk && !controls.attracting);
+            assert!(!controls.talk && controls.trigger.is_none());
             assert!(!controls.talk_active);
             assert_press_edges(&controls, false);
             assert_eq!(controls.audience_grip, 0.0);
-            assert_eq!(controls.environment_grip, 0.0);
             assert_eq!((controls.navigation.x, controls.navigation.y), (0.0, 0.0));
             assert_eq!(
                 (
@@ -1337,17 +1399,6 @@ mod tests {
         let controls = Controls::from_actions(input, true);
         assert_eq!(controls.audience_grip, 1.0);
         assert!(!controls.talk);
-        assert_press_edges(&controls, false);
-    }
-
-    #[test]
-    fn environment_grip_is_independent_of_chat_and_attraction() {
-        let mut input = actions(false, true, false);
-        input.environment_grip = action(1.0, true, true);
-        let controls = Controls::from_actions(input, true);
-        assert_eq!(controls.environment_grip, 1.0);
-        assert_eq!(controls.audience_grip, 0.0);
-        assert!(!controls.talk && !controls.attracting);
         assert_press_edges(&controls, false);
     }
 

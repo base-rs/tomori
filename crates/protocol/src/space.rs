@@ -10,6 +10,9 @@ pub struct SpaceSummary {
     pub title: String,
     pub backend: String,
     pub directory: String,
+    /// The identifier of the space's [`EnvironmentInfo`]. Empty from older servers, which did not name one.
+    #[serde(default)]
+    pub environment: String,
     pub activity: Activity,
     pub participants: usize,
 }
@@ -39,6 +42,15 @@ pub struct WorkspaceRoot {
     pub label: String,
 }
 
+/// An environment a space can be bound to, as offered to a client so it can choose one when creating a space. See `design/environments.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentInfo {
+    /// An opaque identifier, such as `sky`, ready to send in a `CreateSpace`. A client that does not know it can still name it.
+    pub id: String,
+    /// A short name for display.
+    pub label: String,
+}
+
 /// The agent's observed state. `Unknown` is never treated as idle or complete, and stands for any state a newer server sends that this build does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +73,9 @@ pub struct SpaceState {
     pub title: String,
     pub backend: String,
     pub directory: String,
+    /// The identifier of the environment the space is bound to, the same for every participant. A client that does not know it shows the Minimal grid and names it. Empty from older servers, which did not name one.
+    #[serde(default)]
+    pub environment: String,
     pub activity: Activity,
     /// Recent conversation, oldest first, projected to displayable text.
     pub messages: Vec<Message>,
@@ -68,6 +83,11 @@ pub struct SpaceState {
     pub approval: Option<Approval>,
     pub question: Option<Question>,
     pub workers: Vec<Worker>,
+    /// Whether absence from this list is evidence that a previously observed
+    /// worker was removed. It does not assert that every worker was discovered.
+    /// Absent when sent by an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_authoritative: Option<bool>,
     pub presentations: Vec<Presentation>,
     pub participants: Vec<Participant>,
     pub attribution: bool,
@@ -286,6 +306,27 @@ mod tests {
     }
 
     #[test]
+    fn worker_completeness_is_optional_for_older_servers() {
+        let legacy = serde_json::to_value(SpaceState::default()).unwrap();
+        assert!(legacy.get("workers_authoritative").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(legacy)
+                .unwrap()
+                .workers_authoritative,
+            None
+        );
+        for complete in [true, false] {
+            let state = SpaceState {
+                workers_authoritative: Some(complete),
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&state).unwrap();
+            assert_eq!(json["workers_authoritative"], complete);
+            assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+        }
+    }
+
+    #[test]
     fn approvals_list_options_only_when_offered() {
         let mut approval = Approval {
             id: "p".into(),
@@ -350,5 +391,36 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(summary.activity, Activity::Unknown);
+    }
+
+    #[test]
+    fn spaces_name_their_environment_and_older_servers_name_none() {
+        let summary: SpaceSummary = serde_json::from_value(serde_json::json!({
+            "id": "space-1",
+            "title": "Tomori",
+            "backend": "fake",
+            "directory": "/tmp",
+            "environment": "sky",
+            "activity": "idle",
+            "participants": 1,
+        }))
+        .unwrap();
+        assert_eq!(summary.environment, "sky");
+        let state = SpaceState {
+            environment: "observe".into(),
+            ..SpaceState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["environment"], "observe");
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+
+        let mut older = serde_json::to_value(SpaceState::default()).unwrap();
+        older.as_object_mut().unwrap().remove("environment");
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(older)
+                .unwrap()
+                .environment,
+            ""
+        );
     }
 }

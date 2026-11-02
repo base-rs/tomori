@@ -208,6 +208,7 @@ fn main() {
                 backend: "fake".to_owned(),
                 directory,
                 session: None,
+                environment: None,
             });
             client.wait_for(|message| match message {
                 ServerMessage::Space { state } => Some(state.id.clone()),
@@ -262,7 +263,7 @@ fn main() {
             head,
             left: None,
             right: None,
-            hands: Some([Some(hand), None]),
+            hands: Some(Box::new([Some(hand), None])),
         });
 
         // A periodic ping keeps the client side of the connection alive too.

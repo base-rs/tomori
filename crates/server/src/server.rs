@@ -9,13 +9,14 @@ use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::{Backend, Event, Session, SessionSpec, Snapshot};
+use backend::{Backend, Event, Session, SessionSpec};
 use base_http_server::{Error, Statistics};
 use base_scheduler::{
     Cancellation, OperationError, OperationResult, SocketAccept, SocketAddress, SocketBind,
     SocketClose, SocketListen, SocketOpen, SocketReuseAddress, SocketSetOption,
     SocketStreamReading, SocketStreamWriting, SocketType, Timers,
 };
+use discovery::Counts;
 use futures_lite::future::zip;
 use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -49,6 +50,9 @@ pub struct Server {
     slots: Arc<SpaceSlots>,
     /// How long cancelled connections may take to finish once serving ends; see [`DEFAULT_DRAIN_TIMEOUT`].
     drain_timeout: Duration,
+    /// Told the counts to advertise as they change; see [`Self::with_counts`].
+    counts: Option<Box<dyn Fn(Counts) + Send + Sync>>,
+    counts_interval: Duration,
 }
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
@@ -62,6 +66,9 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// How long cancelled connections may take to finish once serving ends, before they are abandoned so that shutdown completes. See `design/server.md`.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The shortest time between two advertised counts, and between starting to serve and the first. Changes in between are coalesced, so a burst of connections or spaces is advertised once, with the counts at its end. Each update is a multicast announcement, and browsers only replace a TXT record they have held for a second (see [`discovery::Advertisement::update`]), so updates must be at least that far apart. See `design/server.md`.
+pub const COUNTS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Open a listening TCP socket.
 pub async fn bind<S>(
@@ -102,7 +109,26 @@ impl Server {
             roots: None,
             slots,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+            counts: None,
+            counts_interval: COUNTS_INTERVAL,
         }
+    }
+
+    /// How many spaces are listed and participants connected now, for advertising before [`run`](Self::run) starts.
+    pub fn counts(&self) -> Counts {
+        self.hub.counts()
+    }
+
+    /// While running, call `publish` with the counts whenever they change, at most once per [`COUNTS_INTERVAL`], so that they can be advertised. The first call reports a change from the counts when [`run`](Self::run) started.
+    pub fn with_counts(mut self, publish: impl Fn(Counts) + Send + Sync + 'static) -> Self {
+        self.counts = Some(Box::new(publish));
+        self
+    }
+
+    /// Change the shortest time between published counts; see [`COUNTS_INTERVAL`].
+    pub fn with_counts_interval(mut self, interval: Duration) -> Self {
+        self.counts_interval = interval;
+        self
     }
 
     /// Run spaces only in these directories or beneath them. Without this, the only root is the current directory when the server runs. See `design/workspaces.md`.
@@ -181,18 +207,57 @@ impl Server {
             services.cancel();
             served
         };
-        let (served, ((), ((), ()))) = zip(
+        let (served, ((), ((), ((), ())))) = zip(
             serving,
             zip(
                 self.supervise(scheduler, &services),
                 zip(
                     self.sweep(scheduler, &services),
-                    self.pace(scheduler, &services),
+                    zip(
+                        self.pace(scheduler, &services),
+                        self.publish(scheduler, &services),
+                    ),
                 ),
             ),
         )
         .await;
         served
+    }
+
+    /// Report changed counts to the [`with_counts`](Self::with_counts) callback, at most once per interval. A change waits until the interval since the last report, or since starting, has passed, and then the latest counts are reported, unless they have changed back.
+    async fn publish<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+        let Some(publish) = &self.counts else {
+            return;
+        };
+        let mut timer = scheduler.timer();
+        let mut published = self.hub.counts();
+        let mut due = scheduler.now() + self.counts_interval;
+        loop {
+            let listener = self.hub.listen_counts();
+            if self.hub.counts() == published {
+                if let Either::Right(_) =
+                    select(pin!(listener), pin!(cancellation.cancelled())).await
+                {
+                    return;
+                }
+                continue;
+            }
+            if let Err(error) = scheduler
+                .timer_wait_until(&mut timer, due, cancellation)
+                .await
+            {
+                if !cancellation.is_cancelled() {
+                    log::error!("The counts timer failed: {error}");
+                }
+                return;
+            }
+            let counts = self.hub.counts();
+            if counts != published {
+                publish(counts);
+                published = counts;
+                due = scheduler.now() + self.counts_interval;
+            }
+        }
     }
 
     /// Send space snapshots that were deferred to keep a streaming reply within [`crate::hub::SNAPSHOT_INTERVAL`], when they are due. Sleeps until a space defers one, and wakes when another space defers one, which may be due sooner.
@@ -692,7 +757,7 @@ async fn run_space<S: Timers>(
         }
     }
     // Only an accepted directory takes a place, which is held until the session has closed or failed to start. Spaces still starting count, so concurrent requests cannot pass the limit together.
-    let Some(_slot) = places.slots.acquire() else {
+    let Some(slot) = places.slots.acquire() else {
         hub.create_failed(&request.creator, places.slots.full_error());
         return;
     };
@@ -720,9 +785,24 @@ async fn run_space<S: Timers>(
             return;
         }
     };
-    let (snapshot, error) = match session.snapshot().await {
-        Ok(snapshot) => (snapshot, None),
-        Err(error) => (Snapshot::default(), Some(error.message)),
+    let snapshot = match session.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // Close the backend handle without deleting an attached session.
+            if let Err(error) = session.close().await {
+                log::warn!("Closing a session after snapshot failure failed: {error}");
+            }
+            // Release the slot before reporting the retryable failure.
+            drop(slot);
+            hub.create_failed(
+                &request.creator,
+                format!(
+                    "Could not read the initial session state: {}. Please retry.",
+                    error.message
+                ),
+            );
+            return;
+        }
     };
     let (commands, receiver) = async_channel::unbounded();
     let Some(space) = hub.register_space(&request, session.id(), snapshot, commands) else {
@@ -732,9 +812,6 @@ async fn run_space<S: Timers>(
         }
         return;
     };
-    if let Some(error) = error {
-        hub.space_event(&space, Event::Error { message: error });
-    }
     let voice = voices.start(&hub, &space);
     let error = drive(&hub, &space, &session, receiver, voice).await;
     hub.space_ended(&space, error);

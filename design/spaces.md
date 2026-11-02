@@ -12,7 +12,13 @@ Space identifiers are never reused, including by a later run of the server, beca
 
 A participant who disconnects leaves their space but keeps their identity and audio source, and rejoins that space when they reconnect, unless they left it explicitly. A client may send `leave` straight after Hello to restore a leave made while it was disconnected; this overrides the rejoin, and is harmless when the participant is in no space. The server forgets a participant who has been disconnected for longer than a generous retention, 12 hours by default; after that they reconnect as a new participant in the lobby.
 
-Shared space state is held by the server and is the same for every participant: the conversation, the input queue, pending approvals and questions (including partially answered forms), delegated workers, the session's mode and the modes it offers (see `agent-backends.md`), presentation cards and worker visibility. A delegated worker names the worker that delegated to it as its parent; a worker the space's own agent session started has no parent, so clients can arrange workers without knowing the backend's session identifier. Per-participant state is limited to presence, local presentation choices such as mute or paging, and the participant's own in-progress recording.
+Shared space state is held by the server and is the same for every participant: the space's environment (see `environments.md`), the conversation, the input queue, pending approvals and questions (including partially answered forms), delegated workers, the session's mode and the modes it offers (see `agent-backends.md`), presentation cards and worker visibility. A delegated worker names the worker that delegated to it as its parent; a worker the space's own agent session started has no parent, so clients can arrange workers without knowing the backend's session identifier. Per-participant state is limited to presence, local presentation choices such as mute or paging, and the participant's own in-progress recording.
+
+If the initial session snapshot cannot be read, the server refuses to open the space, reports a retryable error to its creator, and closes the backend handle. It does not delete an attached agent session. This avoids presenting incomplete conversation, permission or worker state as current. The initial snapshot carries every pending approval and question, so a session with several parallel requests opens with all of them queued.
+
+An OpenCode session is bound to at most one space at a time. A request to bind one that is already bound is refused with an error directing the requester to the existing space, and the refusal does not affect that space. A stale handle to a session that has since been bound again cannot close or command the new binding. The server does not yet enforce this for Claude Code, whose attach starts a separate agent process.
+
+Worker-list authority is reported independently from unrelated space errors: when the server says omissions are authoritative, a client may retire a previously observed worker even if another error remains visible. An incomplete list, including one trimmed to fit the snapshot budget, never authorizes a departure. Older servers without this indication retain the earlier conservative error-based behavior.
 
 When participants act concurrently:
 
@@ -27,12 +33,16 @@ When participants act concurrently:
 
 Several people should be able to share one conversational workspace with one coordinating agent, and move between separate workspaces. Agreed in the October 2026 design discussion for replacing the Node bridge.
 
+In November 2026 the user chose to refuse and retry an initial snapshot failure rather than open an incomplete space while attempting recovery.
+
 ## Scope
 
 The server's space registry, the client protocol for joining and leaving spaces, the input queue, and approval and question handling. How spaces persist across server restarts is not yet decided.
 
 ## Validation
 
+- Test that an initial snapshot failure opens no space, reports a retryable error, closes only the failed handle and allows a later retry; an already running space remains unaffected.
+- Test that attaching an OpenCode (or fake) session already bound to a space is refused without closing that space, that a stale handle cannot close or command a reattachment, and that an initial snapshot with several pending approvals and questions presents them all in order.
 - Inspect the space model: a space has exactly one session binding, and per-space stores are keyed by space.
 - Test two participants in one space: both observe the same conversation, queue and pending requests; concurrent decisions on one approval result in exactly one decision reaching the backend. Test two parallel approvals: both are presented in turn and both decisions reach the backend in order.
 - Test that finalizing the same utterance twice queues it once and acknowledges the repeat with the text queued first, and that utterances of participants `a` and `a/b` whose identifiers would join to the same text are both queued.

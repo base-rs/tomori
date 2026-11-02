@@ -2,7 +2,7 @@
 
 A conversational spatial workspace for people and agents, currently a native
 **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**.
-128 agents inhabit a selectable moonlit Sky environment or minimal floor grid.
+128 agents inhabit a moonlit Sky environment or a minimal floor grid.
 Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest
 renders the interactive scene and joins conversations through a Tomori server on
 the PC, which runs the agent sessions.
@@ -15,27 +15,35 @@ you say and queues it, and the agent's replies are spoken. Sky is an early envir
 Private workspace memory and session state are not included in this public
 source repository.
 
-- **Right trigger:** attract the swarm to the right controller (orange cube).
+- **Right trigger:** outside a space, choose what the right controller's ray
+  points at; a pull that starts away from every object, or any pull inside a
+  space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
-- **Squeeze the right grip:** switch between Sky and Minimal environments.
 - **Hold Meta button:** Quest's system recenter brings the swarm in front of you.
   A short press opens the system menu. No artificial camera movement.
 
 ## Environments
 
-**Sky** is the default: a fixed moonlit night, sparse stars, static cloud banks,
-a stable platform and an open shrine blockout with warm lanterns. The concrete
-renderer lives in [`crates/environment-sky`](crates/environment-sky/README.md),
-separate from sessions, worker simulation and application input.
+Each space is bound to one environment, chosen when it is created and the same
+for everyone in it (see [design/environments.md](design/environments.md)). The
+server offers only **Sky** for now: a fixed moonlit night, sparse stars, static
+cloud banks, a stable platform and an open shrine blockout with warm lanterns.
+The concrete renderer lives in
+[`crates/environment-sky`](crates/environment-sky/README.md), separate from
+sessions, worker simulation and application input. **Minimal**, the plain floor
+grid, is the waiting area outside any space.
 
-- **Quest / desktop XR:** squeeze and release the right grip to switch presets.
-- **Desktop window:** press **E** to switch presets; or launch with
-  `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` for the original grid.
-- **Spectator:** followed the headset's selection; the headset doesn't publish
+- **Quest / desktop XR:** choosing a server and a space happens on the grid;
+  joining a space switches to its environment, and leaving returns to the grid.
+  Nothing switches the environment inside a space. A space whose environment
+  this build doesn't know shows the grid, and its panel names the environment.
+- **Desktop window:** it has no server, so press **E** to switch between Sky
+  and the grid; or launch with
+  `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` to start on the grid.
+- **Spectator:** followed the headset's scenery; the headset doesn't publish
   to the spectator for now.
 
-Switching does not reset agents, conversations or worker positions. Selection
-is not persisted across launches. Sky uses the same scene/recenter transform as
+Switching does not reset agents, conversations or worker positions. Sky uses the same scene/recenter transform as
 the workspace; it does not move the camera. Clouds use a bounded low-resolution
 volumetric density pass with translucent edges and approximate moonlighting;
 lanterns have brighter emissive faces and cast warm, occluded illumination onto
@@ -67,9 +75,10 @@ bash scripts/fetch-sherpa-onnx.sh
 cargo run -p server --bin tomori-server -- --backend claude-code
 ```
 
-The headset joins existing spaces but can't create them yet, so create one from
-the PC with the example client: give it the server's address, then type
-`create` with the backend and a directory beneath a workspace root.
+The headset creates spaces with its **New space** object (see
+[Controls](#controls)). To create one from the PC instead, use the example
+client: give it the server's address, then type `create` with the backend and a
+directory beneath a workspace root.
 
 ```sh
 cargo run -p client --example connect -- 127.0.0.1:8765
@@ -91,12 +100,26 @@ selection first.
 
 ### Controls
 
-- **Servers:** flick the left stick up/down to choose; **A** connects; **Y**
-  searches again. A server with an incompatible protocol is listed with its
-  version but can't be chosen.
-- **Spaces:** flick the left stick up/down to choose; **A** joins; **B** returns
-  to the servers, or first dismisses an error or a note that a space has ended;
-  **Y** lists again.
+Before you join a space, servers, spaces and the **New space** object stand in
+the world in front of you, each labelled. Point the right controller at one:
+its ray turns cyan and the object is highlighted, with its full label above the
+row. Pull the right trigger to choose it. Choosing happens once per pull, and
+only for a pull that starts on an object, so a pull that starts elsewhere still
+attracts the swarm, even if the ray then crosses an object. The stick and
+buttons do the same, and the object they select is underlined.
+
+- **Servers:** point and pull, or flick the left stick up/down and press **A**,
+  to connect; **Y** searches again. A server with an incompatible protocol is
+  shown, grey, with its version, but can't be chosen.
+- **Spaces:** the spaces and the **New space** object are shown together; with
+  no spaces, only **New space** is. Choose a space to join it. Choose the
+  connected server, on the left, or press **B**, to return to the servers; **B**
+  first dismisses an error or a note that a space has ended. **Y** lists again.
+- **New space:** choosing it opens rings of choices around it, one at a time:
+  the backend, then the folder, then, for a backend that can attach, a new
+  session or one of its existing sessions in that folder. **B**, or choosing the
+  centre object again, steps back to the previous ring. **Y** lists the sessions
+  again.
 - **In a space:** flick the left stick up/down to page through text and
   left/right to move between messages; the queue follows the last message.
   **Y** fetches the space again.

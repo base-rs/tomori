@@ -51,14 +51,6 @@ pub struct Visual {
 }
 
 impl Visual {
-    #[cfg(any(not(target_os = "android"), test))]
-    pub fn valid(&self) -> bool {
-        self.level.is_finite()
-            && (0.0..=1.0).contains(&self.level)
-            && self.time.is_finite()
-            && self.time >= 0.0
-    }
-
     pub fn color(self) -> [f32; 3] {
         match self.mode {
             Mode::Neutral => [0.3, 0.75, 1.0],
@@ -254,31 +246,5 @@ mod tests {
         assert_eq!(visual.mode, Mode::Speaking);
         assert!(visual.working);
         assert_eq!(visual.level, 0.7);
-    }
-
-    #[test]
-    fn visual_rejects_invalid_audio_or_time() {
-        assert!(Visual::default().valid());
-        assert!(
-            !Visual {
-                level: f32::NAN,
-                ..Default::default()
-            }
-            .valid()
-        );
-        assert!(
-            !Visual {
-                level: 1.1,
-                ..Default::default()
-            }
-            .valid()
-        );
-        assert!(
-            !Visual {
-                time: -1.0,
-                ..Default::default()
-            }
-            .valid()
-        );
     }
 }

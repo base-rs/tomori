@@ -14,7 +14,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base_scheduler::{Cancellation, SocketLocalAddress};
@@ -274,14 +274,21 @@ fn host_name() -> String {
     }
 }
 
-/// Advertise the bound `address` unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
-fn advertise(arguments: &Arguments, address: SocketAddr) -> Option<discovery::Advertisement> {
+/// The running advertisement, if any, which the server updates as its counts change.
+type Advertised = Arc<Mutex<Option<discovery::Advertisement>>>;
+
+/// Advertise the bound `address`, with the server's current `counts`, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
+fn advertise(
+    arguments: &Arguments,
+    address: SocketAddr,
+    counts: discovery::Counts,
+) -> Option<discovery::Advertisement> {
     if !arguments.advertise {
         eprintln!("Bonjour: not advertising (--no-advertise).");
         return None;
     }
     let name = arguments.name.clone().unwrap_or_else(host_name);
-    match discovery::advertise(&name, address.port(), address.ip()) {
+    match discovery::advertise(&name, address.port(), address.ip(), counts) {
         Ok(advertisement) => {
             eprintln!(
                 "Bonjour: advertising {:?} as _tomori._tcp on port {}.",
@@ -591,6 +598,20 @@ fn main() -> ExitCode {
         server = server.with_request_timeout(timeout);
     }
     let server = synthesis(server, root, &arguments.speech_segmentation, &mut engines);
+    let advertised = Advertised::default();
+    let server = server.with_counts({
+        let advertised = advertised.clone();
+        move |counts| {
+            let advertised = advertised
+                .lock()
+                .expect("the advertisement is never left poisoned");
+            if let Some(advertisement) = advertised.as_ref()
+                && let Err(error) = advertisement.update(counts)
+            {
+                log::warn!("Bonjour: could not advertise the new counts ({error}).");
+            }
+        }
+    });
     let cancellation = Cancellation::new();
     // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
     #[cfg(unix)]
@@ -615,20 +636,27 @@ fn main() -> ExitCode {
             "Tomori server listening on http://{address} (backends: {}). There is no authentication: anyone on this network can join.",
             arguments.backends.join(", ")
         );
-        let _advertisement = advertise(&arguments, address);
-        server
-            .run(&scheduler, listener, &cancellation)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                let mut message = format!("The server failed: {error}");
-                let mut source = std::error::Error::source(&error);
-                while let Some(cause) = source {
-                    message.push_str(&format!(": {cause}"));
-                    source = cause.source();
-                }
-                message
-            })
+        *advertised
+            .lock()
+            .expect("the advertisement is never left poisoned") =
+            advertise(&arguments, address, server.counts());
+        let served = server.run(&scheduler, listener, &cancellation).await;
+        // Withdraw the advertisement as soon as serving ends.
+        drop(
+            advertised
+                .lock()
+                .expect("the advertisement is never left poisoned")
+                .take(),
+        );
+        served.map(|_| ()).map_err(|error| {
+            let mut message = format!("The server failed: {error}");
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                message.push_str(&format!(": {cause}"));
+                source = cause.source();
+            }
+            message
+        })
     });
     // Closing the scheduler unregisters its signal handlers, which would then swallow a repeated signal. Restore the default action first, so that a signal during the rest of shutdown still ends the process at once, without running destructors.
     #[cfg(unix)]

@@ -12,7 +12,7 @@ Initially, audio travels over the same HTTP streaming connection. Later, audio m
 
 Whose view the spectator feed shows when a space has several participants is not yet decided.
 
-The server advertises itself on the local network with DNS service discovery over multicast DNS (Bonjour), as service type `_tomori._tcp`, with TXT records for the protocol version and a display name. When a client starts, it browses for that service and lists the servers it finds, so a participant can choose one without typing an address; entering an address manually remains possible. Advertising can be turned off.
+The server advertises itself on the local network with DNS service discovery over multicast DNS (Bonjour), as service type `_tomori._tcp`, with TXT records for the protocol version, a display name, the number of spaces and the number of connected participants. The counts are kept current, for the server's constellation in `arrival.md`. The space count is the spaces the server lists, including closed spaces it still lists, and the participant count is every participant with a connection, whether in a space or in the lobby. Changes are coalesced and announced at most once every 2 seconds, so that a burst of changes is one announcement; browsers see a change within a few seconds. A browser treats a missing or malformed count as unknown, and still lists a server that advertises none. When a client starts, it browses for that service and lists the servers it finds, so a participant can choose one without typing an address; entering an address manually remains possible. Advertising can be turned off.
 
 Wire types are defined once in a shared protocol crate used by both the server and native clients. A client reads a space or worker state that it does not know, such as one added by a newer server, as unknown rather than rejecting the message, so adding such a state does not change the protocol version.
 
@@ -33,6 +33,8 @@ What waits to be sent on one connection is bounded too, so that a slow or carele
 - Space snapshots are full states, coalesced so that one waits at a time. Changes caused by agent events, such as a streaming reply, send a snapshot at most every 100 milliseconds per space: the first change is sent at once, and later changes within the interval are sent together at its end, so the latest state always arrives. Each space's deferred snapshot is sent at the end of its own interval, however many other spaces have one pending. Changes made by participants are sent at once.
 
 Clients connect over the local network; a USB connection is not required. Authentication is not an initial requirement. It will be added later, likely as tokens carried in cookies or authorization headers; until then, anyone who can reach the server on the local network can join a space, so sessions run only beneath the operator's workspace roots and only a limited number at once, as described in `workspaces.md`. Whether local network traffic is encrypted is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
+
+When fitting a snapshot to its budget removes workers, the snapshot marks its worker list non-authoritative and retains or supplies a visible error, so clients do not mistake transport trimming for a worker departure.
 
 ## Rationale
 
