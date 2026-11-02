@@ -2820,6 +2820,8 @@ mod tests {
                         let active = active_tx.clone();
                         let delayed = delayed_tx.clone();
                         std::thread::spawn(move || {
+                            // macOS accepted sockets inherit the listener's nonblocking mode.
+                            socket.set_nonblocking(false).unwrap();
                             socket
                                 .set_read_timeout(Some(Duration::from_secs(3)))
                                 .unwrap();
@@ -3562,6 +3564,8 @@ mod tests {
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
+                // macOS accepted sockets inherit the listener's nonblocking mode.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -3662,6 +3666,8 @@ mod tests {
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
+                // macOS accepted sockets inherit the listener's nonblocking mode.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
