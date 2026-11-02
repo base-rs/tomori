@@ -25,6 +25,8 @@ mod interaction;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
 mod playback;
+#[allow(dead_code, reason = "wired into arrival in the following commits")]
+mod pointing;
 mod server_choice;
 #[cfg(not(target_os = "android"))]
 mod spectator;
