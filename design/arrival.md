@@ -47,7 +47,6 @@ The headset client's flow from launch to joining a space (`crates/client-quest`)
 Open questions, not yet decided:
 
 - The detailed look of server constellations: their size, colour, motion and spacing, and how the pour into the swarm is timed.
-- How quickly advertised counts follow changes.
 - How the transition between the grid and a space's environment looks.
 - Whether environment previews work well enough to identify spaces, how they show spaces that share an environment, and what they cost on the headset with several spaces in view. `scene-modules.md` replicates a space's scene only to the clients in it, so a lobby preview needs either a summary the server makes for the lobby or replication to clients outside the space.
 - The detailed look and layout of the creation rings.
