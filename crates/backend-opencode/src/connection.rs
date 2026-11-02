@@ -29,7 +29,7 @@ use base_scheduler::{
     Cancellation, SocketClose, SocketConnect, SocketOpen, SocketSetOption, SocketStreamReading,
     SocketStreamWriting, TcpNoDelay, Timers,
 };
-use base_scheduler_direct::{DirectOptions, DirectScheduler};
+use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::StreamExt;
 use futures_lite::future::block_on;
 use futures_util::stream::FuturesUnordered;
@@ -748,9 +748,11 @@ async fn drive(
     resolved: Resolved,
     commands: async_channel::Receiver<Command>,
 ) -> std::result::Result<(), String> {
-    let scheduler = DirectScheduler::new(DirectOptions {
+    let scheduler = NativeScheduler::with_options(NativeOptions {
+        workers: 1,
         threads: 2,
         capacity: 256,
+        ..Default::default()
     })
     .map_err(|error| format!("could not start the connection scheduler: {error}"))?;
     let result = run(&scheduler, resolved, commands).await;
@@ -1469,6 +1471,33 @@ fn owns_registration(
     }
 }
 
+/// The sessions a participant can attach to. The listing asks for top-level,
+/// unarchived sessions; a child session (a subagent's worker) or an archived
+/// one that a server returns anyway is left out.
+fn session_summaries(sessions: &[Value]) -> Vec<SessionSummary> {
+    sessions
+        .iter()
+        .filter(|info| info.get("parentID").is_none_or(Value::is_null))
+        .filter(|info| info.pointer("/time/archived").is_none_or(Value::is_null))
+        .filter_map(|info| {
+            Some(SessionSummary {
+                id: info.get("id")?.as_str()?.to_owned(),
+                title: info
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                directory: info
+                    .get("location")
+                    .and_then(|location| location.get("directory"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Service one command, returning whether the connection should stay open.
 async fn handle_command(
     command: Command,
@@ -1487,27 +1516,7 @@ async fn handle_command(
         Command::Sessions { directory, reply } => {
             let result = api::list_sessions(client, resolved, &directory, cancellation)
                 .await
-                .map(|sessions| {
-                    sessions
-                        .iter()
-                        .filter_map(|info| {
-                            Some(SessionSummary {
-                                id: info.get("id")?.as_str()?.to_owned(),
-                                title: info
-                                    .get("title")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned(),
-                                directory: info
-                                    .get("location")
-                                    .and_then(|location| location.get("directory"))
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned(),
-                            })
-                        })
-                        .collect()
-                })
+                .map(|sessions| session_summaries(&sessions))
                 .map_err(map_failure);
             reply.send(result).await.ok();
             true
@@ -1844,6 +1853,25 @@ mod tests {
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn subagent_sessions_are_not_offered_for_attachment() {
+        let sessions = [
+            json!({"id":"root","title":"Support","location":{"directory":"/tmp"}}),
+            json!({"id":"explicit","parentID":null,"title":"Explicit root"}),
+            json!({"id":"child","parentID":"root","title":"Review commit"}),
+            json!({"id":"archived","title":"Old","time":{"created":1,"archived":2}}),
+            json!({"title":"No identifier"}),
+        ];
+        let summaries = session_summaries(&sessions);
+        let ids: Vec<_> = summaries
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(ids, ["root", "explicit"]);
+        assert_eq!(summaries[0].title, "Support");
+        assert_eq!(summaries[0].directory, "/tmp");
+    }
 
     fn registrations() -> HashMap<String, Registration> {
         let mut registrations = HashMap::new();
@@ -2818,6 +2846,8 @@ mod tests {
                         let active = active_tx.clone();
                         let delayed = delayed_tx.clone();
                         std::thread::spawn(move || {
+                            // macOS accepted sockets inherit the listener's nonblocking mode.
+                            socket.set_nonblocking(false).unwrap();
                             socket
                                 .set_read_timeout(Some(Duration::from_secs(3)))
                                 .unwrap();
@@ -3560,6 +3590,8 @@ mod tests {
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
+                // macOS accepted sockets inherit the listener's nonblocking mode.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -3586,9 +3618,11 @@ mod tests {
             }
         });
         block_on(async {
-            let scheduler = DirectScheduler::new(DirectOptions {
+            let scheduler = NativeScheduler::with_options(NativeOptions {
+                workers: 1,
                 threads: 2,
                 capacity: 256,
+                ..Default::default()
             })
             .unwrap();
             let cancellation = Cancellation::new();
@@ -3658,6 +3692,8 @@ mod tests {
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
+                // macOS accepted sockets inherit the listener's nonblocking mode.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -3686,9 +3722,11 @@ mod tests {
             }
         });
         block_on(async {
-            let scheduler = DirectScheduler::new(DirectOptions {
+            let scheduler = NativeScheduler::with_options(NativeOptions {
+                workers: 1,
                 threads: 2,
                 capacity: 256,
+                ..Default::default()
             })
             .unwrap();
             let cancellation = Cancellation::new();

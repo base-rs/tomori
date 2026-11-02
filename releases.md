@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Offer only top-level OpenCode sessions when attaching a space, not subagents' child sessions or archived sessions.
+- The server, client and OpenCode backend use the Native scheduler instead of the Direct scheduler. An idle server no longer wakes every 2 ms to retry its sockets, and accepting connections can no longer stall on macOS once the Direct blocking pool stops waking its workers.
 - Track OpenCode child lifecycle events so deleted workers animate their return without mistaking completion or partial lists for deletion.
 - Document the direct 1080p virtual camera and dedicated audio input used to share a Tomori space in a Slack Huddle without OBS.
 - Toggle the Quest microphone for live conversation with the left grip; hold X to address the agent and release it to return to the previous live setting. Live capture stops on focus loss or disconnection. Echo cancellation is not guaranteed.

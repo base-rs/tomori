@@ -953,15 +953,15 @@ mod tests {
         BufferPool, BufferPoolOptions, BufferPooling, Clock, IoBuf, SocketLocalAddress,
         SocketOperation, SocketStreamReader, SocketStreamWriter,
     };
-    use base_scheduler_direct::{DirectOptions, DirectScheduler, DirectSocket};
+    use base_scheduler_native::{NativeOptions, NativeScheduler, NativeSocket};
     use futures_lite::future::block_on;
 
     use super::*;
     use crate::transcriber::NullTranscriber;
 
-    /// A direct scheduler whose accepts first fail with queued errors, and whose accepted sockets can be made never to finish closing, as a connection that ignores cancellation would.
+    /// A scheduler whose accepts first fail with queued errors, and whose accepted sockets can be made never to finish closing, as a connection that ignores cancellation would.
     struct Faulty {
-        inner: DirectScheduler,
+        inner: NativeScheduler,
         accept_errors: Mutex<VecDeque<io::Error>>,
         accepts: AtomicUsize,
         stall_connection_closes: bool,
@@ -969,7 +969,7 @@ mod tests {
 
     /// A socket, and whether it was accepted rather than listening.
     struct Tagged {
-        socket: DirectSocket,
+        socket: NativeSocket,
         accepted: bool,
     }
 
@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     impl BufferPooling for Faulty {
-        type Pool = <DirectScheduler as BufferPooling>::Pool;
+        type Pool = <NativeScheduler as BufferPooling>::Pool;
 
         fn buffer_pool(&self, options: BufferPoolOptions) -> io::Result<Self::Pool> {
             self.inner.buffer_pool(options)
@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     impl Timers for Faulty {
-        type Timer = <DirectScheduler as Timers>::Timer;
+        type Timer = <NativeScheduler as Timers>::Timer;
 
         fn timer(&self) -> Self::Timer {
             self.inner.timer()
@@ -1122,9 +1122,11 @@ mod tests {
         let running = cancellation.clone();
         std::thread::spawn(move || {
             let scheduler = Faulty {
-                inner: DirectScheduler::new(DirectOptions {
+                inner: NativeScheduler::with_options(NativeOptions {
+                    workers: 2,
                     threads: 2,
                     capacity: 256,
+                    ..Default::default()
                 })
                 .unwrap(),
                 accept_errors: Mutex::new(accept_errors.into()),

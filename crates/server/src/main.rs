@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base_scheduler::{Cancellation, SocketLocalAddress};
-use base_scheduler_direct::{DirectOptions, DirectScheduler};
+use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
 use protocol::Keepalive;
 use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
@@ -578,9 +578,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let scheduler = match DirectScheduler::new(DirectOptions {
+    let scheduler = match NativeScheduler::with_options(NativeOptions {
+        workers: 4,
         threads: 4,
         capacity: 1024,
+        ..Default::default()
     }) {
         Ok(scheduler) => scheduler,
         Err(error) => {
