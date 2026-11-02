@@ -16,11 +16,12 @@ use base_scheduler::Cancellation;
 use discovery::Counts;
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
-    AudioFrame, ClientMessage, Frame, FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant,
-    ServerMessage, WorkspaceRoot,
+    AudioFrame, ClientMessage, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
+    PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
 };
 
 use crate::backends::Backends;
+use crate::environments;
 use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::space::{AnswerOutcome, SpaceModel};
@@ -59,6 +60,8 @@ pub struct CreateRequest {
     pub backend: String,
     pub directory: String,
     pub session: Option<String>,
+    /// The identifier of the offered environment the space is bound to.
+    pub environment: String,
     /// The participant who asked; they join the space once it exists, unless they have joined another space meanwhile.
     pub creator: String,
     /// The space the creator was in when they asked.
@@ -86,6 +89,8 @@ pub struct Hub {
     slots: Arc<SpaceSlots>,
     /// The directories a space may run in, sent to clients in `Welcome` so they can choose one without typing a path.
     roots: RwLock<Vec<WorkspaceRoot>>,
+    /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
+    environments: Vec<EnvironmentInfo>,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
@@ -463,6 +468,7 @@ impl Hub {
             jobs,
             slots,
             roots: RwLock::new(roots),
+            environments: environments::offered(),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             this: this.clone(),
@@ -821,6 +827,7 @@ impl Hub {
             source,
             backends,
             roots,
+            environments: self.environments.clone(),
         });
         match rejoin.filter(|space| state.space(space).is_some()) {
             Some(space) => state.join(&participant, &space),
@@ -859,6 +866,7 @@ impl Hub {
                 backend,
                 directory,
                 session,
+                environment,
             } => {
                 let checked = limits::check(&title, limits::TITLE_BYTES, "title")
                     .and_then(|()| limits::check(&directory, limits::DIRECTORY_BYTES, "directory"))
@@ -885,6 +893,14 @@ impl Hub {
                     );
                     return;
                 }
+                let environment =
+                    match environments::choose(&self.environments, environment.as_deref()) {
+                        Ok(environment) => environment,
+                        Err(error) => {
+                            state.error(participant, error);
+                            return;
+                        }
+                    };
                 // Refuse early when the limit is already reached. The supervisor checks the directory outside the lock and only then takes a place, so that a refused directory never holds one.
                 if self.slots.is_full() {
                     state.error(participant, self.slots.full_error());
@@ -895,6 +911,7 @@ impl Hub {
                     backend,
                     directory,
                     session,
+                    environment,
                     creator: participant.to_owned(),
                     creator_space: space.map(str::to_owned),
                 };
@@ -1392,14 +1409,16 @@ impl Hub {
             request.title.clone(),
             request.backend.clone(),
             request.directory.clone(),
+            request.environment.clone(),
             session,
             snapshot,
         );
         log::info!(
-            "Space {id} {:?} is bound to {} session {}.",
+            "Space {id} {:?} is bound to {} session {} in the {} environment.",
             model.title,
             model.backend,
-            model.session
+            model.session,
+            model.environment
         );
         state.spaces.push(SpaceRecord {
             model,

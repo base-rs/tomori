@@ -9,6 +9,7 @@ mod admission;
 mod application;
 mod backends;
 mod connection;
+mod environments;
 mod hub;
 mod limits;
 #[cfg(feature = "speech")]

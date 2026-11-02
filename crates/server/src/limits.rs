@@ -258,6 +258,7 @@ mod tests {
                 title: "t".repeat(TITLE_BYTES),
                 backend: "fake".into(),
                 directory: "/d".repeat(DIRECTORY_BYTES / 2),
+                environment: "sky".into(),
                 activity: protocol::Activity::Idle,
                 participants: 0,
             })
