@@ -15,6 +15,8 @@ mod conversation;
 mod delegation;
 #[cfg(not(target_os = "android"))]
 mod desktop;
+#[cfg(not(target_os = "android"))]
+mod discover;
 mod environment;
 mod graphics;
 mod hands;
@@ -81,6 +83,12 @@ pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
 pub fn run_console(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
     console::run(conversation, connection)
+}
+
+/// List the servers on the network, and the spaces on a chosen one.
+#[cfg(not(target_os = "android"))]
+pub fn run_discover(server: Option<String>) -> anyhow::Result<()> {
+    discover::run(server)
 }
 
 /// Desktop runs keep nothing, so each is a new participant.
