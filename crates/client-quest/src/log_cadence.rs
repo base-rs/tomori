@@ -50,7 +50,7 @@ impl Cadence {
 }
 
 impl Due {
-    /// Occurrences per second since the previous logged one, including this one.
+    /// Occurrences per second since the previous logged one, including this one, or `None` for the first occurrence or when no time has passed.
     pub fn rate(&self) -> Option<f64> {
         self.elapsed
             .filter(|elapsed| !elapsed.is_zero())

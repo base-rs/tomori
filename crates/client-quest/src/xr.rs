@@ -524,12 +524,14 @@ pub fn run(
         frames += 1;
         // Once at the first frame, then a summary at most once a minute: per-frame lines would push lifecycle events out of logcat within minutes.
         if let Some(due) = frame_log.record(Instant::now()) {
-            match due.rate() {
+            // The rate includes any time the session was not rendering.
+            match due.elapsed {
                 None => log::info!("Submitted first stereo frame"),
-                Some(rate) => log::info!(
-                    "Submitted {frames} stereo frames; {} in the last {:.0} s ({rate:.1} fps)",
+                Some(elapsed) => log::info!(
+                    "Submitted {frames} stereo frames; {} in the last {:.0} s ({:.1} fps)",
                     due.skipped + 1,
-                    due.elapsed.unwrap_or_default().as_secs_f64()
+                    elapsed.as_secs_f64(),
+                    due.rate().unwrap_or_default()
                 ),
             }
         }
