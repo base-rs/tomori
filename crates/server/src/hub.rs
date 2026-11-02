@@ -1741,6 +1741,7 @@ mod tests {
             session: None,
             creator: creator.to_owned(),
             creator_space: None,
+            environment: "sky".to_owned(),
         };
         hub.register_space(
             &request,
