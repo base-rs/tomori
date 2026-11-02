@@ -152,7 +152,7 @@ impl Feed {
                         head: *head,
                         left: *left,
                         right: *right,
-                        hands: *hands,
+                        hands: hands.as_deref().copied(),
                     },
                 );
             }

@@ -118,7 +118,13 @@ fn listing_the_backend_sessions_returns_the_created_ones() {
         .map(|session| session.title.as_str())
         .collect();
     assert_eq!(titles, vec!["First", "Second"]);
-    assert!(sessions.iter().all(|session| session.directory == "/tmp"));
+    // Sessions report the canonical directory, which differs from `/tmp` where it is a symbolic link, as on macOS.
+    let tmp = std::fs::canonicalize("/tmp").unwrap();
+    assert!(
+        sessions
+            .iter()
+            .all(|session| std::path::Path::new(&session.directory) == tmp)
+    );
 
     // A directory that resolves, beneath a root, but holds no sessions lists none.
     let empty_dir =
@@ -1244,7 +1250,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         head,
         left: Some(head),
         right: None,
-        hands: Some([Some(left_hand), None]),
+        hands: Some(Box::new([Some(left_hand), None])),
     });
 
     bob.wait_for(|message| match message {
@@ -1259,7 +1265,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
             assert_eq!(*relayed_head, head);
             assert_eq!(*left, Some(head));
             assert_eq!(*right, None);
-            assert_eq!(*hands, Some([Some(left_hand), None]));
+            assert_eq!(hands.as_deref(), Some(&[Some(left_hand), None]));
             Some(())
         }
         _ => None,
@@ -1273,7 +1279,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         right: None,
         hands: None,
     });
-    bob.wait_for(|message| Some(()).filter(|_| matches!(message, ServerMessage::Presence { .. })));
+    bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {
         assert!(
             !matches!(message, ServerMessage::Presence { .. }),

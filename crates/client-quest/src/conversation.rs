@@ -226,6 +226,7 @@ impl Conversation {
     }
 
     /// The current panel: the server list, the lobby, or a space.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -299,6 +300,7 @@ impl Conversation {
     }
 
     /// Join `space` by id, as the lobby's accept does, for a client that takes the space as an argument rather than choosing it in the list.
+    #[cfg(not(target_os = "android"))]
     pub fn join_space(&mut self, space: impl Into<String>) {
         let space = space.into();
         self.joining = Some(space.clone());

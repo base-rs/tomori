@@ -103,7 +103,7 @@ pub enum ClientMessage {
         right: Option<Pose>,
         /// Tracked hand skeletons, left then right. Absent from older clients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        hands: Option<[Option<crate::presence::Hand>; 2]>,
+        hands: Option<Box<[Option<crate::presence::Hand>; 2]>>,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -180,7 +180,7 @@ pub enum ServerMessage {
         right: Option<Pose>,
         /// The participant's tracked hand skeletons, left then right. Absent from older servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        hands: Option<[Option<crate::presence::Hand>; 2]>,
+        hands: Option<Box<[Option<crate::presence::Hand>; 2]>>,
     },
     /// A request could not be completed. The connection stays open.
     Error {
@@ -303,6 +303,69 @@ mod tests {
             welcome,
             ServerMessage::Welcome { environments, .. } if environments.is_empty()
         ));
+    }
+
+    #[test]
+    fn presence_hands_keep_their_wire_format() {
+        use crate::presence::{Hand, JOINT_COUNT, Joint};
+
+        let mut joints = [None; JOINT_COUNT];
+        joints[1] = Some(Joint {
+            position: [0.5, 1.0, -0.25],
+            radius: 0.0625,
+        });
+        let hands = [Some(Hand { joints }), None];
+        let head = Pose {
+            position: [0.0, 1.5, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+
+        // The boxed hands serialize exactly as the unboxed array did: a plain two-element array of hands.
+        let mut joints_json = vec![serde_json::Value::Null; JOINT_COUNT];
+        joints_json[1] = serde_json::json!({"position": [0.5, 1.0, -0.25], "radius": 0.0625});
+        let hands_json = serde_json::json!([{"joints": joints_json}, null]);
+        let head_json =
+            serde_json::json!({"position": [0.0, 1.5, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]});
+
+        let client = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: Some(Box::new(hands)),
+        };
+        let client_json =
+            serde_json::json!({"type": "presence", "head": head_json, "hands": hands_json});
+        assert_eq!(serde_json::to_value(&client).unwrap(), client_json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(client_json).unwrap(),
+            client
+        );
+
+        let server = ServerMessage::Presence {
+            source: 3,
+            head,
+            left: None,
+            right: None,
+            hands: Some(Box::new(hands)),
+        };
+        let server_json = serde_json::json!({"type": "presence", "source": 3, "head": head_json, "hands": hands_json});
+        assert_eq!(serde_json::to_value(&server).unwrap(), server_json);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(server_json).unwrap(),
+            server
+        );
+
+        // Presence without hands, as from older clients, omits the field.
+        let bare = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"type": "presence", "head": head_json})
+        );
     }
 
     #[test]
