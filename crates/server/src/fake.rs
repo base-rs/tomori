@@ -5,14 +5,15 @@
 //!
 //! Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use backend::{
-    AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Prompt,
-    Result, Role, Session, SessionSpec, SessionSummary, Snapshot,
+    AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Permission,
+    Prompt, Question, Result, Role, Session, SessionSpec, SessionSummary, Snapshot,
 };
+use base_scheduler::Cancellation;
 
 /// The backend name used in `CreateSpace` requests.
 pub const FAKE_BACKEND_NAME: &str = "fake";
@@ -38,6 +39,7 @@ pub struct FakeBackend {
 #[derive(Default)]
 struct FakeShared {
     manual: AtomicBool,
+    snapshot_failure: Arc<AtomicBool>,
     /// While set, session creation waits; see [`FakeBackend::hold_creation`].
     held: AtomicBool,
     released: event_listener::Event,
@@ -57,6 +59,11 @@ impl FakeBackend {
         let backend = Self::default();
         backend.shared.manual.store(true, Ordering::SeqCst);
         backend
+    }
+
+    /// Simulate an unavailable initial session snapshot.
+    pub fn fail_snapshots(&self, fail: bool) {
+        self.shared.snapshot_failure.store(fail, Ordering::SeqCst);
     }
 
     /// Make session creation wait until [`release_creation`](Self::release_creation), as a slow agent start would.
@@ -81,17 +88,24 @@ impl FakeBackend {
 
     fn start(&self, title: &str, directory: &str) -> FakeSession {
         let number = self.shared.next.fetch_add(1, Ordering::SeqCst) + 1;
-        let (sender, receiver) = async_channel::unbounded();
+        let handle = Arc::new(FakeHandle::new(1));
         let session = FakeSession {
+            handle: handle.clone(),
             inner: Arc::new(FakeSessionInner {
                 id: format!("fake-{number}"),
                 title: title.to_owned(),
                 directory: directory.to_owned(),
                 manual: self.shared.manual.load(Ordering::SeqCst),
-                sender,
-                receiver,
+                snapshot_failure: self.shared.snapshot_failure.clone(),
+                outbound: Mutex::new(FakeOutbound {
+                    current: Some(handle),
+                    backlog: VecDeque::new(),
+                }),
                 busy: AtomicBool::new(false),
-                closed: AtomicBool::new(false),
+                bound: Mutex::new(Some(1)),
+                next_generation: AtomicU64::new(1),
+                permissions: Mutex::new(Vec::new()),
+                questions: Mutex::new(Vec::new()),
                 next_message: AtomicU64::new(0),
                 delivered: Mutex::new(HashSet::new()),
                 modes: Mutex::new(Modes {
@@ -155,10 +169,30 @@ impl Backend for FakeBackend {
     }
 
     async fn attach(&self, id: &str, _directory: &str) -> Result<FakeSession> {
-        self.started()
+        let session = self
+            .started()
             .into_iter()
             .find(|session| session.inner.id == id)
-            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no fake session {id}")))
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no fake session {id}")))?;
+        let mut bound = session.inner.bound.lock().unwrap();
+        if bound.is_some() {
+            return Err(Error::new(
+                ErrorKind::Unavailable,
+                "the fake session is already attached",
+            ));
+        }
+        let generation = session.inner.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let handle = Arc::new(FakeHandle::new(generation));
+        let mut outbound = session.inner.outbound.lock().unwrap();
+        while let Some(event) = outbound.backlog.pop_front() {
+            let _ = handle.sender.try_send(event);
+        }
+        outbound.current = Some(handle.clone());
+        *bound = Some(generation);
+        let inner = session.inner.clone();
+        drop(outbound);
+        drop(bound);
+        Ok(FakeSession { inner, handle })
     }
 }
 
@@ -166,6 +200,33 @@ impl Backend for FakeBackend {
 #[derive(Clone)]
 pub struct FakeSession {
     inner: Arc<FakeSessionInner>,
+    handle: Arc<FakeHandle>,
+}
+
+struct FakeHandle {
+    generation: u64,
+    closing: Cancellation,
+    closed: AtomicBool,
+    sender: async_channel::Sender<Event>,
+    receiver: async_channel::Receiver<Event>,
+}
+
+impl FakeHandle {
+    fn new(generation: u64) -> Self {
+        let (sender, receiver) = async_channel::unbounded();
+        Self {
+            generation,
+            closing: Cancellation::new(),
+            closed: AtomicBool::new(false),
+            sender,
+            receiver,
+        }
+    }
+}
+
+struct FakeOutbound {
+    current: Option<Arc<FakeHandle>>,
+    backlog: VecDeque<Event>,
 }
 
 struct FakeSessionInner {
@@ -173,10 +234,13 @@ struct FakeSessionInner {
     title: String,
     directory: String,
     manual: bool,
-    sender: async_channel::Sender<Event>,
-    receiver: async_channel::Receiver<Event>,
+    snapshot_failure: Arc<AtomicBool>,
+    outbound: Mutex<FakeOutbound>,
     busy: AtomicBool,
-    closed: AtomicBool,
+    bound: Mutex<Option<u64>>,
+    next_generation: AtomicU64,
+    permissions: Mutex<Vec<Permission>>,
+    questions: Mutex<Vec<Question>>,
     next_message: AtomicU64,
     delivered: Mutex<HashSet<String>>,
     modes: Mutex<Modes>,
@@ -184,15 +248,55 @@ struct FakeSessionInner {
 }
 
 impl FakeSession {
+    fn current_binding(&self) -> Result<MutexGuard<'_, Option<u64>>> {
+        let binding = self.inner.bound.lock().unwrap();
+        if *binding == Some(self.handle.generation) {
+            Ok(binding)
+        } else {
+            Err(Error::new(
+                ErrorKind::Closed,
+                "the fake session handle has closed",
+            ))
+        }
+    }
+
     /// Report an event as if the agent produced it.
     pub fn emit(&self, event: Event) {
-        match event {
+        match &event {
             Event::Busy => self.inner.busy.store(true, Ordering::SeqCst),
             Event::Idle => self.inner.busy.store(false, Ordering::SeqCst),
+            Event::PermissionRequested(permission) => {
+                let mut pending = self.inner.permissions.lock().unwrap();
+                if !pending.iter().any(|entry| entry.id == permission.id) {
+                    pending.push(permission.clone());
+                }
+            }
+            Event::PermissionResolved { id } => self
+                .inner
+                .permissions
+                .lock()
+                .unwrap()
+                .retain(|entry| entry.id != *id),
+            Event::QuestionAsked(question) => {
+                let mut pending = self.inner.questions.lock().unwrap();
+                if !pending.iter().any(|entry| entry.id == question.id) {
+                    pending.push(question.clone());
+                }
+            }
+            Event::QuestionResolved { id } => self
+                .inner
+                .questions
+                .lock()
+                .unwrap()
+                .retain(|entry| entry.id != *id),
             _ => {}
         }
-        // The receiver lives as long as the session, so sending cannot fail.
-        let _ = self.inner.sender.try_send(event);
+        let mut outbound = self.inner.outbound.lock().unwrap();
+        if let Some(handle) = &outbound.current {
+            let _ = handle.sender.try_send(event);
+        } else {
+            outbound.backlog.push_back(event);
+        }
     }
 
     /// Stream an assistant reply in two deltas, complete it, and end the turn.
@@ -251,30 +355,47 @@ impl Session for FakeSession {
     }
 
     async fn next_event(&self) -> Result<Event> {
-        if self.inner.closed.load(Ordering::SeqCst) {
+        if self.handle.closed.load(Ordering::SeqCst) {
             return Err(Error::new(ErrorKind::Closed, "the fake session closed"));
         }
-        let event = self
-            .inner
-            .receiver
-            .recv()
-            .await
-            .map_err(|_| Error::new(ErrorKind::Closed, "the fake session closed"))?;
+        // Prefer cancellation if an old handle closes while a new one has
+        // already received events; the old waiter must not steal them.
+        let event = futures_lite::future::or(
+            async {
+                self.handle.closing.cancelled().await;
+                Ok(Event::Closed { reason: None })
+            },
+            async {
+                self.handle
+                    .receiver
+                    .recv()
+                    .await
+                    .map_err(|_| Error::new(ErrorKind::Closed, "the fake session closed"))
+            },
+        )
+        .await?;
         if matches!(event, Event::Closed { .. }) {
-            self.inner.closed.store(true, Ordering::SeqCst);
+            self.handle.closed.store(true, Ordering::SeqCst);
         }
         Ok(event)
     }
 
     async fn snapshot(&self) -> Result<Snapshot> {
+        let _binding = self.current_binding()?;
+        if self.inner.snapshot_failure.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Unavailable, "snapshot unavailable"));
+        }
         Ok(Snapshot {
             busy: Some(self.is_busy()),
+            permissions: self.inner.permissions.lock().unwrap().clone(),
+            questions: self.inner.questions.lock().unwrap().clone(),
             modes: self.inner.modes.lock().unwrap().clone(),
             ..Snapshot::default()
         })
     }
 
     async fn send(&self, prompt: Prompt) -> Result<()> {
+        let _binding = self.current_binding()?;
         if !self
             .inner
             .delivered
@@ -296,6 +417,7 @@ impl Session for FakeSession {
     }
 
     async fn decide(&self, permission: &str, decision: Decision) -> Result<()> {
+        let _binding = self.current_binding()?;
         self.inner
             .log
             .lock()
@@ -309,6 +431,7 @@ impl Session for FakeSession {
     }
 
     async fn answer(&self, question: &str, answers: Vec<(String, AnswerValue)>) -> Result<()> {
+        let _binding = self.current_binding()?;
         self.inner
             .log
             .lock()
@@ -322,6 +445,7 @@ impl Session for FakeSession {
     }
 
     async fn set_mode(&self, mode: &str) -> Result<()> {
+        let _binding = self.current_binding()?;
         self.inner.log.lock().unwrap().modes.push(mode.to_owned());
         let modes = {
             let mut modes = self.inner.modes.lock().unwrap();
@@ -339,16 +463,25 @@ impl Session for FakeSession {
     }
 
     async fn interrupt(&self) -> Result<()> {
+        let _binding = self.current_binding()?;
         self.inner.log.lock().unwrap().interrupts += 1;
         self.emit(Event::Idle);
         Ok(())
     }
 
     async fn close(&self) -> Result<()> {
-        self.inner.log.lock().unwrap().closed = true;
-        if !self.inner.closed.load(Ordering::SeqCst) {
-            self.emit(Event::Closed { reason: None });
+        let mut bound = self.inner.bound.lock().unwrap();
+        if *bound != Some(self.handle.generation) {
+            return Ok(());
         }
+        self.inner.log.lock().unwrap().closed = true;
+        self.handle.closing.cancel();
+        let mut outbound = self.inner.outbound.lock().unwrap();
+        while let Ok(event) = self.handle.receiver.try_recv() {
+            outbound.backlog.push_back(event);
+        }
+        outbound.current = None;
+        *bound = None;
         Ok(())
     }
 }

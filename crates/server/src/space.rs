@@ -45,10 +45,13 @@ pub struct SpaceModel {
     /// Questions whose answers have been sent to the backend but not yet confirmed.
     submitting: Vec<PendingQuestion>,
     workers: Vec<protocol::Worker>,
+    workers_authoritative: bool,
     attribution: bool,
     /// The modes the session offers and its current one, as the agent last reported them.
     modes: Modes,
     error: Option<String>,
+    /// Worker observation failures are separate from unrelated space errors.
+    worker_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -166,10 +169,10 @@ impl SpaceModel {
             user_messages: HashSet::new(),
             queue: InputQueue::default(),
             in_flight: None,
-            approvals: snapshot.permission.into_iter().collect(),
+            approvals: snapshot.permissions.into_iter().collect(),
             deciding: Vec::new(),
             questions: snapshot
-                .question
+                .questions
                 .into_iter()
                 .map(|question| PendingQuestion {
                     question,
@@ -178,9 +181,11 @@ impl SpaceModel {
                 .collect(),
             submitting: Vec::new(),
             workers,
+            workers_authoritative: true,
             attribution: true,
             modes: snapshot.modes,
             error: None,
+            worker_error: None,
         };
         for message in snapshot.messages {
             let mut text = Vec::new();
@@ -378,6 +383,12 @@ impl SpaceModel {
                     .into_iter()
                     .map(|entry| worker(entry, &self.session))
                     .collect();
+                self.workers_authoritative = true;
+                self.worker_error = None;
+            }
+            Event::WorkersUnavailable { message } => {
+                self.worker_error = Some(message);
+                self.workers_authoritative = false;
             }
             Event::ModesChanged(modes) => self.modes = modes,
             Event::ModeRefused { mode, reason } => {
@@ -387,9 +398,13 @@ impl SpaceModel {
                     None => format!("The agent refused {name} mode."),
                 });
             }
-            Event::Error { message } => self.error = Some(message),
+            Event::Error { message } => {
+                self.error = Some(message);
+            }
             Event::Closed { reason } => {
                 self.closed = true;
+                self.workers_authoritative = false;
+                self.worker_error = None;
                 self.busy = None;
                 self.error = Some(reason.unwrap_or_else(|| "The agent session ended.".to_owned()));
                 if let Some(prompt) = self.in_flight.take() {
@@ -615,10 +630,16 @@ impl SpaceModel {
                 .front()
                 .map(|pending| projection::question(&pending.question, &pending.answers)),
             workers: self.workers.clone(),
+            workers_authoritative: Some(self.workers_authoritative),
             presentations: Vec::new(),
             participants,
             attribution: self.attribution,
-            error: self.error.clone(),
+            error: match (&self.error, &self.worker_error) {
+                (Some(error), Some(worker_error)) => Some(format!("{error} {worker_error}")),
+                (Some(error), None) => Some(error.clone()),
+                (None, Some(worker_error)) => Some(worker_error.clone()),
+                (None, None) => None,
+            },
             mode: self
                 .modes
                 .current
@@ -751,6 +772,41 @@ mod tests {
     }
 
     #[test]
+    fn initial_snapshot_keeps_all_pending_permissions_and_questions() {
+        let question = |id: &str| backend::Question {
+            id: id.into(),
+            title: id.into(),
+            fields: Vec::new(),
+        };
+        let mut space = SpaceModel::new(
+            "s1".into(),
+            "Title".into(),
+            "fake".into(),
+            "/tmp".into(),
+            "sky".into(),
+            "fake-1".into(),
+            Snapshot {
+                busy: Some(false),
+                permissions: vec![permission("p1"), permission("p2")],
+                questions: vec![question("q1"), question("q2")],
+                ..Snapshot::default()
+            },
+        );
+        space.apply(Event::PermissionRequested(permission("p1")));
+        space.apply(Event::QuestionAsked(question("q1")));
+        assert_eq!(space.activity(), Activity::Waiting);
+        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
+        assert_eq!(space.state(Vec::new()).question.unwrap().id, "q1");
+        space.apply(Event::PermissionResolved { id: "p1".into() });
+        space.apply(Event::QuestionResolved { id: "q1".into() });
+        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p2");
+        assert_eq!(space.state(Vec::new()).question.unwrap().id, "q2");
+        space.apply(Event::PermissionResolved { id: "p2".into() });
+        space.apply(Event::QuestionResolved { id: "q2".into() });
+        assert_eq!(space.activity(), Activity::Idle);
+    }
+
+    #[test]
     fn only_offered_options_can_be_granted() {
         let mut space = model();
         let mut offering = permission("p1");
@@ -869,6 +925,35 @@ mod tests {
                 protocol::WorkerState::Error,
             ]
         );
+    }
+
+    #[test]
+    fn a_fresh_worker_update_does_not_clear_an_unrelated_space_error() {
+        let mut space = model();
+        space.apply(Event::Error {
+            message: "unrelated error".into(),
+        });
+        let current = space.state(Vec::new());
+        assert_eq!(current.workers_authoritative, Some(true));
+        space.apply(Event::WorkersChanged { workers: vec![] });
+        let current = space.state(Vec::new());
+        assert_eq!(current.workers_authoritative, Some(true));
+        assert_eq!(current.error.as_deref(), Some("unrelated error"));
+        space.apply(Event::WorkersUnavailable {
+            message: "worker observation interrupted".into(),
+        });
+        let uncertain = space.state(Vec::new());
+        assert_eq!(uncertain.workers_authoritative, Some(false));
+        assert_eq!(
+            uncertain.error.as_deref(),
+            Some("unrelated error worker observation interrupted")
+        );
+        space.apply(Event::WorkersChanged { workers: vec![] });
+        let recovered = space.state(Vec::new());
+        assert_eq!(recovered.workers_authoritative, Some(true));
+        assert_eq!(recovered.error.as_deref(), Some("unrelated error"));
+        space.apply(Event::Closed { reason: None });
+        assert_eq!(space.state(Vec::new()).workers_authoritative, Some(false));
     }
 
     #[test]

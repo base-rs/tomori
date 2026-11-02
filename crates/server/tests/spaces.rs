@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{
-    AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question, Session, Worker,
-    WorkerState,
+    AnswerValue, Backend, Event, Field, FieldKind, FieldOption, Permission, Question, Session,
+    SessionSpec, Worker, WorkerState,
 };
 use protocol::{
     Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState,
@@ -199,6 +199,228 @@ fn pair(server: &TestServer) -> (TestClient, TestClient, String) {
 }
 
 #[test]
+fn a_failed_initial_snapshot_opens_no_space_and_a_retry_succeeds() {
+    let backend = FakeBackend::manual();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let original = ada.create_space("Existing");
+    let existing = backend.started()[0].clone();
+    backend.fail_snapshots(true);
+
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::CreateSpace {
+        title: "Unavailable".into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: None,
+        environment: None,
+    });
+    let error = bob.error();
+    assert!(error.contains("initial session state"), "{error}");
+    assert!(error.contains("retry"), "{error}");
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        if backend
+            .started()
+            .get(1)
+            .is_some_and(|session| session.log().closed)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failed handle was not closed"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!existing.log().closed);
+    bob.send(&ClientMessage::ListSpaces);
+    let spaces = bob.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => Some(spaces.clone()),
+        _ => None,
+    });
+    assert_eq!(spaces.len(), 1);
+    assert_eq!(spaces[0].id, original.id);
+    backend.fail_snapshots(false);
+    let retried = bob.create_space("Retried");
+    assert_eq!(retried.title, "Retried");
+    assert!(!existing.log().closed);
+}
+
+#[test]
+fn a_snapshot_failure_releases_the_only_space_slot_before_retry() {
+    let backend = FakeBackend::manual();
+    backend.fail_snapshots(true);
+    let server = TestServer::with_server(backend.clone(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_max_spaces(1)
+    });
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Unavailable".into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: None,
+        environment: None,
+    });
+    let error = ada.error();
+    assert!(error.contains("initial session state"), "{error}");
+    assert!(backend.started()[0].log().closed);
+    backend.fail_snapshots(false);
+    assert_eq!(ada.create_space("Retried").title, "Retried");
+}
+
+#[test]
+fn duplicate_attachment_does_not_close_the_existing_space() {
+    let backend = FakeBackend::manual();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Existing");
+    let existing = backend.started()[0].clone();
+    backend.fail_snapshots(true);
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::CreateSpace {
+        title: "Duplicate".into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: Some(existing.id()),
+        environment: None,
+    });
+    assert!(bob.error().contains("already attached"));
+    assert!(!existing.log().closed);
+    existing.emit(Event::Busy);
+    assert_eq!(
+        ada.space(|state| state.activity == Activity::Running).title,
+        "Existing"
+    );
+}
+
+#[test]
+fn a_failed_snapshot_of_an_attached_session_can_be_retried() {
+    let backend = FakeBackend::manual();
+    let detached = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = detached.id();
+    futures_lite::future::block_on(detached.close()).unwrap();
+    backend.fail_snapshots(true);
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    let request = |title: &str| ClientMessage::CreateSpace {
+        title: title.into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: Some(id.clone()),
+        environment: None,
+    };
+    ada.send(&request("Failed"));
+    assert!(ada.error().contains("initial session state"));
+    backend.fail_snapshots(false);
+    ada.send(&request("Retried"));
+    assert_eq!(
+        ada.space(|state| state.title == "Retried").activity,
+        Activity::Idle
+    );
+}
+
+#[test]
+fn closing_a_fake_handle_still_reports_closed_once() {
+    let backend = FakeBackend::manual();
+    let session = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    futures_lite::future::block_on(session.close()).unwrap();
+    assert!(matches!(
+        futures_lite::future::block_on(session.next_event()),
+        Ok(Event::Closed { .. })
+    ));
+    assert!(
+        matches!(futures_lite::future::block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Closed)
+    );
+}
+
+#[test]
+fn closing_an_old_fake_handle_cannot_close_a_reattachment() {
+    let backend = FakeBackend::manual();
+    let old = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = old.id();
+    futures_lite::future::block_on(old.close()).unwrap();
+    let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    futures_lite::future::block_on(old.close()).unwrap();
+    assert!(futures_lite::future::block_on(replacement.snapshot()).is_ok());
+    assert!(
+        matches!(futures_lite::future::block_on(old.snapshot()), Err(error) if error.kind == backend::ErrorKind::Closed)
+    );
+    replacement.emit(Event::Busy);
+    assert!(matches!(
+        futures_lite::future::block_on(replacement.next_event()),
+        Ok(Event::Busy)
+    ));
+}
+
+#[test]
+fn a_stale_fake_waiter_cannot_consume_reattachment_events() {
+    let backend = FakeBackend::manual();
+    let old = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = old.id();
+    let mut waiting = Box::pin(old.next_event());
+    assert!(
+        futures_lite::future::block_on(futures_lite::future::poll_once(waiting.as_mut())).is_none()
+    );
+    futures_lite::future::block_on(old.close()).unwrap();
+    let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    replacement.emit(Event::Busy);
+    assert!(matches!(
+        futures_lite::future::block_on(waiting),
+        Ok(Event::Closed { .. })
+    ));
+    assert!(matches!(
+        futures_lite::future::block_on(replacement.next_event()),
+        Ok(Event::Busy)
+    ));
+}
+
+#[test]
+fn a_fake_reattachment_preserves_pending_events_and_snapshot_requests() {
+    let backend = FakeBackend::manual();
+    let old = futures_lite::future::block_on(backend.create(SessionSpec {
+        directory: "/tmp".into(),
+        title: "Existing".into(),
+    }))
+    .unwrap();
+    let id = old.id();
+    futures_lite::future::block_on(old.close()).unwrap();
+    let permission = Permission {
+        id: "pending".into(),
+        tool: "Read".into(),
+        input: serde_json::Value::Null,
+        description: None,
+        options: Vec::new(),
+    };
+    old.emit(Event::PermissionRequested(permission.clone()));
+    let replacement = futures_lite::future::block_on(backend.attach(&id, "/tmp")).unwrap();
+    let snapshot = futures_lite::future::block_on(replacement.snapshot()).unwrap();
+    assert_eq!(
+        snapshot.permissions.as_slice(),
+        std::slice::from_ref(&permission)
+    );
+    assert!(
+        matches!(futures_lite::future::block_on(replacement.next_event()), Ok(Event::PermissionRequested(found)) if found == permission)
+    );
+}
+
+#[test]
 fn workers_started_by_the_session_have_no_parent() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");
@@ -227,6 +449,48 @@ fn workers_started_by_the_session_have_no_parent() {
         parents,
         [("lead", None), ("helper", Some("lead")), ("orphan", None)]
     );
+}
+
+#[test]
+fn worker_freshness_is_shared_without_clearing_an_unrelated_error() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (mut ada, mut bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::WorkersChanged {
+        workers: vec![Worker {
+            id: "child".into(),
+            parent: Some(session.id()),
+            title: "Child".into(),
+            state: WorkerState::Completed,
+        }],
+    });
+    for client in [&mut ada, &mut bob] {
+        let state = client.space(|state| state.workers.len() == 1);
+        assert_eq!(state.workers_authoritative, Some(true));
+    }
+    session.emit(Event::Error {
+        message: "unrelated error".into(),
+    });
+    for client in [&mut ada, &mut bob] {
+        let state = client.space(|state| state.error.as_deref() == Some("unrelated error"));
+        assert_eq!(state.workers_authoritative, Some(true));
+    }
+    session.emit(Event::WorkersUnavailable {
+        message: "worker observation interrupted".into(),
+    });
+    for client in [&mut ada, &mut bob] {
+        let state = client.space(|state| state.workers_authoritative == Some(false));
+        assert_eq!(
+            state.error.as_deref(),
+            Some("unrelated error worker observation interrupted")
+        );
+    }
+    session.emit(Event::WorkersChanged { workers: vec![] });
+    for client in [&mut ada, &mut bob] {
+        let state = client
+            .space(|state| state.workers.is_empty() && state.workers_authoritative == Some(true));
+        assert_eq!(state.error.as_deref(), Some("unrelated error"));
+    }
 }
 
 #[test]

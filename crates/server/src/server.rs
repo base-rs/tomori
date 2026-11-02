@@ -9,7 +9,7 @@ use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::{Backend, Event, Session, SessionSpec, Snapshot};
+use backend::{Backend, Event, Session, SessionSpec};
 use base_http_server::{Error, Statistics};
 use base_scheduler::{
     Cancellation, OperationError, OperationResult, SocketAccept, SocketAddress, SocketBind,
@@ -757,7 +757,7 @@ async fn run_space<S: Timers>(
         }
     }
     // Only an accepted directory takes a place, which is held until the session has closed or failed to start. Spaces still starting count, so concurrent requests cannot pass the limit together.
-    let Some(_slot) = places.slots.acquire() else {
+    let Some(slot) = places.slots.acquire() else {
         hub.create_failed(&request.creator, places.slots.full_error());
         return;
     };
@@ -785,9 +785,24 @@ async fn run_space<S: Timers>(
             return;
         }
     };
-    let (snapshot, error) = match session.snapshot().await {
-        Ok(snapshot) => (snapshot, None),
-        Err(error) => (Snapshot::default(), Some(error.message)),
+    let snapshot = match session.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // Close the backend handle without deleting an attached session.
+            if let Err(error) = session.close().await {
+                log::warn!("Closing a session after snapshot failure failed: {error}");
+            }
+            // Release the slot before reporting the retryable failure.
+            drop(slot);
+            hub.create_failed(
+                &request.creator,
+                format!(
+                    "Could not read the initial session state: {}. Please retry.",
+                    error.message
+                ),
+            );
+            return;
+        }
     };
     let (commands, receiver) = async_channel::unbounded();
     let Some(space) = hub.register_space(&request, session.id(), snapshot, commands) else {
@@ -797,9 +812,6 @@ async fn run_space<S: Timers>(
         }
         return;
     };
-    if let Some(error) = error {
-        hub.space_event(&space, Event::Error { message: error });
-    }
     let voice = voices.start(&hub, &space);
     let error = drive(&hub, &space, &session, receiver, voice).await;
     hub.space_ended(&space, error);

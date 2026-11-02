@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use backend::{AnswerValue, Decision, ErrorKind, Event, Prompt, Result, Session, Snapshot};
 
-use crate::connection::{Command, Commands};
+use crate::connection::{Command, Commands, RegistrationEvents};
 use crate::wire;
 
 /// One session bound to the connection thread.
@@ -22,14 +22,14 @@ pub struct OpenCodeSession {
 
 struct Inner {
     id: String,
-    events: async_channel::Receiver<Event>,
+    events: RegistrationEvents,
     commands: Commands,
     closed: AtomicBool,
 }
 
 impl OpenCodeSession {
     /// Build the handle from the thread's reply to a create or attach command.
-    pub fn new(id: String, events: async_channel::Receiver<Event>, commands: Commands) -> Self {
+    pub(crate) fn new(id: String, events: RegistrationEvents, commands: Commands) -> Self {
         Self {
             inner: Arc::new(Inner {
                 id,
@@ -49,38 +49,57 @@ impl Session for OpenCodeSession {
     fn next_event(&self) -> impl std::future::Future<Output = Result<Event>> + Send {
         let inner = Arc::clone(&self.inner);
         async move {
-            let event = inner.events.recv().await.map_err(|error| {
-                let kind = if inner.closed.load(Ordering::Acquire) {
-                    ErrorKind::Closed
-                } else {
-                    ErrorKind::Unavailable
+            loop {
+                if inner.closed.load(Ordering::Acquire) {
+                    return Err(backend::Error::new(
+                        ErrorKind::Closed,
+                        "the session has closed",
+                    ));
+                }
+                let queued = inner.events.recv().await.map_err(|error| {
+                    let kind = if inner.closed.load(Ordering::Acquire) {
+                        ErrorKind::Closed
+                    } else {
+                        ErrorKind::Unavailable
+                    };
+                    backend::Error::new(kind, error.to_string())
+                })?;
+                let Some(event) = queued.into_current() else {
+                    continue;
                 };
-                backend::Error::new(kind, error.to_string())
-            })?;
-            if matches!(event, Event::Closed { .. }) {
-                inner.closed.store(true, Ordering::Release);
+                if matches!(event, Event::Closed { .. }) {
+                    inner.closed.store(true, Ordering::Release);
+                }
+                return Ok(event);
             }
-            Ok(event)
         }
     }
 
     fn snapshot(&self) -> impl std::future::Future<Output = Result<Snapshot>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         async move {
             commands
-                .reply_with(move |reply| Command::Snapshot { id, reply })
+                .reply_with(move |reply| Command::Snapshot {
+                    id,
+                    identity,
+                    reply,
+                })
                 .await
+                .and_then(|snapshot| snapshot.accept())
         }
     }
 
     fn send(&self, prompt: Prompt) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         async move {
             commands
                 .reply_with(move |reply| Command::Prompt {
                     id,
+                    identity,
                     key: prompt.key,
                     text: prompt.text,
                     reply,
@@ -95,6 +114,7 @@ impl Session for OpenCodeSession {
         decision: Decision,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         async move {
             // OpenCode's reply is a flat `once` / `always` / `reject`; the
@@ -108,6 +128,7 @@ impl Session for OpenCodeSession {
             commands
                 .reply_with(move |reply| Command::Decide {
                     id,
+                    identity,
                     request: permission.to_owned(),
                     decision,
                     reply,
@@ -122,12 +143,14 @@ impl Session for OpenCodeSession {
         answers: Vec<(String, AnswerValue)>,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         async move {
             let answer = wire::form_answer(&answers);
             commands
                 .reply_with(move |reply| Command::Answer {
                     id,
+                    identity,
                     form: question.to_owned(),
                     answer,
                     reply,
@@ -138,35 +161,54 @@ impl Session for OpenCodeSession {
 
     fn set_mode(&self, mode: &str) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         let mode = mode.to_owned();
         async move {
             commands
-                .reply_with(move |reply| Command::SetMode { id, mode, reply })
+                .reply_with(move |reply| Command::SetMode {
+                    id,
+                    identity,
+                    mode,
+                    reply,
+                })
                 .await
         }
     }
 
     fn interrupt(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         async move {
             commands
-                .reply_with(move |reply| Command::Interrupt { id, reply })
+                .reply_with(move |reply| Command::Interrupt {
+                    id,
+                    identity,
+                    reply,
+                })
                 .await
         }
     }
 
     fn close(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
         let commands = self.inner.commands.clone();
         let inner = Arc::clone(&self.inner);
         async move {
             inner.closed.store(true, Ordering::Release);
-            // Closing the last session stops the thread; there is no reply
-            // channel for a close, so fire and forget.
-            let _ = commands.tx().try_send(Command::Close { id });
-            Ok(())
+            // The registration is removed in command order. Never let a
+            // stalled shared dispatcher hold this space's cleanup forever.
+            commands
+                .tx()
+                .try_send(Command::Close { id, identity })
+                .map_err(|_| {
+                    backend::Error::new(
+                        ErrorKind::Unavailable,
+                        "the connection could not close the registration",
+                    )
+                })
         }
     }
 }

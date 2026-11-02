@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Track OpenCode child lifecycle events so deleted workers animate their return without mistaking completion or partial lists for deletion.
 - Document the direct 1080p virtual camera and dedicated audio input used to share a Tomori space in a Slack Huddle without OBS.
 - The spectator renders an unobstructed view without the headset HUD, animates the swarm from the space's activity, and publishes 1080p PipeWire video instead of 4K.
 - Release Tomori under the MIT License only, replacing the MIT or Apache-2.0 dual license.

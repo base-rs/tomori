@@ -76,10 +76,13 @@ pub fn event_for(
         "session.execution.interrupted" => busy_like(data, session_id, Event::Idle),
         "session.execution.succeeded" => busy_like(data, session_id, Event::Idle),
         "session.execution.failed" => execution_failed(data, session_id),
-        // Children are tracked as workers; the caller refreshes the list.
-        "session.created" | "session.deleted" | "session.forked" => Some(Event::WorkersChanged {
-            workers: Vec::new(),
+        // A registered session ending closes its own space. The connection
+        // also routes the same deletion to any parent that knows it as a worker.
+        "session.deleted" => for_session(data, session_id).then(|| Event::Closed {
+            reason: Some("the OpenCode session was deleted".into()),
         }),
+        // Child creation is routed to its parent by the connection.
+        "session.created" | "session.forked" => None,
         _ => None,
     }
 }
@@ -394,6 +397,25 @@ fn field_options(values: &[Value]) -> Vec<FieldOption> {
 
 /// A child session as a delegated worker.
 pub fn worker_from_session(info: &Value) -> Option<Worker> {
+    let time = info.get("time");
+    let busy = time
+        .and_then(|time| time.get("busy"))
+        .and_then(Value::as_f64);
+    let idle = time
+        .and_then(|time| time.get("idle"))
+        .and_then(Value::as_f64);
+    let outcome = match info.get("outcome").and_then(Value::as_str) {
+        Some("succeeded") => WorkerState::Completed,
+        Some("failed") => WorkerState::Error,
+        Some("interrupted") => WorkerState::Stopped,
+        _ => WorkerState::Unknown,
+    };
+    let state = match (busy, idle) {
+        (Some(busy), Some(idle)) if busy > idle => WorkerState::Running,
+        (Some(busy), Some(idle)) if busy == idle => WorkerState::Unknown,
+        (Some(_), None) => WorkerState::Running,
+        _ => outcome,
+    };
     Some(Worker {
         id: info.get("id")?.as_str()?.to_owned(),
         parent: info
@@ -405,12 +427,7 @@ pub fn worker_from_session(info: &Value) -> Option<Worker> {
             .and_then(Value::as_str)
             .unwrap_or("worker")
             .to_owned(),
-        state: match info.get("outcome").and_then(Value::as_str) {
-            Some("succeeded") => WorkerState::Completed,
-            Some("failed") => WorkerState::Error,
-            Some("interrupted") => WorkerState::Stopped,
-            _ => WorkerState::Running,
-        },
+        state,
     })
 }
 
@@ -481,6 +498,44 @@ pub fn agent_switched(value: &Value, session_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_child_is_not_mistaken_for_its_previous_outcome() {
+        let mut info = serde_json::json!({"id":"child", "outcome":"succeeded", "time":{"busy":101,"idle":100}});
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Running
+        );
+        info["time"]["busy"] = serde_json::json!(100);
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Unknown
+        );
+        info["time"]["busy"] = serde_json::json!(99);
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Completed
+        );
+    }
+
+    #[test]
+    fn a_child_without_execution_evidence_is_not_assumed_running() {
+        let info = serde_json::json!({"id":"child", "time":{"created":1,"updated":1}});
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Unknown
+        );
+    }
+
+    #[test]
+    fn deleting_the_registered_session_closes_its_space() {
+        let event = serde_json::json!({"type":"session.deleted","data":{"sessionID":"parent"}});
+        assert!(matches!(
+            event_for(&event, "parent", &mut Default::default()),
+            Some(Event::Closed { .. })
+        ));
+        assert!(event_for(&event, "other", &mut Default::default()).is_none());
+    }
 
     fn event(
         value: &Value,

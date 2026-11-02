@@ -34,6 +34,8 @@ What waits to be sent on one connection is bounded too, so that a slow or carele
 
 Clients connect over the local network; a USB connection is not required. Authentication is not an initial requirement. It will be added later, likely as tokens carried in cookies or authorization headers; until then, anyone who can reach the server on the local network can join a space, so sessions run only beneath the operator's workspace roots and only a limited number at once, as described in `workspaces.md`. Whether local network traffic is encrypted is not yet decided. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
 
+When fitting a snapshot to its budget removes workers, the snapshot marks its worker list non-authoritative and retains or supplies a visible error, so clients do not mistake transport trimming for a worker departure.
+
 ## Rationale
 
 A single duplex connection per participant keeps the server simple and supports real-time audio in both directions. Sharing one protocol crate prevents the client and server definitions from drifting apart. Local network connections let several headsets share a space without USB cables, and discovery lets a headset find the server without typing an address. Deferring authentication keeps the first server simple; because space participants can approve agent tool use, it must be added before use on untrusted networks. Agreed in the October 2026 design discussion.
