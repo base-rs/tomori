@@ -15,7 +15,7 @@ use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_http::{InterimHandler, InterimResponses, Request, Response, Status};
 use base_http_server::Handler;
 use base_scheduler::{Cancellation, SocketLocalAddress};
-use base_scheduler_direct::DirectScheduler;
+use base_scheduler_native::NativeScheduler;
 use futures_lite::future::block_on;
 use protocol::{
     AudioFrame, CONNECT_PATH, ClientMessage, Frame, FrameDecoder, FrameKind, PROTOCOL_VERSION,
@@ -223,7 +223,7 @@ impl MiniServer {
         };
         let lifetime = stop.clone();
         let thread = std::thread::spawn(move || {
-            let scheduler = DirectScheduler::new(Default::default()).unwrap();
+            let scheduler = NativeScheduler::new().unwrap();
             block_on(async {
                 let listener = AddressEndpoint::new(address)
                     .bind(&scheduler, BindOptions::default(), &lifetime)

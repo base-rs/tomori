@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use base_scheduler::{Cancellation, SocketLocalAddress};
-use base_scheduler_direct::{DirectOptions, DirectScheduler};
+use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
 use protocol::{
     AudioFrame, ClientMessage, Frame, FrameDecoder, FrameKind, Gate, PROTOCOL_VERSION,
@@ -106,9 +106,11 @@ impl TestServer {
             let backend = backend.clone();
             let cancellation = cancellation.clone();
             std::thread::spawn(move || {
-                let scheduler = DirectScheduler::new(DirectOptions {
+                let scheduler = NativeScheduler::with_options(NativeOptions {
+                    workers: 2,
                     threads: 2,
                     capacity: 256,
+                    ..Default::default()
                 })
                 .expect("the scheduler starts");
                 // Tests name `/tmp` or the temporary directory unless they give their own roots.
