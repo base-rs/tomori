@@ -408,7 +408,7 @@ pub fn worker_from_session(info: &Value) -> Option<Worker> {
         state: match info.get("outcome").and_then(Value::as_str) {
             Some("succeeded") => WorkerState::Completed,
             Some("failed") => WorkerState::Error,
-            Some("interrupted") => WorkerState::Unknown,
+            Some("interrupted") => WorkerState::Stopped,
             _ => WorkerState::Running,
         },
     })

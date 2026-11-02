@@ -156,6 +156,8 @@ pub enum WorkerState {
     Idle,
     Completed,
     Error,
+    /// Ended before it finished without failing, such as when its agent process ended. It may be resumed.
+    Stopped,
     #[default]
     #[serde(other)]
     Unknown,
@@ -254,6 +256,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<WorkerState>("\"paused\"").unwrap(),
             WorkerState::Unknown
+        );
+        assert_eq!(
+            serde_json::from_str::<WorkerState>("\"stopped\"").unwrap(),
+            WorkerState::Stopped
         );
         let summary: SpaceSummary = serde_json::from_value(serde_json::json!({
             "id": "space-1",

@@ -663,6 +663,7 @@ fn state_label(state: &State) -> (&'static str, [f32; 3]) {
         State::Idle => ("IDLE", [0.55, 0.7, 0.78]),
         State::Completed => ("COMPLETED", [0.3, 0.95, 0.65]),
         State::Error => ("ERROR", [1.0, 0.35, 0.3]),
+        State::Stopped => ("STOPPED", [0.8, 0.68, 0.55]),
         State::Unknown => ("UNKNOWN", [0.7, 0.65, 0.8]),
     }
 }
@@ -1106,6 +1107,12 @@ fn status_symbol(mesh: &mut Vec<Vertex>, state: State, p: f32, color: [f32; 4]) 
         State::Idle => {
             line([-0.45, -0.8], [-0.45, 0.8]);
             line([0.45, -0.8], [0.45, 0.8]);
+        }
+        State::Stopped => {
+            line([-0.7, -0.7], [0.7, -0.7]);
+            line([0.7, -0.7], [0.7, 0.7]);
+            line([0.7, 0.7], [-0.7, 0.7]);
+            line([-0.7, 0.7], [-0.7, -0.7]);
         }
         State::Unknown => {
             line([0.0, 0.95], [0.9, 0.0]);

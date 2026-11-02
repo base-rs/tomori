@@ -9,7 +9,9 @@
 
 mod process;
 mod protocol;
+mod records;
 mod session;
+mod workers;
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -22,6 +24,7 @@ use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
 pub use session::ClaudeCodeSession;
+use workers::Workers;
 
 /// How to run `claude`.
 #[derive(Clone, Debug)]
@@ -136,7 +139,7 @@ impl backend::Backend for ClaudeCode {
         if !spec.title.is_empty() {
             command.args(["--name", &spec.title]);
         }
-        ClaudeCodeSession::spawn(command, id, self.config.grace)
+        ClaudeCodeSession::spawn(command, id, self.config.grace, Workers::default())
     }
 
     async fn attach(&self, id: &str, directory: &str) -> Result<ClaudeCodeSession> {
@@ -146,7 +149,8 @@ impl backend::Backend for ClaudeCode {
                 format!("no session {id:?}"),
             ));
         }
-        if let Some(transcripts) = self.transcripts(directory)
+        let transcripts = self.transcripts(directory);
+        if let Some(transcripts) = &transcripts
             && !transcripts.join(format!("{id}.jsonl")).is_file()
         {
             return Err(Error::new(
@@ -154,9 +158,24 @@ impl backend::Backend for ClaudeCode {
                 format!("no session {id:?} in {directory}"),
             ));
         }
+        // The session's workers are reported from its own records, read on their own thread like the session list.
+        let workers = match transcripts {
+            Some(transcripts) => {
+                let session = id.to_owned();
+                let (sender, receiver) = async_channel::bounded(1);
+                std::thread::Builder::new()
+                    .name("claude-code-records".into())
+                    .spawn(move || {
+                        let _ = sender.send_blocking(records::workers(&transcripts, &session));
+                    })
+                    .map_err(|error| Error::new(ErrorKind::Other, error.to_string()))?;
+                receiver.recv().await.unwrap_or_default()
+            }
+            None => Workers::default(),
+        };
         let mut command = self.command(directory);
         command.args(["--resume", id]);
-        ClaudeCodeSession::spawn(command, id.into(), self.config.grace)
+        ClaudeCodeSession::spawn(command, id.into(), self.config.grace, workers)
     }
 }
 

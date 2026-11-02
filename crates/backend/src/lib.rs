@@ -180,6 +180,9 @@ pub enum WorkerState {
     Idle,
     Completed,
     Error,
+    /// Ended before it finished without failing, such as when it was stopped or the agent process running it ended. The
+    /// agent may resume it later.
+    Stopped,
     Unknown,
 }
 
