@@ -6,13 +6,11 @@
 //! The view is driven by a [`crate::spectator_feed::Feed`], polled once per
 //! rendered frame: the feed connects to a space the same way the headset does
 //! and projects the followed participant's point of view into a [`Frame`].
-use crate::{caption::Caption, graphics::Renderer, spectator_feed::Feed, swarm::Swarm};
+use crate::{graphics::Renderer, spectator_feed::Feed, swarm::Swarm};
 use glam::{Mat4, Vec3};
-use std::time::Duration;
 
 pub(crate) struct SpectatorView {
     feed: Feed,
-    caption: Caption,
 }
 
 pub(crate) struct RenderInputs<'a> {
@@ -25,11 +23,8 @@ pub(crate) struct RenderInputs<'a> {
 }
 
 impl SpectatorView {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, feed: Feed) -> Self {
-        Self {
-            feed,
-            caption: Caption::new(device, format),
-        }
+    pub fn new(feed: Feed) -> Self {
+        Self { feed }
     }
 
     pub fn render(&mut self, input: RenderInputs<'_>) {
@@ -68,12 +63,6 @@ impl SpectatorView {
         input
             .renderer
             .update_controllers(input.queue, frame.controllers, frame.hands);
-        self.caption.set_text(input.queue, &frame.caption);
-        self.caption.set_recording_progress(
-            input.queue,
-            frame.recording_ms.map(Duration::from_millis),
-            Duration::ZERO,
-        );
         // Preserve the followed participant's vertical FOV instead of
         // stretching its view to the spectator output aspect ratio.
         let aspect_correction =
@@ -85,7 +74,8 @@ impl SpectatorView {
             &[input.target],
             &[projection],
             Mat4::from_cols_array(&frame.scene_to_space),
-            Some((&self.caption, Mat4::from_cols_array(&frame.head))),
+            // The headset's head-locked HUD would obstruct the spectator view.
+            None,
         );
     }
 }

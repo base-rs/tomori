@@ -20,7 +20,7 @@ use crate::{
     identity::{Identity, Overrides, Store},
     interaction, playback,
     spectator::Frame,
-    swarm::{AGENT_COUNT, CENTER},
+    swarm::{CENTER, Swarm},
 };
 use glam::{Mat4, Quat, Vec3};
 use protocol::{Hand, ServerMessage};
@@ -37,6 +37,35 @@ struct ParticipantPresence {
     left: Option<protocol::Pose>,
     right: Option<protocol::Pose>,
     hands: Option<[Option<Hand>; 2]>,
+}
+
+/// Animate the coordinator from the space's observed activity, as the headset
+/// does. Presence does not currently carry the headset's swarm or attractor,
+/// so this is a local simulation rather than an exact copy of its particles.
+struct SwarmAnimation {
+    signals: interaction::Signals,
+    swarm: Swarm,
+}
+
+impl SwarmAnimation {
+    fn new() -> Self {
+        Self {
+            signals: interaction::Signals::default(),
+            swarm: Swarm::new(),
+        }
+    }
+
+    fn update(&mut self, session: interaction::SessionActivity, dt: f32) {
+        let visual = self.signals.update(
+            interaction::Inputs {
+                session,
+                ..Default::default()
+            },
+            dt,
+        );
+        self.swarm.set_visual(visual, dt);
+        self.swarm.step(dt, None);
+    }
 }
 
 /// The options a spectator is started with.
@@ -67,6 +96,7 @@ pub struct Feed {
     /// Worker simulation state, derived from the space's workers.
     workers: Workers,
     scene: Scene,
+    swarm: SwarmAnimation,
     sequence: u64,
     environment: Environment,
     last_poll: Instant,
@@ -137,6 +167,7 @@ impl Feed {
             following_name: None,
             workers: Workers::default(),
             scene: Scene::new(),
+            swarm: SwarmAnimation::new(),
             sequence: 0,
             environment: Environment::initial(),
             last_poll: Instant::now(),
@@ -253,8 +284,19 @@ impl Feed {
             }
         };
 
-        // Update the worker simulation from the space's state.
+        // Use the same activity-driven swarm simulation as the headset.
+        self.swarm.update(self.conversation.activity(), dt);
+        let agents: Vec<[f32; 3]> = self
+            .swarm
+            .swarm
+            .agents
+            .iter()
+            .map(|agent| agent.position.to_array())
+            .collect();
+
+        // Worker transitions depart from the animated coordinator, as on XR.
         let (root, workspace) = self.workers.update(self.conversation.joined_space());
+        self.scene.set_coordinator_samples(&agents);
         self.scene.update(root, workspace, dt);
 
         // Convert protocol poses to controller poses for the frame.
@@ -264,18 +306,6 @@ impl Feed {
                 orientation: p.orientation,
             })
         };
-
-        // A neutral spherical distribution, matching the swarm's own default,
-        // since the spectator does not run the swarm simulation.
-        let agents: Vec<[f32; 3]> = (0..AGENT_COUNT)
-            .map(|i| {
-                let y = 1.0 - 2.0 * (i as f32 + 0.5) / AGENT_COUNT as f32;
-                let angle = i as f32 * 2.399_963_1;
-                let r = (1.0 - y * y).sqrt();
-                let offset = Vec3::new(r * angle.cos(), y * 0.6, r * angle.sin());
-                (CENTER + offset * 0.85).to_array()
-            })
-            .collect();
 
         Frame {
             sequence: self.sequence,
@@ -291,7 +321,7 @@ impl Feed {
             attracting: false,
             caption,
             recording_ms: None,
-            interaction: interaction::Visual::default(),
+            interaction: self.swarm.swarm.visual,
             worker_cubes: self.scene.cubes().to_vec(),
             worker_stations: self.scene.stations().to_vec(),
             workspace: workspace.clone(),
@@ -311,6 +341,103 @@ impl Feed {
                 Some(name) => format!("SPECTATOR\nFollowing {name}"),
                 None => "SPECTATOR\nIn space, waiting for a participant...".to_string(),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server_choice::{Choice, Source};
+    use client::{ConnectionState, Event};
+    use protocol::{Activity, SpaceState};
+
+    #[test]
+    fn frames_follow_the_joined_spaces_activity() {
+        let mut feed = Feed::new(SpectatorOptions::default());
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                backends: vec![],
+                roots: vec![],
+            }));
+        let mut space = SpaceState {
+            id: "space".into(),
+            title: "Test".into(),
+            activity: Activity::Running,
+            ..Default::default()
+        };
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Space {
+                state: Box::new(space.clone()),
+            }));
+        let initial = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        assert_eq!(initial.interaction.mode, interaction::Mode::Working);
+        assert!(initial.interaction.working);
+
+        space.activity = Activity::Idle;
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Space {
+                state: Box::new(space),
+            }));
+        let mut frame = initial.clone();
+        for _ in 0..120 {
+            frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        }
+        assert_eq!(frame.interaction.mode, interaction::Mode::Ready);
+        assert!(!frame.interaction.working);
+        assert_ne!(frame.agents, initial.agents);
+    }
+
+    #[test]
+    fn swarm_animates_with_space_activity() {
+        let mut animation = SwarmAnimation::new();
+        let initial = animation.swarm.agents[0].position;
+        for _ in 0..120 {
+            animation.update(interaction::SessionActivity::Working, 1.0 / 60.0);
+        }
+        assert_eq!(animation.swarm.visual.mode, interaction::Mode::Working);
+        assert!(animation.swarm.visual.working);
+        assert!(animation.swarm.agents[0].position.distance(initial) > 0.01);
+
+        for _ in 0..120 {
+            animation.update(interaction::SessionActivity::Ready, 1.0 / 60.0);
+        }
+        assert_eq!(animation.swarm.visual.mode, interaction::Mode::Ready);
+        assert!(!animation.swarm.visual.working);
+        assert!(animation.swarm.visual.time > 0.0);
+    }
+
+    #[test]
+    fn swarm_uses_the_same_simulation_as_the_headset() {
+        let mut animation = SwarmAnimation::new();
+        let mut signals = interaction::Signals::default();
+        let mut headset = Swarm::new();
+        for activity in [
+            interaction::SessionActivity::Working,
+            interaction::SessionActivity::Waiting,
+            interaction::SessionActivity::Ready,
+        ] {
+            for _ in 0..80 {
+                let dt = 1.0 / 60.0;
+                animation.update(activity, dt);
+                let visual = signals.update(
+                    interaction::Inputs {
+                        session: activity,
+                        ..Default::default()
+                    },
+                    dt,
+                );
+                headset.set_visual(visual, dt);
+                headset.step(dt, None);
+            }
+        }
+        assert_eq!(animation.swarm.visual, headset.visual);
+        for (spectator, headset) in animation.swarm.agents.iter().zip(&headset.agents) {
+            assert_eq!(spectator.position, headset.position);
         }
     }
 }

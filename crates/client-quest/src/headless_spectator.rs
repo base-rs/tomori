@@ -69,7 +69,7 @@ impl State {
             pipewire_video::WIDTH,
             pipewire_video::HEIGHT,
         );
-        let spectator = SpectatorView::new(&device, pipewire_video::FORMAT, feed);
+        let spectator = SpectatorView::new(feed);
         let video = Video::new(&device, None)?;
         Ok(Self {
             device,
