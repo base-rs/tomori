@@ -3,7 +3,7 @@
 
 //! A [`Transcriber`] that buffers each utterance and decodes it whole, once, with the offline recognizer. See `design/speech.md`.
 //!
-//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so nothing is shown while the participant is still speaking, and the transcript arrives a couple of seconds after they let go, instead of almost at once.
+//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so nothing is shown while the participant is still speaking, and the transcript arrives a couple of seconds after they let go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`speech::stt::MAX_UTTERANCE`].
 
 use std::{
     collections::HashMap,
@@ -11,7 +11,7 @@ use std::{
 };
 
 use protocol::AudioFrame;
-use speech::stt::{OfflineRecognition, OfflineRecognizer, OfflineUtterance, RATE};
+use speech::stt::{OfflineRecognition, OfflineRecognizer, OfflineUtterance, RATE, VoiceActivity};
 use speech::{Error, Stopper};
 
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
@@ -29,10 +29,17 @@ pub struct OfflineTranscriber {
 }
 
 impl OfflineTranscriber {
-    /// Buffer and decode each utterance with an offline `recognizer`.
-    pub fn new(recognizer: impl OfflineRecognizer + 'static) -> Self {
+    /// Buffer and decode each utterance with an offline `recognizer`, splitting one too long for it at the pauses `voice` hears, or at its quietest points without one.
+    pub fn new(
+        recognizer: impl OfflineRecognizer + 'static,
+        voice: Option<Box<dyn VoiceActivity>>,
+    ) -> Self {
+        let offline = match voice {
+            Some(voice) => OfflineRecognition::with_voice_activity(recognizer, voice),
+            None => OfflineRecognition::spawn(recognizer),
+        };
         Self {
-            offline: Mutex::new(OfflineRecognition::spawn(recognizer)),
+            offline: Mutex::new(offline),
             utterances: Mutex::default(),
         }
     }
@@ -64,6 +71,9 @@ impl Transcriber for OfflineTranscriber {
                 }
                 speech::TranscriptEvent::Final(text) => sink.finish(&text),
                 speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
+                speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(&format!(
+                    "Nothing was sent: {error}. Say it in shorter messages."
+                )),
                 speech::TranscriptEvent::Failed(error) => sink.fail(&format!(
                     "Transcription failed, so nothing was sent: {error}."
                 )),
@@ -94,7 +104,7 @@ impl Transcriber for OfflineTranscriber {
     }
 }
 
-/// An [`OfflineRecognizer`] for the in-process Whisper model: it decodes the buffered clip whole, once.
+/// An [`OfflineRecognizer`] for the in-process Whisper model: it decodes each buffered clip, or segment of a long one, whole, once.
 pub struct Whisper {
     inner: speech::stt::WhisperRecognizer,
 }

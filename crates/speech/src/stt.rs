@@ -12,7 +12,9 @@
 mod offline;
 mod punctuation;
 mod resample;
+pub mod segment;
 mod transducer;
+mod vad;
 mod whisper;
 
 use std::{
@@ -28,12 +30,14 @@ use std::{
 
 use protocol::AudioFrame;
 
-pub use offline::{OfflineRecognition, OfflineRecognizer, OfflineUtterance};
+pub use offline::{MAX_UTTERANCE, OfflineRecognition, OfflineRecognizer, OfflineUtterance};
 pub use punctuation::{
     CnnBilstmPunctuator, DEFAULT_PUNCTUATION_MODEL, Punctuated, PunctuationConfig, Punctuator,
 };
 pub use resample::Resampler;
+pub use segment::{MAX_SEGMENT, VoiceActivity};
 pub use transducer::{TransducerConfig, TransducerRecognizer};
+pub use vad::{SileroVad, SileroVadConfig};
 pub use whisper::{WhisperConfig, WhisperRecognizer};
 
 use crate::{

@@ -1,9 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Whole-clip Whisper recognition in-process through sherpa-onnx, used only by the recognition benchmark to compare accuracy and latency with the streaming recognizer.
+//! Whole-clip Whisper recognition in-process through sherpa-onnx, used by the server's offline backend and by the recognition benchmark to compare accuracy and latency with the streaming recognizer.
 //!
-//! Whisper cannot stream: it decodes a complete clip, so the server does not use it.
+//! Whisper cannot stream: it decodes a complete clip of at most 30 seconds, so the server uses it only through [`super::OfflineRecognition`], which splits longer clips at their pauses.
 
 use std::path::{Path, PathBuf};
 

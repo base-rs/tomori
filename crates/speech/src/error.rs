@@ -14,6 +14,8 @@ pub enum Error {
     Engine(String),
     /// Recognition fell further behind the audio than [`crate::stt::BACKLOG`] allows.
     Behind,
+    /// The utterance was longer than the recognizer transcribes at once: the limit, in seconds.
+    TooLong(usize),
 }
 
 impl fmt::Display for Error {
@@ -27,6 +29,18 @@ impl fmt::Display for Error {
                 "speech recognition fell more than {} seconds behind the audio",
                 crate::stt::BACKLOG / crate::stt::RATE as usize
             ),
+            Self::TooLong(seconds) => {
+                let (count, unit) = if seconds % 60 == 0 {
+                    (seconds / 60, "minute")
+                } else {
+                    (*seconds, "second")
+                };
+                let plural = if count == 1 { "" } else { "s" };
+                write!(
+                    formatter,
+                    "the speech was longer than {count} {unit}{plural}, the most that is transcribed at once"
+                )
+            }
         }
     }
 }

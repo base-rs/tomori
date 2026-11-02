@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch the streaming speech recognition model, and the model that punctuates its transcripts, for the server into .tools/asr. With `whisper`, also fetch Whisper small.en, used only by the comparison benchmark; see crates/speech/readme.md.
+# Fetch the streaming speech recognition model, and the model that punctuates its transcripts, for the server into .tools/asr. With `whisper`, also fetch Whisper small.en and the Silero voice activity detector, used by the offline backend (`--speech-backend offline`) and the comparison benchmark; see crates/speech/readme.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root="$PWD/.tools/asr"
@@ -67,4 +67,17 @@ if [[ "${1:-}" == whisper ]]; then
     check "$root/$whisper/small.en-decoder.int8.onnx" 710ccf890e10f3faa15f51ec346081a2723c9f3adb6e4da81c6573a5a6f877fb
     check "$root/$whisper/small.en-tokens.txt" 306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930
     echo "Whisper small.en ready in $root/$whisper"
+
+    # Finds the pauses at which the offline backend splits an utterance longer than Whisper's 30 second window. The digest is the one the release publishes for the file.
+    vad=silero_vad.onnx
+    vad_sha=9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6
+    if [[ ! -s "$root/$vad" ]] || [[ "$(digest "$root/$vad")" != "$vad_sha" ]]; then
+        curl --fail --location --retry 3 "$releases/asr-models/$vad" -o "$root/$vad.part"
+        if [[ "$(digest "$root/$vad.part")" != "$vad_sha" ]]; then
+            echo "Checksum mismatch for $root/$vad.part" >&2
+            exit 1
+        fi
+        mv "$root/$vad.part" "$root/$vad"
+    fi
+    echo "Silero voice activity detector ready in $root/$vad"
 fi
