@@ -76,8 +76,13 @@ pub fn event_for(
         "session.execution.interrupted" => busy_like(data, session_id, Event::Idle),
         "session.execution.succeeded" => busy_like(data, session_id, Event::Idle),
         "session.execution.failed" => execution_failed(data, session_id),
-        // Child lifecycle changes are routed to their parent by the connection.
-        "session.created" | "session.deleted" | "session.forked" => None,
+        // A registered session ending closes its own space. The connection
+        // also routes the same deletion to any parent that knows it as a worker.
+        "session.deleted" => for_session(data, session_id).then(|| Event::Closed {
+            reason: Some("the OpenCode session was deleted".into()),
+        }),
+        // Child creation is routed to its parent by the connection.
+        "session.created" | "session.forked" => None,
         _ => None,
     }
 }
@@ -403,7 +408,7 @@ pub fn worker_from_session(info: &Value) -> Option<Worker> {
         Some("succeeded") => WorkerState::Completed,
         Some("failed") => WorkerState::Error,
         Some("interrupted") => WorkerState::Stopped,
-        _ => WorkerState::Running,
+        _ => WorkerState::Unknown,
     };
     let state = match (busy, idle) {
         (Some(busy), Some(idle)) if busy > idle => WorkerState::Running,
@@ -511,6 +516,25 @@ mod tests {
             worker_from_session(&info).unwrap().state,
             WorkerState::Completed
         );
+    }
+
+    #[test]
+    fn a_child_without_execution_evidence_is_not_assumed_running() {
+        let info = serde_json::json!({"id":"child", "time":{"created":1,"updated":1}});
+        assert_eq!(
+            worker_from_session(&info).unwrap().state,
+            WorkerState::Unknown
+        );
+    }
+
+    #[test]
+    fn deleting_the_registered_session_closes_its_space() {
+        let event = serde_json::json!({"type":"session.deleted","data":{"sessionID":"parent"}});
+        assert!(matches!(
+            event_for(&event, "parent", &mut Default::default()),
+            Some(Event::Closed { .. })
+        ));
+        assert!(event_for(&event, "other", &mut Default::default()).is_none());
     }
 
     fn event(

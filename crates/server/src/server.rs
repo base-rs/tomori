@@ -757,7 +757,7 @@ async fn run_space<S: Timers>(
         }
     }
     // Only an accepted directory takes a place, which is held until the session has closed or failed to start. Spaces still starting count, so concurrent requests cannot pass the limit together.
-    let Some(_slot) = places.slots.acquire() else {
+    let Some(slot) = places.slots.acquire() else {
         hub.create_failed(&request.creator, places.slots.full_error());
         return;
     };
@@ -788,6 +788,12 @@ async fn run_space<S: Timers>(
     let snapshot = match session.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(error) => {
+            // Close the backend handle without deleting an attached session.
+            if let Err(error) = session.close().await {
+                log::warn!("Closing a session after snapshot failure failed: {error}");
+            }
+            // Release the slot before reporting the retryable failure.
+            drop(slot);
             hub.create_failed(
                 &request.creator,
                 format!(
@@ -795,10 +801,6 @@ async fn run_space<S: Timers>(
                     error.message
                 ),
             );
-            // Close the backend handle without deleting an attached session.
-            if let Err(error) = session.close().await {
-                log::warn!("Closing a session after snapshot failure failed: {error}");
-            }
             return;
         }
     };

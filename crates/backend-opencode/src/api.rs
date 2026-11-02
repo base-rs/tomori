@@ -21,6 +21,8 @@ use crate::wire::question_from_form;
 /// Bound the backend's worker cache. Exceeding it is a visible incomplete
 /// snapshot, never an authoritative truncated list.
 pub(crate) const MAX_TRACKED_WORKERS: usize = 4096;
+/// A single agent response must not grow without bound while it is read.
+const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 /// A failed call, with the HTTP status when the server answered.
 #[derive(Debug)]
@@ -90,7 +92,7 @@ async fn read_json(
         })?;
         let end = frame.is_end();
         if let BodyFrame::Data { data, .. } = frame {
-            bytes.extend_from_slice(&data);
+            append_json_bytes(&mut bytes, &data, status)?;
         }
         if end {
             break;
@@ -119,6 +121,17 @@ async fn read_json(
         status: Some(status),
         message: format!("the server sent an unparseable body: {error}"),
     })
+}
+
+fn append_json_bytes(bytes: &mut Vec<u8>, data: &[u8], status: u16) -> Result<(), Failure> {
+    if bytes.len().saturating_add(data.len()) > MAX_JSON_BYTES {
+        return Err(Failure {
+            status: Some(status),
+            message: "the server's JSON response exceeds the supported size".into(),
+        });
+    }
+    bytes.extend_from_slice(data);
+    Ok(())
 }
 
 fn post(path: &str, payload: &Value) -> Request<BufferedBody> {
@@ -631,6 +644,12 @@ pub async fn session_messages<'scope>(
                     message: "the server repeated a message across pages".into(),
                 });
             }
+            if !valid_snapshot_message(message) {
+                return Err(Failure {
+                    status: None,
+                    message: "the server returned an invalid session message".into(),
+                });
+            }
             messages.push(message.clone());
         }
         let next = value
@@ -660,8 +679,44 @@ pub async fn session_messages<'scope>(
     })
 }
 
+/// Conversation messages must be readable; known non-conversation messages
+/// are valid but intentionally not projected as conversation text.
+fn valid_snapshot_message(message: &Value) -> bool {
+    match message.get("type").and_then(Value::as_str) {
+        Some("user") => message.get("text").and_then(Value::as_str).is_some(),
+        Some("assistant") => message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                parts
+                    .iter()
+                    .all(|part| match part.get("type").and_then(Value::as_str) {
+                        Some("text" | "reasoning") => {
+                            part.get("text").and_then(Value::as_str).is_some()
+                        }
+                        Some("tool") => {
+                            part.get("id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| !id.is_empty())
+                                && part
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|name| !name.is_empty())
+                                && part.get("state").is_some_and(Value::is_object)
+                        }
+                        _ => false,
+                    })
+            }),
+        Some(
+            "agent-switched" | "model-switched" | "location-switched" | "synthetic" | "system"
+            | "skill" | "shell" | "compaction" | "idle",
+        ) => true,
+        _ => false,
+    }
+}
+
 /// The pieces of a session needed to reconstruct a [`backend::Snapshot`]:
-/// its record, its messages, its open permission and form, and its children.
+/// its record, messages, open permissions and forms, and children.
 pub struct SnapshotParts {
     pub messages: Value,
     pub permissions: Vec<Value>,
@@ -681,19 +736,17 @@ impl SnapshotParts {
             .collect()
     }
 
-    /// The snapshot's single pending permission, if any.
-    pub fn permission(&self) -> Option<backend::Permission> {
+    /// All pending permissions, in the order the server returned them.
+    pub fn permissions(&self) -> Vec<backend::Permission> {
         self.permissions
-            .first()
-            .and_then(crate::wire::permission_from_request)
+            .iter()
+            .filter_map(crate::wire::permission_from_request)
+            .collect()
     }
 
-    /// The snapshot's single pending question, if any.
-    pub fn question(&self) -> Option<backend::Question> {
-        self.forms
-            .first()
-            .and_then(|form| form.get("form").or(Some(form)))
-            .map(question_from_form)
+    /// All pending questions, in the order the server returned them.
+    pub fn questions(&self) -> Vec<backend::Question> {
+        self.forms.iter().map(question_from_form).collect()
     }
 
     /// Fetch every piece for `session_id`.
@@ -712,43 +765,55 @@ impl SnapshotParts {
                 message: "the server returned an invalid session record".into(),
             });
         }
-        let busy = info
-            .get("time")
-            .and_then(|time| {
-                let busy = time.get("busy")?.as_u64()?;
-                let idle = time.get("idle")?.as_u64()?;
-                Some(busy > idle)
-            })
-            .unwrap_or(false);
+        let busy = running_from_record(&info).ok_or_else(|| Failure {
+            status: None,
+            message: "the server returned invalid session timing".into(),
+        })?;
         let messages = session_messages(client, resolved, session_id, cancellation).await?;
         let permissions = open_permissions(client, resolved, session_id, cancellation).await?;
         let forms = open_forms(client, resolved, session_id, cancellation).await?;
-        if permissions.len() > 1 || forms.len() > 1 {
-            return Err(Failure {
-                status: None,
-                message:
-                    "the snapshot contains more pending requests than the backend can represent"
-                        .into(),
-            });
-        }
+        let mut permission_ids = std::collections::HashSet::new();
         if permissions.iter().any(|request| {
             request.get("sessionID").and_then(Value::as_str) != Some(session_id)
                 || crate::wire::permission_from_request(request).is_none()
-                || !request.get("resources").is_some_and(Value::is_array)
+                || !request
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty() && permission_ids.insert(id))
+                || !request
+                    .get("resources")
+                    .and_then(Value::as_array)
+                    .is_some_and(|resources| resources.iter().all(Value::is_string))
         }) {
             return Err(Failure {
                 status: None,
                 message: "the server returned an invalid permission request".into(),
             });
         }
+        let mut form_ids = std::collections::HashSet::new();
         if forms.iter().any(|form| {
             form.get("sessionID").and_then(Value::as_str) != Some(session_id)
                 || !form
                     .get("id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| !id.is_empty())
+                    .is_some_and(|id| !id.is_empty() && form_ids.insert(id))
                 || form.get("title").and_then(Value::as_str).is_none()
-                || !form.get("fields").is_some_and(Value::is_array)
+                || !form
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .is_some_and(|fields| {
+                        !fields.is_empty()
+                            && fields.iter().all(|field| {
+                                field
+                                    .get("key")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|key| !key.is_empty())
+                                    && field
+                                        .get("type")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|kind| !kind.is_empty())
+                            })
+                    })
         }) {
             return Err(Failure {
                 status: None,
@@ -775,12 +840,22 @@ pub async fn session_running<'scope>(
     cancellation: &Cancellation,
 ) -> Result<Option<bool>, Failure> {
     let info = session_info(client, resolved, session_id, cancellation).await?;
-    let running = info.get("time").and_then(|time| {
-        let busy = time.get("busy")?.as_u64()?;
-        let idle = time.get("idle")?.as_u64()?;
-        Some(busy > idle)
-    });
+    let running = running_from_record(&info);
     Ok(running)
+}
+
+/// A session's first running turn has `busy` but no earlier `idle` timestamp.
+fn running_from_record(info: &Value) -> Option<bool> {
+    let time = info.get("time")?.as_object()?;
+    let timestamp = |key| match time.get(key) {
+        None => Some(None),
+        Some(value) => value.as_u64().map(Some),
+    };
+    match (timestamp("busy")?, timestamp("idle")?) {
+        (Some(busy), Some(idle)) => Some(busy > idle),
+        (Some(_), None) => Some(true),
+        (None, _) => Some(false),
+    }
 }
 
 /// Percent-encode the segment of a path: ids and directories are opaque.
@@ -795,4 +870,57 @@ fn urlencoding(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn response_bytes_are_bounded_without_truncating_valid_json() {
+        let mut bytes = vec![b'x'; MAX_JSON_BYTES - 1];
+        assert!(append_json_bytes(&mut bytes, b"y", 200).is_ok());
+        assert_eq!(bytes.len(), MAX_JSON_BYTES);
+        assert!(append_json_bytes(&mut bytes, b"z", 200).is_err());
+        assert_eq!(bytes.len(), MAX_JSON_BYTES);
+    }
+
+    #[test]
+    fn snapshot_message_validation_rejects_missing_required_content() {
+        assert!(valid_snapshot_message(
+            &json!({"type":"user","text":"hello"})
+        ));
+        assert!(!valid_snapshot_message(&json!({"id":"m"})));
+        assert!(!valid_snapshot_message(&json!({"type":"user"})));
+        assert!(valid_snapshot_message(
+            &json!({"type":"assistant","content":[{"type":"text","text":"hi"}]})
+        ));
+        assert!(!valid_snapshot_message(
+            &json!({"type":"assistant","content":[{"type":"text"}]})
+        ));
+        assert!(!valid_snapshot_message(
+            &json!({"type":"assistant","content":[{"type":"tool","id":"t"}]})
+        ));
+        assert!(valid_snapshot_message(&json!({"type":"agent-switched"})));
+        assert!(!valid_snapshot_message(&json!({"type":"unrecognized"})));
+    }
+
+    #[test]
+    fn session_running_state_handles_a_first_turn_without_idle_timestamp() {
+        assert_eq!(
+            running_from_record(&json!({"time":{"busy":10}})),
+            Some(true)
+        );
+        assert_eq!(
+            running_from_record(&json!({"time":{"busy":10,"idle":11}})),
+            Some(false)
+        );
+        assert_eq!(running_from_record(&json!({"time":{}})), Some(false));
+        assert_eq!(
+            running_from_record(&json!({"time":{"busy":"invalid"}})),
+            None
+        );
+        assert_eq!(running_from_record(&json!({})), None);
+    }
 }

@@ -13,7 +13,7 @@
 //! events out to the sessions they name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,9 +60,8 @@ const LISTINGS: u8 = 30;
 pub(crate) enum QueuedEvent {
     Ordinary(Event),
     Workers {
-        event: Event,
-        epoch: u64,
-        current: Arc<AtomicU64>,
+        pending: Arc<Mutex<PendingWorkers>>,
+        watermark: Arc<AtomicU64>,
     },
 }
 
@@ -70,61 +69,192 @@ impl QueuedEvent {
     pub(crate) fn into_current(self) -> Option<Event> {
         match self {
             Self::Ordinary(event) => Some(event),
-            Self::Workers {
-                event,
-                epoch,
-                current,
-            } => (epoch == current.load(Ordering::Acquire)).then_some(event),
+            Self::Workers { pending, watermark } => {
+                let mut pending = pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pending.latest.take().and_then(|update| match update {
+                    PendingWorkerUpdate::Workers { epoch, workers } => (epoch
+                        >= watermark.load(Ordering::Acquire))
+                    .then_some(Event::WorkersChanged { workers }),
+                    PendingWorkerUpdate::Unavailable(message) => {
+                        Some(Event::WorkersUnavailable { message })
+                    }
+                })
+            }
         }
     }
+}
+
+/// At most one worker replacement is queued per registration. Later changes
+/// update the pending value instead of cloning whole families into the channel.
+#[derive(Default)]
+pub(crate) struct PendingWorkers {
+    latest: Option<PendingWorkerUpdate>,
+}
+
+enum PendingWorkerUpdate {
+    Workers { epoch: u64, workers: Vec<Worker> },
+    Unavailable(String),
 }
 
 /// The sender side of one session's event channel.
 #[derive(Clone)]
 pub struct Events {
     tx: async_channel::Sender<QueuedEvent>,
+    worker_tx: async_channel::Sender<()>,
     worker_epoch: Arc<AtomicU64>,
+    worker_watermark: Arc<AtomicU64>,
+    pending_workers: Arc<Mutex<PendingWorkers>>,
+    worker_incomplete: Arc<AtomicBool>,
+}
+
+/// A session's event receiver and the identity of its specific registration.
+#[derive(Clone)]
+pub(crate) struct RegistrationEvents {
+    receiver: async_channel::Receiver<QueuedEvent>,
+    worker_receiver: async_channel::Receiver<()>,
+    pending: Arc<Mutex<PendingWorkers>>,
+    watermark: Arc<AtomicU64>,
+    prefer_workers: Arc<AtomicBool>,
+    pub(crate) identity: Arc<AtomicU64>,
+}
+
+impl RegistrationEvents {
+    fn worker_event(&self) -> QueuedEvent {
+        QueuedEvent::Workers {
+            pending: self.pending.clone(),
+            watermark: self.watermark.clone(),
+        }
+    }
+
+    fn try_recv(&self) -> std::result::Result<QueuedEvent, async_channel::TryRecvError> {
+        let prefer_worker = self.prefer_workers.fetch_xor(true, Ordering::Relaxed);
+        if prefer_worker && self.worker_receiver.try_recv().is_ok() {
+            return Ok(self.worker_event());
+        }
+        match self.receiver.try_recv() {
+            Ok(event) => return Ok(event),
+            Err(async_channel::TryRecvError::Closed) => {
+                return Err(async_channel::TryRecvError::Closed);
+            }
+            Err(async_channel::TryRecvError::Empty) => {}
+        }
+        if !prefer_worker && self.worker_receiver.try_recv().is_ok() {
+            return Ok(self.worker_event());
+        }
+        Err(async_channel::TryRecvError::Empty)
+    }
+
+    pub(crate) async fn recv(&self) -> std::result::Result<QueuedEvent, async_channel::RecvError> {
+        match self.try_recv() {
+            Ok(event) => return Ok(event),
+            Err(async_channel::TryRecvError::Closed) => return Err(async_channel::RecvError),
+            Err(async_channel::TryRecvError::Empty) => {}
+        }
+        futures_lite::future::race(self.receiver.recv(), async {
+            self.worker_receiver
+                .recv()
+                .await
+                .map(|()| self.worker_event())
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.receiver.len() + self.worker_receiver.len()
+    }
 }
 
 impl Events {
-    pub fn new() -> (Self, async_channel::Receiver<QueuedEvent>) {
+    pub fn new() -> (Self, RegistrationEvents) {
         let (tx, rx) = async_channel::bounded(1024);
+        let (worker_tx, worker_rx) = async_channel::bounded(1);
+        let identity = Arc::new(AtomicU64::new(0));
+        let watermark = Arc::new(AtomicU64::new(0));
+        let pending = Arc::new(Mutex::new(PendingWorkers::default()));
         (
             Self {
                 tx,
-                worker_epoch: Arc::new(AtomicU64::new(0)),
+                worker_tx,
+                worker_epoch: identity.clone(),
+                worker_watermark: watermark.clone(),
+                pending_workers: pending.clone(),
+                worker_incomplete: Arc::new(AtomicBool::new(false)),
             },
-            rx,
+            RegistrationEvents {
+                receiver: rx,
+                worker_receiver: worker_rx,
+                pending,
+                watermark,
+                prefer_workers: Arc::new(AtomicBool::new(true)),
+                identity,
+            },
         )
     }
 
     /// Attempt delivery without blocking the shared dispatcher.
     pub fn deliver(&self, event: Event) -> bool {
+        match self.tx.try_send(QueuedEvent::Ordinary(event)) {
+            Ok(()) => true,
+            Err(async_channel::TrySendError::Full(_)) => {
+                // Ordinary events cannot be reconstructed reliably. Closing
+                // the channel makes the loss visible instead of silently
+                // presenting an incomplete session as current.
+                self.tx.close();
+                false
+            }
+            Err(async_channel::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    /// Retryable state events are allowed to wait for ordinary channel space.
+    fn try_deliver_state(&self, event: Event) -> bool {
         self.tx.try_send(QueuedEvent::Ordinary(event)).is_ok()
     }
 
-    /// Worker snapshots must be retried if the consumer is temporarily behind.
+    fn publish_worker_update(&self, update: PendingWorkerUpdate) -> bool {
+        if self.worker_tx.is_closed() || self.tx.is_closed() {
+            return false;
+        }
+        let mut pending = self
+            .pending_workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.latest = Some(update);
+        matches!(
+            self.worker_tx.try_send(()),
+            Ok(()) | Err(async_channel::TrySendError::Full(()))
+        )
+    }
+
+    /// Worker notifications use a separate one-element channel so a burst
+    /// cannot fill the ordinary event channel or duplicate family snapshots.
     fn try_deliver_workers(&self, workers: Vec<Worker>) -> bool {
-        self.tx
-            .try_send(QueuedEvent::Workers {
-                event: Event::WorkersChanged { workers },
-                epoch: self.worker_epoch.load(Ordering::Acquire),
-                current: self.worker_epoch.clone(),
-            })
-            .is_ok()
+        self.publish_worker_update(PendingWorkerUpdate::Workers {
+            epoch: self.worker_epoch.load(Ordering::Acquire),
+            workers,
+        })
     }
 
-    fn try_deliver_error(&self, message: &str) -> bool {
-        self.tx
-            .try_send(QueuedEvent::Ordinary(Event::Error {
-                message: message.to_owned(),
-            }))
-            .is_ok()
+    fn try_deliver_worker_error(&self, message: &str) -> bool {
+        self.publish_worker_update(PendingWorkerUpdate::Unavailable(message.to_owned()))
     }
 
-    /// An installed snapshot supersedes older queued worker replacements.
+    /// Begin a new producer epoch. Old events are superseded only if the
+    /// receiver actually accepts the corresponding snapshot.
     fn advance_workers(&self) {
         self.worker_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn snapshot_reply(&self, snapshot: Snapshot) -> SnapshotReply {
+        SnapshotReply {
+            snapshot,
+            epoch: self.worker_epoch.load(Ordering::Acquire),
+            watermark: self.worker_watermark.clone(),
+            worker_incomplete: self.worker_incomplete.clone(),
+        }
     }
 }
 
@@ -148,6 +278,8 @@ pub struct Registration {
     initial_creations: BTreeMap<String, Worker>,
     /// Worker events are not published until a snapshot has been installed.
     workers_ready: bool,
+    /// The first offered bootstrap epoch; its journals remain until accepted.
+    bootstrap_epoch: Option<u64>,
     /// A worker event could not enter the bounded event channel and needs retry.
     workers_dirty: bool,
     /// Once the cache overflows, omissions cannot establish deletion.
@@ -187,7 +319,7 @@ impl RunningState {
 }
 
 impl Registration {
-    pub fn new() -> (Self, async_channel::Receiver<QueuedEvent>) {
+    pub fn new() -> (Self, RegistrationEvents) {
         let (events, rx) = Events::new();
         (
             Self {
@@ -199,6 +331,7 @@ impl Registration {
                 initial_changes: HashMap::new(),
                 initial_creations: BTreeMap::new(),
                 workers_ready: false,
+                bootstrap_epoch: None,
                 workers_dirty: false,
                 workers_incomplete: false,
                 snapshot_in_flight: None,
@@ -216,7 +349,7 @@ impl Registration {
     fn publish_workers(&mut self) {
         if self.workers_ready {
             self.workers_dirty = if self.workers_incomplete {
-                !self.events.try_deliver_error(
+                !self.events.try_deliver_worker_error(
                     "Worker observation exceeds the supported limit; reattach after reducing it.",
                 )
             } else {
@@ -227,17 +360,39 @@ impl Registration {
         }
     }
 
+    fn mark_workers_incomplete(&mut self) {
+        if !self.workers_incomplete {
+            self.workers_incomplete = true;
+            self.events.worker_incomplete.store(true, Ordering::Release);
+            self.publish_workers();
+        }
+    }
+
     fn publish_modes(&mut self) {
-        self.modes_dirty = !self.events.deliver(Event::ModesChanged(self.modes.clone()));
+        self.modes_dirty = !self
+            .events
+            .try_deliver_state(Event::ModesChanged(self.modes.clone()));
     }
 
     fn reconcile_running(&mut self, running: RunningState) {
         if self.running != running
             && let Some(event) = running.event()
-            && self.events.deliver(event)
+            && self.events.try_deliver_state(event)
         {
             self.running = running;
         }
+    }
+
+    fn discovering_workers(&self) -> bool {
+        !self
+            .bootstrap_epoch
+            .is_some_and(|epoch| self.events.worker_watermark.load(Ordering::Acquire) >= epoch)
+    }
+
+    fn clear_bootstrap_journals(&mut self) {
+        self.initial_deletions.clear();
+        self.initial_changes.clear();
+        self.initial_creations.clear();
     }
 
     /// Install a snapshot without losing lifecycle events already observed
@@ -249,7 +404,8 @@ impl Registration {
                 "Worker observation exceeds the supported limit.",
             ));
         }
-        if !self.workers_ready {
+        let discovering = self.discovering_workers();
+        if discovering {
             let additional = workers
                 .iter()
                 .filter(|worker| {
@@ -265,7 +421,10 @@ impl Registration {
             }
         }
         self.events.advance_workers();
-        if !self.workers_ready {
+        if self.bootstrap_epoch.is_none() {
+            self.bootstrap_epoch = Some(self.events.worker_epoch.load(Ordering::Acquire));
+        }
+        if discovering {
             for mut worker in workers.drain(..) {
                 if !self.initial_deletions.contains(&worker.id) {
                     if !self.children.contains_key(&worker.id)
@@ -326,11 +485,10 @@ impl Registration {
             }
         }
         *workers = self.children.values().cloned().collect();
-        self.initial_deletions.clear();
-        self.initial_changes.clear();
-        self.initial_creations.clear();
+        if !discovering {
+            self.clear_bootstrap_journals();
+        }
         self.workers_ready = true;
-        self.workers_dirty = false;
         Ok(())
     }
 }
@@ -346,36 +504,40 @@ pub enum Command {
     },
     Create {
         spec: SessionSpec,
-        reply:
-            async_channel::Sender<backend::Result<(String, async_channel::Receiver<QueuedEvent>)>>,
+        reply: async_channel::Sender<backend::Result<(String, RegistrationEvents)>>,
     },
     Attach {
         id: String,
         directory: String,
-        reply: async_channel::Sender<backend::Result<async_channel::Receiver<QueuedEvent>>>,
+        reply: async_channel::Sender<backend::Result<RegistrationEvents>>,
     },
     Snapshot {
         id: String,
-        reply: async_channel::Sender<backend::Result<Snapshot>>,
+        identity: Arc<AtomicU64>,
+        reply: async_channel::Sender<backend::Result<SnapshotReply>>,
     },
     Prompt {
         id: String,
+        identity: Arc<AtomicU64>,
         key: String,
         text: String,
         reply: async_channel::Sender<backend::Result<()>>,
     },
     Interrupt {
         id: String,
+        identity: Arc<AtomicU64>,
         reply: async_channel::Sender<backend::Result<()>>,
     },
     Decide {
         id: String,
+        identity: Arc<AtomicU64>,
         request: String,
         decision: String,
         reply: async_channel::Sender<backend::Result<()>>,
     },
     Answer {
         id: String,
+        identity: Arc<AtomicU64>,
         form: String,
         answer: Value,
         reply: async_channel::Sender<backend::Result<()>>,
@@ -383,18 +545,50 @@ pub enum Command {
     /// Choose the agent for `id`'s later prompts.
     SetMode {
         id: String,
+        identity: Arc<AtomicU64>,
         mode: String,
         reply: async_channel::Sender<backend::Result<()>>,
     },
     /// Close `id`'s registration without deleting its OpenCode session.
-    Close { id: String },
+    Close {
+        id: String,
+        identity: Arc<AtomicU64>,
+    },
 }
 
 struct SnapshotResult {
     id: String,
     registration: Arc<AtomicU64>,
-    reply: async_channel::Sender<backend::Result<Snapshot>>,
+    reply: async_channel::Sender<backend::Result<SnapshotReply>>,
     result: backend::Result<Snapshot>,
+}
+
+/// A snapshot's worker epoch becomes authoritative only when its recipient
+/// receives it; an abandoned reply must not invalidate queued worker events.
+pub(crate) struct SnapshotReply {
+    snapshot: Snapshot,
+    epoch: u64,
+    watermark: Arc<AtomicU64>,
+    worker_incomplete: Arc<AtomicBool>,
+}
+
+impl SnapshotReply {
+    pub(crate) fn accept(self) -> backend::Result<Snapshot> {
+        if self.worker_incomplete.load(Ordering::Acquire) {
+            return Err(backend::Error::new(
+                backend::ErrorKind::Unavailable,
+                "Worker observation exceeds the supported limit.",
+            ));
+        }
+        let previous = self.watermark.fetch_max(self.epoch, Ordering::AcqRel);
+        if self.epoch < previous {
+            return Err(backend::Error::new(
+                backend::ErrorKind::Unavailable,
+                "A newer session snapshot was already accepted.",
+            ));
+        }
+        Ok(self.snapshot)
+    }
 }
 
 struct ReconcileResult {
@@ -417,7 +611,7 @@ impl Commands {
         (Self { tx }, rx)
     }
 
-    /// The raw sender, for fire-and-forget commands like close.
+    /// The raw sender, including nonblocking registration cleanup.
     pub fn tx(&self) -> &async_channel::Sender<Command> {
         &self.tx
     }
@@ -626,8 +820,10 @@ async fn service<S: Timers>(
                     break;
                 };
                 match command {
-                    Command::Snapshot { id, reply } => {
-                        if let Some(registration) = registrations.get_mut(&id) {
+                    Command::Snapshot { id, identity, reply } => {
+                        if let Some(registration) = registrations.get_mut(&id)
+                            && Arc::ptr_eq(&registration.events.worker_epoch, &identity)
+                        {
                             if registration.snapshot_in_flight.is_some() || snapshots.len() >= MAX_SNAPSHOTS {
                                 let _ = reply.try_send(Err(backend::Error::new(backend::ErrorKind::Unavailable, "A session snapshot is already running or the snapshot limit was reached; please retry.")));
                             } else {
@@ -667,19 +863,18 @@ async fn service<S: Timers>(
                     snapshots.next().await
                 }
             }) => {
-                if let Some(mut completed) = completed {
-                    match registrations.get_mut(&completed.id) {
+                if let Some(completed) = completed {
+                    let result = match registrations.get_mut(&completed.id) {
                         Some(registration) if Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration) => {
                             registration.snapshot_in_flight = None;
-                            if let Ok(snapshot) = &mut completed.result
-                                && let Err(error) = registration.install_workers(&mut snapshot.workers)
-                            {
-                                completed.result = Err(error);
-                            }
+                            completed.result.and_then(|mut snapshot| {
+                                registration.install_workers(&mut snapshot.workers)?;
+                                Ok(registration.events.snapshot_reply(snapshot))
+                            })
                         }
-                        _ => completed.result = Err(backend::Error::new(backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
-                    }
-                    let _ = completed.reply.try_send(completed.result);
+                        _ => Err(backend::Error::new(backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
+                    };
+                    let _ = completed.reply.try_send(result);
                 }
             }
             completed = Fused::new(async {
@@ -744,6 +939,10 @@ async fn service<S: Timers>(
                     break;
                 }
                 let mut ids: Vec<_> = registrations.keys().cloned().collect();
+                for id in &ids {
+                    close_abandoned_registration(&mut registrations, id);
+                }
+                ids.retain(|id| registrations.contains_key(id));
                 ids.sort();
                 if !ids.is_empty() {
                     let start = reconcile_offset % ids.len();
@@ -820,7 +1019,7 @@ fn insert_registration(
     id: String,
     directory: &str,
     modes: Modes,
-) -> async_channel::Receiver<QueuedEvent> {
+) -> RegistrationEvents {
     let (mut registration, rx) = Registration::new();
     registration.modes = modes;
     registration.directory = directory.to_owned();
@@ -906,10 +1105,12 @@ fn dispatch_events(event: &str, registrations: &mut HashMap<String, Registration
                 Event::Idle => Some(RunningState::Idle),
                 _ => None,
             };
-            if registration.events.deliver(event)
-                && let Some(running) = running
-            {
-                registration.running = running;
+            if let Some(running) = running {
+                if registration.events.try_deliver_state(event) {
+                    registration.running = running;
+                }
+            } else {
+                registration.events.deliver(event);
             }
         }
     }
@@ -945,7 +1146,11 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
         return;
     };
     for (root, registration) in registrations {
-        if !registration.workers_ready && !registration.children.contains_key(child) {
+        let discovering = registration.discovering_workers();
+        if !discovering {
+            registration.clear_bootstrap_journals();
+        }
+        if discovering && !registration.children.contains_key(child) {
             let state = match kind {
                 "session.execution.started" => Some(WorkerState::Running),
                 "session.execution.succeeded" => Some(WorkerState::Completed),
@@ -971,7 +1176,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                         change.1 = Some(title.to_owned());
                     }
                 } else {
-                    registration.workers_incomplete = true;
+                    registration.mark_workers_incomplete();
                 }
             }
         }
@@ -983,7 +1188,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                 } else if parent != Some(root.as_str())
                     && !parent.is_some_and(|id| registration.children.contains_key(id))
                 {
-                    if !registration.workers_ready && parent.is_some() {
+                    if discovering && parent.is_some() {
                         if registration.initial_creations.contains_key(child)
                             || registration.initial_creations.len() < api::MAX_TRACKED_WORKERS
                         {
@@ -998,19 +1203,18 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                                         .and_then(Value::as_str)
                                         .unwrap_or("worker")
                                         .to_owned(),
-                                    state: WorkerState::Running,
+                                    state: WorkerState::Unknown,
                                 },
                             );
                         } else {
-                            registration.workers_incomplete = true;
+                            registration.mark_workers_incomplete();
                         }
                     }
                     false
                 } else if registration.children.contains_key(child) {
                     false
                 } else if registration.children.len() >= api::MAX_TRACKED_WORKERS {
-                    registration.workers_incomplete = true;
-                    registration.publish_workers();
+                    registration.mark_workers_incomplete();
                     false
                 } else {
                     registration.initial_deletions.remove(child);
@@ -1025,7 +1229,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                                 .and_then(Value::as_str)
                                 .unwrap_or("worker")
                                 .to_owned(),
-                            state: WorkerState::Running,
+                            state: WorkerState::Unknown,
                         },
                     );
                     true
@@ -1033,13 +1237,15 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
             }
             "session.deleted" => {
                 let removed = registration.children.remove(child).is_some();
-                if !registration.workers_ready {
+                if discovering {
                     // A delete event has no parent ID. Before bootstrap, keep
                     // even an unknown ID: a stale page may later list it.
-                    if registration.initial_deletions.len() < api::MAX_TRACKED_WORKERS {
+                    if registration.initial_deletions.contains(child)
+                        || registration.initial_deletions.len() < api::MAX_TRACKED_WORKERS
+                    {
                         registration.initial_deletions.insert(child.to_owned());
                     } else {
-                        registration.workers_incomplete = true;
+                        registration.mark_workers_incomplete();
                     }
                 }
                 registration.initial_changes.remove(child);
@@ -1092,8 +1298,16 @@ fn retry_worker_delivery(registrations: &mut HashMap<String, Registration>) {
     }
 }
 
-fn close_registration(registrations: &mut HashMap<String, Registration>, id: &str) {
-    if let Some(registration) = registrations.remove(id) {
+fn close_registration(
+    registrations: &mut HashMap<String, Registration>,
+    id: &str,
+    identity: &Arc<AtomicU64>,
+) {
+    if registrations
+        .get(id)
+        .is_some_and(|registration| Arc::ptr_eq(&registration.events.worker_epoch, identity))
+        && let Some(registration) = registrations.remove(id)
+    {
         if let Some(cancellation) = registration.snapshot_in_flight {
             cancellation.cancel();
         }
@@ -1101,6 +1315,38 @@ fn close_registration(registrations: &mut HashMap<String, Registration>, id: &st
             cancellation.cancel();
         }
         registration.events.deliver(Event::Closed { reason: None });
+    }
+}
+
+/// A create/attach reply can be abandoned before the caller obtains its
+/// handle. Reap only registrations whose event receiver no longer exists.
+fn close_abandoned_registration(registrations: &mut HashMap<String, Registration>, id: &str) {
+    let identity = registrations.get(id).and_then(|registration| {
+        (registration.events.tx.receiver_count() == 0)
+            .then(|| registration.events.worker_epoch.clone())
+    });
+    if let Some(identity) = identity {
+        close_registration(registrations, id, &identity);
+    }
+}
+
+fn owns_registration(
+    registrations: &HashMap<String, Registration>,
+    id: &str,
+    identity: &Arc<AtomicU64>,
+    reply: &async_channel::Sender<backend::Result<()>>,
+) -> bool {
+    if registrations
+        .get(id)
+        .is_some_and(|registration| Arc::ptr_eq(&registration.events.worker_epoch, identity))
+    {
+        true
+    } else {
+        let _ = reply.try_send(Err(backend::Error::new(
+            backend::ErrorKind::Closed,
+            "The session registration has closed.",
+        )));
+        false
     }
 }
 
@@ -1113,8 +1359,8 @@ async fn handle_command(
     cancellation: &Cancellation,
 ) -> bool {
     match command {
-        Command::Close { id } => {
-            close_registration(registrations, &id);
+        Command::Close { id, identity } => {
+            close_registration(registrations, &id, &identity);
             // Keep the shared connection available for other registrations and
             // for a later retry after the last one closes.
             true
@@ -1159,6 +1405,14 @@ async fn handle_command(
             {
                 Ok(info) => match info.get("id").and_then(Value::as_str) {
                     Some(id) => {
+                        close_abandoned_registration(registrations, id);
+                        if registrations.contains_key(id) {
+                            let _ = reply.try_send(Err(backend::Error::new(
+                                backend::ErrorKind::Unavailable,
+                                "The server returned a session that is already attached.",
+                            )));
+                            return true;
+                        }
                         let modes =
                             modes(client, resolved, &spec.directory, &info, cancellation).await;
                         let rx = insert_registration(
@@ -1185,6 +1439,14 @@ async fn handle_command(
             directory,
             reply,
         } => {
+            close_abandoned_registration(registrations, &id);
+            if registrations.contains_key(&id) {
+                let _ = reply.try_send(Err(backend::Error::new(
+                    backend::ErrorKind::Unavailable,
+                    "That OpenCode session is already attached; join its existing space.",
+                )));
+                return true;
+            }
             let result = match api::session_info(client, resolved, &id, cancellation).await {
                 Ok(info) => {
                     let session_directory = info
@@ -1216,17 +1478,29 @@ async fn handle_command(
         Command::Snapshot { .. } => unreachable!("snapshots are scheduled by the service loop"),
         Command::Prompt {
             id,
+            identity,
             key,
             text,
             reply,
         } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return true;
+            }
             let result = api::send_prompt(client, resolved, &id, &key, &text, cancellation)
                 .await
                 .map_err(map_failure);
             reply.send(result).await.ok();
             true
         }
-        Command::SetMode { id, mode, reply } => {
+        Command::SetMode {
+            id,
+            identity,
+            mode,
+            reply,
+        } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return true;
+            }
             // OpenCode accepts any agent name, so only an offered one is passed on. The mode changes when the server
             // confirms the switch on the event stream.
             if let Some(registration) = registrations.get_mut(&id) {
@@ -1252,7 +1526,14 @@ async fn handle_command(
             reply.send(result).await.ok();
             true
         }
-        Command::Interrupt { id, reply } => {
+        Command::Interrupt {
+            id,
+            identity,
+            reply,
+        } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return true;
+            }
             let result = api::interrupt(client, resolved, &id, cancellation)
                 .await
                 .map_err(map_failure);
@@ -1261,10 +1542,14 @@ async fn handle_command(
         }
         Command::Decide {
             id,
+            identity,
             request,
             decision,
             reply,
         } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return true;
+            }
             let result =
                 api::reply_permission(client, resolved, &id, &request, &decision, cancellation)
                     .await
@@ -1274,10 +1559,14 @@ async fn handle_command(
         }
         Command::Answer {
             id,
+            identity,
             form,
             answer,
             reply,
         } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return true;
+            }
             let result = api::reply_form(client, resolved, &id, &form, &answer, cancellation)
                 .await
                 .map_err(map_failure);
@@ -1300,8 +1589,8 @@ async fn snapshot(
         modes,
         busy: Some(parts.busy),
         messages,
-        permission: parts.permission(),
-        question: parts.question(),
+        permissions: parts.permissions(),
+        questions: parts.questions(),
         workers: parts.workers(),
     })
 }
@@ -1427,6 +1716,16 @@ mod tests {
         });
         apply_worker_event(&event, &mut registrations);
         assert!(registrations["parent"].children.contains_key("child"));
+        assert_eq!(
+            registrations["parent"].children["child"].state,
+            WorkerState::Unknown
+        );
+        let started = json!({"type":"session.execution.started","data":{"sessionID":"child"}});
+        apply_worker_event(&started, &mut registrations);
+        assert_eq!(
+            registrations["parent"].children["child"].state,
+            WorkerState::Running
+        );
         assert!(registrations["other"].children.is_empty());
         assert!(wire::event_for(&event, "parent", &mut HashSet::new()).is_none());
     }
@@ -1474,20 +1773,73 @@ mod tests {
     }
 
     #[test]
-    fn a_full_event_channel_retries_the_worker_snapshot() {
+    fn a_full_ordinary_channel_does_not_block_worker_updates() {
         let (mut registration, events) = Registration::new();
         registration.workers_ready = true;
         for _ in 0..1024 {
-            registration.events.deliver(Event::Busy);
+            assert!(registration.events.deliver(Event::Busy));
         }
         registration.publish_workers();
-        assert!(registration.workers_dirty);
-        while events.try_recv().is_ok() {}
-        registration.publish_workers();
         assert!(!registration.workers_dirty);
+        assert_eq!(events.len(), 1025);
+        let mut workers = 0;
+        let mut ordinary = 0;
+        while let Ok(event) = events.try_recv() {
+            match event.into_current() {
+                Some(Event::WorkersChanged { workers: list }) if list.is_empty() => workers += 1,
+                Some(Event::Busy) => ordinary += 1,
+                _ => panic!("unexpected event"),
+            }
+        }
+        assert_eq!(workers, 1);
+        assert_eq!(ordinary, 1024);
+    }
+
+    #[test]
+    fn a_lost_ordinary_event_closes_the_channel_visibly() {
+        let (events, receiver) = Events::new();
+        for _ in 0..1024 {
+            assert!(events.deliver(Event::Busy));
+        }
+        assert!(!events.deliver(Event::Error {
+            message: "could not deliver".into()
+        }));
+        for _ in 0..1024 {
+            assert!(matches!(
+                receiver.try_recv().unwrap().into_current(),
+                Some(Event::Busy)
+            ));
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
+        ));
+    }
+
+    #[test]
+    fn mode_and_running_changes_retry_when_ordinary_events_are_full() {
+        let (mut registration, events) = Registration::new();
+        registration.running = RunningState::Running;
+        registration.modes.current = Some("plan".into());
+        for _ in 0..1024 {
+            assert!(registration.events.deliver(Event::Busy));
+        }
+        registration.publish_modes();
+        registration.reconcile_running(RunningState::Idle);
+        assert!(registration.modes_dirty);
+        assert!(matches!(registration.running, RunningState::Running));
+        while events.try_recv().is_ok() {}
+        registration.publish_modes();
+        registration.reconcile_running(RunningState::Idle);
+        assert!(!registration.modes_dirty);
+        assert!(matches!(registration.running, RunningState::Idle));
         assert!(
-            matches!(events.try_recv().ok().and_then(QueuedEvent::into_current), Some(Event::WorkersChanged { workers }) if workers.is_empty())
+            matches!(events.try_recv().unwrap().into_current(), Some(Event::ModesChanged(modes)) if modes.current.as_deref() == Some("plan"))
         );
+        assert!(matches!(
+            events.try_recv().unwrap().into_current(),
+            Some(Event::Idle)
+        ));
     }
 
     #[test]
@@ -1506,12 +1858,60 @@ mod tests {
         registration.children.remove("child");
         let mut later = Vec::new();
         registration.install_workers(&mut later).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
         assert!(later.is_empty());
         assert!(events.try_recv().unwrap().into_current().is_none());
         assert!(matches!(
             events.try_recv().unwrap().into_current(),
             Some(Event::Busy)
         ));
+    }
+
+    #[test]
+    fn a_new_worker_update_survives_an_accepted_snapshot() {
+        let (mut registration, events) = Registration::new();
+        let mut initial = vec![Worker {
+            id: "child".into(),
+            parent: Some("parent".into()),
+            title: "Worker".into(),
+            state: WorkerState::Running,
+        }];
+        registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        registration.publish_workers();
+        let mut snapshot = Vec::new();
+        registration.install_workers(&mut snapshot).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        registration.children.remove("child");
+        registration.publish_workers();
+        assert!(
+            matches!(events.try_recv().unwrap().into_current(), Some(Event::WorkersChanged { workers }) if workers.is_empty())
+        );
+    }
+
+    #[test]
+    fn an_older_snapshot_reply_is_rejected_after_a_newer_one() {
+        let (mut registration, _events) = Registration::new();
+        let mut initial = Vec::new();
+        registration.install_workers(&mut initial).unwrap();
+        let older = registration.events.snapshot_reply(Snapshot::default());
+        let mut later = Vec::new();
+        registration.install_workers(&mut later).unwrap();
+        let newer = registration.events.snapshot_reply(Snapshot::default());
+        assert!(newer.accept().is_ok());
+        assert!(older.accept().is_err());
     }
 
     #[test]
@@ -1523,7 +1923,172 @@ mod tests {
         assert!(events.try_deliver_workers(Vec::new()));
         events.deliver(Event::Busy);
         events.advance_workers();
+        events.snapshot_reply(Snapshot::default()).accept().unwrap();
         assert!(matches!(block_on(session.next_event()), Ok(Event::Busy)));
+    }
+
+    #[test]
+    fn a_closed_session_does_not_deliver_later_events() {
+        use backend::Session;
+        let (events, rx) = Events::new();
+        let (commands, _receiver) = Commands::new();
+        let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
+        assert!(events.deliver(Event::Closed { reason: None }));
+        assert!(events.deliver(Event::Busy));
+        assert!(matches!(
+            block_on(session.next_event()),
+            Ok(Event::Closed { .. })
+        ));
+        assert!(
+            matches!(block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Closed)
+        );
+    }
+
+    #[test]
+    fn closing_a_session_is_nonblocking_and_identity_scoped() {
+        use backend::Session;
+        let (_registration, rx) = Registration::new();
+        let expected = rx.identity.clone();
+        let (commands, receiver) = Commands::new();
+        let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
+        for _ in 0..2 {
+            assert!(block_on(session.close()).is_ok());
+            match receiver.try_recv().unwrap() {
+                Command::Close { id, identity } => {
+                    assert_eq!(id, "parent");
+                    assert!(Arc::ptr_eq(&identity, &expected));
+                }
+                _ => panic!("expected close"),
+            }
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn closing_a_session_does_not_wait_for_a_full_command_queue() {
+        use backend::Session;
+        let (_registration, rx) = Registration::new();
+        let identity = rx.identity.clone();
+        let (commands, _receiver) = Commands::new();
+        for _ in 0..256 {
+            assert!(
+                commands
+                    .tx()
+                    .try_send(Command::Close {
+                        id: "parent".into(),
+                        identity: identity.clone()
+                    })
+                    .is_ok()
+            );
+        }
+        let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
+        assert!(
+            matches!(block_on(session.close()), Err(error) if error.kind == backend::ErrorKind::Unavailable)
+        );
+    }
+
+    #[test]
+    fn abandoning_a_snapshot_does_not_discard_a_queued_worker_update() {
+        let (mut registration, events) = Registration::new();
+        let child = Worker {
+            id: "child".into(),
+            parent: Some("parent".into()),
+            title: "Worker".into(),
+            state: WorkerState::Completed,
+        };
+        let mut initial = vec![child];
+        registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        registration.publish_workers();
+        registration.events.deliver(Event::Busy);
+        registration.children.remove("child");
+        registration.publish_workers();
+
+        // The reply can be queued successfully yet dropped before its caller
+        // consumes it. It must not invalidate the coalesced worker event.
+        let mut later = Vec::new();
+        registration.install_workers(&mut later).unwrap();
+        let (reply, waiting) = async_channel::bounded(1);
+        assert!(
+            reply
+                .try_send(registration.events.snapshot_reply(Snapshot::default()))
+                .is_ok()
+        );
+        drop(waiting);
+        assert!(
+            matches!(events.try_recv().unwrap().into_current(), Some(Event::WorkersChanged { workers }) if workers.is_empty())
+        );
+        assert!(matches!(
+            events.try_recv().unwrap().into_current(),
+            Some(Event::Busy)
+        ));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_worker_burst_coalesces_to_one_bounded_latest_update() {
+        let (mut registration, events) = Registration::new();
+        let mut initial = Vec::new();
+        registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        for index in 0..1000 {
+            let id = format!("worker-{index}");
+            registration.children.insert(
+                id.clone(),
+                Worker {
+                    id: id.clone(),
+                    parent: Some("parent".into()),
+                    title: "Worker".into(),
+                    state: WorkerState::Running,
+                },
+            );
+            registration.publish_workers();
+            registration.children.remove(&id);
+        }
+        registration.publish_workers();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events.try_recv().unwrap().into_current(), Some(Event::WorkersChanged { workers }) if workers.is_empty())
+        );
+        assert!(!registration.workers_dirty);
+    }
+
+    #[test]
+    fn an_abandoned_snapshot_preserves_workers_when_ordinary_events_are_full() {
+        let (mut registration, events) = Registration::new();
+        let mut initial = vec![Worker {
+            id: "child".into(),
+            parent: Some("parent".into()),
+            title: "Worker".into(),
+            state: WorkerState::Running,
+        }];
+        registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        for _ in 0..1024 {
+            assert!(registration.events.deliver(Event::Busy));
+        }
+        registration.children.remove("child");
+        registration.publish_workers();
+        assert!(!registration.workers_dirty);
+        let mut later = Vec::new();
+        registration.install_workers(&mut later).unwrap();
+        drop(registration.events.snapshot_reply(Snapshot::default()));
+        assert!(
+            matches!(events.try_recv().unwrap().into_current(), Some(Event::WorkersChanged { workers }) if workers.is_empty())
+        );
+        assert_eq!(events.len(), 1024);
     }
 
     #[test]
@@ -1537,6 +2102,11 @@ mod tests {
         };
         let mut initial = vec![child.clone()];
         registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
         registration.children.remove("child");
         let mut stale = vec![child];
         registration.install_workers(&mut stale).unwrap();
@@ -1557,6 +2127,109 @@ mod tests {
         let mut incomplete = Vec::new();
         registration.install_workers(&mut incomplete).unwrap();
         assert_eq!(incomplete, [child]);
+    }
+
+    #[test]
+    fn retry_after_an_abandoned_bootstrap_discovers_workers_without_resurrecting_deletions() {
+        let mut registrations = registrations();
+        let parent = registrations.get_mut("parent").unwrap();
+        let mut initial = Vec::new();
+        parent.install_workers(&mut initial).unwrap();
+        drop(parent.events.snapshot_reply(Snapshot::default()));
+
+        let deleted = json!({"type":"session.deleted","data":{"sessionID":"deleted"}});
+        apply_worker_event(&deleted, &mut registrations);
+        let worker = |id: &str| Worker {
+            id: id.into(),
+            parent: Some("parent".into()),
+            title: id.into(),
+            state: WorkerState::Running,
+        };
+        let parent = registrations.get_mut("parent").unwrap();
+        let mut retried = vec![worker("existing"), worker("deleted")];
+        parent.install_workers(&mut retried).unwrap();
+        assert_eq!(
+            retried
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            ["existing"]
+        );
+        parent
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        let mut stale = vec![worker("deleted")];
+        parent.install_workers(&mut stale).unwrap();
+        assert_eq!(
+            stale
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            ["existing"]
+        );
+    }
+
+    #[test]
+    fn bootstrap_journal_overflow_reports_uncertainty_before_or_after_acceptance() {
+        for kind in ["deletion", "change", "creation"] {
+            let mut registrations = HashMap::new();
+            let events = insert_registration(
+                &mut registrations,
+                "parent".into(),
+                "/tmp",
+                Modes::default(),
+            );
+            let registration = registrations.get_mut("parent").unwrap();
+            let mut workers = Vec::new();
+            registration.install_workers(&mut workers).unwrap();
+            let snapshot = registration.events.snapshot_reply(Snapshot::default());
+            for index in 0..api::MAX_TRACKED_WORKERS {
+                let id = format!("worker-{index}");
+                match kind {
+                    "deletion" => {
+                        registration.initial_deletions.insert(id);
+                    }
+                    "change" => {
+                        registration
+                            .initial_changes
+                            .insert(id, (Some(WorkerState::Running), None));
+                    }
+                    "creation" => {
+                        registration.initial_creations.insert(
+                            id.clone(),
+                            Worker {
+                                id,
+                                parent: Some("unknown".into()),
+                                title: "Worker".into(),
+                                state: WorkerState::Unknown,
+                            },
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let event = match kind {
+                "deletion" => json!({"type":"session.deleted","data":{"sessionID":"overflow"}}),
+                "change" => {
+                    json!({"type":"session.execution.started","data":{"sessionID":"overflow"}})
+                }
+                "creation" => {
+                    json!({"type":"session.created","data":{"sessionID":"overflow","parentID":"unknown"}})
+                }
+                _ => unreachable!(),
+            };
+            apply_worker_event(&event, &mut registrations);
+            assert!(snapshot.accept().is_err());
+            assert!(
+                matches!(
+                    events.try_recv().unwrap().into_current(),
+                    Some(Event::WorkersUnavailable { .. })
+                ),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
@@ -1741,14 +2414,21 @@ mod tests {
             "/tmp",
             Modes::default(),
         );
-        close_registration(&mut registrations, "first");
+        close_registration(&mut registrations, "first", &first.identity);
         assert!(matches!(
             first.try_recv().unwrap().into_current(),
             Some(Event::Closed { .. })
         ));
         assert!(second.try_recv().is_err());
         assert!(registrations.contains_key("second"));
-        close_registration(&mut registrations, "second");
+        let replacement =
+            insert_registration(&mut registrations, "first".into(), "/tmp", Modes::default());
+        // A late close from the old handle cannot remove the replacement.
+        close_registration(&mut registrations, "first", &first.identity);
+        assert!(registrations.contains_key("first"));
+        assert!(replacement.try_recv().is_err());
+        close_registration(&mut registrations, "first", &replacement.identity);
+        close_registration(&mut registrations, "second", &second.identity);
         assert!(registrations.is_empty());
         assert!(matches!(
             second.try_recv().unwrap().into_current(),
@@ -1867,13 +2547,22 @@ mod tests {
                                 {
                                     r#"{"data":[{"id":"second","type":"user","text":"Second"}],"cursor":{"next":null}}"#.to_owned()
                                 } else if path.starts_with("/api/session/duplicate/message?") {
-                                    r#"{"data":[{"id":"same","type":"user"},{"id":"same","type":"user"}],"cursor":{"next":null}}"#.to_owned()
+                                    r#"{"data":[{"id":"same","type":"user","text":"a"},{"id":"same","type":"user","text":"b"}],"cursor":{"next":null}}"#.to_owned()
+                                } else if path.starts_with("/api/session/bad-message/message?") {
+                                    r#"{"data":[{"id":"message"}],"cursor":{"next":null}}"#
+                                        .to_owned()
                                 } else if path.contains("/message?") {
                                     r#"{"data":[],"cursor":{"next":null}}"#.to_owned()
                                 } else if path == "/api/session/bad-permission/permission"
                                     || path == "/api/session/bad-form/form"
                                 {
                                     r#"{"invalid":[]}"#.to_owned()
+                                } else if path == "/api/session/bad-field/form" {
+                                    r#"{"data":[{"id":"form","sessionID":"bad-field","title":"Question","fields":[{"key":"good","type":"string"},{"type":"string"}]}]}"#.to_owned()
+                                } else if path == "/api/session/multi/permission" {
+                                    r#"{"data":[{"id":"p1","sessionID":"multi","action":"read","resources":[]},{"id":"p2","sessionID":"multi","action":"write","resources":[]}]}"#.to_owned()
+                                } else if path == "/api/session/multi/form" {
+                                    r#"{"data":[{"id":"q1","sessionID":"multi","title":"First","fields":[{"key":"a","type":"string"}]},{"id":"q2","sessionID":"multi","title":"Second","fields":[{"key":"b","type":"string"}]}]}"#.to_owned()
                                 } else if path.ends_with("/permission") || path.ends_with("/form") {
                                     r#"{"data":[]}"#.to_owned()
                                 } else if path.starts_with("/api/session/") {
@@ -1910,15 +2599,59 @@ mod tests {
             }))
             .unwrap()
         };
+        let close = |id: &str, events: &RegistrationEvents| {
+            let id = id.to_owned();
+            let identity = events.identity.clone();
+            assert!(
+                commands
+                    .tx()
+                    .try_send(Command::Close { id, identity })
+                    .is_ok()
+            );
+        };
+        // If a caller abandons an attach, a later retry can reclaim the ID
+        // both before and after the first reply reaches its channel.
+        let (abandoned_reply, abandoned_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Attach {
+                id: "abandoned-before".into(),
+                directory: "/tmp".into(),
+                reply: abandoned_reply,
+            })
+            .unwrap();
+        drop(abandoned_wait);
+        let recovered = attach("abandoned-before");
+        close("abandoned-before", &recovered);
+        let abandoned = attach("abandoned-after");
+        drop(abandoned);
+        let recovered = attach("abandoned-after");
+        close("abandoned-after", &recovered);
         let slow_events = attach("slow");
         let fast_events = attach("fast");
-        for id in ["bad-permission", "bad-form", "duplicate"] {
-            let _events = attach(id);
+        let duplicate = block_on(commands.reply_with(|reply| Command::Attach {
+            id: "fast".into(),
+            directory: "/tmp".into(),
+            reply,
+        }));
+        assert!(
+            duplicate.is_err(),
+            "a duplicate attachment must not replace the first"
+        );
+        for id in [
+            "bad-permission",
+            "bad-form",
+            "bad-field",
+            "bad-message",
+            "duplicate",
+        ] {
+            let events = attach(id);
             let (reply, waiting) = async_channel::bounded(1);
             commands
                 .tx()
                 .try_send(Command::Snapshot {
                     id: id.into(),
+                    identity: events.identity.clone(),
                     reply,
                 })
                 .unwrap();
@@ -1926,21 +2659,55 @@ mod tests {
                 block_on(waiting.recv()).unwrap().is_err(),
                 "{id} snapshot should fail closed"
             );
-            commands
-                .tx()
-                .try_send(Command::Close { id: id.into() })
-                .unwrap();
+            close(id, &events);
         }
-        let _family_events = attach("family");
+        let multi_events = attach("multi");
+        let (multi_reply, multi_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "multi".into(),
+                identity: multi_events.identity.clone(),
+                reply: multi_reply,
+            })
+            .unwrap();
+        let multi = block_on(multi_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
+        assert_eq!(
+            multi
+                .permissions
+                .iter()
+                .map(|permission| permission.id.as_str())
+                .collect::<Vec<_>>(),
+            ["p1", "p2"]
+        );
+        assert_eq!(
+            multi
+                .questions
+                .iter()
+                .map(|question| question.id.as_str())
+                .collect::<Vec<_>>(),
+            ["q1", "q2"]
+        );
+        close("multi", &multi_events);
+        let family_events = attach("family");
         let (family_reply, family_wait) = async_channel::bounded(1);
         commands
             .tx()
             .try_send(Command::Snapshot {
                 id: "family".into(),
+                identity: family_events.identity.clone(),
                 reply: family_reply,
             })
             .unwrap();
-        let family = block_on(family_wait.recv()).unwrap().unwrap();
+        let family = block_on(family_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
         assert_eq!(family.workers.len(), 2);
         assert_eq!(
             family
@@ -1952,21 +2719,21 @@ mod tests {
                 .as_deref(),
             Some("child")
         );
-        commands
-            .tx()
-            .try_send(Command::Close {
-                id: "family".into(),
-            })
-            .unwrap();
+        close("family", &family_events);
         let (fast_reply, fast_wait) = async_channel::bounded(1);
         commands
             .tx()
             .try_send(Command::Snapshot {
                 id: "fast".into(),
+                identity: fast_events.identity.clone(),
                 reply: fast_reply,
             })
             .unwrap();
-        let initial_fast = block_on(fast_wait.recv()).unwrap().unwrap();
+        let initial_fast = block_on(fast_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
         assert_eq!(
             initial_fast
                 .messages
@@ -1980,6 +2747,7 @@ mod tests {
             .tx()
             .try_send(Command::Snapshot {
                 id: "slow".into(),
+                identity: slow_events.identity.clone(),
                 reply: slow_reply,
             })
             .unwrap();
@@ -2018,6 +2786,7 @@ mod tests {
             .tx()
             .try_send(Command::Snapshot {
                 id: "fast".into(),
+                identity: fast_events.identity.clone(),
                 reply: fast_reply,
             })
             .unwrap();
@@ -2029,6 +2798,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("the other snapshot was blocked")
             .unwrap()
+            .unwrap()
+            .accept()
             .unwrap();
         assert!(
             fast_snapshot
@@ -2036,10 +2807,7 @@ mod tests {
                 .iter()
                 .any(|worker| worker.id == "child")
         );
-        commands
-            .tx()
-            .try_send(Command::Close { id: "slow".into() })
-            .unwrap();
+        close("slow", &slow_events);
         assert!(block_on(slow_wait.recv()).unwrap().is_err());
         assert!(matches!(
             slow_events.try_recv().unwrap().into_current(),
@@ -2066,12 +2834,70 @@ mod tests {
         );
         // A later registration of the same ID gets an independent deadline.
         // A stalled body that is not explicitly closed must still time out.
-        let _retried_events = attach("slow");
+        let retried_events = attach("slow");
+        // A delayed close or snapshot from the old handle must not affect
+        // the replacement, even though both name the same OpenCode session.
+        close("slow", &slow_events);
+        let duplicate = block_on(commands.reply_with(|reply| Command::Attach {
+            id: "slow".into(),
+            directory: "/tmp".into(),
+            reply,
+        }));
+        assert!(duplicate.is_err());
+        let (stale_reply, stale_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "slow".into(),
+                identity: slow_events.identity.clone(),
+                reply: stale_reply,
+            })
+            .unwrap();
+        assert!(block_on(stale_wait.recv()).unwrap().is_err());
+        for operation in 0..5 {
+            let identity = slow_events.identity.clone();
+            let result = block_on(commands.reply_with(|reply| match operation {
+                0 => Command::Prompt {
+                    id: "slow".into(),
+                    identity,
+                    key: "old".into(),
+                    text: "old".into(),
+                    reply,
+                },
+                1 => Command::Interrupt {
+                    id: "slow".into(),
+                    identity,
+                    reply,
+                },
+                2 => Command::Decide {
+                    id: "slow".into(),
+                    identity,
+                    request: "old".into(),
+                    decision: "reject".into(),
+                    reply,
+                },
+                3 => Command::Answer {
+                    id: "slow".into(),
+                    identity,
+                    form: "old".into(),
+                    answer: Value::Null,
+                    reply,
+                },
+                _ => Command::SetMode {
+                    id: "slow".into(),
+                    identity,
+                    mode: "old".into(),
+                    reply,
+                },
+            }));
+            assert!(matches!(result, Err(error) if error.kind == backend::ErrorKind::Closed));
+        }
         let (slow_reply, slow_wait) = async_channel::bounded(1);
         commands
             .tx()
             .try_send(Command::Snapshot {
                 id: "slow".into(),
+                identity: retried_events.identity.clone(),
                 reply: slow_reply,
             })
             .unwrap();
@@ -2154,13 +2980,13 @@ mod tests {
         assert!(!registrations["parent"].children.contains_key("overflow"));
         assert!(matches!(
             events.try_recv().unwrap().into_current(),
-            Some(Event::Error { .. })
+            Some(Event::WorkersUnavailable { .. })
         ));
         let deleted = json!({"type":"session.deleted","data":{"sessionID":"worker-1"}});
         apply_worker_event(&deleted, &mut registrations);
         assert!(matches!(
             events.try_recv().unwrap().into_current(),
-            Some(Event::Error { .. })
+            Some(Event::WorkersUnavailable { .. })
         ));
     }
 

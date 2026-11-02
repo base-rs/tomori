@@ -250,8 +250,8 @@ pub struct SnapshotMessage {
 pub struct Snapshot {
     pub busy: Option<bool>,
     pub messages: Vec<SnapshotMessage>,
-    pub permission: Option<Permission>,
-    pub question: Option<Question>,
+    pub permissions: Vec<Permission>,
+    pub questions: Vec<Question>,
     pub workers: Vec<Worker>,
     #[serde(default)]
     pub modes: Modes,
@@ -303,6 +303,10 @@ pub enum Event {
     },
     WorkersChanged {
         workers: Vec<Worker>,
+    },
+    /// Worker observation became incomplete; omissions must not imply deletion.
+    WorkersUnavailable {
+        message: String,
     },
     /// The session's offered modes or its current mode changed, as the agent confirmed: after a mode request, when the
     /// agent changes mode itself, or once the offered modes are known.

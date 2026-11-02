@@ -213,6 +213,7 @@ fn a_failed_initial_snapshot_opens_no_space_and_a_retry_succeeds() {
         backend: server::fake::FAKE_BACKEND_NAME.into(),
         directory: "/tmp".into(),
         session: None,
+        environment: None,
     });
     let error = bob.error();
     assert!(error.contains("initial session state"), "{error}");
@@ -244,6 +245,28 @@ fn a_failed_initial_snapshot_opens_no_space_and_a_retry_succeeds() {
     let retried = bob.create_space("Retried");
     assert_eq!(retried.title, "Retried");
     assert!(!existing.log().closed);
+}
+
+#[test]
+fn a_snapshot_failure_releases_the_only_space_slot_before_retry() {
+    let backend = FakeBackend::manual();
+    backend.fail_snapshots(true);
+    let server = TestServer::with_server(backend.clone(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_max_spaces(1)
+    });
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Unavailable".into(),
+        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        directory: "/tmp".into(),
+        session: None,
+        environment: None,
+    });
+    let error = ada.error();
+    assert!(error.contains("initial session state"), "{error}");
+    assert!(backend.started()[0].log().closed);
+    backend.fail_snapshots(false);
+    assert_eq!(ada.create_space("Retried").title, "Retried");
 }
 
 #[test]
@@ -299,7 +322,17 @@ fn worker_freshness_is_shared_without_clearing_an_unrelated_error() {
     });
     for client in [&mut ada, &mut bob] {
         let state = client.space(|state| state.error.as_deref() == Some("unrelated error"));
-        assert_eq!(state.workers_authoritative, Some(false));
+        assert_eq!(state.workers_authoritative, Some(true));
+    }
+    session.emit(Event::WorkersUnavailable {
+        message: "worker observation interrupted".into(),
+    });
+    for client in [&mut ada, &mut bob] {
+        let state = client.space(|state| state.workers_authoritative == Some(false));
+        assert_eq!(
+            state.error.as_deref(),
+            Some("unrelated error worker observation interrupted")
+        );
     }
     session.emit(Event::WorkersChanged { workers: vec![] });
     for client in [&mut ada, &mut bob] {
