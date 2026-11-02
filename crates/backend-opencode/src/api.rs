@@ -871,7 +871,7 @@ pub struct SnapshotParts {
     pub permissions: Vec<Value>,
     pub forms: Vec<Value>,
     pub children: Vec<Value>,
-    /// The record's running state; equal timestamps are ambiguous.
+    /// The record's running state; `None` if its timing is invalid.
     pub busy: Option<bool>,
     /// Child sessions may be background drains, whose absence from the active
     /// endpoint does not by itself establish that they are idle.
@@ -993,19 +993,15 @@ pub async fn session_running<'scope, S: Timers>(
         return Ok(None);
     }
     let recorded = running_from_record(&info);
-    if recorded == Some(false) {
-        // The idle record is sufficient for the missed-idle backstop. An
-        // optional active lookup must not delay it when that endpoint stalls.
-        return Ok(recorded);
-    }
-    let active = active_sessions_with_timeout(
-        client,
-        resolved,
-        cancellation,
-        timers,
-        Duration::from_secs(4),
-    )
-    .await;
+    // The active list is optional evidence. With an idle record, wait only
+    // briefly so a stalled endpoint cannot hold up the missed-idle backstop;
+    // both bounds stay well inside the reconciliation timeout.
+    let wait = if recorded == Some(false) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(4)
+    };
+    let active = active_sessions_with_timeout(client, resolved, cancellation, timers, wait).await;
     let running = match active {
         Some(active) if active.contains(session_id) => Some(true),
         Some(_) if info.get("parentID").is_none() => Some(false),
@@ -1022,7 +1018,6 @@ fn running_from_record(info: &Value) -> Option<bool> {
         Some(value) => value.as_f64().map(Some),
     };
     match (timestamp("busy")?, timestamp("idle")?) {
-        (Some(busy), Some(idle)) if busy == idle => None,
         (Some(busy), Some(idle)) => Some(busy > idle),
         (Some(_), None) => Some(true),
         (None, _) => Some(false),
@@ -1104,7 +1099,7 @@ mod tests {
         );
         assert_eq!(
             running_from_record(&json!({"time":{"busy":10,"idle":10}})),
-            None
+            Some(false)
         );
         assert_eq!(running_from_record(&json!({"time":{}})), Some(false));
         assert_eq!(
