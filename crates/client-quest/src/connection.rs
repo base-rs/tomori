@@ -329,7 +329,7 @@ impl Connection {
                 position: pose.position,
                 orientation: pose.orientation,
             }),
-            hands: Some(hands),
+            hands: Some(Box::new(hands)),
         };
         if let Some(client) = &self.client
             && let Err(error) = client.send(message)

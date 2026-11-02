@@ -1186,7 +1186,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         head,
         left: Some(head),
         right: None,
-        hands: Some([Some(left_hand), None]),
+        hands: Some(Box::new([Some(left_hand), None])),
     });
 
     bob.wait_for(|message| match message {
@@ -1201,7 +1201,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
             assert_eq!(*relayed_head, head);
             assert_eq!(*left, Some(head));
             assert_eq!(*right, None);
-            assert_eq!(*hands, Some([Some(left_hand), None]));
+            assert_eq!(hands.as_deref(), Some(&[Some(left_hand), None]));
             Some(())
         }
         _ => None,

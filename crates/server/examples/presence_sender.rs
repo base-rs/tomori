@@ -262,7 +262,7 @@ fn main() {
             head,
             left: None,
             right: None,
-            hands: Some([Some(hand), None]),
+            hands: Some(Box::new([Some(hand), None])),
         });
 
         // A periodic ping keeps the client side of the connection alive too.
