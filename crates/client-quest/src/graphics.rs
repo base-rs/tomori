@@ -191,7 +191,8 @@ impl Renderer {
             crate::workspace_graphics::WorkspaceGraphics::new(device, format, &camera_layout);
         let arrival = crate::arrival_graphics::ArrivalLabels::new(device, format, &camera_layout);
         Self {
-            environment: Environment::initial(),
+            // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
+            environment: Environment::Minimal,
             sky: environment_sky::Sky::new(device, queue, format, width, height),
             pipeline,
             vertices,
@@ -236,6 +237,7 @@ impl Renderer {
         self.sky.resize(device, width, height);
     }
 
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn environment(&self) -> Environment {
         self.environment
     }

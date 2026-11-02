@@ -348,6 +348,7 @@ impl TestClient {
             backend: FAKE_BACKEND_NAME.to_owned(),
             directory: "/tmp".to_owned(),
             session: None,
+            environment: Some(crate::environments::SKY.to_owned()),
         });
         let title = title.to_owned();
         self.space(|state| state.title == title)

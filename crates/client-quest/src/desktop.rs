@@ -284,7 +284,10 @@ impl State {
         } else {
             (config.width, config.height)
         };
-        let renderer = Renderer::new(&device, &queue, render_format, render_width, render_height);
+        let mut renderer =
+            Renderer::new(&device, &queue, render_format, render_width, render_height);
+        // The desktop window has no server, so it is never in a space and chooses its scenery itself.
+        renderer.set_environment(crate::environment::Environment::initial());
         let spectator = spectator.then(|| SpectatorView::new(&device, render_format));
         log::info!(
             "Desktop adapter: {} — {}x{}",

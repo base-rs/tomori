@@ -30,6 +30,10 @@ pub struct Choice {
     pub source: Source,
     /// Why the server cannot be joined, for listing it greyed.
     pub unavailable: Option<String>,
+    /// How many spaces a discovered server advertises, if it does; see `design/arrival.md`.
+    pub spaces: Option<u32>,
+    /// How many participants a discovered server advertises as connected, if it does.
+    pub participants: Option<u32>,
 }
 
 impl Choice {
@@ -40,11 +44,37 @@ impl Choice {
             instance: None,
             source,
             unavailable: None,
+            spaces: None,
+            participants: None,
+        }
+    }
+
+    /// A discovered server, with what it advertises.
+    fn discovered(server: &discovery::Server, address: String, source: Source) -> Self {
+        Self {
+            instance: Some(server.instance.clone()),
+            spaces: server.spaces,
+            participants: server.participants,
+            ..Self::new(&server.name, address, source)
         }
     }
 
     pub fn is_available(&self) -> bool {
         self.unavailable.is_none()
+    }
+
+    /// The advertised counts that are known, such as "2 spaces, 1 person", or `None` if neither is.
+    pub fn counts(&self) -> Option<String> {
+        let spaces = self.spaces.map(|count| match count {
+            1 => "1 space".to_owned(),
+            count => format!("{count} spaces"),
+        });
+        let participants = self.participants.map(|count| match count {
+            1 => "1 person".to_owned(),
+            count => format!("{count} people"),
+        });
+        let known: Vec<String> = spaces.into_iter().chain(participants).collect();
+        (!known.is_empty()).then(|| known.join(", "))
     }
 }
 
@@ -62,8 +92,8 @@ pub fn choices(
     let mut discovered = Vec::new();
     for server in servers.compatible() {
         let remembered = remembered == Some(server.instance.as_str());
-        let mut choice = Choice::new(
-            &server.name,
+        let mut choice = Choice::discovered(
+            server,
             server.address().unwrap_or_default(),
             if remembered {
                 Source::Remembered
@@ -71,7 +101,6 @@ pub fn choices(
                 Source::Discovered
             },
         );
-        choice.instance = Some(server.instance.clone());
         if choice.address.is_empty() {
             choice.unavailable = Some("no address".into());
             unavailable.push(choice);
@@ -91,12 +120,11 @@ pub fn choices(
         !duplicate
     });
     for server in servers.incompatible() {
-        let mut choice = Choice::new(
-            &server.name,
+        let mut choice = Choice::discovered(
+            server,
             server.address().unwrap_or_default(),
             Source::Discovered,
         );
-        choice.instance = Some(server.instance.clone());
         choice.unavailable = Some(match server.protocol {
             Some(version) => format!("protocol {version}, needs {PROTOCOL_VERSION}"),
             None => "unknown protocol".into(),
@@ -133,6 +161,8 @@ mod tests {
             addresses: address.parse().into_iter().collect(),
             port: 8765,
             protocol,
+            spaces: None,
+            participants: None,
         }
     }
 
@@ -305,6 +335,43 @@ mod tests {
         assert_eq!(
             automatic(&choices(None, Some("beta"), &servers(&[unreachable]))),
             None
+        );
+    }
+
+    #[test]
+    fn counts_are_shown_only_when_advertised() {
+        let mut busy = server("busy", "Busy", "10.0.0.1:8765", Some(PROTOCOL_VERSION));
+        busy.spaces = Some(2);
+        busy.participants = Some(1);
+        let mut quiet = server("quiet", "Quiet", "10.0.0.2:8765", Some(PROTOCOL_VERSION));
+        quiet.spaces = Some(1);
+        quiet.participants = Some(0);
+        let mut partial = server(
+            "partial",
+            "Partial",
+            "10.0.0.3:8765",
+            Some(PROTOCOL_VERSION),
+        );
+        partial.participants = Some(3);
+        let older = server("older", "Older", "10.0.0.4:8765", Some(PROTOCOL_VERSION));
+        let choices = choices(None, None, &servers(&[busy, quiet, partial, older]));
+        let shown: Vec<(&str, Option<String>)> = choices
+            .iter()
+            .map(|choice| (choice.label.as_str(), choice.counts()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Busy", Some("2 spaces, 1 person".to_owned())),
+                ("Older", None),
+                ("Partial", Some("3 people".to_owned())),
+                ("Quiet", Some("1 space, 0 people".to_owned())),
+                ("USB (adb reverse)", None),
+            ]
+        );
+        assert_eq!(
+            (choices[0].spaces, choices[0].participants),
+            (Some(2), Some(1))
         );
     }
 }

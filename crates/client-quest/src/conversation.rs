@@ -7,13 +7,14 @@
 use crate::{
     arrival,
     caption::{COLUMNS, ROWS, wrapped_lines},
+    environment::Environment,
     interaction::SessionActivity,
     server_choice::{self, Choice},
 };
 use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
-    Activity, BackendInfo, ClientMessage, Decision, QueueState, Role, ServerMessage,
-    SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    Activity, BackendInfo, ClientMessage, Decision, EnvironmentInfo, QueueState, Role,
+    ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
 };
 use std::{
     sync::Arc,
@@ -84,7 +85,8 @@ enum LobbyStep {
     Directory,
     /// Creating a space with a backend that can attach: a new session, or one of the backend's existing sessions in the directory.
     Session,
-    // An environment ring follows when the server offers more than one environment; see `Conversation::create`.
+    /// Creating a space: choose the environment it is bound to. Only when the server offers more than one.
+    Environment,
 }
 
 impl LobbyStep {
@@ -94,6 +96,7 @@ impl LobbyStep {
             LobbyStep::Backend => Some(arrival::Step::Backend),
             LobbyStep::Directory => Some(arrival::Step::Directory),
             LobbyStep::Session => Some(arrival::Step::Session),
+            LobbyStep::Environment => Some(arrival::Step::Environment),
         }
     }
 }
@@ -145,10 +148,14 @@ pub struct Conversation {
     roots: Vec<WorkspaceRoot>,
     /// The answer to [`ClientMessage::ListSessions`], shown on the session ring after "New session".
     sessions: Vec<SessionSummary>,
+    /// The environments a space may be bound to, offered on the environment ring when there are several.
+    environments: Vec<EnvironmentInfo>,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
     menu_directory: Option<String>,
+    /// The `CreateSpace` waiting at the environment step for its environment.
+    menu_create: Option<ClientMessage>,
     error: Option<String>,
     actions: Vec<Action>,
     /// The last body paginated, since the panel is drawn every frame.
@@ -198,9 +205,11 @@ impl Conversation {
             menu: 0,
             backends: Vec::new(),
             roots: Vec::new(),
+            environments: Vec::new(),
             sessions: Vec::new(),
             menu_backend: None,
             menu_directory: None,
+            menu_create: None,
             error: None,
             actions: Vec::new(),
             paged: None,
@@ -282,6 +291,7 @@ impl Conversation {
         self.close_menu();
         self.backends.clear();
         self.roots.clear();
+        self.environments.clear();
         self.mode = Mode::Lobby;
         self.error = None;
         self.notice = None;
@@ -331,6 +341,7 @@ impl Conversation {
             server,
             backends,
             roots,
+            environments,
             ..
         } = &state
         {
@@ -338,6 +349,7 @@ impl Conversation {
             self.error = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
+            self.environments = environments.clone();
             match self.mode {
                 // A space joined meanwhile is restored by the client, and the server sends its state.
                 Mode::Lobby => self.list(),
@@ -547,6 +559,7 @@ impl Conversation {
             LobbyStep::Directory => self.roots.len(),
             // "New session", then the existing sessions.
             LobbyStep::Session => self.sessions.len() + 1,
+            LobbyStep::Environment => self.environments.len(),
         }
     }
 
@@ -567,6 +580,39 @@ impl Conversation {
         self.sessions.clear();
         self.menu_backend = None;
         self.menu_directory = None;
+        self.menu_create = None;
+    }
+
+    /// Send `create`, bound to the only environment the server offers, or ask which one when it offers several. A server that offers none predates environments, and binds its own.
+    fn submit(&mut self, create: ClientMessage) {
+        self.joining = None;
+        if self.environments.len() > 1 {
+            self.menu = 0;
+            self.step = LobbyStep::Environment;
+            self.menu_create = Some(create);
+            return;
+        }
+        let only = self.environments.first().map(|offered| offered.id.clone());
+        self.send(with_environment(create, only));
+        self.close_menu();
+    }
+
+    /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment. See `design/environments.md`.
+    pub fn environment(&self) -> Environment {
+        match &self.space {
+            Some(space) if self.mode == Mode::Space => {
+                Environment::for_space(&space.environment).unwrap_or(Environment::Minimal)
+            }
+            _ => Environment::Minimal,
+        }
+    }
+
+    /// The joined space's environment, when this build cannot draw it and shows the grid instead.
+    fn missing_environment(&self) -> Option<&str> {
+        self.space
+            .as_ref()
+            .filter(|space| Environment::for_space(&space.environment).is_none())
+            .map(|space| space.environment.as_str())
     }
 
     /// Open the first creation ring.
@@ -599,6 +645,20 @@ impl Conversation {
                 self.menu_directory = None;
                 self.sessions.clear();
             }
+            LobbyStep::Environment => {
+                self.menu_create = None;
+                if self.attaches() {
+                    self.step = LobbyStep::Session;
+                    self.menu = 0;
+                } else {
+                    self.step = LobbyStep::Directory;
+                    self.menu = self
+                        .roots
+                        .iter()
+                        .position(|root| Some(&root.path) == self.menu_directory.as_ref())
+                        .unwrap_or(0);
+                }
+            }
         }
     }
 
@@ -614,9 +674,7 @@ impl Conversation {
         format!("{backend} in {label}")
     }
 
-    /// Create the space chosen on the rings, bound to `session` if one was chosen, and close them.
-    ///
-    /// When the server offers more than one environment, an environment ring belongs between the last ring and this; see `design/arrival.md`.
+    /// Create the space chosen on the rings, bound to `session` if one was chosen, then choose its environment if the server offers more than one.
     fn create(&mut self, session: Option<SessionSummary>) {
         let (Some(backend), Some(directory)) =
             (self.menu_backend.clone(), self.menu_directory.clone())
@@ -627,14 +685,14 @@ impl Conversation {
             Some(session) if !session.title.trim().is_empty() => session.title.clone(),
             _ => self.lobby_title(),
         };
-        self.send(ClientMessage::CreateSpace {
+        let create = ClientMessage::CreateSpace {
             title,
             backend,
             directory,
             session: session.map(|session| session.id),
-        });
-        self.joining = None;
-        self.close_menu();
+            environment: None,
+        };
+        self.submit(create);
     }
 
     /// Return to the server list, closing the connection.
@@ -775,6 +833,18 @@ impl Conversation {
                             .cloned();
                         self.create(session);
                     }
+                    LobbyStep::Environment => {
+                        let environment = self
+                            .environments
+                            .get(self.menu)
+                            .map(|offered| offered.id.clone());
+                        if let (Some(environment), Some(create)) =
+                            (environment, self.menu_create.take())
+                        {
+                            self.send(with_environment(create, Some(environment)));
+                            self.close_menu();
+                        }
+                    }
                 }
                 false
             }
@@ -857,7 +927,10 @@ impl Conversation {
             Mode::Servers => self.actions.push(Action::Rescan),
             Mode::Lobby => match self.step {
                 LobbyStep::Session => self.list_sessions(),
-                LobbyStep::Spaces | LobbyStep::Backend | LobbyStep::Directory => self.list(),
+                LobbyStep::Spaces
+                | LobbyStep::Backend
+                | LobbyStep::Directory
+                | LobbyStep::Environment => self.list(),
             },
             Mode::Space => {
                 if let Some(space) = self.space.as_ref().map(|space| space.id.clone()) {
@@ -1015,7 +1088,11 @@ impl Conversation {
         for (index, choice) in self.servers.iter().enumerate().skip(start).take(rows) {
             let marker = if index == self.server { '>' } else { ' ' };
             lines.push(short(&match &choice.unavailable {
-                None => format!("{marker} {} {}", choice.label, choice.address),
+                // A row has no room for both, and the counts say more about a discovered server than its address.
+                None => match choice.counts() {
+                    Some(counts) => format!("{marker} {} ({counts})", choice.label),
+                    None => format!("{marker} {} {}", choice.label, choice.address),
+                },
                 Some(reason) => format!("{marker} ({} - {reason})", choice.label),
             }));
         }
@@ -1111,6 +1188,7 @@ impl Conversation {
                 "Start a new session; none listed yet."
             }
             LobbyStep::Session => "A new session, or attach to an existing one.",
+            LobbyStep::Environment => "Where the space takes place, for everyone in it.",
             LobbyStep::Spaces => "",
         }
     }
@@ -1121,6 +1199,7 @@ impl Conversation {
             LobbyStep::Backend => "NEW SPACE: BACKEND",
             LobbyStep::Directory => "NEW SPACE: FOLDER",
             LobbyStep::Session => "NEW SPACE: SESSION",
+            LobbyStep::Environment => "NEW SPACE: ENVIRONMENT",
             LobbyStep::Spaces => unreachable!(),
         };
         let count = self.step_list(step);
@@ -1196,6 +1275,17 @@ impl Conversation {
                     }))
                     .collect()
             }
+            LobbyStep::Environment => self
+                .environments
+                .iter()
+                .map(|offered| {
+                    choice(
+                        arrival::Key::Environment(offered.id.clone()),
+                        &offered.label,
+                        None,
+                    )
+                })
+                .collect(),
         };
         if let Some(item) = items.get_mut(self.menu) {
             item.selected = true;
@@ -1230,6 +1320,7 @@ impl Conversation {
                             choice
                                 .unavailable
                                 .clone()
+                                .or_else(|| choice.counts())
                                 .unwrap_or_else(|| choice.address.clone()),
                         ),
                         selected: index == self.server,
@@ -1460,6 +1551,12 @@ impl Conversation {
         let status = talking.or_else(|| self.status()).unwrap_or_else(|| {
             if let Some(error) = &space.error {
                 format!("ERROR: {error}")
+            } else if let Some(missing) = self.missing_environment() {
+                // The grid is shown instead, never another environment.
+                match missing {
+                    "" => "The server named no environment.".into(),
+                    missing => format!("Unknown environment: {missing}"),
+                }
             } else if let Some(entry) = self.own_queued() {
                 format!("Queued: {}", entry.text)
             } else {
@@ -1512,6 +1609,14 @@ impl Conversation {
         lines.push(footer.into());
         lines
     }
+}
+
+/// `create`, a `CreateSpace`, bound to `chosen`.
+fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> ClientMessage {
+    if let ClientMessage::CreateSpace { environment, .. } = &mut create {
+        *environment = chosen;
+    }
+    create
 }
 
 /// Messages, then the queue when it has entries.
@@ -1602,7 +1707,16 @@ mod tests {
             server: "studio".into(),
             backends,
             roots,
+            environments: sky(),
         })
+    }
+
+    /// The environments today's server offers.
+    fn sky() -> Vec<EnvironmentInfo> {
+        vec![EnvironmentInfo {
+            id: "sky".into(),
+            label: "Sky".into(),
+        }]
     }
 
     /// A backend list for the menu tests.
@@ -1643,6 +1757,7 @@ mod tests {
             title: "Tomori".into(),
             backend: "claude-code".into(),
             directory: "/work/tomori".into(),
+            environment: "sky".into(),
             activity: Activity::Idle,
             participants: vec![Participant {
                 id: "p".into(),
@@ -1753,6 +1868,7 @@ mod tests {
                 title: "Tomori".into(),
                 backend: "claude-code".into(),
                 directory: "/work/tomori".into(),
+                environment: "sky".into(),
                 activity: Activity::Running,
                 participants: 2,
             }],
@@ -1782,6 +1898,7 @@ mod tests {
             directory: "/work/tomori".into(),
             activity: Activity::Idle,
             participants: 1,
+            environment: "sky".into(),
         }
     }
 
@@ -1864,6 +1981,7 @@ mod tests {
                 backend: "plain".into(),
                 directory: "/work/tomori".into(),
                 session: None,
+                environment: Some("sky".into()),
             }]
         );
         // Back at the spaces, with the rings closed.
@@ -1905,6 +2023,7 @@ mod tests {
                 backend: "fake".into(),
                 directory: "/work/tomori".into(),
                 session: Some("ses_1".into()),
+                environment: Some("sky".into()),
             }]
         );
         assert_eq!(conversation.arrival().unwrap().ring, None);
@@ -1928,6 +2047,7 @@ mod tests {
                 backend: "fake".into(),
                 directory: "/work/tomori".into(),
                 session: None,
+                environment: Some("sky".into()),
             }]
         );
     }
@@ -2050,6 +2170,144 @@ mod tests {
             arrival::Step::Backend
         );
         assert!(sent(&mut conversation).is_empty());
+    }
+
+    /// Walk the creation rings from the create object, choosing the first backend, the first folder and a new session.
+    fn create_in(conversation: &mut Conversation) {
+        listed(conversation, vec![]);
+        conversation.accept();
+        conversation.accept();
+        conversation.accept();
+        conversation.apply(sessions());
+        conversation.take_actions();
+        conversation.accept();
+    }
+
+    #[test]
+    fn several_environments_are_chosen_after_the_folder() {
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            backends: backends(),
+            roots: roots(),
+            environments: vec![
+                EnvironmentInfo {
+                    id: "sky".into(),
+                    label: "Sky".into(),
+                },
+                EnvironmentInfo {
+                    id: "observe".into(),
+                    label: "Observe".into(),
+                },
+            ],
+        }));
+        conversation.take_actions();
+        create_in(&mut conversation);
+        assert!(sent(&mut conversation).is_empty());
+        let text = conversation.text();
+        assert!(text.contains("NEW SPACE: ENVIRONMENT 1/2"), "{text}");
+        assert!(text.contains("> Sky") && text.contains("Observe"), "{text}");
+        assert_fits(&mut conversation);
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        assert_eq!(ring.step, arrival::Step::Environment);
+
+        // B steps back to the session ring without creating anything; choosing again offers the environments again.
+        conversation.back();
+        assert!(conversation.text().contains("NEW SPACE: SESSION"));
+        assert!(sent(&mut conversation).is_empty());
+        conversation.accept();
+        conversation.choose_object(&arrival::Key::Environment("observe".into()));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CreateSpace {
+                title: "fake in tomori".into(),
+                backend: "fake".into(),
+                directory: "/work/tomori".into(),
+                session: None,
+                environment: Some("observe".into()),
+            }]
+        );
+        assert!(conversation.text().contains("SPACES"));
+    }
+
+    #[test]
+    fn a_server_offering_no_environments_binds_its_own() {
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            backends: backends(),
+            roots: roots(),
+            environments: vec![],
+        }));
+        conversation.take_actions();
+        create_in(&mut conversation);
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace {
+                environment: None,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn arrival_and_the_lobby_use_the_grid_and_a_space_its_environment() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        // Leaving returns to the grid at once, before the server confirms.
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        // Returning to the servers keeps the grid.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.back();
+        assert_eq!(conversation.mode(), Mode::Servers);
+        assert_eq!(conversation.environment(), Environment::Minimal);
+    }
+
+    #[test]
+    fn a_space_in_an_unknown_environment_shows_the_grid_and_names_it() {
+        let mut conversation = joined(|state| state.environment = "observe".into());
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        let text = conversation.text();
+        assert!(text.contains("Unknown environment: observe"), "{text}");
+        assert_fits(&mut conversation);
+        // An older server names none.
+        conversation.apply(space(|state| state.environment = String::new()));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert!(
+            conversation
+                .text()
+                .contains("The server named no environment.")
+        );
+        // A known one is drawn, and the notice goes.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.environment(), Environment::Sky);
+        assert!(!conversation.text().contains("environment"));
+    }
+
+    #[test]
+    fn the_server_list_shows_advertised_counts() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        let mut studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
+        studio.spaces = Some(2);
+        studio.participants = Some(1);
+        let usb = Choice::new("USB", "127.0.0.1:8765", Source::Usb);
+        conversation.set_servers(vec![studio, usb]);
+        let text = conversation.text();
+        assert!(text.contains("> Studio (2 spaces, 1 person)\n"), "{text}");
+        assert!(text.contains("\nUSB 127.0.0.1:8765\n"), "{text}");
     }
 
     #[test]
@@ -2367,6 +2625,7 @@ mod tests {
                 title: "Tomori".into(),
                 backend: "claude-code".into(),
                 directory: "/work/tomori".into(),
+                environment: "sky".into(),
                 activity: Activity::Idle,
                 participants: 0,
             }],
@@ -2588,6 +2847,7 @@ mod tests {
                     title: long.clone(),
                     backend: "claude-code".into(),
                     directory: "/".into(),
+                    environment: "sky".into(),
                     activity: Activity::Unknown,
                     participants: 0,
                 })

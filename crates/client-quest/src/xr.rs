@@ -166,7 +166,6 @@ pub fn run(
     let mut last_frame = Instant::now();
     let mut frames = 0_u64;
     let mut stick_latched = false;
-    let mut environment_latched = false;
     let mut choice_latched = false;
     let mut was_talking = false;
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
@@ -197,7 +196,6 @@ pub fn run(
                         // Do not lose a real focus-loss transition if the
                         // runtime also queues a refocus in this poll batch.
                         stick_latched = false;
-                        environment_latched = false;
                         choice_latched = false;
                         was_talking = false;
                         talk_blocked = true;
@@ -241,7 +239,6 @@ pub fn run(
         connection.poll(focused && running, &mut conversation);
         if !focused || !running {
             stick_latched = false;
-            environment_latched = false;
             choice_latched = false;
             was_talking = false;
             talk_blocked = true;
@@ -265,12 +262,6 @@ pub fn run(
         // Only actual session focus loss cancels an utterance; an X release
         // while still focused must finalize/send it instead.
         let mut controls = input.sample_actions(&session, focused)?;
-        let environment_pressed = controls.environment_grip > 0.75;
-        if environment_pressed && !environment_latched {
-            renderer.set_environment(renderer.environment().next());
-            log::info!("Environment: {:?}", renderer.environment());
-        }
-        environment_latched = environment_pressed;
         let stick = controls.navigation;
         let moving = stick.x.abs() > 0.6 || stick.y.abs() > 0.6;
         let navigate = moving && !stick_latched;
@@ -320,6 +311,8 @@ pub fn run(
             if choosing { 0.0 } else { right.x },
             if choosing { 0.0 } else { right.y },
         );
+        // Arrival and the lobby show the grid, and a space its own environment; no control switches it. See `design/environments.md`.
+        renderer.set_environment(conversation.environment());
         caption.set_text(&gpu.queue, &conversation.text());
         caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
         if reset {
@@ -772,7 +765,6 @@ struct Input {
     sound_toggle: xr::Action<bool>,
     replay: xr::Action<bool>,
     audience_grip: xr::Action<f32>,
-    environment_grip: xr::Action<f32>,
     set: xr::ActionSet,
     hand_paths: [xr::Path; 2],
     location_errors: [Option<xr::sys::Result>; 2],
@@ -793,7 +785,6 @@ struct ActionInputs {
     sound_toggle: xr::ActionState<bool>,
     replay: xr::ActionState<bool>,
     audience_grip: xr::ActionState<f32>,
-    environment_grip: xr::ActionState<f32>,
 }
 
 #[derive(Default)]
@@ -814,7 +805,6 @@ struct Controls {
     sound_toggle: bool,
     replay: bool,
     audience_grip: f32,
-    environment_grip: f32,
 }
 
 impl Controls {
@@ -847,11 +837,6 @@ impl Controls {
             replay: pressed(actions.replay),
             audience_grip: if actions.audience_grip.is_active {
                 actions.audience_grip.current_state
-            } else {
-                0.0
-            },
-            environment_grip: if actions.environment_grip.is_active {
-                actions.environment_grip.current_state
             } else {
                 0.0
             },
@@ -912,8 +897,6 @@ impl Input {
         let replay = set.create_action::<bool>("replay", "Replay spoken reply", &[])?;
         let audience_grip =
             set.create_action::<f32>("audience_mic", "Toggle live audience microphone", &[])?;
-        let environment_grip =
-            set.create_action::<f32>("environment", "Switch environment", &[])?;
         instance.suggest_interaction_profile_bindings(
             instance.string_to_path("/interaction_profiles/oculus/touch_controller")?,
             &[
@@ -969,10 +952,6 @@ impl Input {
                     &audience_grip,
                     instance.string_to_path("/user/hand/left/input/squeeze/value")?,
                 ),
-                xr::Binding::new(
-                    &environment_grip,
-                    instance.string_to_path("/user/hand/right/input/squeeze/value")?,
-                ),
             ],
         )?;
         session.attach_action_sets(&[&set])?;
@@ -997,7 +976,6 @@ impl Input {
             sound_toggle,
             replay,
             audience_grip,
-            environment_grip,
             set,
             hand_paths: [
                 instance.string_to_path("/user/hand/left")?,
@@ -1046,7 +1024,6 @@ impl Input {
                 sound_toggle: self.sound_toggle.state(session, xr::Path::NULL)?,
                 replay: self.replay.state(session, xr::Path::NULL)?,
                 audience_grip: self.audience_grip.state(session, xr::Path::NULL)?,
-                environment_grip: self.environment_grip.state(session, xr::Path::NULL)?,
             },
             focused,
         ))
@@ -1266,7 +1243,6 @@ mod tests {
             sound_toggle: action(held, active, changed),
             replay: action(held, active, changed),
             audience_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
-            environment_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
         }
     }
 
@@ -1310,7 +1286,6 @@ mod tests {
             controls.set_locations(locations);
             assert_eq!(controls.talk, held);
             assert_eq!(controls.audience_grip, if held { 1.0 } else { 0.0 });
-            assert_eq!(controls.environment_grip, if held { 1.0 } else { 0.0 });
             assert_press_edges(&controls, held && changed);
         }
     }
@@ -1383,7 +1358,6 @@ mod tests {
             assert!(!controls.talk_active);
             assert_press_edges(&controls, false);
             assert_eq!(controls.audience_grip, 0.0);
-            assert_eq!(controls.environment_grip, 0.0);
             assert_eq!((controls.navigation.x, controls.navigation.y), (0.0, 0.0));
             assert_eq!(
                 (
@@ -1410,17 +1384,6 @@ mod tests {
         let controls = Controls::from_actions(input, true);
         assert_eq!(controls.audience_grip, 1.0);
         assert!(!controls.talk);
-        assert_press_edges(&controls, false);
-    }
-
-    #[test]
-    fn environment_grip_is_independent_of_chat_and_attraction() {
-        let mut input = actions(false, true, false);
-        input.environment_grip = action(1.0, true, true);
-        let controls = Controls::from_actions(input, true);
-        assert_eq!(controls.environment_grip, 1.0);
-        assert_eq!(controls.audience_grip, 0.0);
-        assert!(!controls.talk && controls.trigger == Some(0.0));
         assert_press_edges(&controls, false);
     }
 

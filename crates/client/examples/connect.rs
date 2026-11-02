@@ -17,7 +17,7 @@
 //!
 //! `create` starts a new agent session, such as `create claude-code /home/sam/project`, which the server accepts only
 //! beneath one of its workspace roots; the directory cannot contain spaces. The title defaults to the directory's last
-//! component.
+//! component. The space is bound to the first environment the server offers, which the connected state lists.
 
 use std::collections::BTreeMap;
 use std::io::BufRead;
@@ -62,6 +62,7 @@ fn command(sender: &Sender, line: &str) -> bool {
                     backend: backend.into(),
                     directory: directory.into(),
                     session: None,
+                    environment: None,
                 }
             }
             None => {
@@ -105,9 +106,10 @@ fn describe(message: &ServerMessage) -> String {
     match message {
         ServerMessage::Space { state } => {
             let mut text = format!(
-                "space {} ({}) activity={:?} messages={} queue={} participants={}",
+                "space {} ({}) environment={} activity={:?} messages={} queue={} participants={}",
                 state.id,
                 state.title,
+                state.environment,
                 state.activity,
                 state.messages.len(),
                 state.queue.len(),

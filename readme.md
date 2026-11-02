@@ -2,7 +2,7 @@
 
 A conversational spatial workspace for people and agents, currently a native
 **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**.
-128 agents inhabit a selectable moonlit Sky environment or minimal floor grid.
+128 agents inhabit a moonlit Sky environment or a minimal floor grid.
 Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest
 renders the interactive scene and joins conversations through a Tomori server on
 the PC, which runs the agent sessions.
@@ -19,25 +19,31 @@ source repository.
   points at; a pull that starts away from every object, or any pull inside a
   space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
-- **Squeeze the right grip:** switch between Sky and Minimal environments.
 - **Hold Meta button:** Quest's system recenter brings the swarm in front of you.
   A short press opens the system menu. No artificial camera movement.
 
 ## Environments
 
-**Sky** is the default: a fixed moonlit night, sparse stars, static cloud banks,
-a stable platform and an open shrine blockout with warm lanterns. The concrete
-renderer lives in [`crates/environment-sky`](crates/environment-sky/README.md),
-separate from sessions, worker simulation and application input.
+Each space is bound to one environment, chosen when it is created and the same
+for everyone in it (see [design/environments.md](design/environments.md)). The
+server offers only **Sky** for now: a fixed moonlit night, sparse stars, static
+cloud banks, a stable platform and an open shrine blockout with warm lanterns.
+The concrete renderer lives in
+[`crates/environment-sky`](crates/environment-sky/README.md), separate from
+sessions, worker simulation and application input. **Minimal**, the plain floor
+grid, is the waiting area outside any space.
 
-- **Quest / desktop XR:** squeeze and release the right grip to switch presets.
-- **Desktop window:** press **E** to switch presets; or launch with
-  `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` for the original grid.
-- **Spectator:** followed the headset's selection; the headset doesn't publish
+- **Quest / desktop XR:** choosing a server and a space happens on the grid;
+  joining a space switches to its environment, and leaving returns to the grid.
+  Nothing switches the environment inside a space. A space whose environment
+  this build doesn't know shows the grid, and its panel names the environment.
+- **Desktop window:** it has no server, so press **E** to switch between Sky
+  and the grid; or launch with
+  `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` to start on the grid.
+- **Spectator:** followed the headset's scenery; the headset doesn't publish
   to the spectator for now.
 
-Switching does not reset agents, conversations or worker positions. Selection
-is not persisted across launches. Sky uses the same scene/recenter transform as
+Switching does not reset agents, conversations or worker positions. Sky uses the same scene/recenter transform as
 the workspace; it does not move the camera. Clouds use a bounded low-resolution
 volumetric density pass with translucent edges and approximate moonlighting;
 lanterns have brighter emissive faces and cast warm, occluded illumination onto

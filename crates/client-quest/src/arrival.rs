@@ -56,6 +56,8 @@ pub enum Key {
     Directory(String),
     /// A choice on the session ring: an existing session to attach, or `None` for a new one.
     Session(Option<String>),
+    /// A choice on the environment ring, by identifier.
+    Environment(String),
 }
 
 /// How an object should look, as far as arrival knows.
@@ -98,7 +100,8 @@ pub enum Step {
     Directory,
     /// Only for backends that can attach to an existing session.
     Session,
-    // An environment ring follows when the server offers more than one environment; see `design/arrival.md`.
+    /// Only when the server offers more than one environment.
+    Environment,
 }
 
 impl Step {
@@ -107,6 +110,7 @@ impl Step {
             Step::Backend => "Choose a backend",
             Step::Directory => "Choose a folder",
             Step::Session => "New or existing session",
+            Step::Environment => "Choose an environment",
         }
     }
 }
