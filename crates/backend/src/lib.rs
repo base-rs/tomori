@@ -196,6 +196,29 @@ pub struct Worker {
     pub state: WorkerState,
 }
 
+/// A mode a session can be switched to while it runs, as the agent's own interface offers it: for Claude Code, a
+/// permission mode its terminal cycles through with Shift-Tab; for OpenCode, a primary agent its terminal cycles through
+/// with Tab. See `design/agent-backends.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mode {
+    /// The agent's own identifier, such as `acceptEdits` or `plan`; passed back to [`Session::set_mode`].
+    pub id: String,
+    /// The name the agent's interface shows for it.
+    pub name: String,
+    /// A short description of what the mode does.
+    pub description: Option<String>,
+}
+
+/// The modes a session offers and the one it is in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Modes {
+    /// In the order the agent's own interface steps through them. Empty when the backend offers no modes.
+    pub offered: Vec<Mode>,
+    /// The identifier of the current mode, as the agent last reported it. It may be a mode that is not offered, such as
+    /// one set by the user's configuration. `None` until the agent reports one.
+    pub current: Option<String>,
+}
+
 /// A part of a message in a [`Snapshot`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -230,6 +253,8 @@ pub struct Snapshot {
     pub permission: Option<Permission>,
     pub question: Option<Question>,
     pub workers: Vec<Worker>,
+    #[serde(default)]
+    pub modes: Modes,
 }
 
 /// A fact reported by a session, in order.
@@ -278,6 +303,15 @@ pub enum Event {
     },
     WorkersChanged {
         workers: Vec<Worker>,
+    },
+    /// The session's offered modes or its current mode changed, as the agent confirmed: after a mode request, when the
+    /// agent changes mode itself, or once the offered modes are known.
+    ModesChanged(Modes),
+    /// The agent refused to enter `mode`, either as the starting mode or when asked through [`Session::set_mode`]. The
+    /// session stays in the mode reported by [`Event::ModesChanged`]. `reason` is the agent's own explanation, if any.
+    ModeRefused {
+        mode: String,
+        reason: Option<String>,
     },
     /// A recoverable problem. The session continues.
     Error {
@@ -381,6 +415,11 @@ pub trait Session: Send + Sync + 'static {
     ) -> impl Future<Output = Result<()>> + Send;
 
     fn interrupt(&self) -> impl Future<Output = Result<()>> + Send;
+
+    /// Ask the agent to switch to the offered mode `mode`, the way its own interface does. Only called when a participant
+    /// chooses a mode. Returns once the request is sent; the change is reported by [`Event::ModesChanged`] when the agent
+    /// confirms it, or [`Event::ModeRefused`] when it does not.
+    fn set_mode(&self, mode: &str) -> impl Future<Output = Result<()>> + Send;
 
     /// Stop the session's process or connection. The agent's own history is kept.
     fn close(&self) -> impl Future<Output = Result<()>> + Send;

@@ -11,8 +11,8 @@ use std::path::Path;
 
 use backend::{
     AnswerValue, Decision, Error, ErrorKind, Event, Field, FieldKind, FieldOption, Grant,
-    GrantScope, Part, Permission, PermissionOption, Prompt, Question, Result, Role, Snapshot,
-    SnapshotMessage,
+    GrantScope, Mode, Modes, Part, Permission, PermissionOption, Prompt, Question, Result, Role,
+    Snapshot, SnapshotMessage,
 };
 use serde_json::{Map, Value, json};
 
@@ -33,6 +33,36 @@ pub(crate) const SUGGESTIONS_OPTION: &str = "suggestions";
 
 /// Tools whose terminal dialog offers to accept edits for the session rather than to add rules.
 const EDIT_TOOLS: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+
+/// Claude Code's permission modes, in the order its terminal steps through them with Shift-Tab, with the titles it shows
+/// for them. As in Claude Code 2.1.311, Shift-Tab goes from default to accept edits to plan, then to bypass permissions
+/// when that mode is available, then to auto when that mode is available, and back to default; any other mode, such as
+/// `dontAsk`, steps to default.
+const PERMISSION_MODES: [(&str, &str, &str); 5] = [
+    (
+        "default",
+        "Manual",
+        "Asks before tool uses that need permission.",
+    ),
+    ("acceptEdits", "Accept edits", "Edits files without asking."),
+    ("plan", "Plan", "Explores and plans without making changes."),
+    (
+        BYPASS_MODE,
+        "Bypass Permissions",
+        "Runs every tool without asking.",
+    ),
+    (
+        AUTO_MODE,
+        "Auto",
+        "Decides itself which tool uses need permission.",
+    ),
+];
+
+/// The permission mode Claude Code offers only to a process launched with bypassing allowed.
+pub(crate) const BYPASS_MODE: &str = "bypassPermissions";
+
+/// The permission mode Claude Code offers only where the user's account and model allow it.
+pub(crate) const AUTO_MODE: &str = "auto";
 
 /// What handling one line produced.
 #[derive(Debug, Default)]
@@ -76,6 +106,16 @@ pub(crate) struct State {
     prompts: HashMap<String, Prompt>,
     /// Control requests sent to the agent and awaiting a response, by request id.
     requests: HashMap<String, &'static str>,
+    /// The permission mode the agent last reported.
+    mode: Option<String>,
+    /// The mode the process was started in, until the agent first reports its mode.
+    start: Option<String>,
+    /// The agent offers bypass permissions mode, because the process was launched with bypassing allowed.
+    bypass: bool,
+    /// The agent offers auto mode. Claude Code does not say whether it does until it refuses it.
+    auto: bool,
+    /// `set_permission_mode` requests awaiting a response, by request id, with the mode they ask for.
+    mode_requests: HashMap<String, String>,
 }
 
 impl State {
@@ -99,6 +139,90 @@ impl State {
             sent: HashSet::new(),
             prompts: HashMap::new(),
             requests: HashMap::new(),
+            mode: None,
+            start: None,
+            bypass: false,
+            auto: true,
+            mode_requests: HashMap::new(),
+        }
+    }
+
+    /// The state of a process started with `--permission-mode start`. `bypass` says whether it was launched with
+    /// bypassing allowed.
+    pub(crate) fn starting(session: String, workers: Workers, start: &str, bypass: bool) -> Self {
+        Self {
+            start: Some(start.into()),
+            bypass,
+            ..Self::attached(session, workers)
+        }
+    }
+
+    /// The modes the terminal's Shift-Tab steps through for this process, in its order, and the current mode.
+    pub(crate) fn modes(&self) -> Modes {
+        Modes {
+            offered: PERMISSION_MODES
+                .iter()
+                .filter(|(id, ..)| match *id {
+                    BYPASS_MODE => self.bypass,
+                    AUTO_MODE => self.auto,
+                    _ => true,
+                })
+                .map(|(id, name, description)| Mode {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    description: Some((*description).into()),
+                })
+                .collect(),
+            current: self.mode.clone(),
+        }
+    }
+
+    /// The control request that asks the agent to switch to the offered permission mode `mode`, as the terminal does.
+    pub(crate) fn set_mode(&mut self, mode: &str) -> Result<Value> {
+        if !self
+            .modes()
+            .offered
+            .iter()
+            .any(|offered| offered.id == mode)
+        {
+            return Err(Error::new(
+                ErrorKind::Invalid,
+                format!("the session offers no mode {mode:?}"),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.mode_requests.insert(id.clone(), mode.into());
+        Ok(json!({
+            "type": "control_request",
+            "request_id": id,
+            "request": {"subtype": "set_permission_mode", "mode": mode},
+        }))
+    }
+
+    /// The agent reported its permission mode. The first report after starting says whether it took the starting mode.
+    fn reported_mode(&mut self, mode: &str, effects: &mut Effects) {
+        if let Some(start) = self.start.take()
+            && start != mode
+        {
+            // Claude Code starts in its default mode instead of one it cannot take.
+            self.unavailable(&start);
+            effects.events.push(Event::ModeRefused {
+                mode: start,
+                reason: None,
+            });
+        } else if self.mode.as_deref() == Some(mode) {
+            return;
+        }
+        self.mode = Some(mode.into());
+        effects.events.push(Event::ModesChanged(self.modes()));
+    }
+
+    /// Stop offering a mode the agent refused because it is unavailable to this process.
+    fn unavailable(&mut self, mode: &str) {
+        match mode {
+            AUTO_MODE => self.auto = false,
+            BYPASS_MODE => self.bypass = false,
+            _ => {}
         }
     }
 
@@ -119,6 +243,7 @@ impl State {
                 Pending::Permission { .. } => None,
             }),
             workers: self.workers.list().to_vec(),
+            modes: self.modes(),
         }
     }
 
@@ -307,18 +432,7 @@ impl State {
                 }
             }
             Some("control_request") => self.control(value, effects),
-            Some("control_response") => {
-                let response = &value["response"];
-                if let Some(id) = str_field(response, "request_id")
-                    && self.requests.remove(id).is_some()
-                    && str_field(response, "subtype") == Some("error")
-                {
-                    let message = str_field(response, "error").unwrap_or("control request failed");
-                    effects.events.push(Event::Error {
-                        message: message.into(),
-                    });
-                }
-            }
+            Some("control_response") => self.control_response(&value["response"], effects),
             Some("control_cancel_request") => {
                 if let Some(id) = str_field(value, "request_id")
                     && let Ok(index) = self.pending_index(id)
@@ -334,7 +448,54 @@ impl State {
         }
     }
 
+    fn control_response(&mut self, response: &Value, effects: &mut Effects) {
+        let Some(id) = str_field(response, "request_id") else {
+            return;
+        };
+        let failed = str_field(response, "subtype") == Some("error");
+        if let Some(mode) = self.mode_requests.remove(id) {
+            if failed {
+                // Claude Code names why with an error code such as `auto_mode_unavailable` or `bypass_not_launched`.
+                if str_field(response, "error_code")
+                    .is_some_and(|code| code.starts_with("auto_mode") || code.starts_with("bypass"))
+                {
+                    self.unavailable(&mode);
+                    effects.events.push(Event::ModesChanged(self.modes()));
+                }
+                effects.events.push(Event::ModeRefused {
+                    mode,
+                    reason: str_field(response, "error").map(Into::into),
+                });
+            } else if let Some(mode) = str_field(&response["response"], "mode") {
+                self.reported_mode(mode, effects);
+            }
+            return;
+        }
+        match self.requests.remove(id) {
+            Some(_) if failed => {
+                let message = str_field(response, "error").unwrap_or("control request failed");
+                effects.events.push(Event::Error {
+                    message: message.into(),
+                });
+            }
+            // The agent's mode at connect time, which says whether it took the starting mode.
+            Some("initialize") => {
+                if let Some(mode) = str_field(&response["response"], "current_permission_mode") {
+                    self.reported_mode(mode, effects);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn system(&mut self, value: &Value, effects: &mut Effects) {
+        // Claude Code reports its permission mode when a turn starts and whenever it changes, including changes it makes
+        // itself, such as leaving plan mode.
+        if matches!(str_field(value, "subtype"), Some("init" | "status"))
+            && let Some(mode) = str_field(value, "permissionMode")
+        {
+            self.reported_mode(mode, effects);
+        }
         match str_field(value, "subtype") {
             Some("init") => {
                 if let Some(session) = str_field(value, "session_id") {
