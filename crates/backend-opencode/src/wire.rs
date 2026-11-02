@@ -12,7 +12,7 @@
 //! reported.
 
 use backend::{
-    AnswerValue, Event, Field, FieldKind, FieldOption, Grant, GrantScope, Permission,
+    AnswerValue, Event, Field, FieldKind, FieldOption, Grant, GrantScope, Mode, Permission,
     PermissionOption, Question, Role, Worker, WorkerState,
 };
 use serde_json::Value;
@@ -433,6 +433,51 @@ pub fn form_answer(answers: &[(String, AnswerValue)]) -> Value {
     Value::Object(object)
 }
 
+/// The modes OpenCode's terminal steps through with Tab: its primary agents, in its order, leaving out subagents and
+/// the hidden agents it runs itself (compaction, titles and summaries).
+pub fn modes_from_agents(agents: &[Value]) -> Vec<Mode> {
+    agents
+        .iter()
+        .filter(|agent| agent.get("mode").and_then(Value::as_str) != Some("subagent"))
+        .filter(|agent| agent.get("hidden").and_then(Value::as_bool) != Some(true))
+        .filter_map(|agent| {
+            let id = agent.get("id").and_then(Value::as_str)?.to_owned();
+            Some(Mode {
+                // The agent listing has no separate display name; the terminal shows the id.
+                name: id.clone(),
+                id,
+                description: agent
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|description| !description.is_empty())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// The agent a session's prompts go to: the one recorded on the session once a participant chose it, otherwise
+/// OpenCode's default, the first agent it offers.
+pub fn current_mode(info: &Value, offered: &[Mode]) -> Option<String> {
+    info.get("agent")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| offered.first().map(|mode| mode.id.clone()))
+}
+
+/// The agent an event reports the session switched to, if it reports a switch for `session_id`.
+pub fn agent_switched(value: &Value, session_id: &str) -> Option<String> {
+    let data = value.get("data")?;
+    match value.get("type")?.as_str()? {
+        "session.next.agent.switched" | "session.agent.switched" | "session.agent.selected"
+            if for_session(data, session_id) =>
+        {
+            data.get("agent").and_then(Value::as_str).map(str::to_owned)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +536,54 @@ mod tests {
             matches!(event(&ended, session, &mut seen), Some(Event::MessageCompleted { message }) if message == "msg_1"),
             "text.ended must complete the message it names"
         );
+    }
+
+    /// The agent listing as OpenCode 1.18 answers it, abridged.
+    fn agents() -> Vec<Value> {
+        serde_json::from_value(serde_json::json!([
+            {"id": "build", "description": "The default agent.", "mode": "primary", "hidden": false},
+            {"id": "plan", "description": "Plan mode.", "mode": "primary", "hidden": false},
+            {"id": "general", "description": "General-purpose agent.", "mode": "subagent", "hidden": false},
+            {"id": "explore", "description": "Fast agent.", "mode": "subagent", "hidden": false},
+            {"id": "compaction", "mode": "primary", "hidden": true},
+            {"id": "title", "mode": "primary", "hidden": true},
+            {"id": "summary", "mode": "primary", "hidden": true},
+            {"id": "review", "description": "Reviews changes.", "mode": "all"}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn modes_are_the_primary_agents_in_order() {
+        let modes = modes_from_agents(&agents());
+        let ids: Vec<&str> = modes.iter().map(|mode| mode.id.as_str()).collect();
+        assert_eq!(ids, ["build", "plan", "review"]);
+        assert_eq!(modes[1].name, "plan");
+        assert_eq!(modes[1].description.as_deref(), Some("Plan mode."));
+    }
+
+    #[test]
+    fn the_current_mode_defaults_to_the_first_agent() {
+        let modes = modes_from_agents(&agents());
+        let fresh = serde_json::json!({"id": "ses_test"});
+        assert_eq!(current_mode(&fresh, &modes).as_deref(), Some("build"));
+        let switched = serde_json::json!({"id": "ses_test", "agent": "plan"});
+        assert_eq!(current_mode(&switched, &modes).as_deref(), Some("plan"));
+        assert_eq!(current_mode(&fresh, &[]), None);
+    }
+
+    #[test]
+    fn reports_agent_switches_for_the_session() {
+        let switched = serde_json::json!({
+            "type": "session.next.agent.switched",
+            "data": {"sessionID": "ses_test", "messageID": "msg_1", "agent": "plan"}
+        });
+        assert_eq!(
+            agent_switched(&switched, "ses_test").as_deref(),
+            Some("plan")
+        );
+        assert_eq!(agent_switched(&switched, "ses_other"), None);
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(event(&switched, "ses_test", &mut seen), None);
     }
 }

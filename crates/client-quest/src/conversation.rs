@@ -225,7 +225,7 @@ impl Conversation {
         }
     }
 
-    #[cfg(test)]
+    /// The current panel: the server list, the lobby, or a space.
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -296,6 +296,16 @@ impl Conversation {
         self.error = None;
         self.notice = None;
         self.ended = None;
+    }
+
+    /// Join `space` by id, as the lobby's accept does, for a client that takes the space as an argument rather than choosing it in the list.
+    pub fn join_space(&mut self, space: impl Into<String>) {
+        let space = space.into();
+        self.joining = Some(space.clone());
+        self.leaving = false;
+        self.error = None;
+        self.ended = None;
+        self.send(ClientMessage::Join { space });
     }
 
     /// Report a problem the connection found, such as a client that could not start.
@@ -920,7 +930,7 @@ impl Conversation {
         }
     }
 
-    /// Y: browse again, refresh the spaces or the sessions being shown, or fetch the space's state again.
+    /// Y: browse again, refresh the spaces or the sessions being shown, or in a space step to the agent's next mode, as its terminal key does. A space whose agent offers no modes fetches its state again instead.
     pub fn refresh(&mut self) {
         self.error = None;
         match self.mode {
@@ -933,7 +943,14 @@ impl Conversation {
                 | LobbyStep::Environment => self.list(),
             },
             Mode::Space => {
-                if let Some(space) = self.space.as_ref().map(|space| space.id.clone()) {
+                let Some(space) = &self.space else {
+                    return;
+                };
+                // Stepped from the mode the agent last confirmed, so a second press before it confirms asks again rather than skipping a mode.
+                if let Some(mode) = space.next_mode().map(|mode| mode.id.clone()) {
+                    self.send(ClientMessage::SetMode { mode });
+                } else {
+                    let space = space.id.clone();
                     self.joining = Some(space.clone());
                     self.send(ClientMessage::Join { space });
                 }
@@ -1583,12 +1600,20 @@ impl Conversation {
                 }
             }
         });
+        // The current mode is shown by the name the agent's interface gives it, even when it is not one Tomori can step to.
+        let mode = space
+            .current_mode()
+            .map(|mode| mode.name.as_str())
+            .or(space.mode.as_deref().filter(|_| !space.modes.is_empty()));
         let mut lines = vec![
-            short(&format!(
-                "[{}] {}",
-                activity_label(space.activity),
-                space.title
-            )),
+            short(&match mode {
+                Some(mode) => format!(
+                    "[{} | {mode}] {}",
+                    activity_label(space.activity),
+                    space.title
+                ),
+                None => format!("[{}] {}", activity_label(space.activity), space.title),
+            }),
             short(&status),
             short(&format!("p{}/{} {label}", self.page + 1, pages.len())),
         ];
@@ -1609,8 +1634,10 @@ impl Conversation {
             "Sending decision..."
         } else if self.own_queued().is_some() {
             "B cancel queued | stick pages"
-        } else {
+        } else if space.modes.is_empty() {
             "X talk | B leave | Y refresh"
+        } else {
+            "X talk | B leave | Y mode"
         };
         while lines.len() < ROWS - 1 {
             lines.push(String::new());
@@ -2895,6 +2922,80 @@ mod tests {
         let paged = pages(&(0..200).map(|i| format!("line {i}\n")).collect::<String>());
         assert!(paged.last().unwrap().last().unwrap().contains("199"));
         assert!(short(&"🦀".repeat(200)).len() <= COLUMNS);
+    }
+
+    fn modes(current: &str) -> impl FnOnce(&mut SpaceState) {
+        let current = current.to_owned();
+        move |state| {
+            state.mode = Some(current);
+            state.modes = [
+                ("default", "Manual"),
+                ("acceptEdits", "Accept edits"),
+                ("plan", "Plan"),
+                ("auto", "Auto"),
+            ]
+            .map(|(id, name)| protocol::Mode {
+                id: id.into(),
+                name: name.into(),
+                description: None,
+            })
+            .into();
+        }
+    }
+
+    #[test]
+    fn y_steps_through_the_agents_modes_in_its_order() {
+        let mut conversation = joined(modes("auto"));
+        assert!(
+            conversation
+                .text()
+                .lines()
+                .next()
+                .unwrap()
+                .starts_with("[idle | Auto] Tomori")
+        );
+        assert!(conversation.text().ends_with("Y mode"));
+        assert_fits(&mut conversation);
+        let mut stepped = Vec::new();
+        for confirmed in ["auto", "default", "acceptEdits", "plan"] {
+            conversation.apply(space(modes(confirmed)));
+            conversation.refresh();
+            stepped.extend(sent(&mut conversation));
+        }
+        let mode = |mode: &str| ClientMessage::SetMode { mode: mode.into() };
+        assert_eq!(
+            stepped,
+            [
+                mode("default"),
+                mode("acceptEdits"),
+                mode("plan"),
+                mode("auto")
+            ]
+        );
+
+        // Until the agent confirms, another press asks for the same mode again.
+        conversation.refresh();
+        assert_eq!(sent(&mut conversation), [mode("auto")]);
+
+        // A mode the agent is in but Tomori cannot step to is still shown, and steps to the first.
+        conversation.apply(space(modes("dontAsk")));
+        assert!(conversation.text().starts_with("[idle | dontAsk]"));
+        conversation.refresh();
+        assert_eq!(sent(&mut conversation), [mode("default")]);
+    }
+
+    #[test]
+    fn y_fetches_the_space_again_when_the_agent_offers_no_modes() {
+        let mut conversation = joined(|_| {});
+        assert!(conversation.text().starts_with("[idle] Tomori"));
+        assert!(conversation.text().ends_with("Y refresh"));
+        conversation.refresh();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: SPACE.into()
+            }]
+        );
     }
 
     #[test]

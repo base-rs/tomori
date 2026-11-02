@@ -1,0 +1,6 @@
+# A session asked to start in auto mode where the account does not offer it. Claude Code 2.1.311 then starts in its
+# default mode and reports that mode at connect; the account the other scenarios were recorded with offers auto mode,
+# so this response is the recorded one with the mode Claude Code falls back to.
+expect control_request:initialize
+send {"type":"control_response","response":{"subtype":"success","request_id":"{{request}}","response":{"commands":[],"agents":[],"output_style":"default","models":[],"claude_code_version":"2.1.311","current_permission_mode":"default","session_state":"idle"}}}
+drain

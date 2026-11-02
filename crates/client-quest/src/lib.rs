@@ -17,6 +17,8 @@ mod conversation;
 mod delegation;
 #[cfg(not(target_os = "android"))]
 mod desktop;
+#[cfg(not(target_os = "android"))]
+mod discover;
 mod environment;
 mod graphics;
 mod hands;
@@ -32,6 +34,8 @@ mod server_choice;
 #[cfg(not(target_os = "android"))]
 mod spectator;
 #[cfg(not(target_os = "android"))]
+mod spectator_feed;
+#[cfg(not(target_os = "android"))]
 mod spectator_view;
 mod swarm;
 mod vulkan;
@@ -39,37 +43,42 @@ mod workspace_graphics;
 mod xr;
 
 pub use identity::Overrides;
+#[cfg(not(target_os = "android"))]
+pub use spectator_feed::SpectatorOptions;
 
 /// Run the windowed desktop demo without an XR runtime or headset.
 #[cfg(not(target_os = "android"))]
 pub fn run() -> anyhow::Result<()> {
-    desktop::run(false, false)
+    desktop::run(false, false, None)
 }
 
-/// Render a read-only, headset-following view from the PC bridge.
+/// Render a read-only, participant-following view of a live space.
 #[cfg(not(target_os = "android"))]
-pub fn run_spectator() -> anyhow::Result<()> {
-    desktop::run(true, false)
+pub fn run_spectator(options: SpectatorOptions) -> anyhow::Result<()> {
+    let feed = crate::spectator_feed::Feed::new(options);
+    desktop::run(true, false, Some(feed))
 }
 
-/// Prototype direct PipeWire output without a window.
+/// PipeWire video source of a live space, without a window.
 #[cfg(not(target_os = "android"))]
-pub fn run_spectator_pipewire() -> anyhow::Result<()> {
+pub fn run_spectator_pipewire(options: SpectatorOptions) -> anyhow::Result<()> {
     anyhow::ensure!(
         cfg!(target_os = "linux"),
         "PipeWire video output requires Linux"
     );
-    headless_spectator::run()
+    let feed = crate::spectator_feed::Feed::new(options);
+    headless_spectator::run(feed)
 }
 
-/// Prototype direct PipeWire output with a local preview window.
+/// PipeWire video source of a live space, with a preview window.
 #[cfg(not(target_os = "android"))]
-pub fn run_spectator_pipewire_preview() -> anyhow::Result<()> {
+pub fn run_spectator_pipewire_preview(options: SpectatorOptions) -> anyhow::Result<()> {
     anyhow::ensure!(
         cfg!(target_os = "linux"),
         "PipeWire video output requires Linux"
     );
-    desktop::run(true, true)
+    let feed = crate::spectator_feed::Feed::new(options);
+    desktop::run(true, true, Some(feed))
 }
 
 /// Run against the host's active OpenXR runtime instead of a desktop window.
@@ -84,6 +93,12 @@ pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
 pub fn run_console(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
     console::run(conversation, connection)
+}
+
+/// List the servers on the network, and the spaces on a chosen one.
+#[cfg(not(target_os = "android"))]
+pub fn run_discover(server: Option<String>) -> anyhow::Result<()> {
+    discover::run(server)
 }
 
 /// Desktop runs keep nothing, so each is a new participant.

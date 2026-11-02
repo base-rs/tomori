@@ -3,15 +3,15 @@
 
 //! A scripted in-memory backend for tests and for running the server without an agent.
 //!
-//! In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
+//! Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use backend::{
-    AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Prompt, Result, Role,
-    Session, SessionSpec, SessionSummary, Snapshot,
+    AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Prompt,
+    Result, Role, Session, SessionSpec, SessionSummary, Snapshot,
 };
 
 /// The backend name used in `CreateSpace` requests.
@@ -24,6 +24,8 @@ pub struct FakeLog {
     pub decisions: Vec<(String, Decision)>,
     pub answers: Vec<(String, Vec<(String, AnswerValue)>)>,
     pub interrupts: usize,
+    /// The modes the server asked for, in order.
+    pub modes: Vec<String>,
     /// Whether the server closed the session.
     pub closed: bool,
 }
@@ -92,6 +94,16 @@ impl FakeBackend {
                 closed: AtomicBool::new(false),
                 next_message: AtomicU64::new(0),
                 delivered: Mutex::new(HashSet::new()),
+                modes: Mutex::new(Modes {
+                    offered: ["default", "plan"]
+                        .map(|id| Mode {
+                            id: id.to_owned(),
+                            name: id.to_owned(),
+                            description: None,
+                        })
+                        .into(),
+                    current: Some("default".to_owned()),
+                }),
                 log: Mutex::new(FakeLog::default()),
             }),
         };
@@ -167,6 +179,7 @@ struct FakeSessionInner {
     closed: AtomicBool,
     next_message: AtomicU64,
     delivered: Mutex<HashSet<String>>,
+    modes: Mutex<Modes>,
     log: Mutex<FakeLog>,
 }
 
@@ -256,6 +269,7 @@ impl Session for FakeSession {
     async fn snapshot(&self) -> Result<Snapshot> {
         Ok(Snapshot {
             busy: Some(self.is_busy()),
+            modes: self.inner.modes.lock().unwrap().clone(),
             ..Snapshot::default()
         })
     }
@@ -304,6 +318,23 @@ impl Session for FakeSession {
         self.emit(Event::QuestionResolved {
             id: question.to_owned(),
         });
+        Ok(())
+    }
+
+    async fn set_mode(&self, mode: &str) -> Result<()> {
+        self.inner.log.lock().unwrap().modes.push(mode.to_owned());
+        let modes = {
+            let mut modes = self.inner.modes.lock().unwrap();
+            if !modes.offered.iter().any(|offered| offered.id == mode) {
+                return Err(Error::new(
+                    ErrorKind::Invalid,
+                    format!("the fake session has no {mode} mode"),
+                ));
+            }
+            modes.current = Some(mode.to_owned());
+            modes.clone()
+        };
+        self.emit(Event::ModesChanged(modes));
         Ok(())
     }
 
