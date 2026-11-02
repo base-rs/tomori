@@ -394,7 +394,12 @@ pub fn run(
         // Report this participant's head, controllers and hands to the server, in
         // the space's scene coordinates, so the others in the space can render them.
         if let Some(head) = scene_anchor.to_scene_transform(head_pose(&views)) {
-            connection.send_presence(head, controller_poses[controller::LEFT], controller_poses[controller::RIGHT], tracked_hands);
+            connection.send_presence(
+                head,
+                controller_poses[controller::LEFT],
+                controller_poses[controller::RIGHT],
+                tracked_hands,
+            );
         }
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;

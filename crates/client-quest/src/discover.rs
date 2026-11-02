@@ -24,9 +24,13 @@ pub fn run(server: Option<String>) -> anyhow::Result<()> {
         Some(address) => list_spaces(&address)?,
         None => {
             if servers.compatible().is_empty() {
-                eprintln!("No servers found. Start a server, or pass one: tomori discover --server ADDRESS");
+                eprintln!(
+                    "No servers found. Start a server, or pass one: tomori discover --server ADDRESS"
+                );
             } else {
-                eprintln!("To list the spaces on one of these, pass it: tomori discover --server ADDRESS");
+                eprintln!(
+                    "To list the spaces on one of these, pass it: tomori discover --server ADDRESS"
+                );
             }
         }
     }
@@ -127,10 +131,7 @@ fn print_spaces(spaces: &[SpaceSummary]) {
     for space in spaces {
         println!(
             "  {:<12} {:<24} {}{} participant(s)",
-            space.id,
-            space.title,
-            space.backend,
-            space.participants
+            space.id, space.title, space.backend, space.participants
         );
     }
     eprintln!("Join one with: tomori --spectator --server ADDRESS --space SPACE_ID");

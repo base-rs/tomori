@@ -10,6 +10,8 @@ fn main() -> anyhow::Result<()> {
         server: std::env::var("TOMORI_SERVER").ok(),
         name: None,
     };
+    let mut space = None;
+    let mut follow = None;
     let mut mode = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -20,28 +22,61 @@ fn main() -> anyhow::Result<()> {
             "--name" => {
                 overrides.name = Some(arguments.next().context("--name needs a name")?);
             }
+            "--space" => {
+                space = Some(arguments.next().context("--space needs a space id")?);
+            }
+            "--follow" => {
+                follow = Some(
+                    arguments
+                        .next()
+                        .context("--follow needs a participant name")?,
+                );
+            }
             _ if mode.is_none() => mode = Some(argument),
             _ => anyhow::bail!("Unexpected argument {argument:?}; use --help"),
         }
     }
+    const SPECTATOR_MODES: &[&str] = &[
+        "--spectator",
+        "--spectator-pipewire",
+        "--spectator-pipewire-preview",
+    ];
     if overrides.server.is_some()
         && !matches!(mode.as_deref(), Some("--xr" | "--console" | "discover"))
+        && !SPECTATOR_MODES.contains(&mode.as_deref().unwrap_or(""))
     {
         // Only the server-connected modes take a server address.
-        anyhow::bail!("--server applies only to --xr, --console and discover; use --help");
+        anyhow::bail!(
+            "--server applies only to --xr, --console, discover and the spectator modes; use --help"
+        );
     }
     if overrides.name.is_some() && !matches!(mode.as_deref(), Some("--xr" | "--console")) {
         // Only the participant modes take a display name.
         anyhow::bail!("--name applies only to --xr and --console; use --help");
     }
+    if (space.is_some() || follow.is_some())
+        && !SPECTATOR_MODES.contains(&mode.as_deref().unwrap_or(""))
+    {
+        // Only the spectator modes join a space and follow a participant.
+        anyhow::bail!("--space and --follow apply only to the spectator modes; use --help");
+    }
+    let spectator_options = |server: Option<String>| tomori::SpectatorOptions {
+        server,
+        space: space.clone(),
+        follow: follow.clone(),
+    };
     match mode.as_deref() {
         None => tomori::run(),
         Some("--xr") => tomori::run_xr(overrides),
         Some("--console") => tomori::run_console(overrides),
         Some("discover") => tomori::run_discover(overrides.server),
-        Some("--spectator") => tomori::run_spectator(),
-        Some("--spectator-pipewire") => tomori::run_spectator_pipewire(),
-        Some("--spectator-pipewire-preview") => tomori::run_spectator_pipewire_preview(),
+        Some("--spectator") => tomori::run_spectator(spectator_options(overrides.server)),
+        Some("--spectator-pipewire") => {
+            tomori::run_spectator_pipewire(spectator_options(overrides.server))
+        }
+        Some("--spectator-pipewire-preview") => {
+            tomori::run_spectator_pipewire_preview(spectator_options(overrides.server))
+        }
         Some("--licenses") => {
             println!(
                 "Bundled WebXR Input Profiles controller assets:\n\n{}\n\nBasis Universal transcoder:\n\n{}",
@@ -52,7 +87,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--help" | "-h") => {
             println!(
-                "tomori [MODE] [--server ADDRESS] [--name NAME]\n\nModes:\n  (none)                  desktop window (no headset needed).\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n  --licenses              show the bundled controller assets' license.\n\nOptions:\n  --server ADDRESS  with --xr, --console, discover (and --spectator), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --xr or --console, the display name other participants see (default: this computer's name).\n\nDesktop controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the initial environment (default sky)."
+                "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME]\n\nModes:\n  (none)                  desktop window (no headset needed).\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n  --licenses              show the bundled controller assets' license.\n\nOptions:\n  --server ADDRESS  with --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --xr or --console, the display name other participants see (default: this computer's name).\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n\nDesktop controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the initial environment (default sky)."
             );
             Ok(())
         }

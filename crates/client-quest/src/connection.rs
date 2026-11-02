@@ -45,7 +45,12 @@ pub struct Connection {
     remembered: Option<String>,
     voice: Voice,
     speaker: Speaker,
+    /// Receives other participants' presence reports, which the conversation ignores. Set by a spectator that renders them.
+    presence: Option<PresenceHook>,
 }
+
+/// A hook that renders the other participants' presence reports, which the conversation ignores.
+type PresenceHook = Box<dyn FnMut(&ServerMessage) + Send>;
 
 /// Push-to-talk audio, from the platform microphone through the client's [`Microphone`]. The microphone is open only while recording.
 struct Voice {
@@ -296,6 +301,7 @@ impl Connection {
                 recording: None,
             },
             speaker: Speaker::new(playback),
+            presence: None,
         }
     }
 
@@ -325,11 +331,16 @@ impl Connection {
             }),
             hands: Some(hands),
         };
-        if let Some(client) = &self.client {
-            if let Err(error) = client.send(message) {
-                log::debug!("Cannot send presence: {error}");
-            }
+        if let Some(client) = &self.client
+            && let Err(error) = client.send(message)
+        {
+            log::debug!("Cannot send presence: {error}");
         }
+    }
+
+    /// Receive the other participants' presence reports, which the conversation ignores. The hook is called for every [`ServerMessage::Presence`], from the render loop's thread.
+    pub fn watch_presence(&mut self, hook: impl FnMut(&ServerMessage) + Send + 'static) {
+        self.presence = Some(Box::new(hook));
     }
 
     /// Run once per frame. Browsing, and the multicast lock it needs, stop while unfocused.
@@ -354,6 +365,12 @@ impl Connection {
                     Event::Message(ServerMessage::Left) => control.clear(),
                     _ => {}
                 }
+            }
+            // The spectator renders presence, which the conversation ignores.
+            if let Event::Message(message @ ServerMessage::Presence { .. }) = &event
+                && let Some(presence) = self.presence.as_deref_mut()
+            {
+                presence(message);
             }
             conversation.apply(event);
             // After the conversation applies the welcome, which clears earlier errors, so that a failure is shown again.

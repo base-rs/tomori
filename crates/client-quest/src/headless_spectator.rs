@@ -3,17 +3,17 @@
 
 //! Render the Quest spectator directly to PipeWire without a display surface.
 use crate::{
-    desktop::Camera,
     graphics::Renderer,
     pipewire_video::{self, Video},
+    spectator_feed::Feed,
     spectator_view::{RenderInputs, SpectatorView},
     swarm::Swarm,
 };
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
 
-pub fn run() -> Result<()> {
-    let mut state = pollster::block_on(State::new())?;
+pub fn run(feed: Feed) -> Result<()> {
+    let mut state = pollster::block_on(State::new(feed))?;
     let interval = Duration::from_secs_f64(1.0 / f64::from(pipewire_video::FPS));
     let mut next = Instant::now();
     log::info!("Headless spectator running; Ctrl-C stops the PipeWire source.");
@@ -38,11 +38,10 @@ struct State {
     video: Video,
     spectator: SpectatorView,
     swarm: Swarm,
-    waiting_projection: glam::Mat4,
 }
 
 impl State {
-    async fn new() -> Result<Self> {
+    async fn new(feed: Feed) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -70,9 +69,8 @@ impl State {
             pipewire_video::WIDTH,
             pipewire_video::HEIGHT,
         );
-        let spectator = SpectatorView::new(&device, pipewire_video::FORMAT);
+        let spectator = SpectatorView::new(&device, pipewire_video::FORMAT, feed);
         let video = Video::new(&device, None)?;
-        let aspect = pipewire_video::WIDTH as f32 / pipewire_video::HEIGHT as f32;
         Ok(Self {
             device,
             queue,
@@ -80,7 +78,6 @@ impl State {
             video,
             spectator,
             swarm: Swarm::new(),
-            waiting_projection: Camera::default().view_projection(aspect),
         })
     }
 
@@ -92,7 +89,6 @@ impl State {
             swarm: &mut self.swarm,
             target: self.video.view.clone(),
             aspect: pipewire_video::WIDTH as f32 / pipewire_video::HEIGHT as f32,
-            waiting_projection: self.waiting_projection,
         });
         self.video
             .capture(&self.device, &self.queue)

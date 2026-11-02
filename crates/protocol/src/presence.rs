@@ -77,21 +77,27 @@ mod tests {
                 .iter()
                 .all(|(a, b)| *a < JOINT_COUNT && *b < JOINT_COUNT)
         );
-        assert!(Joint {
-            position: [1.0, 2.0, 3.0],
-            radius: 0.01
-        }
-        .valid());
-        assert!(!Joint {
-            position: [f32::NAN, 0.0, 0.0],
-            radius: 0.01
-        }
-        .valid());
-        assert!(!Joint {
-            position: [0.0; 3],
-            radius: -1.0
-        }
-        .valid());
+        assert!(
+            Joint {
+                position: [1.0, 2.0, 3.0],
+                radius: 0.01
+            }
+            .valid()
+        );
+        assert!(
+            !Joint {
+                position: [f32::NAN, 0.0, 0.0],
+                radius: 0.01
+            }
+            .valid()
+        );
+        assert!(
+            !Joint {
+                position: [0.0; 3],
+                radius: -1.0
+            }
+            .valid()
+        );
     }
 
     #[test]

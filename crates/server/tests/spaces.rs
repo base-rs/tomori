@@ -8,7 +8,10 @@ use backend::{
     AnswerValue, Event, Field, FieldKind, FieldOption, Permission, Question, Session, Worker,
     WorkerState,
 };
-use protocol::{Activity, ClientMessage, Decision, Gate, QueueState, ServerMessage, SpaceState};
+use protocol::{
+    Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState,
+    ServerMessage, SpaceState,
+};
 use server::Server;
 use server::fake::FakeBackend;
 use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, speech};
@@ -1102,4 +1105,68 @@ fn a_participant_gone_longer_than_the_retention_is_forgotten() {
         ServerMessage::Space { .. } => panic!("a forgotten participant rejoined"),
         _ => None,
     });
+}
+
+/// A presence update from one participant is relayed to the others in her space only.
+#[test]
+fn presence_is_relayed_to_the_other_participants_in_the_space() {
+    let server = TestServer::start();
+    let (mut ada, bob, _space) = pair(&server);
+    let ada_source = ada.source;
+
+    let head = Pose {
+        position: [0.0, 1.6, 0.0],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+    };
+    let left_hand = Hand {
+        joints: {
+            let mut joints = [None; JOINT_COUNT];
+            joints[1] = Some(Joint {
+                position: [0.1, 0.2, 0.3],
+                radius: 0.01,
+            });
+            joints
+        },
+    };
+
+    ada.send(&ClientMessage::Presence {
+        head,
+        left: Some(head),
+        right: None,
+        hands: Some([Some(left_hand), None]),
+    });
+
+    bob.wait_for(|message| match message {
+        ServerMessage::Presence {
+            source,
+            head: relayed_head,
+            left,
+            right,
+            hands,
+        } => {
+            assert_eq!(*source, ada_source);
+            assert_eq!(*relayed_head, head);
+            assert_eq!(*left, Some(head));
+            assert_eq!(*right, None);
+            assert_eq!(*hands, Some([Some(left_hand), None]));
+            Some(())
+        }
+        _ => None,
+    });
+
+    // A lobby participant does not receive presence from the space.
+    let carol = server.connect("carol", "Carol");
+    ada.send(&ClientMessage::Presence {
+        head,
+        left: None,
+        right: None,
+        hands: None,
+    });
+    bob.wait_for(|message| Some(()).filter(|_| matches!(message, ServerMessage::Presence { .. })));
+    while let Some(message) = carol.next_message(TIMEOUT) {
+        assert!(
+            !matches!(message, ServerMessage::Presence { .. }),
+            "a lobby participant received a space presence update"
+        );
+    }
 }

@@ -208,7 +208,7 @@ impl Conversation {
         }
     }
 
-    #[cfg(test)]
+    /// The current panel: the server list, the lobby, or a space.
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -278,6 +278,16 @@ impl Conversation {
         self.error = None;
         self.notice = None;
         self.ended = None;
+    }
+
+    /// Join `space` by id, as the lobby's accept does, for a client that takes the space as an argument rather than choosing it in the list.
+    pub fn join_space(&mut self, space: impl Into<String>) {
+        let space = space.into();
+        self.joining = Some(space.clone());
+        self.leaving = false;
+        self.error = None;
+        self.ended = None;
+        self.send(ClientMessage::Join { space });
     }
 
     /// Report a problem the connection found, such as a client that could not start.
