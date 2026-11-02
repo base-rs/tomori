@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "android")]
 mod android;
+#[allow(dead_code, reason = "wired into the headset in the following commits")]
+mod arrival;
 mod caption;
 mod capture;
 mod connection;
