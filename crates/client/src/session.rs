@@ -14,7 +14,7 @@ use base_http::body::{BodyFrame, ReadableBody};
 use base_http::{Method, RequestMetadata};
 use base_http_client::{Client as HttpClient, Endpoint, StreamingResponseBody};
 use base_scheduler::{Cancellation, Clock, Timers};
-use base_scheduler_direct::DirectScheduler;
+use base_scheduler_native::NativeScheduler;
 use futures_lite::future::{or, zip};
 use protocol::{
     AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, Frame, FrameDecoder, FrameKind,
@@ -30,7 +30,7 @@ use crate::{ConnectionState, Disconnect, Event, Options};
 const BATCH_LIMIT: usize = 32 * 1024;
 
 pub(crate) struct Context<'a> {
-    pub scheduler: &'a DirectScheduler,
+    pub scheduler: &'a NativeScheduler,
     pub shared: &'a Shared,
     pub options: &'a Options,
     pub audio: &'a SyncSender<AudioFrame>,
@@ -372,7 +372,7 @@ struct FrameReader<'a, 'scope> {
     decoder: FrameDecoder,
     ended: bool,
     lifetime: &'a Cancellation,
-    scheduler: &'a DirectScheduler,
+    scheduler: &'a NativeScheduler,
     /// When data last arrived: any data counts as liveness, even part of a frame.
     received: &'a Cell<Instant>,
 }

@@ -28,7 +28,7 @@ use base_scheduler::{
     Cancellation, SocketClose, SocketConnect, SocketOpen, SocketSetOption, SocketStreamReading,
     SocketStreamWriting, TcpNoDelay, Timers,
 };
-use base_scheduler_direct::{DirectOptions, DirectScheduler};
+use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
 use serde_json::Value;
 
@@ -231,9 +231,11 @@ async fn drive(
     resolved: Resolved,
     commands: async_channel::Receiver<Command>,
 ) -> std::result::Result<(), String> {
-    let scheduler = DirectScheduler::new(DirectOptions {
+    let scheduler = NativeScheduler::with_options(NativeOptions {
+        workers: 1,
         threads: 2,
         capacity: 256,
+        ..Default::default()
     })
     .map_err(|error| format!("could not start the connection scheduler: {error}"))?;
     let result = run(&scheduler, resolved, commands).await;
