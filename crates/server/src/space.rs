@@ -119,6 +119,7 @@ fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
             From::Idle => To::Idle,
             From::Completed => To::Completed,
             From::Error => To::Error,
+            From::Stopped => To::Stopped,
             From::Unknown => To::Unknown,
         },
     }
@@ -355,6 +356,16 @@ impl SpaceModel {
                 self.deciding.clear();
                 self.questions.clear();
                 self.submitting.clear();
+                // The agent process has ended, so nothing it was running is running any more, whatever the backend
+                // last reported.
+                for worker in &mut self.workers {
+                    if matches!(
+                        worker.state,
+                        protocol::WorkerState::Running | protocol::WorkerState::Waiting
+                    ) {
+                        worker.state = protocol::WorkerState::Stopped;
+                    }
+                }
             }
         }
     }
@@ -723,6 +734,46 @@ mod tests {
         assert!(state.approval.is_none());
         assert!(state.error.is_some());
         assert!(space.next_prompt().is_none());
+    }
+
+    fn backend_worker(id: &str, state: backend::WorkerState) -> backend::Worker {
+        backend::Worker {
+            id: id.into(),
+            parent: None,
+            title: id.into(),
+            state,
+        }
+    }
+
+    #[test]
+    fn workers_stop_running_when_the_agent_process_exits() {
+        let mut space = model();
+        space.apply(Event::WorkersChanged {
+            workers: vec![
+                backend_worker("running", backend::WorkerState::Running),
+                backend_worker("waiting", backend::WorkerState::Waiting),
+                backend_worker("completed", backend::WorkerState::Completed),
+                backend_worker("failed", backend::WorkerState::Error),
+            ],
+        });
+        space.apply(Event::Closed {
+            reason: Some("claude exited with 1".into()),
+        });
+        let states: Vec<_> = space
+            .state(Vec::new())
+            .workers
+            .iter()
+            .map(|worker| worker.state)
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                protocol::WorkerState::Stopped,
+                protocol::WorkerState::Stopped,
+                protocol::WorkerState::Completed,
+                protocol::WorkerState::Error,
+            ]
+        );
     }
 
     #[test]

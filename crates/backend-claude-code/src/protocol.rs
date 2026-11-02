@@ -12,12 +12,11 @@ use std::path::Path;
 use backend::{
     AnswerValue, Decision, Error, ErrorKind, Event, Field, FieldKind, FieldOption, Grant,
     GrantScope, Part, Permission, PermissionOption, Prompt, Question, Result, Role, Snapshot,
-    SnapshotMessage, Worker, WorkerState,
+    SnapshotMessage,
 };
 use serde_json::{Map, Value, json};
 
-/// Tools that delegate to a subagent. Claude Code 2.1 names it `Agent`; earlier versions name it `Task`.
-const WORKER_TOOLS: [&str; 2] = ["Agent", "Task"];
+use crate::workers::{self, WORKER_TOOLS, Workers};
 
 /// The tool Claude Code uses to ask the user structured questions.
 const QUESTION_TOOL: &str = "AskUserQuestion";
@@ -70,9 +69,7 @@ pub(crate) struct State {
     tools: HashSet<String>,
     /// Unresolved `can_use_tool` requests by request id, oldest first.
     pending: Vec<(String, Pending)>,
-    workers: Vec<Worker>,
-    /// Worker tool uses that run in the background, so their tool result does not mean completion.
-    background: HashSet<String>,
+    workers: Workers,
     /// Prompt keys that were sent, so a key is delivered at most once.
     sent: HashSet<String>,
     /// Sent prompts awaiting acknowledgement, by message uuid.
@@ -82,7 +79,13 @@ pub(crate) struct State {
 }
 
 impl State {
+    #[cfg(test)]
     pub(crate) fn new(session: String) -> Self {
+        Self::attached(session, Workers::default())
+    }
+
+    /// A session that already has `workers`, such as those found in its records when attaching.
+    pub(crate) fn attached(session: String, workers: Workers) -> Self {
         Self {
             session,
             busy: false,
@@ -92,8 +95,7 @@ impl State {
             settled: HashSet::new(),
             tools: HashSet::new(),
             pending: Vec::new(),
-            workers: Vec::new(),
-            background: HashSet::new(),
+            workers,
             sent: HashSet::new(),
             prompts: HashMap::new(),
             requests: HashMap::new(),
@@ -116,7 +118,23 @@ impl State {
                 Pending::Question { question, .. } => Some(question.clone()),
                 Pending::Permission { .. } => None,
             }),
-            workers: self.workers.clone(),
+            workers: self.workers.list().to_vec(),
+        }
+    }
+
+    /// The agent process ended: report that none of its workers is running any more.
+    pub(crate) fn stop_workers(&mut self) -> Vec<Event> {
+        let mut effects = Effects::default();
+        let changed = self.workers.stop();
+        self.workers_changed(changed, &mut effects);
+        effects.events
+    }
+
+    fn workers_changed(&self, changed: bool, effects: &mut Effects) {
+        if changed {
+            effects.events.push(Event::WorkersChanged {
+                workers: self.workers.list().to_vec(),
+            });
         }
     }
 
@@ -327,20 +345,21 @@ impl State {
                 self.begin_turn(effects);
             }
             Some("task_started") => {
-                if value["is_backgrounded"].as_bool() == Some(true)
-                    && let Some(id) = str_field(value, "tool_use_id")
-                {
-                    self.background.insert(id.into());
-                }
+                let changed = self.workers.task_started(value);
+                self.workers_changed(changed, effects);
+            }
+            Some("task_updated") => {
+                let changed = self.workers.task_updated(value);
+                self.workers_changed(changed, effects);
             }
             Some("task_notification") => {
-                if let Some(id) = str_field(value, "tool_use_id") {
-                    let state = match str_field(value, "status") {
-                        Some("completed") => WorkerState::Completed,
-                        _ => WorkerState::Error,
-                    };
-                    self.set_worker(id, state, effects);
-                }
+                let changed = self.workers.notified(
+                    str_field(value, "task_id"),
+                    str_field(value, "tool_use_id"),
+                    str_field(value, "status"),
+                    str_field(value, "run_id"),
+                );
+                self.workers_changed(changed, effects);
             }
             _ => {}
         }
@@ -516,19 +535,9 @@ impl State {
         };
         let input = block.get("input").cloned().unwrap_or(Value::Null);
 
-        if WORKER_TOOLS.contains(&tool) && !self.workers.iter().any(|worker| worker.id == id) {
-            let title = str_field(&input, "description")
-                .or_else(|| str_field(&input, "subagent_type"))
-                .unwrap_or(tool);
-            self.workers.push(Worker {
-                id: id.into(),
-                parent: parent.map(Into::into),
-                title: title.into(),
-                state: WorkerState::Running,
-            });
-            effects.events.push(Event::WorkersChanged {
-                workers: self.workers.clone(),
-            });
+        if WORKER_TOOLS.contains(&tool) {
+            let changed = self.workers.start(id, parent, workers::title(&input, tool));
+            self.workers_changed(changed, effects);
         }
 
         // Only the session's own tool activity is reported; subagent activity is summarized by its worker.
@@ -559,9 +568,16 @@ impl State {
         }
 
         let top_level = is_top_level(value);
+        let parent = str_field(value, "parent_tool_use_id");
         let Some(content) = value["message"]["content"].as_array() else {
             return;
         };
+        // The tool's structured output belongs to the message's one tool result.
+        let results = content
+            .iter()
+            .filter(|block| str_field(block, "type") == Some("tool_result"))
+            .count();
+        let output = value.get("tool_use_result").filter(|_| results == 1);
         for block in content {
             if str_field(block, "type") != Some("tool_result") {
                 continue;
@@ -571,13 +587,9 @@ impl State {
             };
             let failed = block["is_error"].as_bool() == Some(true);
 
-            if self.workers.iter().any(|worker| worker.id == id) {
-                if failed {
-                    self.set_worker(id, WorkerState::Error, effects);
-                } else if !self.background.contains(id) {
-                    self.set_worker(id, WorkerState::Completed, effects);
-                }
-            }
+            let text = result_text(&block["content"]);
+            let changed = self.workers.tool_result(id, failed, output, &text, parent);
+            self.workers_changed(changed, effects);
 
             if top_level && self.tools.contains(id) {
                 for message in self.messages.iter_mut().rev() {
@@ -592,7 +604,7 @@ impl State {
                 }
                 effects.events.push(Event::ToolFinished {
                     id: id.into(),
-                    error: failed.then(|| result_text(&block["content"])),
+                    error: failed.then_some(text),
                 });
             }
         }
@@ -699,17 +711,6 @@ impl State {
             message.completed = true;
             effects.events.push(Event::MessageCompleted {
                 message: message.id.clone(),
-            });
-        }
-    }
-
-    fn set_worker(&mut self, id: &str, state: WorkerState, effects: &mut Effects) {
-        if let Some(worker) = self.workers.iter_mut().find(|worker| worker.id == id)
-            && worker.state != state
-        {
-            worker.state = state;
-            effects.events.push(Event::WorkersChanged {
-                workers: self.workers.clone(),
             });
         }
     }
@@ -1203,6 +1204,7 @@ fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use backend::{Worker, WorkerState};
 
     fn handle(state: &mut State, value: Value) -> Vec<Event> {
         state.handle_line(&value.to_string()).events
@@ -1948,5 +1950,311 @@ mod tests {
             panic!("{events:?}")
         };
         assert_eq!(workers[1].state, WorkerState::Error);
+    }
+
+    fn tool_use(id: &str, name: &str, input: Value) -> Value {
+        json!({
+            "type": "assistant",
+            "parent_tool_use_id": null,
+            "message": {"model": "claude-opus-5-5", "id": format!("msg_{id}"), "content": [
+                {"type": "tool_use", "id": id, "name": name, "input": input},
+            ]},
+        })
+    }
+
+    fn tool_result(id: &str, text: &str, output: Value) -> Value {
+        json!({
+            "type": "user",
+            "parent_tool_use_id": null,
+            "message": {"role": "user", "content": [{"tool_use_id": id, "type": "tool_result", "content": [{"type": "text", "text": text}]}]},
+            "tool_use_result": output,
+        })
+    }
+
+    fn task(subtype: &str, fields: Value) -> Value {
+        let mut value = json!({"type": "system", "subtype": subtype, "session_id": "session"});
+        for (key, field) in fields.as_object().unwrap() {
+            value[key] = field.clone();
+        }
+        value
+    }
+
+    fn states(state: &State) -> Vec<(String, WorkerState)> {
+        state
+            .snapshot()
+            .workers
+            .into_iter()
+            .map(|worker| (worker.id, worker.state))
+            .collect()
+    }
+
+    fn worker_states(events: &[Event]) -> Vec<Vec<WorkerState>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::WorkersChanged { workers } => {
+                    Some(workers.iter().map(|worker| worker.state).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // The resume below follows Claude Code 2.1.311: `SendMessage` to a finished subagent starts a new run of it in the
+    // background, named by the same agent id, a new run id and the `SendMessage` tool use, and its completion
+    // notification names that tool use rather than the `Agent` tool use that first started it.
+
+    #[test]
+    fn a_resumed_worker_runs_again_and_then_finishes() {
+        let mut state = State::new("session".into());
+        let agent = "a28dae036c1fdfad9";
+        handle(
+            &mut state,
+            tool_use(
+                "toolu_agent",
+                "Agent",
+                json!({"description": "Review the design", "subagent_type": "general-purpose", "prompt": "..."}),
+            ),
+        );
+        handle(
+            &mut state,
+            task(
+                "task_started",
+                json!({"task_id": agent, "run_id": "0mvyn868n-91ea8097", "tool_use_id": "toolu_agent", "description": "Review the design", "subagent_type": "general-purpose", "is_backgrounded": true, "task_type": "local_agent"}),
+            ),
+        );
+        handle(
+            &mut state,
+            tool_result(
+                "toolu_agent",
+                "Async agent launched successfully.\nagentId: a28dae036c1fdfad9",
+                json!({"isAsync": true, "status": "async_launched", "agentId": agent}),
+            ),
+        );
+        assert_eq!(
+            states(&state),
+            vec![("toolu_agent".into(), WorkerState::Running)]
+        );
+        handle(
+            &mut state,
+            task(
+                "task_notification",
+                json!({"task_id": agent, "run_id": "0mvyn868n-91ea8097", "tool_use_id": "toolu_agent", "status": "completed", "summary": "Agent \"Review the design\" finished"}),
+            ),
+        );
+        assert_eq!(
+            states(&state),
+            vec![("toolu_agent".into(), WorkerState::Completed)]
+        );
+
+        // `SendMessage` resumes it.
+        handle(
+            &mut state,
+            tool_use(
+                "toolu_send",
+                "SendMessage",
+                json!({"to": agent, "summary": "Confirm the fixes", "message": "..."}),
+            ),
+        );
+        let mut events = handle(
+            &mut state,
+            task(
+                "task_started",
+                json!({"task_id": agent, "run_id": "0mvynahll-947d762a", "tool_use_id": "toolu_send", "description": "Review the design", "subagent_type": "general-purpose", "is_backgrounded": true, "task_type": "local_agent"}),
+            ),
+        );
+        events.extend(handle(
+            &mut state,
+            tool_result("toolu_send", r#"{"success":true,"message":"Resuming agent a28dae0","resumedAgentId":"a28dae036c1fdfad9"}"#, json!({"success": true, "message": "Resuming agent a28dae0", "resumedAgentId": agent})),
+        ));
+        assert_eq!(worker_states(&events), vec![vec![WorkerState::Running]]);
+        // The resumed run's activity belongs to the same worker.
+        handle(
+            &mut state,
+            json!({
+                "type": "assistant",
+                "parent_tool_use_id": "toolu_send",
+                "message": {"id": "msg_nested", "content": [
+                    {"type": "tool_use", "id": "toolu_nested", "name": "Agent", "input": {"description": "Explore", "prompt": "..."}},
+                ]},
+            }),
+        );
+        assert_eq!(
+            state.snapshot().workers[1].parent.as_deref(),
+            Some("toolu_agent")
+        );
+
+        // A late notification of the earlier run changes nothing.
+        let events = handle(
+            &mut state,
+            task(
+                "task_notification",
+                json!({"task_id": agent, "run_id": "0mvyn868n-91ea8097", "tool_use_id": "toolu_agent", "status": "completed", "summary": ""}),
+            ),
+        );
+        assert!(events.is_empty(), "{events:?}");
+
+        let events = handle(
+            &mut state,
+            task(
+                "task_notification",
+                json!({"task_id": agent, "run_id": "0mvynahll-947d762a", "tool_use_id": "toolu_send", "status": "completed", "summary": "Agent \"Review the design\" finished"}),
+            ),
+        );
+        assert_eq!(
+            worker_states(&events),
+            vec![vec![WorkerState::Completed, WorkerState::Running]]
+        );
+        assert_eq!(state.snapshot().workers.len(), 2);
+    }
+
+    #[test]
+    fn a_resumed_worker_the_session_did_not_report_is_added() {
+        let mut state = State::new("session".into());
+        // Only the text of the result is reported.
+        let events = handle(
+            &mut state,
+            tool_result(
+                "toolu_send",
+                r#"{"success":true,"message":"Resuming agent a2dfc76","resumedAgentId":"a2dfc762df22d6d4b"}"#,
+                Value::Null,
+            ),
+        );
+        let Event::WorkersChanged { workers } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            workers[..],
+            [Worker {
+                id: "toolu_send".into(),
+                parent: None,
+                title: "Agent".into(),
+                state: WorkerState::Running,
+            }]
+        );
+        handle(
+            &mut state,
+            task(
+                "task_started",
+                json!({"task_id": "a2dfc762df22d6d4b", "run_id": "0mvyq0000-00000000", "tool_use_id": "toolu_send", "description": "Implement arrival transitions", "is_backgrounded": true, "task_type": "local_agent"}),
+            ),
+        );
+        assert_eq!(
+            state.snapshot().workers[0].title,
+            "Implement arrival transitions"
+        );
+        handle(
+            &mut state,
+            task(
+                "task_notification",
+                json!({"task_id": "a2dfc762df22d6d4b", "tool_use_id": "toolu_send", "status": "failed", "summary": ""}),
+            ),
+        );
+        assert_eq!(
+            states(&state),
+            vec![("toolu_send".into(), WorkerState::Error)]
+        );
+    }
+
+    #[test]
+    fn a_resume_the_tool_waits_for_ends_with_its_result() {
+        let mut state = State::new("session".into());
+        handle(
+            &mut state,
+            tool_use("toolu_agent", "Agent", json!({"description": "Explore"})),
+        );
+        handle(
+            &mut state,
+            tool_result(
+                "toolu_agent",
+                "Found it.",
+                json!({"status": "completed", "agentId": "a1"}),
+            ),
+        );
+        handle(
+            &mut state,
+            tool_use(
+                "toolu_send",
+                "SendMessage",
+                json!({"to": "a1", "message": "More."}),
+            ),
+        );
+        let events = handle(
+            &mut state,
+            task(
+                "task_started",
+                json!({"task_id": "a1", "run_id": "2", "tool_use_id": "toolu_send", "description": "Explore", "is_backgrounded": false, "awaited": true, "task_type": "local_agent"}),
+            ),
+        );
+        assert_eq!(worker_states(&events), vec![vec![WorkerState::Running]]);
+        let events = handle(
+            &mut state,
+            tool_result("toolu_send", "Found more.", Value::Null),
+        );
+        assert_eq!(worker_states(&events), vec![vec![WorkerState::Completed]]);
+    }
+
+    #[test]
+    fn background_shells_are_not_workers() {
+        let mut state = State::new("session".into());
+        let events = handle(
+            &mut state,
+            task(
+                "task_started",
+                json!({"task_id": "b1", "tool_use_id": "toolu_shell", "description": "sleep", "is_backgrounded": true, "task_type": "local_bash"}),
+            ),
+        );
+        assert!(events.is_empty());
+        let events = handle(
+            &mut state,
+            task(
+                "task_notification",
+                json!({"task_id": "b1", "tool_use_id": "toolu_shell", "status": "stopped"}),
+            ),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn workers_stop_when_the_process_ends() {
+        let mut state = State::new("session".into());
+        handle(
+            &mut state,
+            tool_use("toolu_a", "Agent", json!({"description": "A"})),
+        );
+        handle(
+            &mut state,
+            tool_use("toolu_b", "Agent", json!({"description": "B"})),
+        );
+        handle(&mut state, tool_result("toolu_b", "Done.", Value::Null));
+        // Claude Code reports a subagent it stopped, too.
+        handle(
+            &mut state,
+            tool_use("toolu_c", "Agent", json!({"description": "C"})),
+        );
+        handle(
+            &mut state,
+            task(
+                "task_started",
+                json!({"task_id": "ac", "tool_use_id": "toolu_c", "description": "C", "is_backgrounded": true, "task_type": "local_agent"}),
+            ),
+        );
+        handle(
+            &mut state,
+            task(
+                "task_updated",
+                json!({"task_id": "ac", "patch": {"status": "killed"}}),
+            ),
+        );
+        let events = state.stop_workers();
+        assert_eq!(
+            worker_states(&events),
+            vec![vec![
+                WorkerState::Stopped,
+                WorkerState::Completed,
+                WorkerState::Stopped
+            ]]
+        );
+        assert!(state.stop_workers().is_empty());
     }
 }
