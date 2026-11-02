@@ -1327,6 +1327,7 @@ impl Conversation {
                     })
                     .collect(),
                 ring: None,
+                joining: None,
             }),
             Mode::Lobby => {
                 let server = self
@@ -1378,7 +1379,7 @@ impl Conversation {
                     },
                     status,
                     connected: self.connected.as_ref().map(|choice| arrival::Item {
-                        key: arrival::Key::Connected,
+                        key: arrival::Key::Connected(choice.address.clone()),
                         kind: arrival::Kind::Connected,
                         label: choice.label.clone(),
                         detail: Some("Choose to change".into()),
@@ -1389,9 +1390,21 @@ impl Conversation {
                         step,
                         items: self.ring_items(self.step),
                     }),
+                    joining: self
+                        .joining
+                        .as_ref()
+                        .map(|space| arrival::Key::Space(space.clone())),
                 })
             }
         }
+    }
+
+    /// The space joined, as the arrival object it was chosen from, so that its environment grows out of that object.
+    pub fn entered(&self) -> Option<arrival::Key> {
+        self.space
+            .as_ref()
+            .filter(|_| self.mode == Mode::Space)
+            .map(|space| arrival::Key::Space(space.id.clone()))
     }
 
     /// Choose an arrival object, as by pointing at it and pulling the trigger.
@@ -1409,7 +1422,7 @@ impl Conversation {
                     self.accept();
                 }
             }
-            (Mode::Lobby, arrival::Key::Connected) => self.leave_server(),
+            (Mode::Lobby, arrival::Key::Connected(_)) => self.leave_server(),
             (Mode::Lobby, arrival::Key::Space(id)) => {
                 if let Some(index) = self.spaces.iter().position(|space| &space.id == id) {
                     self.close_menu();
@@ -2152,7 +2165,7 @@ mod tests {
             }]
         );
         // The connected server returns to the servers.
-        conversation.choose_object(&arrival::Key::Connected);
+        conversation.choose_object(&arrival::Key::Connected("10.0.0.1:8765".into()));
         assert_eq!(conversation.take_actions(), [Action::Disconnect]);
         assert!(conversation.is_browsing());
     }

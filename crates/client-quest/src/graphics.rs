@@ -1533,7 +1533,7 @@ mod tests {
                 selected: false,
             };
             let connected = Some(Item {
-                key: Key::Connected,
+                key: Key::Connected("studio.local:8765".into()),
                 kind: Kind::Connected,
                 label: "studio.local".into(),
                 detail: Some("connected".into()),

@@ -5,6 +5,7 @@
 mod android;
 mod arrival;
 mod arrival_graphics;
+mod arrival_motion;
 mod caption;
 mod capture;
 mod connection;

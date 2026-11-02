@@ -191,11 +191,15 @@ fn brighten(color: [f32; 3], amount: f32) -> [f32; 3] {
     color.map(|v| v + (1.0 - v) * amount)
 }
 
-/// Every cube arrival adds: object forms, the highlight on the object pointed at and on the stick's selection, and the ray.
+/// Every cube arrival adds: object forms, the highlight on the object pointed at and on the stick's selection, and the ray. An object's size is already scaled by its presence; its colour fades with it too.
 pub fn cubes(frame: &Frame) -> Vec<Cube> {
     let mut out = Vec::new();
     for object in &frame.scene.objects {
-        let hovered = frame.hovered == Some(&object.key);
+        if object.presence <= 0.0 {
+            continue;
+        }
+        let hovered = object.choosable && frame.hovered == Some(&object.key);
+        let fade = object.presence * (1.0 - 0.7 * object.dim);
         let start = out.len();
         form(object, frame.time, &mut out);
         for cube in &mut out[start..] {
@@ -204,9 +208,8 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
                 cube.position = (object.position + (position - object.position) * 1.25).to_array();
                 cube.scale = cube.scale.map(|v| v * 1.25);
                 cube.color = brighten(cube.color, 0.35);
-            } else if object.dimmed {
-                cube.color = cube.color.map(|v| v * 0.3);
             }
+            cube.color = cube.color.map(|v| v * fade);
         }
         let face = Quat::from_rotation_arc(Vec3::Z, facing(object.position));
         if hovered {
@@ -221,7 +224,7 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
                 ));
             }
         }
-        if object.selected {
+        if object.selected && object.choosable {
             out.push(cube(
                 object.position - Vec3::Y * object.size * 1.45,
                 Vec3::new(object.size * 2.0, 0.006, 0.006),
@@ -262,7 +265,8 @@ const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
 struct Styled<'a> {
     label: &'a Label,
     hovered: bool,
-    dimmed: bool,
+    /// How opaque it is, from its own alpha and its object's dimming.
+    alpha: f32,
 }
 
 /// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is.
@@ -287,7 +291,10 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
         Align::Centre => label.anchor - right * width * 0.5,
         Align::Right => label.anchor - right * width,
     };
-    let alpha = if styled.dimmed { 0.35 } else { 1.0 };
+    let alpha = styled.alpha;
+    if alpha <= 0.0 {
+        return;
+    }
     let rgba = |rgb: [f32; 3], a: f32| [rgb[0], rgb[1], rgb[2], a * alpha];
     let mut quad = |x: f32, y: f32, w: f32, h: f32, z: f32, color: [f32; 4]| {
         if mesh.len() + 6 > MAX_VERTICES {
@@ -377,13 +384,13 @@ pub fn label_mesh(scene: &Scene, hovered: Option<&Key>) -> Vec<Vertex> {
         .iter()
         .map(|object| Styled {
             label: &object.label,
-            hovered: hovered == Some(&object.key),
-            dimmed: object.dimmed,
+            hovered: object.choosable && hovered == Some(&object.key),
+            alpha: object.label.alpha * (1.0 - 0.65 * object.dim),
         })
         .chain(heading.iter().map(|label| Styled {
             label,
             hovered: false,
-            dimmed: false,
+            alpha: label.alpha,
         }))
         .collect();
     let distance = |styled: &Styled| styled.label.anchor.distance(crate::arrival::HOME);
