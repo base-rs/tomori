@@ -39,7 +39,7 @@ pub struct ClaudeCodeSession {
 }
 
 impl ClaudeCodeSession {
-    pub(crate) fn spawn(command: Command, session: String, grace: Duration) -> Result<Self> {
+    pub(crate) fn spawn(command: Command, mut state: State, grace: Duration) -> Result<Self> {
         let (sender, input) = async_channel::unbounded();
         let local = sender.clone();
         let process = Process::spawn(command, grace, move |output| {
@@ -52,7 +52,6 @@ impl ClaudeCodeSession {
             )
         })?;
 
-        let mut state = State::new(session);
         process.write(state.control_request("initialize").to_string());
 
         Ok(Self {
@@ -125,7 +124,10 @@ impl ClaudeCodeSession {
             }
             Some(reason)
         };
-        vec![Event::Closed { reason }]
+        // Nothing the process was running is running any more.
+        let mut events = self.state.lock().unwrap().stop_workers();
+        events.push(Event::Closed { reason });
+        events
     }
 }
 
@@ -177,6 +179,13 @@ impl backend::Session for ClaudeCodeSession {
     async fn interrupt(&self) -> Result<()> {
         self.ensure_open()?;
         let request = self.state.lock().unwrap().control_request("interrupt");
+        self.write(request);
+        Ok(())
+    }
+
+    async fn set_mode(&self, mode: &str) -> Result<()> {
+        self.ensure_open()?;
+        let request = self.state.lock().unwrap().set_mode(mode)?;
         self.write(request);
         Ok(())
     }

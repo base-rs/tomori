@@ -11,8 +11,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-pub const WIDTH: u32 = 3840;
-pub const HEIGHT: u32 = 2160;
+pub const WIDTH: u32 = 1920;
+pub const HEIGHT: u32 = 1080;
 pub const FPS: u32 = 30;
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const ROW_BYTES: u32 = WIDTH * 4;
@@ -34,7 +34,7 @@ impl Video {
     pub fn new(device: &wgpu::Device, surface_format: Option<wgpu::TextureFormat>) -> Result<Self> {
         let producer = Producer::start()?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("PipeWire spectator 4K"),
+            label: Some("PipeWire spectator 1080p"),
             size: extent(),
             mip_level_count: 1,
             sample_count: 1,
@@ -272,11 +272,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_layout_is_tightly_packed_rgba_4k() {
-        assert_eq!((WIDTH, HEIGHT), (3840, 2160));
-        assert_eq!(ROW_BYTES, 15_360);
+    fn frame_layout_is_tightly_packed_rgba_1080p() {
+        assert_eq!((WIDTH, HEIGHT), (1920, 1080));
+        assert_eq!(ROW_BYTES, 7_680);
         assert_eq!(PADDED_ROW_BYTES, ROW_BYTES);
-        assert_eq!(FRAME_BYTES, 33_177_600);
+        assert_eq!(FRAME_BYTES, 8_294_400);
         assert_eq!(FORMAT, wgpu::TextureFormat::Rgba8UnormSrgb);
     }
 
@@ -288,8 +288,8 @@ mod tests {
             .map(|arg| arg.to_str().unwrap())
             .collect();
         assert!(args.contains(&"format=rgba"));
-        assert!(args.contains(&"width=3840"));
-        assert!(args.contains(&"height=2160"));
+        assert!(args.contains(&"width=1920"));
+        assert!(args.contains(&"height=1080"));
         assert!(args.contains(&"framerate=30/1"));
     }
 

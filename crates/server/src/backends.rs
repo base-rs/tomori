@@ -151,6 +151,10 @@ impl Session for AnySession {
         dispatch!(self, session => session.answer(question, answers).await)
     }
 
+    async fn set_mode(&self, mode: &str) -> Result<()> {
+        dispatch!(self, session => session.set_mode(mode).await)
+    }
+
     async fn interrupt(&self) -> Result<()> {
         dispatch!(self, session => session.interrupt().await)
     }

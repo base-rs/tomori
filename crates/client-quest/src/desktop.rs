@@ -4,6 +4,7 @@
 use crate::{
     graphics::Renderer,
     pointing::Ray,
+    spectator_feed::Feed,
     spectator_view::{RenderInputs, SpectatorView},
     swarm::{CENTER, Swarm},
 };
@@ -37,11 +38,12 @@ fn initial_window_size(spectator: bool) -> Size {
     }
 }
 
-pub fn run(spectator: bool, pipewire: bool) -> Result<()> {
+pub fn run(spectator: bool, pipewire: bool, feed: Option<Feed>) -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = App {
         spectator,
         pipewire,
+        feed,
         ..Default::default()
     };
     event_loop.run_app(&mut app)?;
@@ -57,6 +59,7 @@ struct App {
     error: Option<anyhow::Error>,
     spectator: bool,
     pipewire: bool,
+    feed: Option<Feed>,
     next_video_frame: Option<Instant>,
 }
 
@@ -81,7 +84,12 @@ impl ApplicationHandler for App {
                     .with_min_inner_size(PhysicalSize::new(SPECTATOR_WIDTH, SPECTATOR_HEIGHT));
             }
             let window = Arc::new(event_loop.create_window(attributes)?);
-            pollster::block_on(State::new(window, self.spectator, self.pipewire))
+            pollster::block_on(State::new(
+                window,
+                self.spectator,
+                self.pipewire,
+                self.feed.take(),
+            ))
         })();
         match result {
             Ok(state) => {
@@ -234,7 +242,12 @@ struct State {
 }
 
 impl State {
-    async fn new(window: Arc<Window>, spectator: bool, pipewire: bool) -> Result<Self> {
+    async fn new(
+        window: Arc<Window>,
+        spectator: bool,
+        pipewire: bool,
+        feed: Option<Feed>,
+    ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -288,7 +301,10 @@ impl State {
             Renderer::new(&device, &queue, render_format, render_width, render_height);
         // The desktop window has no server, so it is never in a space and chooses its scenery itself.
         renderer.set_environment(crate::environment::Environment::initial());
-        let spectator = spectator.then(|| SpectatorView::new(&device, render_format));
+        let spectator = match (spectator, feed) {
+            (true, Some(feed)) => Some(SpectatorView::new(feed)),
+            _ => None,
+        };
         log::info!(
             "Desktop adapter: {} — {}x{}",
             adapter.get_info().name,
@@ -405,7 +421,6 @@ impl State {
                 swarm: &mut self.swarm,
                 target,
                 aspect: size.x / size.y,
-                waiting_projection: matrix,
             });
         } else {
             if !self.paused {

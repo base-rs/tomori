@@ -45,7 +45,6 @@ ndk = { version = "0.9", features = ["audio", "api-level-29"] }
 cpal = "0.18"
 env_logger = "0.11"
 pollster = "0.4"
-ureq = { version = "2.12", default-features = false, features = ["json"] }
 winit = "0.30"
 
 [target.'cfg(target_os = "linux")'.dependencies]

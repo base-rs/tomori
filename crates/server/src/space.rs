@@ -3,9 +3,10 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use backend::{AnswerValue, Event, Part, Permission, Prompt, Snapshot};
+use backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
 use protocol::{Activity, Participant, QueueState, SpaceState, SpaceSummary};
 
+use crate::limits;
 use crate::projection;
 use crate::queue::InputQueue;
 
@@ -45,6 +46,8 @@ pub struct SpaceModel {
     submitting: Vec<PendingQuestion>,
     workers: Vec<protocol::Worker>,
     attribution: bool,
+    /// The modes the session offers and its current one, as the agent last reported them.
+    modes: Modes,
     error: Option<String>,
 }
 
@@ -119,6 +122,7 @@ fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
             From::Idle => To::Idle,
             From::Completed => To::Completed,
             From::Error => To::Error,
+            From::Stopped => To::Stopped,
             From::Unknown => To::Unknown,
         },
     }
@@ -175,6 +179,7 @@ impl SpaceModel {
             submitting: Vec::new(),
             workers,
             attribution: true,
+            modes: snapshot.modes,
             error: None,
         };
         for message in snapshot.messages {
@@ -232,6 +237,40 @@ impl SpaceModel {
 
     pub fn set_attribution(&mut self, enabled: bool) {
         self.attribution = enabled;
+    }
+
+    /// Whether `mode` is one the space shows as offered, so a participant may choose it.
+    pub fn offers_mode(&self, mode: &str) -> bool {
+        self.shown_modes().iter().any(|offered| offered.id == mode)
+    }
+
+    /// The offered modes as shared, bounded so that a misbehaving agent cannot fill the snapshot: a mode whose
+    /// identifier no client could send back is left out, and names and descriptions are cut.
+    fn shown_modes(&self) -> Vec<protocol::Mode> {
+        self.modes
+            .offered
+            .iter()
+            .filter(|mode| mode.id.len() <= limits::IDENTIFIER_BYTES)
+            .take(limits::MODES)
+            .map(|mode| protocol::Mode {
+                id: mode.id.clone(),
+                name: limits::truncate(&mode.name, limits::MODE_NAME_BYTES),
+                description: mode.description.as_deref().map(|description| {
+                    limits::truncate(description, limits::MODE_DESCRIPTION_BYTES)
+                }),
+            })
+            .collect()
+    }
+
+    /// The name the space shows for `mode`, falling back to its identifier.
+    fn mode_name(&self, mode: &str) -> String {
+        let name = self
+            .modes
+            .offered
+            .iter()
+            .find(|offered| offered.id == mode)
+            .map_or(mode, |offered| offered.name.as_str());
+        limits::truncate(name, limits::MODE_NAME_BYTES)
     }
 
     fn push_message(&mut self, message: MessageModel) {
@@ -340,6 +379,14 @@ impl SpaceModel {
                     .map(|entry| worker(entry, &self.session))
                     .collect();
             }
+            Event::ModesChanged(modes) => self.modes = modes,
+            Event::ModeRefused { mode, reason } => {
+                let name = self.mode_name(&mode);
+                self.error = Some(match reason {
+                    Some(reason) => format!("The agent refused {name} mode: {reason}"),
+                    None => format!("The agent refused {name} mode."),
+                });
+            }
             Event::Error { message } => self.error = Some(message),
             Event::Closed { reason } => {
                 self.closed = true;
@@ -355,6 +402,16 @@ impl SpaceModel {
                 self.deciding.clear();
                 self.questions.clear();
                 self.submitting.clear();
+                // The agent process has ended, so nothing it was running is running any more, whatever the backend
+                // last reported.
+                for worker in &mut self.workers {
+                    if matches!(
+                        worker.state,
+                        protocol::WorkerState::Running | protocol::WorkerState::Waiting
+                    ) {
+                        worker.state = protocol::WorkerState::Stopped;
+                    }
+                }
             }
         }
     }
@@ -562,6 +619,13 @@ impl SpaceModel {
             participants,
             attribution: self.attribution,
             error: self.error.clone(),
+            mode: self
+                .modes
+                .current
+                .as_ref()
+                .filter(|mode| mode.len() <= limits::IDENTIFIER_BYTES)
+                .cloned(),
+            modes: self.shown_modes(),
         }
     }
 
@@ -595,6 +659,48 @@ mod tests {
                 ..Snapshot::default()
             },
         )
+    }
+
+    #[test]
+    fn modes_follow_the_agent_and_stay_within_limits() {
+        let mut space = model();
+        assert_eq!(space.state(Vec::new()).mode, None);
+        assert!(!space.offers_mode("plan"));
+        let mode = |id: String, name: String| backend::Mode {
+            id,
+            name,
+            description: Some("d".repeat(1000)),
+        };
+        let mut offered = vec![
+            mode("plan".into(), "Plan".into()),
+            mode("x".repeat(limits::IDENTIFIER_BYTES + 1), "Long".into()),
+            mode("named".into(), "n".repeat(1000)),
+        ];
+        offered.extend((0..limits::MODES).map(|index| mode(format!("m{index}"), "M".into())));
+        space.apply(Event::ModesChanged(Modes {
+            offered,
+            current: Some("plan".into()),
+        }));
+        let state = space.state(Vec::new());
+        assert_eq!(state.mode.as_deref(), Some("plan"));
+        assert_eq!(state.modes.len(), limits::MODES);
+        assert_eq!(state.modes[1].id, "named");
+        assert!(state.modes[1].name.len() <= limits::MODE_NAME_BYTES);
+        assert!(
+            state.modes[0].description.as_ref().unwrap().len() <= limits::MODE_DESCRIPTION_BYTES
+        );
+        assert!(space.offers_mode("plan"));
+        assert!(!space.offers_mode(&"x".repeat(limits::IDENTIFIER_BYTES + 1)));
+
+        // A starting mode the agent refused is named in the space error.
+        space.apply(Event::ModeRefused {
+            mode: "plan".into(),
+            reason: None,
+        });
+        assert_eq!(
+            space.state(Vec::new()).error.as_deref(),
+            Some("The agent refused Plan mode.")
+        );
     }
 
     #[test]
@@ -723,6 +829,46 @@ mod tests {
         assert!(state.approval.is_none());
         assert!(state.error.is_some());
         assert!(space.next_prompt().is_none());
+    }
+
+    fn backend_worker(id: &str, state: backend::WorkerState) -> backend::Worker {
+        backend::Worker {
+            id: id.into(),
+            parent: None,
+            title: id.into(),
+            state,
+        }
+    }
+
+    #[test]
+    fn workers_stop_running_when_the_agent_process_exits() {
+        let mut space = model();
+        space.apply(Event::WorkersChanged {
+            workers: vec![
+                backend_worker("running", backend::WorkerState::Running),
+                backend_worker("waiting", backend::WorkerState::Waiting),
+                backend_worker("completed", backend::WorkerState::Completed),
+                backend_worker("failed", backend::WorkerState::Error),
+            ],
+        });
+        space.apply(Event::Closed {
+            reason: Some("claude exited with 1".into()),
+        });
+        let states: Vec<_> = space
+            .state(Vec::new())
+            .workers
+            .iter()
+            .map(|worker| worker.state)
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                protocol::WorkerState::Stopped,
+                protocol::WorkerState::Stopped,
+                protocol::WorkerState::Completed,
+                protocol::WorkerState::Error,
+            ]
+        );
     }
 
     #[test]

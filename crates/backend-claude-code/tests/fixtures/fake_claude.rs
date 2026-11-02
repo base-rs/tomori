@@ -4,7 +4,8 @@
 //! A stand-in for `claude -p --input-format stream-json --output-format stream-json` that replays a scenario.
 //!
 //! Usage: `fake-claude --scenario <path> --log <path> [claude arguments...]`. Every line read from standard input is
-//! appended to the log. Scenario lines are commands:
+//! appended to the log, and the arguments are written to `arguments` next to it, one per line. Scenario lines are
+//! commands:
 //!
 //! - `send <json>` writes a line to standard output, replacing `{{session}}`, `{{uuid}}` (of the last user message
 //!   received) and `{{request}}` (the id of the last control request received).
@@ -42,6 +43,11 @@ fn main() {
         .expect("the scenario is readable");
     let log_path = option("--log").expect("--log is required");
     let children = Path::new(&log_path).with_file_name("children");
+    fs::write(
+        Path::new(&log_path).with_file_name("arguments"),
+        arguments[1..].join("\n"),
+    )
+    .expect("the arguments file is writable");
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)

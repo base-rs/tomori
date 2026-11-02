@@ -4,7 +4,9 @@
 //! Carries out the [`Conversation`]'s actions: owns the server connection, the microphone and the speaker, and browses for servers while the server list shows.
 use crate::{
     capture::{Capture, Recording},
+    controller,
     conversation::{Action, Conversation},
+    hands,
     identity::{Identity, Store},
     playback::{Playback, Speaking},
     server_choice::{self, Choice, Source},
@@ -13,7 +15,7 @@ use client::{
     Client, ConnectionState, Event, Microphone, Options, discovery,
     playback::{MixerOptions, Player, PlayerControl},
 };
-use protocol::ServerMessage;
+use protocol::{ClientMessage, Pose, ServerMessage};
 use std::{
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
@@ -43,7 +45,12 @@ pub struct Connection {
     remembered: Option<String>,
     voice: Voice,
     speaker: Speaker,
+    /// Receives other participants' presence reports, which the conversation ignores. Set by a spectator that renders them.
+    presence: Option<PresenceHook>,
 }
+
+/// A hook that renders the other participants' presence reports, which the conversation ignores.
+type PresenceHook = Box<dyn FnMut(&ServerMessage) + Send>;
 
 /// Push-to-talk audio, from the platform microphone through the client's [`Microphone`]. The microphone is open only while recording.
 struct Voice {
@@ -294,7 +301,46 @@ impl Connection {
                 recording: None,
             },
             speaker: Speaker::new(playback),
+            presence: None,
         }
+    }
+
+    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays them to the other participants.
+    pub fn send_presence(
+        &mut self,
+        head: controller::Pose,
+        left: Option<controller::Pose>,
+        right: Option<controller::Pose>,
+        hands: [Option<hands::Hand>; 2],
+    ) {
+        if self.client.is_none() {
+            return;
+        }
+        let message = ClientMessage::Presence {
+            head: Pose {
+                position: head.position,
+                orientation: head.orientation,
+            },
+            left: left.map(|pose| Pose {
+                position: pose.position,
+                orientation: pose.orientation,
+            }),
+            right: right.map(|pose| Pose {
+                position: pose.position,
+                orientation: pose.orientation,
+            }),
+            hands: Some(hands),
+        };
+        if let Some(client) = &self.client
+            && let Err(error) = client.send(message)
+        {
+            log::debug!("Cannot send presence: {error}");
+        }
+    }
+
+    /// Receive the other participants' presence reports, which the conversation ignores. The hook is called for every [`ServerMessage::Presence`], from the render loop's thread.
+    pub fn watch_presence(&mut self, hook: impl FnMut(&ServerMessage) + Send + 'static) {
+        self.presence = Some(Box::new(hook));
     }
 
     /// Run once per frame. Browsing, and the multicast lock it needs, stop while unfocused.
@@ -319,6 +365,12 @@ impl Connection {
                     Event::Message(ServerMessage::Left) => control.clear(),
                     _ => {}
                 }
+            }
+            // The spectator renders presence, which the conversation ignores.
+            if let Event::Message(message @ ServerMessage::Presence { .. }) = &event
+                && let Some(presence) = self.presence.as_deref_mut()
+            {
+                presence(message);
             }
             conversation.apply(event);
             // After the conversation applies the welcome, which clears earlier errors, so that a failure is shown again.

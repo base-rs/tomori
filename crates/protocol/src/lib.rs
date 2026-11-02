@@ -12,14 +12,16 @@ mod audio;
 mod frame;
 mod keepalive;
 mod message;
+mod presence;
 mod space;
 
 pub use audio::{AGENT_SOURCE, AUDIO_HEADER_BYTES, AudioError, AudioFrame, Gate};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{ClientMessage, Decision, Pose, ServerMessage};
+pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{
-    Activity, Approval, ApprovalOption, BackendInfo, EnvironmentInfo, Message, Participant,
+    Activity, Approval, ApprovalOption, BackendInfo, EnvironmentInfo, Message, Mode, Participant,
     Presentation, PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary,
     SpaceState, SpaceSummary, Worker, WorkerState, WorkspaceRoot,
 };

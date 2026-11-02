@@ -34,6 +34,15 @@ pub const FIELD_BYTES: usize = 1024;
 /// Longest identifier a client names in a join, decision or answer, in bytes: a space, request, question, option or field. Longer ones cannot match anything the server presented.
 pub const IDENTIFIER_BYTES: usize = 1024;
 
+/// The most modes a space offers; an agent offering more has the rest left out.
+pub const MODES: usize = 16;
+
+/// Longest mode name shared in a snapshot, in bytes. Longer names are cut.
+pub const MODE_NAME_BYTES: usize = 64;
+
+/// Longest mode description shared in a snapshot, in bytes. Longer descriptions are cut.
+pub const MODE_DESCRIPTION_BYTES: usize = 256;
+
 /// Longest transcript that can be queued, in bytes. Partial transcripts are cut to this length.
 pub const QUEUED_TEXT_BYTES: usize = 4096;
 
@@ -45,7 +54,7 @@ pub const ERROR_BYTES: usize = 512;
 
 /// The most bytes of JSON in one space snapshot or lobby listing: a quarter of [`protocol::MAX_FRAME_BYTES`].
 ///
-/// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries are dropped, then approval and question text, their titles and the space error are cut, and then workers are dropped. What remains is bounded by the input limits above, [`FIELD_BYTES`], the approval option limits and the connection limit, and stays below the frame limit even in the worst case. Agent identifiers for approvals and questions are not cut, because clients name them in their replies.
+/// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries are dropped, then approval and question text, their titles and the space error are cut, and then workers are dropped. What remains is bounded by the input limits above, [`FIELD_BYTES`], the mode limits, the approval option limits and the connection limit, and stays below the frame limit even in the worst case. Agent identifiers for approvals and questions are not cut, because clients name them in their replies.
 pub const SNAPSHOT_BUDGET: usize = protocol::MAX_FRAME_BYTES / 4;
 
 /// Appended to text that was cut to fit.

@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use backend::{
-    AnswerValue, Backend, Decision, ErrorKind, Event, FieldKind, Grant, GrantScope, Part,
+    AnswerValue, Backend, Decision, ErrorKind, Event, FieldKind, Grant, GrantScope, Modes, Part,
     PermissionOption, Prompt, Role, Session, SessionSpec, WorkerState,
 };
 use backend_claude_code::{ClaudeCode, ClaudeCodeSession, Config};
@@ -25,7 +25,13 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// A fixture whose sessions start in default mode, as the recorded scenarios did.
     fn new(scenario: &str) -> Self {
+        Self::starting(scenario, Some("default"))
+    }
+
+    /// A fixture whose sessions start in `mode`, or in the backend's default starting mode for `None`.
+    fn starting(scenario: &str, mode: Option<&str>) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "backend-claude-code-{scenario}-{}",
             uuid::Uuid::new_v4()
@@ -45,6 +51,7 @@ impl Fixture {
             ],
             grace: Duration::from_millis(500),
             projects: Some(directory.join("projects")),
+            permission_mode: mode.map_or_else(|| Config::default().permission_mode, Into::into),
         });
         Self {
             directory,
@@ -78,6 +85,15 @@ impl Fixture {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// The arguments the agent was started with.
+    fn arguments(&self) -> Vec<String> {
+        fs::read_to_string(self.directory.join("arguments"))
+            .unwrap()
+            .lines()
+            .map(Into::into)
+            .collect()
     }
 
     /// Lines Tomori wrote to the agent's standard input.
@@ -168,6 +184,8 @@ fn streams_text() {
         assert_eq!(
             events,
             vec![
+                // The recorded session ran in the default mode.
+                Event::ModesChanged(session.snapshot().await.unwrap().modes),
                 Event::Delivered { key: "one".into() },
                 Event::Busy,
                 Event::MessageStarted {
@@ -654,6 +672,136 @@ fn interrupts_a_turn() {
     });
 }
 
+/// The ids of the offered modes and the current mode.
+fn modes(modes: &Modes) -> (Vec<&str>, Option<&str>) {
+    (
+        modes.offered.iter().map(|mode| mode.id.as_str()).collect(),
+        modes.current.as_deref(),
+    )
+}
+
+/// The `set_permission_mode` requests Tomori wrote, by mode.
+fn mode_requests(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .written()
+        .iter()
+        .filter(|line| line["request"]["subtype"] == "set_permission_mode")
+        .map(|line| line["request"]["mode"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn starts_in_auto_mode_and_switches_when_asked() {
+    run(|| async {
+        let fixture = Fixture::starting("mode", None);
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::ModesChanged(_))).await;
+        assert!(
+            fixture
+                .arguments()
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "auto"])
+        );
+        let Some(Event::ModesChanged(started)) = events.last() else {
+            unreachable!()
+        };
+        // The order Shift-Tab steps through; bypass permissions is not offered to a process launched without it.
+        assert_eq!(
+            modes(started),
+            (vec!["default", "acceptEdits", "plan", "auto"], Some("auto"))
+        );
+        assert_eq!(started.offered[1].name, "Accept edits");
+        // Nothing is asked of the agent until a participant chooses a mode.
+        assert!(mode_requests(&fixture).is_empty());
+
+        let error = session.set_mode("bypassPermissions").await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Invalid);
+        session.set_mode("plan").await.unwrap();
+        // The mode follows the agent's confirmation, once.
+        let events = events_until(&session, |event| matches!(event, Event::ModesChanged(_))).await;
+        let Some(Event::ModesChanged(changed)) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(changed.current.as_deref(), Some("plan"));
+        assert_eq!(session.snapshot().await.unwrap().modes, *changed);
+
+        close(&session).await;
+        assert_eq!(mode_requests(&fixture), vec!["plan"]);
+    });
+}
+
+#[test]
+fn starts_in_the_operators_mode() {
+    run(|| async {
+        let fixture = Fixture::starting("override", Some("plan"));
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::ModesChanged(_))).await;
+        assert!(
+            fixture
+                .arguments()
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "plan"])
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ModeRefused { .. }))
+        );
+        let Some(Event::ModesChanged(started)) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(started.current.as_deref(), Some("plan"));
+
+        // A refused request leaves the mode as it was and stops offering a mode the agent says is unavailable.
+        session.set_mode("auto").await.unwrap();
+        let events =
+            events_until(&session, |event| matches!(event, Event::ModeRefused { .. })).await;
+        assert_eq!(
+            events,
+            vec![
+                Event::ModesChanged(backend::Modes {
+                    offered: started.offered[..3].to_vec(),
+                    current: Some("plan".into()),
+                }),
+                Event::ModeRefused {
+                    mode: "auto".into(),
+                    reason: Some(
+                        "Cannot set permission mode to auto: auto mode is unavailable for your plan"
+                            .into()
+                    ),
+                },
+            ]
+        );
+        close(&session).await;
+    });
+}
+
+#[test]
+fn reports_a_refused_starting_mode() {
+    run(|| async {
+        let fixture = Fixture::starting("refused-start", None);
+        let session = fixture.create().await;
+        let events = events_until(&session, |event| matches!(event, Event::ModesChanged(_))).await;
+        assert_eq!(
+            events[0],
+            Event::ModeRefused {
+                mode: "auto".into(),
+                reason: None
+            }
+        );
+        let Some(Event::ModesChanged(started)) = events.last() else {
+            unreachable!()
+        };
+        // The session is in the agent's default mode, and auto mode is no longer offered.
+        assert_eq!(
+            modes(started),
+            (vec!["default", "acceptEdits", "plan"], Some("default"))
+        );
+        close(&session).await;
+        assert!(mode_requests(&fixture).is_empty());
+    });
+}
+
 #[test]
 fn closes_when_the_process_exits() {
     run(|| async {
@@ -850,6 +998,112 @@ fn lists_and_attaches_sessions() {
         session.send(prompt("one", "Hello again.")).await.unwrap();
         events_until(&session, |event| *event == Event::Idle).await;
         close(&session).await;
+    });
+}
+
+/// Copy a directory tree, for fixture session records.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn worker_states(workers: &[backend::Worker]) -> Vec<(&str, WorkerState)> {
+    workers
+        .iter()
+        .map(|worker| (worker.id.as_str(), worker.state))
+        .collect()
+}
+
+#[test]
+fn attaching_reports_recorded_workers_and_follows_their_resumes() {
+    run(|| async {
+        let fixture = Fixture::new("resume");
+        let directory = fixture.directory.display().to_string();
+        let canonical = fs::canonicalize(&fixture.directory).unwrap();
+        let name: String = canonical
+            .display()
+            .to_string()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        copy_tree(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/records"),
+            &fixture.directory.join("projects").join(name),
+        );
+
+        let session = fixture
+            .backend
+            .attach("5d1c3a52-7f0e-4c39-9a51-2b7f4c0d9e11", &directory)
+            .await
+            .unwrap();
+        // The records' workers, none of them running: the process that ran them has ended.
+        let snapshot = session.snapshot().await.unwrap();
+        assert_eq!(
+            worker_states(&snapshot.workers),
+            vec![
+                ("toolu_review", WorkerState::Completed),
+                ("toolu_implement", WorkerState::Stopped),
+                ("toolu_tests", WorkerState::Completed),
+                ("toolu_lint", WorkerState::Error),
+                ("toolu_nested", WorkerState::Stopped),
+            ]
+        );
+        assert_eq!(
+            snapshot.workers[4].parent.as_deref(),
+            Some("toolu_implement")
+        );
+
+        // A recorded worker resumed with `SendMessage` runs again, then finishes.
+        session
+            .send(prompt("one", "Resume the implementer."))
+            .await
+            .unwrap();
+        let mut changes = Vec::new();
+        while changes.len() < 2 {
+            if let Event::WorkersChanged { workers } = session.next_event().await.unwrap() {
+                changes.push(workers);
+            }
+        }
+        assert_eq!(changes[0][1].state, WorkerState::Running);
+        assert_eq!(changes[0].len(), 5);
+        assert_eq!(changes[1][1].state, WorkerState::Completed);
+
+        // A worker running when the process exits is not reported as running.
+        session
+            .send(prompt("two", "Resume the test writer."))
+            .await
+            .unwrap();
+        let events = events_until(&session, |event| matches!(event, Event::Closed { .. })).await;
+        let changes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::WorkersChanged { workers } => Some(workers),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0][2].state, WorkerState::Running);
+        assert_eq!(changes[1][2].state, WorkerState::Stopped);
+        assert!(matches!(
+            &events[events.len() - 2],
+            Event::WorkersChanged { .. }
+        ));
+        assert!(
+            session
+                .snapshot()
+                .await
+                .unwrap()
+                .workers
+                .iter()
+                .all(|worker| worker.state != WorkerState::Running)
+        );
     });
 }
 
