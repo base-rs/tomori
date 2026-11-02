@@ -19,7 +19,7 @@ pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{ClientMessage, Decision, Pose, ServerMessage};
 pub use space::{
-    Activity, Approval, ApprovalOption, BackendInfo, Message, Participant, Presentation,
+    Activity, Approval, ApprovalOption, BackendInfo, Message, Mode, Participant, Presentation,
     PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary, SpaceState,
     SpaceSummary, Worker, WorkerState, WorkspaceRoot,
 };
