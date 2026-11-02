@@ -204,20 +204,82 @@ pub async fn child_sessions<'scope>(
     parent_id: &str,
     cancellation: &Cancellation,
 ) -> Result<Vec<Value>, Failure> {
-    let path = format!("/api/session?parentID={}", urlencoding(parent_id));
-    let response = exchange(
-        client,
-        get(&path),
-        resolved.authorization_header().as_deref(),
-        cancellation,
-    )
-    .await?;
-    let value = read_json(response).await?;
-    Ok(value
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 128;
+    let mut children = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    let mut cursors = std::collections::HashSet::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let mut path = format!(
+            "/api/session?parentID={}&limit={PAGE_SIZE}",
+            urlencoding(parent_id)
+        );
+        if let Some(cursor) = &cursor {
+            path.push_str("&cursor=");
+            path.push_str(&urlencoding(cursor));
+        }
+        let response = exchange(
+            client,
+            get(&path),
+            resolved.authorization_header().as_deref(),
+            cancellation,
+        )
+        .await?;
+        let value = read_json(response).await?;
+        let page = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Failure {
+                status: None,
+                message: "the server did not return a child session list".to_owned(),
+            })?;
+        for child in page {
+            let worker = crate::wire::worker_from_session(child).ok_or_else(|| Failure {
+                status: None,
+                message: "the server returned a child session without an identifier".to_owned(),
+            })?;
+            if worker.id.is_empty() || worker.parent.as_deref() != Some(parent_id) {
+                return Err(Failure {
+                    status: None,
+                    message:
+                        "the server returned a child session with an invalid parent or identifier"
+                            .to_owned(),
+                });
+            }
+            if !ids.insert(worker.id) {
+                return Err(Failure {
+                    status: None,
+                    message: "the server repeated a child session across pages".to_owned(),
+                });
+            }
+            children.push(child.clone());
+        }
+        let next = value
+            .get("cursor")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Failure {
+                status: None,
+                message: "the server did not return a child session cursor".to_owned(),
+            })?
+            .get("next");
+        match next {
+            None | Some(Value::Null) => return Ok(children),
+            Some(Value::String(next)) if !next.is_empty() && cursors.insert(next.clone()) => {
+                cursor = Some(next.clone())
+            }
+            _ => {
+                return Err(Failure {
+                    status: None,
+                    message: "the server returned an invalid child session cursor".to_owned(),
+                });
+            }
+        }
+    }
+    Err(Failure {
+        status: None,
+        message: "the child session list exceeds the page limit".to_owned(),
+    })
 }
 
 /// `POST /api/session/:id/prompt`: deliver one user turn. `key` is the

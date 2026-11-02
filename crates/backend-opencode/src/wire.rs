@@ -76,10 +76,8 @@ pub fn event_for(
         "session.execution.interrupted" => busy_like(data, session_id, Event::Idle),
         "session.execution.succeeded" => busy_like(data, session_id, Event::Idle),
         "session.execution.failed" => execution_failed(data, session_id),
-        // Children are tracked as workers; the caller refreshes the list.
-        "session.created" | "session.deleted" | "session.forked" => Some(Event::WorkersChanged {
-            workers: Vec::new(),
-        }),
+        // Child lifecycle changes are routed to their parent by the connection.
+        "session.created" | "session.deleted" | "session.forked" => None,
         _ => None,
     }
 }

@@ -61,6 +61,11 @@ impl Events {
     pub fn deliver(&self, event: Event) {
         let _ = self.tx.try_send(event);
     }
+
+    /// Worker snapshots must be retried if the consumer is temporarily behind.
+    fn try_deliver(&self, event: Event) -> bool {
+        self.tx.try_send(event).is_ok()
+    }
 }
 
 /// A registered session: what the thread needs to serve it. Its id is the map
@@ -72,6 +77,11 @@ pub struct Registration {
     /// The session's running state as last reconciled against the server's
     /// record, so the reconciler reports a change only once.
     running: RunningState,
+    /// Direct children from the last successful snapshot or refresh. Deletion
+    /// events name only the deleted child, so this preserves its parent link.
+    children: HashSet<String>,
+    /// An event-triggered refresh failed and must be retried.
+    workers_dirty: bool,
 }
 
 /// The running state of a session as the server's record reports it, derived
@@ -102,9 +112,20 @@ impl Registration {
                 events,
                 seen: Mutex::new(HashSet::new()),
                 running: RunningState::Unknown,
+                children: HashSet::new(),
+                workers_dirty: false,
             },
             rx,
         )
+    }
+
+    fn remember_children(&mut self, workers: &[Worker]) {
+        self.children = workers.iter().map(|worker| worker.id.clone()).collect();
+    }
+
+    fn publish_workers(&mut self, workers: Vec<Worker>) {
+        self.remember_children(&workers);
+        self.workers_dirty = !self.events.try_deliver(Event::WorkersChanged { workers });
     }
 }
 
@@ -462,60 +483,86 @@ async fn dispatch_events(
     let Ok(value) = serde_json::from_str::<Value>(event) else {
         return;
     };
-    let Some(session_id) = wire::session_id_of(&value) else {
-        return;
-    };
-    let refresh = registrations.get(&session_id).is_some()
-        && matches!(
-            value.get("type").and_then(Value::as_str),
-            Some("session.created" | "session.deleted" | "session.forked")
-        );
-    let Some(registration) = registrations.get_mut(&session_id) else {
-        return;
-    };
-    // Deliver into the registration behind its own scoped borrow so it ends
-    // before `refresh_workers` re-borrows the map.
-    {
-        let event = match wire::event_for(
+    let parents = worker_refresh_targets(&value, registrations);
+    if let Some(session_id) = wire::session_id_of(&value)
+        && let Some(registration) = registrations.get_mut(&session_id)
+        && let Some(event) = wire::event_for(
             &value,
             &session_id,
             &mut registration
                 .seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-        ) {
-            Some(event) => event,
-            None => return,
-        };
+        )
+    {
         registration.events.deliver(event);
     }
-    if refresh {
-        refresh_workers(client, resolved, registrations, &session_id, cancellation).await;
+    for parent in parents {
+        refresh_workers(client, resolved, registrations, &parent, cancellation).await;
     }
+}
+
+/// Route child lifecycle events to their registered parent. A create event
+/// names its parent; a delete/completion event only names the child.
+fn worker_refresh_targets(
+    value: &Value,
+    registrations: &HashMap<String, Registration>,
+) -> Vec<String> {
+    let Some(kind) = value.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    if !matches!(
+        kind,
+        "session.created"
+            | "session.forked"
+            | "session.deleted"
+            | "session.execution.started"
+            | "session.execution.succeeded"
+            | "session.execution.failed"
+            | "session.execution.interrupted"
+    ) {
+        return Vec::new();
+    }
+    let Some(data) = value.get("data") else {
+        return Vec::new();
+    };
+    let parent = data.get("parentID").and_then(Value::as_str);
+    let child = data.get("sessionID").and_then(Value::as_str);
+    registrations
+        .iter()
+        .filter(|(id, registration)| {
+            parent == Some(id.as_str())
+                || child.is_some_and(|child| registration.children.contains(child))
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// Re-fetch a session's children after one of them changed, and report them.
 async fn refresh_workers(
     client: &Client<'_>,
     resolved: &Resolved,
-    registrations: &HashMap<String, Registration>,
+    registrations: &mut HashMap<String, Registration>,
     id: &str,
     cancellation: &Cancellation,
 ) {
-    let Some(registration) = registrations.get(id) else {
+    if !registrations.contains_key(id) {
         return;
-    };
+    }
     match api::child_sessions(client, resolved, id, cancellation).await {
         Ok(children) => {
             let workers = children
                 .iter()
                 .filter_map(wire::worker_from_session)
                 .collect::<Vec<Worker>>();
-            registration
-                .events
-                .deliver(Event::WorkersChanged { workers });
+            if let Some(registration) = registrations.get_mut(id) {
+                registration.publish_workers(workers);
+            }
         }
         Err(failure) => {
+            if let Some(registration) = registrations.get_mut(id) {
+                registration.workers_dirty = true;
+            }
             eprintln!("refreshing the workers of {id}: {}", failure.message);
         }
     }
@@ -557,6 +604,16 @@ async fn reconcile(
         if let Some(event) = running.event() {
             registration.events.deliver(event);
         }
+    }
+    // Retry only refreshes requested by a child event that failed, never poll
+    // the worker list during normal observation.
+    let dirty: Vec<String> = registrations
+        .iter()
+        .filter(|(_, registration)| registration.workers_dirty)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in dirty {
+        refresh_workers(client, resolved, registrations, &id, cancellation).await;
     }
 }
 
@@ -658,6 +715,12 @@ async fn handle_command(
             let result = snapshot(client, resolved, &id, cancellation)
                 .await
                 .map_err(map_failure);
+            if let Ok(snapshot) = &result
+                && let Some(registration) = registrations.get_mut(&id)
+            {
+                registration.remember_children(&snapshot.workers);
+                registration.workers_dirty = false;
+            }
             reply.send(result).await.ok();
             true
         }
@@ -815,4 +878,324 @@ fn snapshot_message(value: &Value) -> Option<backend::SnapshotMessage> {
         parts,
         completed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use backend::WorkerState;
+    use serde_json::json;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    fn registrations() -> HashMap<String, Registration> {
+        let mut registrations = HashMap::new();
+        insert_registration(&mut registrations, "parent".into());
+        insert_registration(&mut registrations, "other".into());
+        registrations
+    }
+
+    #[test]
+    fn child_creation_refreshes_its_parent_not_other_spaces() {
+        let registrations = registrations();
+        let event = json!({
+            "type": "session.created",
+            "data": { "sessionID": "child", "parentID": "parent" }
+        });
+        assert_eq!(worker_refresh_targets(&event, &registrations), ["parent"]);
+        assert!(wire::event_for(&event, "parent", &mut HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn deletion_and_completion_use_the_remembered_child_parent() {
+        let mut registrations = registrations();
+        registrations
+            .get_mut("parent")
+            .unwrap()
+            .remember_children(&[Worker {
+                id: "child".into(),
+                parent: Some("parent".into()),
+                title: "Worker".into(),
+                state: WorkerState::Completed,
+            }]);
+        for kind in [
+            "session.deleted",
+            "session.execution.started",
+            "session.execution.succeeded",
+            "session.execution.failed",
+            "session.execution.interrupted",
+        ] {
+            let event = json!({"type": kind, "data": {"sessionID": "child"}});
+            assert_eq!(worker_refresh_targets(&event, &registrations), ["parent"]);
+        }
+        // A successful empty refresh forgets the deleted child. Its duplicate
+        // event and unrelated session events cannot clear another space.
+        registrations
+            .get_mut("parent")
+            .unwrap()
+            .remember_children(&[]);
+        let deleted = json!({"type": "session.deleted", "data": {"sessionID": "child"}});
+        assert!(worker_refresh_targets(&deleted, &registrations).is_empty());
+        let unrelated = json!({"type": "session.deleted", "data": {"sessionID": "unrelated"}});
+        assert!(worker_refresh_targets(&unrelated, &registrations).is_empty());
+    }
+
+    #[test]
+    fn ordinary_child_messages_do_not_refresh_workers() {
+        let mut registrations = registrations();
+        registrations
+            .get_mut("parent")
+            .unwrap()
+            .children
+            .insert("child".into());
+        let event = json!({"type": "session.text.delta", "data": {"sessionID": "child"}});
+        assert!(worker_refresh_targets(&event, &registrations).is_empty());
+    }
+
+    #[test]
+    fn a_full_event_channel_retries_the_worker_snapshot() {
+        let (mut registration, events) = Registration::new();
+        for _ in 0..1024 {
+            registration.events.deliver(Event::Busy);
+        }
+        registration.publish_workers(Vec::new());
+        assert!(registration.workers_dirty);
+        while events.try_recv().is_ok() {}
+        registration.publish_workers(Vec::new());
+        assert!(!registration.workers_dirty);
+        assert!(
+            matches!(events.try_recv(), Ok(Event::WorkersChanged { workers }) if workers.is_empty())
+        );
+    }
+
+    #[test]
+    fn deleting_a_remembered_child_refreshes_the_actual_worker_list() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..9 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "no refresh request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept: {error}"),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let expected = if attempt % 2 == 1 {
+                    "GET /api/session/parent "
+                } else {
+                    "GET /api/session?parentID=parent&limit=100 "
+                };
+                assert!(line.starts_with(expected), "{line}");
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                let (status, body) = match attempt {
+                    0 | 1 | 3 | 5 | 7 => ("503 Service Unavailable", r#"{"error":"temporary"}"#),
+                    2 => ("200 OK", r#"{"not_a_child_list":[]}"#),
+                    4 => ("200 OK", r#"{"data":[]}"#),
+                    6 => ("200 OK", r#"{"data":[{}],"cursor":{"next":null}}"#),
+                    _ => ("200 OK", r#"{"data":[],"cursor":{"next":null}}"#),
+                };
+                write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        block_on(async {
+            let scheduler = DirectScheduler::new(DirectOptions {
+                threads: 2,
+                capacity: 256,
+            })
+            .unwrap();
+            let cancellation = Cancellation::new();
+            let address = scheduler
+                .address_resolve(
+                    Some("127.0.0.1"),
+                    AddressService::Port(address.port()),
+                    AddressHints::default(),
+                    &cancellation,
+                )
+                .await
+                .unwrap()
+                .entries()
+                .next()
+                .unwrap()
+                .address();
+            let (client, driver) = Client::new(
+                &scheduler,
+                Endpoint::new(address),
+                base_http_client::Options::default(),
+            )
+            .unwrap();
+            let mut registrations = HashMap::new();
+            let events = insert_registration(&mut registrations, "parent".into());
+            registrations
+                .get_mut("parent")
+                .unwrap()
+                .children
+                .insert("child".into());
+            let resolved = Resolved {
+                host: "127.0.0.1".into(),
+                port: address.port(),
+                auth: None,
+            };
+            let (_driver_result, ()) = futures_lite::future::zip(driver.run(&cancellation), async {
+                let event = json!({"type": "session.deleted", "data": {"sessionID": "child"}}).to_string();
+                dispatch_events(&event, &mut registrations, &client, &resolved, &cancellation).await;
+                assert!(events.try_recv().is_err());
+                assert!(registrations["parent"].children.contains("child"));
+                assert!(registrations["parent"].workers_dirty);
+                // Retry a failed worker refresh on the reconciliation tick,
+                // even if the separate running-state query also fails.
+                // Missing data, missing cursor and an invalid child are each
+                // malformed responses, not evidence that the worker vanished.
+                for _ in 0..3 {
+                    reconcile(&client, &resolved, &mut registrations, &cancellation).await;
+                    assert!(events.try_recv().is_err());
+                    assert!(registrations["parent"].children.contains("child"));
+                    assert!(registrations["parent"].workers_dirty);
+                }
+                reconcile(&client, &resolved, &mut registrations, &cancellation).await;
+                assert!(matches!(events.try_recv(), Ok(Event::WorkersChanged { workers }) if workers.is_empty()));
+                assert!(registrations["parent"].children.is_empty());
+                assert!(!registrations["parent"].workers_dirty);
+                cancellation.cancel();
+            }).await;
+            drop(client);
+            scheduler.shutdown().await;
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn child_refresh_reads_every_page_before_reporting_removals() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "no page request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept: {error}"),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let expected = if attempt == 0 {
+                    "GET /api/session?parentID=parent&limit=100 "
+                } else {
+                    "GET /api/session?parentID=parent&limit=100&cursor=next%2Bpage "
+                };
+                assert!(line.starts_with(expected), "{line}");
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                let body = if attempt == 0 {
+                    r#"{"data":[{"id":"first","parentID":"parent"}],"cursor":{"next":"next+page"}}"#
+                } else {
+                    r#"{"data":[{"id":"second","parentID":"parent"}],"cursor":{"next":null}}"#
+                };
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        block_on(async {
+            let scheduler = DirectScheduler::new(DirectOptions {
+                threads: 2,
+                capacity: 256,
+            })
+            .unwrap();
+            let cancellation = Cancellation::new();
+            let resolved_address = scheduler
+                .address_resolve(
+                    Some("127.0.0.1"),
+                    AddressService::Port(address.port()),
+                    AddressHints::default(),
+                    &cancellation,
+                )
+                .await
+                .unwrap()
+                .entries()
+                .next()
+                .unwrap()
+                .address();
+            let (client, driver) = Client::new(
+                &scheduler,
+                Endpoint::new(resolved_address),
+                base_http_client::Options::default(),
+            )
+            .unwrap();
+            let mut registrations = HashMap::new();
+            let events = insert_registration(&mut registrations, "parent".into());
+            registrations
+                .get_mut("parent")
+                .unwrap()
+                .children
+                .insert("deleted".into());
+            let resolved = Resolved {
+                host: "127.0.0.1".into(),
+                port: address.port(),
+                auth: None,
+            };
+            let (_driver_result, ()) =
+                futures_lite::future::zip(driver.run(&cancellation), async {
+                    let event = json!({"type":"session.deleted","data":{"sessionID":"deleted"}})
+                        .to_string();
+                    dispatch_events(
+                        &event,
+                        &mut registrations,
+                        &client,
+                        &resolved,
+                        &cancellation,
+                    )
+                    .await;
+                    match events.try_recv().unwrap() {
+                        Event::WorkersChanged { workers } => {
+                            assert_eq!(
+                                workers
+                                    .iter()
+                                    .map(|worker| worker.id.as_str())
+                                    .collect::<Vec<_>>(),
+                                ["first", "second"]
+                            );
+                        }
+                        other => panic!("unexpected event: {other:?}"),
+                    }
+                    assert!(!registrations["parent"].children.contains("deleted"));
+                    assert!(registrations["parent"].children.contains("second"));
+                    cancellation.cancel();
+                })
+                .await;
+            drop(client);
+            scheduler.shutdown().await;
+        });
+        server.join().unwrap();
+    }
 }
