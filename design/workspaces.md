@@ -14,11 +14,11 @@ The server runs agent sessions only in directories its operator has allowed, and
 
 ## Rationale
 
-There is no authentication yet (see `server.md`), and the local network is not fully trusted: anyone who can reach the server can ask it to start agent processes, which can read and change files in their directory. Confining sessions to chosen roots keeps an agent away from directories such as `/` or `~/.ssh`. By default the operator scopes agents by where they start the server, as with `claude` itself, which runs in the directory it is started in; so the default no longer exposes `~/.ssh` or `~/.claude` unless the server is started in the home directory. The current working directory replaced the home directory as the default in the October 2026 server review (finding 3); a uniform refusal stops the server from serving as a probe of the filesystem; and the cap stops one client from exhausting the machine with agent processes. Agreed in the October 2026 server review (finding 8).
+The local network is not fully trusted, and agent processes can read and change files in their directory. Only owners can create spaces (see `security.md`), but in `--auth open` mode anyone who can reach the server is an owner, and an owner's device can be lost or misused, so the roots and the limit apply whatever the mode. Confining sessions to chosen roots keeps an agent away from directories such as `/` or `~/.ssh`. By default the operator scopes agents by where they start the server, as with `claude` itself, which runs in the directory it is started in; so the default no longer exposes `~/.ssh` or `~/.claude` unless the server is started in the home directory. The current working directory replaced the home directory as the default in the October 2026 server review (finding 3); a uniform refusal stops the server from serving as a probe of the filesystem; and the cap stops one client from exhausting the machine with agent processes. Agreed in the October 2026 server review (finding 8).
 
 ## Scope
 
-The server's handling of space creation, session binding and any client-triggered session listing; the `tomori-server` options for roots and the space limit. Which roots or directories the server tells clients about is not yet decided.
+The server's handling of space creation, session binding and any client-triggered session listing; the `tomori-server` options for roots and the space limit. The server tells only owners about its roots (see `security.md`); which other directories it tells them about is not yet decided.
 
 ## Validation
 

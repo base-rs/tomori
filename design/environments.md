@@ -4,7 +4,7 @@ This describes how a space's environment relates to the space. The first part is
 
 ## Requirement
 
-Each space is bound to exactly one environment. The environment is chosen when the space is created, is part of the space's shared state, and is the same for every participant in it. A participant does not switch a space's environment on their own device; the per-device environment choice, such as squeezing the grip to switch between Sky and Minimal, does not apply inside a space. The server offers the environments a space can use, as it offers backends and directories; today that is only Sky (`crates/environment-sky`). A client that doesn't know a space's environment shows the Minimal grid and says which environment it lacks, rather than substituting another environment silently.
+Each space is bound to exactly one environment. The environment is chosen when the space is created, is part of the space's shared state, and is the same for everyone in it, participants and visitors alike. A participant does not switch a space's environment on their own device; the per-device environment choice, such as squeezing the grip to switch between Sky and Minimal, does not apply inside a space. The server offers the environments a space can use, as it offers backends and directories; today that is only Sky (`crates/environment-sky`). A client that doesn't know a space's environment shows the Minimal grid and says which environment it lacks, rather than substituting another environment silently.
 
 Arrival, outside any space, uses the Minimal grid as its waiting area (see `arrival.md`).
 
