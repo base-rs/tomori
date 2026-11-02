@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Toggle the Quest microphone for live conversation with the left grip; hold X to address the agent and release it to return to the previous live setting. Live capture stops on focus loss or disconnection. Echo cancellation is not guaranteed.
 - The spectator renders an unobstructed view without the headset HUD, animates the swarm from the space's activity, and publishes 1080p PipeWire video instead of 4K.
 - Release Tomori under the MIT License only, replacing the MIT or Apache-2.0 dual license.
 - The headset joins spaces on a Tomori server instead of chatting through the PC bridge: it lists servers found with Bonjour and the USB connection, reconnects to the last server when it finds it again, then lists the server's spaces. It reconnects and rejoins after a dropped connection, says when a space has ended, as after the server restarts, and answers approvals with the right stick and **A**.

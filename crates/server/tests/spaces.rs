@@ -786,6 +786,8 @@ fn audio_is_relayed_within_the_space_with_the_server_assigned_source() {
     assert_eq!(frame.gate, Gate::Live);
     assert_eq!(frame.source, ada.source);
     assert_eq!(frame.samples, vec![7; 320]);
+    // Live conversation is relayed but never sent as a prompt to the agent.
+    assert!(server.backend.started()[0].log().prompts.is_empty());
 
     // Agent audio is relayed too, and transcribed for the speaker.
     ada.say("u1", "hi");

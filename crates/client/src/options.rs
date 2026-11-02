@@ -30,6 +30,9 @@ pub struct Options {
     pub outgoing_utterance_limit: usize,
     /// Received audio frames held for the application; newer frames are dropped when it falls this far behind.
     pub incoming_audio_limit: usize,
+    /// Require a new explicit microphone activation after a connection ends.
+    /// Disabled by default for clients that restore their microphone gate.
+    pub microphone_rearm_on_disconnect: bool,
 }
 
 impl Options {
@@ -50,6 +53,7 @@ impl Options {
             outgoing_audio_limit: 8,
             outgoing_utterance_limit: 1500,
             incoming_audio_limit: 256,
+            microphone_rearm_on_disconnect: false,
         }
     }
 }

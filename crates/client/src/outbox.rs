@@ -132,6 +132,9 @@ struct State {
     /// A `Leave` the server has not confirmed, sent again after the next Hello because the server rejoins the last space on reconnection.
     leave_unconfirmed: bool,
     connected: bool,
+    connection_generation: u64,
+    require_microphone_rearm: bool,
+    microphone_armed: bool,
     closed: bool,
     /// Alternates between control and the stream when both are waiting, so neither starves the other.
     prefer_stream: bool,
@@ -206,6 +209,9 @@ impl Outbox {
                 membership: Membership::default(),
                 leave_unconfirmed: false,
                 connected: false,
+                connection_generation: 0,
+                require_microphone_rearm: false,
+                microphone_armed: true,
                 closed: false,
                 prefer_stream: false,
                 dropped_audio: 0,
@@ -216,6 +222,36 @@ impl Outbox {
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Opt in before connecting: a disconnected microphone must be explicitly
+    /// reactivated before any subsequent audio can leave the outbox.
+    pub(crate) fn require_microphone_rearm(&self) {
+        let mut state = self.lock();
+        state.require_microphone_rearm = true;
+        state.microphone_armed = false;
+    }
+
+    pub(crate) fn connection_generation(&self) -> u64 {
+        self.lock().connection_generation
+    }
+
+    pub(crate) fn connection_is_current(&self, generation: u64) -> bool {
+        let state = self.lock();
+        state.connected && !state.closed && state.connection_generation == generation
+    }
+
+    /// Activate a microphone only for the connection on which it was opened.
+    pub(crate) fn arm_microphone(&self, generation: u64) -> bool {
+        let mut state = self.lock();
+        if !state.require_microphone_rearm {
+            return !state.closed;
+        }
+        if state.closed || !state.connected || state.connection_generation != generation {
+            return false;
+        }
+        state.microphone_armed = true;
+        true
     }
 
     fn wake(mut state: MutexGuard<'_, State>) {
@@ -253,7 +289,18 @@ impl Outbox {
                 true
             }
             ClientMessage::Gate { gate } => {
-                state.membership.gate = *gate;
+                state.membership.gate = if state.require_microphone_rearm && !state.connected {
+                    Gate::Off
+                } else {
+                    *gate
+                };
+                if state.require_microphone_rearm {
+                    match gate {
+                        Gate::Off => state.microphone_armed = false,
+                        Gate::Live => {}
+                        Gate::Agent => {}
+                    }
+                }
                 true
             }
             ClientMessage::Presence { .. } => !state.connected,
@@ -334,6 +381,10 @@ impl Outbox {
             return Err(SendError::Closed);
         }
         if frame.gate == Gate::Off {
+            return Ok(None);
+        }
+        if state.require_microphone_rearm && !state.microphone_armed {
+            state.dropped_audio += 1;
             return Ok(None);
         }
         if !state.connected {
@@ -458,6 +509,11 @@ impl Outbox {
     pub fn disconnect(&self) -> Vec<FailedUtterance> {
         let mut state = self.lock();
         state.connected = false;
+        state.connection_generation = state.connection_generation.wrapping_add(1);
+        if state.require_microphone_rearm {
+            state.microphone_armed = false;
+            state.membership.gate = Gate::Off;
+        }
         state.keepalive.clear();
         let mut failed = Vec::new();
         for item in std::mem::take(&mut state.stream) {

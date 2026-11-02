@@ -388,6 +388,68 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
 }
 
 #[test]
+fn live_audio_reaches_the_space_without_addressing_the_agent_and_resumes_after_x() {
+    let server = recognizing_server(FakeBackend::manual());
+    let ada = client::Client::connect(client::Options::new(
+        server.address.to_string(),
+        "ada",
+        "Ada",
+    ))
+    .unwrap();
+    ada.sender()
+        .send(ClientMessage::CreateSpace {
+            title: "Live microphone".into(),
+            backend: server::fake::FAKE_BACKEND_NAME.into(),
+            directory: "/tmp".into(),
+            session: None,
+        })
+        .unwrap();
+    let space = receive(&ada, |message| match message {
+        ServerMessage::Space { state } => Some(state.id),
+        _ => None,
+    });
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::Join { space });
+    bob.space(|state| state.participants.len() == 2);
+
+    let mut microphone = client::Microphone::new(ada.sender(), RATE);
+    microphone.set_gate(Gate::Live).unwrap();
+    microphone.push(&vec![42; FRAME_SAMPLES]).unwrap();
+    let live = bob.next_audio(Duration::from_secs(5)).expect("live audio");
+    assert_eq!(
+        (live.gate, live.samples),
+        (Gate::Live, vec![42; FRAME_SAMPLES])
+    );
+    assert!(server.backend.started()[0].log().prompts.is_empty());
+
+    microphone.begin("launch-live").unwrap();
+    microphone.push(&spoken(&["run", "the", "tests"])).unwrap();
+    microphone.end().unwrap();
+    let transcript = receive(&ada, |message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "launch-live" => Some(text),
+        ServerMessage::TranscriptFailed { error, .. } => panic!("{error}"),
+        _ => None,
+    });
+    assert_eq!(transcript, "run the tests");
+    microphone.push(&vec![43; FRAME_SAMPLES]).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let frame = bob
+            .next_audio(deadline.saturating_duration_since(Instant::now()))
+            .expect("resumed live audio");
+        if frame.gate == Gate::Live && frame.samples == vec![43; FRAME_SAMPLES] {
+            break;
+        }
+    }
+    microphone.set_gate(Gate::Off).unwrap();
+    ada.close();
+}
+
+#[test]
 fn a_recognizer_failure_fails_the_utterance() {
     let server = recognizing_server(FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");
