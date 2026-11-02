@@ -1014,7 +1014,11 @@ impl Conversation {
         for (index, choice) in self.servers.iter().enumerate().skip(start).take(rows) {
             let marker = if index == self.server { '>' } else { ' ' };
             lines.push(short(&match &choice.unavailable {
-                None => format!("{marker} {} {}", choice.label, choice.address),
+                // A row has no room for both, and the counts say more about a discovered server than its address.
+                None => match choice.counts() {
+                    Some(counts) => format!("{marker} {} ({counts})", choice.label),
+                    None => format!("{marker} {} {}", choice.label, choice.address),
+                },
                 Some(reason) => format!("{marker} ({} - {reason})", choice.label),
             }));
         }
@@ -1705,6 +1709,19 @@ mod tests {
             }]
         );
         assert!(conversation.text().contains("SPACES"));
+    }
+
+    #[test]
+    fn the_server_list_shows_advertised_counts() {
+        let mut conversation = Conversation::new("ada", "Ada");
+        let mut studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
+        studio.spaces = Some(2);
+        studio.participants = Some(1);
+        let usb = Choice::new("USB", "127.0.0.1:8765", Source::Usb);
+        conversation.set_servers(vec![studio, usb]);
+        let text = conversation.text();
+        assert!(text.contains("> Studio (2 spaces, 1 person)\n"), "{text}");
+        assert!(text.contains("\nUSB 127.0.0.1:8765\n"), "{text}");
     }
 
     #[test]
