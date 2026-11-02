@@ -173,11 +173,9 @@ pub fn run(
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
     let mut arrival_time = 0.0_f32;
-    #[cfg(target_os = "android")]
     let mut delegation_scene = crate::delegation::Scene::new();
-    #[cfg(target_os = "android")]
+    let mut workers = crate::delegation::Workers::default();
     let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
-    #[cfg(target_os = "android")]
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
     log::info!(
         "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose or reset.",
@@ -201,7 +199,6 @@ pub fn run(
                         talk_blocked = true;
                         conversation.stop_talking();
                         pointer.release();
-                        #[cfg(target_os = "android")]
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
@@ -244,7 +241,6 @@ pub fn run(
             talk_blocked = true;
             conversation.stop_talking();
             pointer.release();
-            #[cfg(target_os = "android")]
             presentation_navigation.release();
         }
         if !running {
@@ -304,7 +300,6 @@ pub fn run(
             controls.replay,
             controls.audience_grip,
         );
-        #[cfg(target_os = "android")]
         presentation_navigation.update(
             None,
             &crate::delegation::Workspace::default(),
@@ -410,10 +405,7 @@ pub fn run(
             },
             pointing.attracting,
         );
-        // Workers arrive with the space state once the scene reads it.
-        #[cfg(target_os = "android")]
-        let (root, current_workspace) = (None, &crate::delegation::Workspace::default());
-        #[cfg(target_os = "android")]
+        let (root, current_workspace) = workers.update(conversation.joined_space());
         {
             renderer.set_presentation_page(presentation_navigation.card);
             renderer.set_presentation_content_page(presentation_navigation.content);
