@@ -225,6 +225,10 @@ pub async fn session_info<'scope>(
     Ok(value.get("data").cloned().unwrap_or(value))
 }
 
+/// How long the optional active-session lookup may take alongside the
+/// session record during reconciliation.
+const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Process-owned active session drains. An ID in this map is positive,
 /// point-in-time evidence that the OpenCode process is running it.
 pub async fn active_sessions<'scope>(
@@ -979,8 +983,12 @@ impl SnapshotParts {
     }
 }
 
-/// The session record's running state, from its `time.busy` / `time.idle`
-/// timestamps: running when the last turn started after its last end.
+/// Whether the session is running: the process's active-session list when it
+/// answers, otherwise the record's `time.busy` / `time.idle` timestamps.
+///
+/// The optional list is fetched alongside the record under a short bound, so
+/// a stalled endpoint adds no time beyond the record request itself and the
+/// reconciliation completes within its timeout whenever the record does.
 pub async fn session_running<'scope, S: Timers>(
     client: &Client<'scope>,
     resolved: &Resolved,
@@ -988,24 +996,25 @@ pub async fn session_running<'scope, S: Timers>(
     cancellation: &Cancellation,
     timers: &S,
 ) -> Result<Option<bool>, Failure> {
-    let info = session_info(client, resolved, session_id, cancellation).await?;
+    let (info, active) = futures_lite::future::zip(
+        session_info(client, resolved, session_id, cancellation),
+        active_sessions_with_timeout(
+            client,
+            resolved,
+            cancellation,
+            timers,
+            ACTIVE_LOOKUP_TIMEOUT,
+        ),
+    )
+    .await;
+    let info = info?;
     if !valid_session_record(&info) {
         return Ok(None);
     }
-    let recorded = running_from_record(&info);
-    // The active list is optional evidence. With an idle record, wait only
-    // briefly so a stalled endpoint cannot hold up the missed-idle backstop;
-    // both bounds stay well inside the reconciliation timeout.
-    let wait = if recorded == Some(false) {
-        Duration::from_secs(1)
-    } else {
-        Duration::from_secs(4)
-    };
-    let active = active_sessions_with_timeout(client, resolved, cancellation, timers, wait).await;
     let running = match active {
         Some(active) if active.contains(session_id) => Some(true),
         Some(_) if info.get("parentID").is_none() => Some(false),
-        _ => recorded,
+        _ => running_from_record(&info),
     };
     Ok(running)
 }
