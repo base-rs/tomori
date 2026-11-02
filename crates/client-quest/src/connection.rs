@@ -339,6 +339,7 @@ impl Connection {
     }
 
     /// Receive the other participants' presence reports, which the conversation ignores. The hook is called for every [`ServerMessage::Presence`], from the render loop's thread.
+    #[cfg(not(target_os = "android"))]
     pub fn watch_presence(&mut self, hook: impl FnMut(&ServerMessage) + Send + 'static) {
         self.presence = Some(Box::new(hook));
     }
