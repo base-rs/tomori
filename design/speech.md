@@ -1,6 +1,6 @@
 # Speech
 
-This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document. The headset client sends push-to-talk (`agent`) audio and plays other participants and agent speech, but does not offer an open (`live`) microphone yet; that gap is tracked in `readme.md`.
+This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document. The headset sends push-to-talk (`agent`) audio and plays other participants and agent speech; its live microphone is described in `live-audio.md`.
 
 ## Requirement
 

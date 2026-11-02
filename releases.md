@@ -6,6 +6,7 @@
 - The server, client and OpenCode backend use the Native scheduler instead of the Direct scheduler. An idle server no longer wakes every 2 ms to retry its sockets, and accepting connections can no longer stall on macOS once the Direct blocking pool stops waking its workers.
 - Track OpenCode child lifecycle events so deleted workers animate their return without mistaking completion or partial lists for deletion.
 - Document the direct 1080p virtual camera and dedicated audio input used to share a Tomori space in a Slack Huddle without OBS.
+- Toggle the Quest microphone for live conversation with the left grip; hold X to address the agent and release it to return to the previous live setting. Live capture stops on focus loss or disconnection. Echo cancellation is not guaranteed.
 - The spectator renders an unobstructed view without the headset HUD, animates the swarm from the space's activity, and publishes 1080p PipeWire video instead of 4K.
 - Release Tomori under the MIT License only, replacing the MIT or Apache-2.0 dual license.
 - The headset joins spaces on a Tomori server instead of chatting through the PC bridge: it lists servers found with Bonjour and the USB connection, reconnects to the last server when it finds it again, then lists the server's spaces. It reconnects and rejoins after a dropped connection, says when a space has ended, as after the server restarts, and answers approvals with the right stick and **A**.

@@ -28,6 +28,8 @@ pub struct Microphone {
     sequence: u32,
     /// Samples pushed so far, including those not sent: the sender's clock for frame timestamps. It counts captured audio, so it stands still while the application captures nothing, as between push-to-talk recordings.
     captured: u64,
+    /// The connection the audio is captured for; see [`Self::bind_connection`].
+    connection: Option<u64>,
 }
 
 impl Microphone {
@@ -50,7 +52,22 @@ impl Microphone {
             utterance: None,
             sequence: 0,
             captured: 0,
+            connection: None,
         }
+    }
+
+    /// Send audio only on the connection identified by `generation` (see [`crate::Sender::connection_generation`]): once it ends, frames are dropped even if a later connection has been made. Rebinding discards samples short of a frame, which belong to the previous connection.
+    pub fn bind_connection(&mut self, generation: u64) {
+        if self.connection != Some(generation) {
+            self.captured += self.pending.len() as u64;
+            self.pending.clear();
+            self.connection = Some(generation);
+        }
+    }
+
+    /// The connection bound with [`Self::bind_connection`], if any.
+    pub fn connection(&self) -> Option<u64> {
+        self.connection
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -185,7 +202,7 @@ impl Microphone {
             samples,
         };
         self.sequence = self.sequence.wrapping_add(1);
-        self.sender.send_audio(frame)
+        self.sender.send_audio_for(frame, self.connection)
     }
 }
 
@@ -243,6 +260,32 @@ mod tests {
         let sender = Sender::detached(Outbox::new(1000, 1000));
         sender.outbox().connect();
         (Microphone::new(sender.clone(), 16_000), sender)
+    }
+
+    #[test]
+    fn a_bound_microphone_sends_only_on_its_connection_and_rebinding_drops_the_partial_frame() {
+        let (mut microphone, sender) = microphone();
+        let old = sender.connection_generation();
+        microphone.bind_connection(old);
+        microphone.set_gate(Gate::Live).unwrap();
+        microphone.push(&[1; 480]).unwrap();
+        assert_eq!(frames(&sent(sender.outbox())), [(Gate::Live, 0, 320)]);
+        sender.outbox().disconnect();
+        sender.outbox().connect();
+        // The old connection's frame is dropped on the new connection.
+        microphone.push(&[1; 160]).unwrap();
+        assert!(frames(&sent(sender.outbox())).is_empty());
+        // Rebinding discards the old connection's partial frame.
+        microphone.push(&[1; 100]).unwrap();
+        microphone.bind_connection(sender.connection_generation());
+        microphone.push(&[2; 320]).unwrap();
+        let items = sent(sender.outbox());
+        assert_eq!(frames(&items).len(), 1);
+        let Some(Item::Audio(frame)) = items.iter().find(|item| matches!(item, Item::Audio(_)))
+        else {
+            panic!("{items:?}")
+        };
+        assert!(frame.samples.iter().all(|sample| *sample == 2));
     }
 
     #[test]

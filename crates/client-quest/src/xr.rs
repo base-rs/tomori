@@ -166,10 +166,16 @@ pub fn run(
     let mut last_frame = Instant::now();
     let mut frames = 0_u64;
     let mut stick_latched = false;
+    let mut audience_toggle = LiveGrip::default();
     let mut choice_latched = false;
     let mut was_talking = false;
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     let mut talk_blocked = false;
+    // Ask for the microphone when the session first has focus, where the
+    // headset can show the request, instead of on the first recording.
+    let mut microphone_requested = false;
+    // The arrival object the ray met on the last frame, which A chooses.
+    let mut highlighted = None;
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
     let mut arrival_time = 0.0_f32;
@@ -195,14 +201,21 @@ pub fn run(
                         // Do not lose a real focus-loss transition if the
                         // runtime also queues a refocus in this poll batch.
                         stick_latched = false;
+                        audience_toggle.blur();
                         choice_latched = false;
                         was_talking = false;
                         talk_blocked = true;
+                        conversation.stop_live();
                         conversation.stop_talking();
                         pointer.release();
+                        highlighted = None;
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
+                    if focused && !microphone_requested {
+                        microphone_requested = true;
+                        connection.request_microphone();
+                    }
                     match state {
                         xr::SessionState::READY => {
                             session.begin(STEREO)?;
@@ -237,11 +250,14 @@ pub fn run(
         connection.poll(focused && running, &mut conversation);
         if !focused || !running {
             stick_latched = false;
+            audience_toggle.blur();
             choice_latched = false;
             was_talking = false;
             talk_blocked = true;
+            conversation.stop_live();
             conversation.stop_talking();
             pointer.release();
+            highlighted = None;
             presentation_navigation.release();
         }
         if !running {
@@ -259,6 +275,13 @@ pub fn run(
         // Only actual session focus loss cancels an utterance; an X release
         // while still focused must finalize/send it instead.
         let mut controls = input.sample_actions(&session, focused)?;
+        if audience_toggle.update(
+            focused,
+            controls.audience_grip_active,
+            controls.audience_grip > 0.75,
+        ) {
+            conversation.toggle_live();
+        }
         let stick = controls.navigation;
         let moving = stick.x.abs() > 0.6 || stick.y.abs() > 0.6;
         let navigate = moving && !stick_latched;
@@ -285,7 +308,9 @@ pub fn run(
             conversation.choose(if right.x > 0.0 { 1 } else { -1 });
         }
         choice_latched = choice_moving;
-        let reset = controls.reset && conversation.accept();
+        // A chooses the object the ray highlighted last frame, as the
+        // trigger does; with nothing highlighted it accepts or resets.
+        let reset = controls.reset && conversation.press_a(highlighted.as_ref());
         // Hold X to talk to the agent; releasing it while focused sends the utterance.
         if focused && !controls.talk {
             talk_blocked = false;
@@ -295,12 +320,8 @@ pub fn run(
             conversation.talk(talking);
         }
         was_talking = talking;
-        // Spoken replies and the audience microphone return with server playback.
-        let _ = (
-            controls.sound_toggle,
-            controls.replay,
-            controls.audience_grip,
-        );
+        // Spoken replies return with server playback.
+        let _ = (controls.sound_toggle, controls.replay);
         presentation_navigation.update(
             None,
             &crate::delegation::Workspace::default(),
@@ -381,6 +402,7 @@ pub fn run(
         motion.update(&arrival_target(&conversation), arrival_time);
         let mut scene = motion.scene(arrival_time);
         let pointing = pointer.update(ray, controls.trigger, &scene.targets());
+        highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
         if let Some(key) = &pointing.chosen {
             conversation.choose_object(key);
             motion.update(&arrival_target(&conversation), arrival_time);
@@ -773,6 +795,33 @@ struct Input {
     last_diagnostic: Instant,
 }
 
+/// A held grip toggles once; after focus loss it must be released first.
+#[derive(Default)]
+struct LiveGrip {
+    held: bool,
+    blocked: bool,
+}
+
+impl LiveGrip {
+    fn blur(&mut self) {
+        self.held = false;
+        self.blocked = true;
+    }
+
+    fn update(&mut self, focused: bool, active: bool, pressed: bool) -> bool {
+        if !focused || !active {
+            self.blur();
+            return false;
+        }
+        if !pressed {
+            self.blocked = false;
+        }
+        let toggle = pressed && !self.held && !self.blocked;
+        self.held = pressed;
+        toggle
+    }
+}
+
 /// A single synchronized action snapshot. No pose/tracking state participates
 /// in interpreting held buttons, press edges, or inactive/disconnected actions.
 struct ActionInputs {
@@ -806,6 +855,7 @@ struct Controls {
     sound_toggle: bool,
     replay: bool,
     audience_grip: f32,
+    audience_grip_active: bool,
 }
 
 impl Controls {
@@ -836,6 +886,7 @@ impl Controls {
             presentation_navigation: axis(actions.presentation_navigation),
             sound_toggle: pressed(actions.sound_toggle),
             replay: pressed(actions.replay),
+            audience_grip_active: actions.audience_grip.is_active,
             audience_grip: if actions.audience_grip.is_active {
                 actions.audience_grip.current_state
             } else {
@@ -1400,6 +1451,22 @@ mod tests {
         assert_eq!(controls.audience_grip, 1.0);
         assert!(!controls.talk);
         assert_press_edges(&controls, false);
+    }
+
+    #[test]
+    fn live_grip_requires_release_after_focus_loss() {
+        let mut grip = LiveGrip::default();
+        assert!(grip.update(true, true, true));
+        assert!(!grip.update(true, true, true));
+        assert!(!grip.update(false, true, true));
+        assert!(!grip.update(true, true, true));
+        assert!(!grip.update(true, true, false));
+        assert!(grip.update(true, true, true));
+        // An inactive action is not evidence that the grip was released.
+        assert!(!grip.update(true, false, false));
+        assert!(!grip.update(true, true, true));
+        assert!(!grip.update(true, true, false));
+        assert!(grip.update(true, true, true));
     }
 
     #[test]

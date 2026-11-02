@@ -211,14 +211,24 @@ sits lower so it doesn't obscure the swarm.
 
 ### Voice
 
-In a space, hold **X** to talk to the agent. The microphone is open only while
-**X** is held: the panel shows **MIC AGENT** with the words recognized so far,
+In a space, squeeze the **left grip** to toggle live audio to the other participants
+and spectator without addressing the agent. The panel shows **MIC LIVE** while
+the microphone is open. Squeeze again to mute. Live audio is off by default and
+stops on focus loss, disconnection, departure or microphone failure; toggle it
+again to resume. Live capture requests the Android voice-communication preset,
+but echo cancellation is not guaranteed: use headphones or lower the headset
+volume if there is feedback.
+The live-microphone toggle is currently available on Quest, not desktop XR.
+
+Hold **X** to talk to the agent: the panel shows **MIC AGENT** with the words recognized so far,
 and a **REC** timer above it counts up. Release **X** to send; the server
 finishes the transcript and queues it like typed input, where **B** can still
 cancel it.
-Otherwise the microphone is off, and the panel says **Mic off**. The first
-press asks for microphone permission; allow it and hold **X** again. If it was
-denied, allow the microphone for Tomori in the headset's Settings.
+Releasing X returns to live audio if it was enabled; otherwise the microphone is
+off, and the panel says **Mic off**. Tomori asks for microphone access when it
+starts, so that the request does not interrupt your first recording; if you
+dismiss it, the first use of the microphone asks again. If it was denied, allow
+the microphone for Tomori in the headset's Settings.
 
 If anything stops the words reaching the agent intact, such as lost audio, a
 dropped connection, nothing being heard or a full queue, the panel shows the
@@ -229,10 +239,8 @@ The agent's replies are spoken as they stream in, and everyone in the space
 hears them and each other's push-to-talk audio through the headset or desktop
 speakers. You never hear your own recording back. While **X** is held, nothing
 plays, so that the speakers cannot be transcribed as your words; the reply
-carries on meanwhile and resumes where it has got to when you release. There is
-no open microphone for talking to other participants without the agent yet (see
-[design/speech.md](design/speech.md) and
-[design/live-audio.md](design/live-audio.md)).
+carries on meanwhile and resumes where it has got to when you release (see
+[design/speech.md](design/speech.md) and [design/live-audio.md](design/live-audio.md)).
 
 Recognition and synthesis run inside the server through sherpa-onnx, whose
 libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build

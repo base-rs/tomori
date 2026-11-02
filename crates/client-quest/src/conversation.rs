@@ -36,13 +36,16 @@ pub enum Action {
     Rescan,
     Send(ClientMessage),
     /// Open the microphone and send what it hears to the agent as this utterance.
-    BeginUtterance(String),
+    BeginUtterance(String, u64),
     /// Close the microphone and finish the utterance, for the server to transcribe.
     EndUtterance,
     /// Close the microphone and abandon the utterance.
     CancelUtterance,
     /// Close the microphone and forget the utterance, which the server has already ended.
     AbandonUtterance,
+    /// Open or close the microphone for other participants without addressing the agent.
+    StartLive(u64),
+    StopLive,
 }
 
 /// Push-to-talk, from pressing X until the server's transcript or failure. See `design/speech.md`.
@@ -161,6 +164,8 @@ pub struct Conversation {
     /// The last body paginated, since the panel is drawn every frame.
     paged: Option<Paged>,
     talk: Option<Talk>,
+    live: bool,
+    capture_generation: u64,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant identity persists.
     launch: String,
     utterances: u64,
@@ -214,6 +219,8 @@ impl Conversation {
             actions: Vec::new(),
             paged: None,
             talk: None,
+            live: false,
+            capture_generation: 0,
             launch: format!(
                 "{:x}",
                 SystemTime::now()
@@ -241,8 +248,23 @@ impl Conversation {
         self.connected.as_ref()
     }
 
+    /// Connection generation at which new microphone actions are requested.
+    pub fn set_capture_generation(&mut self, generation: u64) {
+        self.capture_generation = generation;
+    }
+
+    #[cfg(test)]
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
+    }
+
+    /// Take one action so a failure can cancel later queued microphone starts.
+    pub fn next_action(&mut self) -> Option<Action> {
+        if self.actions.is_empty() {
+            None
+        } else {
+            Some(self.actions.remove(0))
+        }
     }
 
     /// Replace the server list, keeping the selection on the same server.
@@ -336,6 +358,7 @@ impl Conversation {
 
     fn connection_changed(&mut self, state: ConnectionState) {
         if !matches!(state, ConnectionState::Connected { .. }) {
+            self.stop_live();
             match &self.talk {
                 Some(Talk::Recording { .. }) => {
                     self.stop_talking();
@@ -541,6 +564,7 @@ impl Conversation {
     }
 
     fn close_space(&mut self) {
+        self.stop_live();
         self.stop_talking();
         self.space = None;
         self.joining = None;
@@ -784,6 +808,20 @@ impl Conversation {
         }
     }
 
+    /// A while the ray highlights an arrival object chooses that object, as
+    /// the trigger does, so that A never acts on a different item from the one
+    /// pointed at. Otherwise A accepts as [`Self::accept`] does. Returns true
+    /// when A has nothing to do here, so it can keep its swarm-reset meaning.
+    pub fn press_a(&mut self, highlighted: Option<&arrival::Key>) -> bool {
+        match highlighted {
+            Some(key) if self.arrival().is_some() => {
+                self.choose_object(key);
+                false
+            }
+            _ => self.accept(),
+        }
+    }
+
     /// A: connect, join, or confirm the chosen approval option. Returns true when A has nothing to do here, so it can keep its swarm-reset meaning.
     pub fn accept(&mut self) -> bool {
         match self.mode {
@@ -987,7 +1025,10 @@ impl Conversation {
         let utterance = format!("{}-{}", self.launch, self.utterances);
         self.error = None;
         self.notice = None;
-        self.actions.push(Action::BeginUtterance(utterance.clone()));
+        self.actions.push(Action::BeginUtterance(
+            utterance.clone(),
+            self.capture_generation,
+        ));
         self.talk = Some(Talk::Recording {
             utterance,
             started: Instant::now(),
@@ -995,18 +1036,115 @@ impl Conversation {
         });
     }
 
+    /// Toggle an explicitly enabled microphone for the space, not the agent.
+    pub fn toggle_live(&mut self) {
+        if self.live {
+            self.stop_live();
+            return;
+        }
+        if matches!(self.talk, Some(Talk::Recording { .. })) {
+            self.notice = Some("Release X before enabling live audio.".into());
+            return;
+        }
+        if self.mode != Mode::Space || self.space.is_none() {
+            self.notice = Some("Join a space to use live audio.".into());
+            return;
+        }
+        if !matches!(self.state, Some(ConnectionState::Connected { .. })) {
+            self.error = Some("Offline; cannot use live audio.".into());
+            return;
+        }
+        self.error = None;
+        self.notice = None;
+        self.live = true;
+        self.actions
+            .push(Action::StartLive(self.capture_generation));
+    }
+
+    /// Stop live audio on focus loss, departure, failure, or explicit mute.
+    pub fn stop_live(&mut self) {
+        if self.live {
+            self.live = false;
+            let pending = self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::StartLive(_)));
+            self.actions
+                .retain(|action| !matches!(action, Action::StartLive(_)));
+            if !pending {
+                // Mute the live gate before a previously queued X release can
+                // restore it, for example when focus is lost just afterward.
+                let before_end = self
+                    .actions
+                    .iter()
+                    .position(|action| matches!(action, Action::EndUtterance))
+                    .unwrap_or(self.actions.len());
+                self.actions.insert(before_end, Action::StopLive);
+            }
+        }
+    }
+
     /// Abandon a recording without sending it, as when the session loses focus. Words already released are still transcribed.
     pub fn stop_talking(&mut self) {
-        if matches!(self.talk, Some(Talk::Recording { .. })) {
+        if let Some(Talk::Recording { utterance, .. }) = &self.talk {
+            let pending = self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::BeginUtterance(id, _) if id == utterance));
+            self.actions.retain(
+                |action| !matches!(action, Action::BeginUtterance(id, _) if id == utterance),
+            );
+            if !pending {
+                self.actions.push(Action::CancelUtterance);
+            }
             self.talk = None;
-            self.actions.push(Action::CancelUtterance);
         }
     }
 
     /// The microphone could not record, so the recording is abandoned.
     pub fn microphone_failed(&mut self, error: impl Into<String>) {
+        self.stop_live();
+        // X may have been released while capture failed, before the queued end
+        // was sent. Cancel instead of finalizing an incomplete utterance.
+        // Only an utterance whose end has not been performed yet is lost; a
+        // failure after that comes from the live capture reopened after it,
+        // and the sent utterance is still transcribed.
+        let mut cancelled = false;
+        if let Some(Talk::Sending { utterance, .. }) = &self.talk
+            && self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::EndUtterance))
+        {
+            cancelled = true;
+            let pending = self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::BeginUtterance(id, _) if id == utterance));
+            self.actions.retain(|action| {
+                !matches!(action, Action::EndUtterance)
+                    && !matches!(action, Action::BeginUtterance(id, _) if id == utterance)
+            });
+            if !pending {
+                self.actions.push(Action::CancelUtterance);
+            }
+        }
         self.stop_talking();
+        if cancelled {
+            self.talk = None;
+        }
         self.error = Some(error.into());
+    }
+
+    /// Ending the utterance failed, so its words were not sent: stop showing
+    /// them as on their way, and report why.
+    pub fn utterance_not_sent(&mut self, error: impl Into<String>) {
+        // A later utterance may already be queued behind this end: cancel it
+        // as any capture failure does, before clearing what is on its way.
+        self.microphone_failed(error);
+        if matches!(self.talk, Some(Talk::Sending { .. })) {
+            self.talk = None;
+        }
     }
 
     /// How long X has been held, while recording.
@@ -1606,9 +1744,11 @@ impl Conversation {
                     .iter()
                     .filter(|entry| entry.state == QueueState::Queued)
                     .count();
-                match waiting {
-                    0 => format!("Mic off | {} here", space.participants.len()),
-                    count => format!(
+                match (self.live, waiting) {
+                    (true, 0) => format!("{} here", space.participants.len()),
+                    (true, count) => format!("{count} queued | {} here", space.participants.len()),
+                    (false, 0) => format!("Mic off | {} here", space.participants.len()),
+                    (false, count) => format!(
                         "Mic off | {count} queued | {} here",
                         space.participants.len()
                     ),
@@ -1620,6 +1760,11 @@ impl Conversation {
             .current_mode()
             .map(|mode| mode.name.as_str())
             .or(space.mode.as_deref().filter(|_| !space.modes.is_empty()));
+        let status = if self.live && !matches!(self.talk, Some(Talk::Recording { .. })) {
+            format!("MIC LIVE | {status}")
+        } else {
+            status
+        };
         let mut lines = vec![
             short(&match mode {
                 Some(mode) => format!(
@@ -2078,6 +2223,41 @@ mod tests {
             }]
         );
         assert_eq!(conversation.arrival().unwrap().ring, None);
+    }
+
+    #[test]
+    fn a_chooses_the_highlighted_session_not_the_ring_selection() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![summary("one", "One")]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        sent(&mut conversation);
+        conversation.apply(sessions());
+        // The ring's own selection is still "New session"; the ray highlights
+        // an existing session, and A must choose that one.
+        let highlighted = arrival::Key::Session(Some("ses_1".into()));
+        assert!(!conversation.press_a(Some(&highlighted)));
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { session: Some(session), .. }] if session == "ses_1"
+        ));
+    }
+
+    #[test]
+    fn a_without_a_highlight_accepts_the_ring_selection() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![summary("one", "One")]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        sent(&mut conversation);
+        conversation.apply(sessions());
+        assert!(!conversation.press_a(None));
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { session: None, .. }]
+        ));
     }
 
     #[test]
@@ -3038,7 +3218,7 @@ mod tests {
     fn press(conversation: &mut Conversation) -> String {
         conversation.talk(true);
         match conversation.take_actions().as_slice() {
-            [Action::BeginUtterance(utterance)] => utterance.clone(),
+            [Action::BeginUtterance(utterance, _)] => utterance.clone(),
             actions => panic!("{actions:?}"),
         }
     }
@@ -3069,6 +3249,194 @@ mod tests {
         // Releasing again does nothing.
         conversation.talk(false);
         assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn live_toggle_stays_visible_and_x_returns_to_live() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        assert_eq!(conversation.take_actions(), [Action::StartLive(0)]);
+        assert!(conversation.text().contains("MIC LIVE"));
+        let utterance = press(&mut conversation);
+        assert!(conversation.text().contains("MIC AGENT"));
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        assert!(conversation.text().contains("MIC LIVE"));
+        conversation.apply(transcript(&utterance, "hello", true));
+        assert!(conversation.text().contains("MIC LIVE"));
+        conversation.toggle_live();
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(conversation.text().contains("Mic off"));
+    }
+
+    #[test]
+    fn live_stops_on_focus_loss_disconnect_and_microphone_failure() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        conversation.stop_live();
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(!conversation.live);
+        conversation.toggle_live();
+        conversation.take_actions();
+        conversation.microphone_failed("no microphone");
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(!conversation.live);
+        conversation.toggle_live();
+        conversation.take_actions();
+        conversation.apply(Event::State(ConnectionState::Closed));
+        assert!(conversation.take_actions().contains(&Action::StopLive));
+        assert!(!conversation.live);
+    }
+
+    #[test]
+    fn focus_loss_cancels_queued_microphone_starts() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.talk(true);
+        conversation.stop_live();
+        conversation.stop_talking();
+        assert!(conversation.take_actions().is_empty());
+        assert!(!conversation.live);
+        assert!(conversation.recording().is_none());
+    }
+
+    #[test]
+    fn failed_live_start_removes_a_later_queued_agent_start() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.talk(true);
+        assert!(matches!(
+            conversation.next_action(),
+            Some(Action::StartLive(_))
+        ));
+        conversation.microphone_failed("capture failed");
+        assert_eq!(conversation.next_action(), Some(Action::StopLive));
+        assert_eq!(conversation.next_action(), None);
+        assert!(conversation.recording().is_none());
+    }
+
+    #[test]
+    fn live_mute_precedes_a_queued_agent_end() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        conversation.stop_live();
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::StopLive, Action::EndUtterance]
+        );
+    }
+
+    #[test]
+    fn queued_microphone_actions_keep_their_original_connection_generation() {
+        let mut conversation = joined(|_| {});
+        conversation.set_capture_generation(7);
+        conversation.toggle_live();
+        conversation.set_capture_generation(8);
+        assert_eq!(conversation.take_actions(), [Action::StartLive(7)]);
+        conversation.talk(true);
+        conversation.set_capture_generation(9);
+        assert!(matches!(
+            conversation.next_action(),
+            Some(Action::BeginUtterance(_, 8))
+        ));
+    }
+
+    #[test]
+    fn capture_failure_before_a_queued_end_cancels_instead() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        conversation.microphone_failed("capture failed");
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::StopLive, Action::CancelUtterance]
+        );
+        assert!(conversation.text().contains("capture failed"));
+        assert!(!conversation.live);
+    }
+
+    #[test]
+    fn a_live_failure_after_an_utterance_was_ended_keeps_its_pending_transcript() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        // The end has been performed: the utterance is with the server.
+        conversation.take_actions();
+        assert!(matches!(conversation.talk, Some(Talk::Sending { .. })));
+        // The live capture reopened afterwards fails.
+        conversation.microphone_failed("capture failed");
+        assert!(matches!(conversation.talk, Some(Talk::Sending { .. })));
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(!conversation.live);
+        // The panel no longer claims a live microphone, and the error is kept
+        // to show once the pending transcript is resolved.
+        assert!(!conversation.text().contains("MIC LIVE"));
+        assert_eq!(conversation.error.as_deref(), Some("capture failed"));
+        let utterance = conversation.talk.as_ref().unwrap().utterance().to_owned();
+        conversation.apply(transcript(&utterance, "hello", true));
+        assert!(conversation.talk.is_none());
+        assert!(conversation.text().contains("capture failed"));
+    }
+
+    #[test]
+    fn an_utterance_whose_end_failed_is_not_left_sending() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        // The end was taken to be performed, and failed while stopping.
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        conversation.utterance_not_sent("Microphone lost audio; not sent.");
+        assert!(conversation.talk.is_none());
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(
+            conversation
+                .text()
+                .contains("Microphone lost audio; not sent."),
+            "{}",
+            conversation.text()
+        );
+    }
+
+    #[test]
+    fn a_failed_end_also_withdraws_a_later_utterance_queued_behind_it() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        press(&mut conversation);
+        conversation.talk(false);
+        // A second press and release land before the first end is performed.
+        conversation.talk(true);
+        conversation.talk(false);
+        assert!(matches!(
+            conversation.next_action(),
+            Some(Action::EndUtterance)
+        ));
+        conversation.utterance_not_sent("Microphone lost audio; not sent.");
+        assert!(conversation.talk.is_none());
+        // The second utterance never began, so nothing of it is performed.
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+    }
+
+    #[test]
+    fn capture_failure_discards_an_unstarted_utterance_and_its_end() {
+        let mut conversation = joined(|_| {});
+        conversation.toggle_live();
+        conversation.take_actions();
+        conversation.talk(true);
+        conversation.talk(false);
+        conversation.microphone_failed("capture failed");
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        assert!(conversation.text().contains("capture failed"));
     }
 
     #[test]

@@ -75,6 +75,94 @@ fn presence(x: f32) -> ClientMessage {
 }
 
 #[test]
+fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() {
+    let outbox = Outbox::new(16, 64);
+    outbox.require_microphone_rearm();
+    outbox.connect();
+    let generation = outbox.connection_generation();
+    assert!(outbox.arm_microphone(generation));
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    outbox.send_audio(audio(1)).unwrap();
+    assert!(items(&outbox).contains(&Item::Audio(1)));
+
+    outbox.disconnect();
+    assert_eq!(outbox.membership().gate, Gate::Off);
+    // A gate queued while disconnected is not an activation on the next link.
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    assert!(outbox.connect().is_empty());
+    assert!(!outbox.arm_microphone(generation));
+    // An implicit gate restoration from an old utterance must not rearm.
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    items(&outbox);
+    outbox.send_audio(audio(2)).unwrap();
+    let mut agent = audio(3);
+    agent.gate = Gate::Agent;
+    outbox.send_audio(agent).unwrap();
+    assert!(items(&outbox).is_empty());
+
+    assert!(outbox.arm_microphone(outbox.connection_generation()));
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    outbox.send_audio(audio(4)).unwrap();
+    assert!(items(&outbox).contains(&Item::Audio(4)));
+    outbox.disconnect();
+    outbox.connect();
+    assert!(outbox.arm_microphone(outbox.connection_generation()));
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Agent })
+        .unwrap();
+    outbox
+        .send(ClientMessage::UtteranceBegin {
+            utterance: "new".into(),
+        })
+        .unwrap();
+    let mut agent = audio(5);
+    agent.gate = Gate::Agent;
+    outbox.send_audio(agent).unwrap();
+    assert!(items(&outbox).contains(&Item::Audio(5)));
+}
+
+#[test]
+fn audio_bound_to_an_ended_connection_is_never_sent_on_a_later_one() {
+    let outbox = Outbox::new(16, 64);
+    outbox.require_microphone_rearm();
+    outbox.connect();
+    let old = outbox.connection_generation();
+    assert!(outbox.arm_microphone(old));
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    outbox.send_audio_for(audio(1), Some(old)).unwrap();
+    assert!(items(&outbox).contains(&Item::Audio(1)));
+
+    // A capture of the old connection is still delivering when the link is
+    // lost and replaced, and the microphone is explicitly rearmed for the new
+    // one: the old capture's frames must still be dropped.
+    outbox.disconnect();
+    outbox.send_audio_for(audio(2), Some(old)).unwrap();
+    outbox.connect();
+    let new = outbox.connection_generation();
+    assert_ne!(old, new);
+    assert!(outbox.arm_microphone(new));
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    items(&outbox);
+    outbox.send_audio_for(audio(3), Some(old)).unwrap();
+    outbox.send_audio_for(audio(4), Some(new)).unwrap();
+    let sent = items(&outbox);
+    assert!(!sent.contains(&Item::Audio(2)) && !sent.contains(&Item::Audio(3)));
+    assert!(sent.contains(&Item::Audio(4)));
+}
+
+#[test]
 fn alternates_control_and_audio_so_neither_starves() {
     let outbox = Outbox::new(16, 64);
     outbox.connect();
