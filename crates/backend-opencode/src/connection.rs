@@ -311,6 +311,10 @@ pub struct Registration {
     children: BTreeMap<String, Worker>,
     /// Child deletions observed before the initial snapshot was installed.
     initial_deletions: HashSet<String>,
+    /// Deletions observed while a snapshot is in flight; its listing may
+    /// predate them, so they must not be resurrected when it is installed.
+    snapshot_deletions: HashSet<String>,
+    snapshot_deletions_overflow: bool,
     /// State and title events for children not yet discovered by the initial
     /// listing. Their parent is not included in execution events.
     initial_changes: HashMap<String, (Option<WorkerState>, Option<String>)>,
@@ -368,6 +372,8 @@ impl Registration {
                 running: RunningState::Unknown,
                 children: BTreeMap::new(),
                 initial_deletions: HashSet::new(),
+                snapshot_deletions: HashSet::new(),
+                snapshot_deletions_overflow: false,
                 initial_changes: HashMap::new(),
                 initial_creations: BTreeMap::new(),
                 workers_ready: false,
@@ -406,6 +412,21 @@ impl Registration {
             self.events.worker_incomplete.store(true, Ordering::Release);
             self.publish_workers();
         }
+    }
+
+    /// Remove an observed deletion, remembering it against any snapshot
+    /// whose listing is still in flight.
+    fn remove_worker(&mut self, id: &str) -> bool {
+        if self.snapshot_in_flight.is_some() {
+            if self.snapshot_deletions.contains(id)
+                || self.snapshot_deletions.len() < api::MAX_TRACKED_WORKERS
+            {
+                self.snapshot_deletions.insert(id.to_owned());
+            } else {
+                self.snapshot_deletions_overflow = true;
+            }
+        }
+        self.children.remove(id).is_some()
     }
 
     fn publish_modes(&mut self) {
@@ -468,41 +489,43 @@ impl Registration {
             worker.title = bounded_worker_title(&worker.title);
         }
         let discovering = self.discovering_workers();
-        if discovering {
-            let additional = workers
-                .iter()
-                .filter(|worker| {
-                    !self.initial_deletions.contains(&worker.id)
-                        && !self.children.contains_key(&worker.id)
-                })
-                .count();
-            if self.children.len().saturating_add(additional) > api::MAX_TRACKED_WORKERS {
-                return Err(backend::Error::new(
-                    backend::ErrorKind::Unavailable,
-                    "Worker observation exceeds the supported limit.",
-                ));
-            }
+        let additional = workers
+            .iter()
+            .filter(|worker| {
+                !self.initial_deletions.contains(&worker.id)
+                    && !self.snapshot_deletions.contains(&worker.id)
+                    && !self.children.contains_key(&worker.id)
+            })
+            .count();
+        if self.children.len().saturating_add(additional) > api::MAX_TRACKED_WORKERS {
+            return Err(backend::Error::new(
+                backend::ErrorKind::Unavailable,
+                "Worker observation exceeds the supported limit.",
+            ));
         }
         self.events.advance_workers();
         if self.bootstrap_epoch.is_none() {
             self.bootstrap_epoch = Some(self.events.worker_epoch.load(Ordering::Acquire));
         }
-        if discovering {
-            for mut worker in workers.drain(..) {
-                if !self.initial_deletions.contains(&worker.id) {
-                    if !self.children.contains_key(&worker.id)
-                        && let Some((state, title)) = self.initial_changes.get(&worker.id)
-                    {
-                        if let Some(state) = state {
-                            worker.state = *state;
-                        }
-                        if let Some(title) = title {
-                            worker.title.clone_from(title);
-                        }
+        for mut worker in workers.drain(..) {
+            if !self.initial_deletions.contains(&worker.id)
+                && !self.snapshot_deletions.contains(&worker.id)
+            {
+                if discovering
+                    && !self.children.contains_key(&worker.id)
+                    && let Some((state, title)) = self.initial_changes.get(&worker.id)
+                {
+                    if let Some(state) = state {
+                        worker.state = *state;
                     }
-                    self.children.entry(worker.id.clone()).or_insert(worker);
+                    if let Some(title) = title {
+                        worker.title.clone_from(title);
+                    }
                 }
+                self.children.entry(worker.id.clone()).or_insert(worker);
             }
+        }
+        if discovering {
             // A nested child can be created while its preexisting parent is
             // still being discovered. Attach pending descendants only after
             // their parent is known, preserving the actual hierarchy.
@@ -899,6 +922,8 @@ async fn service<S: Timers>(
                             } else {
                                 let local_cancel = cancellation.child();
                                 registration.snapshot_in_flight = Some(local_cancel.clone());
+                                registration.snapshot_deletions.clear();
+                                registration.snapshot_deletions_overflow = false;
                                 let registration = registration.events.worker_epoch.clone();
                                 let modes = registrations[&id].modes.clone();
                                 let resolved = &resolved;
@@ -937,10 +962,16 @@ async fn service<S: Timers>(
                     let result = match registrations.get_mut(&completed.id) {
                         Some(registration) if Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration) => {
                             registration.snapshot_in_flight = None;
-                            completed.result.and_then(|mut snapshot| {
+                            let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
+                            let result = completed.result.and_then(|mut snapshot| {
+                                if overflow {
+                                    return Err(backend::Error::new(backend::ErrorKind::Unavailable, "Too many sessions were deleted during the snapshot; please retry."));
+                                }
                                 registration.install_workers(&mut snapshot.workers)?;
                                 Ok(registration.events.snapshot_reply(snapshot))
-                            })
+                            });
+                            registration.snapshot_deletions.clear();
+                            result
                         }
                         _ => Err(backend::Error::new(backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
                     };
@@ -1274,6 +1305,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                             || registration.initial_creations.len() < api::MAX_TRACKED_WORKERS
                         {
                             registration.initial_deletions.remove(child);
+                            registration.snapshot_deletions.remove(child);
                             registration.initial_creations.insert(
                                 child.to_owned(),
                                 Worker {
@@ -1300,6 +1332,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                 } else {
                     registration.initial_deletions.remove(child);
                     registration.initial_changes.remove(child);
+                    registration.snapshot_deletions.remove(child);
                     registration.children.insert(
                         child.to_owned(),
                         Worker {
@@ -1317,7 +1350,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                 }
             }
             "session.deleted" => {
-                let removed = registration.children.remove(child).is_some();
+                let removed = registration.remove_worker(child);
                 if discovering {
                     // A delete event has no parent ID. Before bootstrap, keep
                     // even an unknown ID: a stale page may later list it.
@@ -1672,14 +1705,20 @@ async fn snapshot<S: Timers>(
 ) -> std::result::Result<Snapshot, Failure> {
     let (parts, active) = futures_lite::future::zip(
         api::SnapshotParts::fetch(client, resolved, id, cancellation),
-        api::active_sessions_with_timeout(client, resolved, cancellation, timers),
+        api::active_sessions_with_timeout(
+            client,
+            resolved,
+            cancellation,
+            timers,
+            Duration::from_secs(1),
+        ),
     )
     .await;
     let parts = parts?;
     let messages = snapshot_messages(&parts.messages);
     let busy = match &active {
-        Some(active) if active.contains(id) => true,
-        Some(_) if !parts.has_parent => false,
+        Some(active) if active.contains(id) => Some(true),
+        Some(_) if !parts.has_parent => Some(false),
         _ => parts.busy,
     };
     let mut workers = parts.workers();
@@ -1698,7 +1737,7 @@ async fn snapshot<S: Timers>(
     }
     Ok(Snapshot {
         modes,
-        busy: Some(busy),
+        busy,
         messages,
         permissions: parts.permissions(),
         questions: parts.questions(),
@@ -2102,7 +2141,7 @@ mod tests {
         registration.install_workers(&mut initial).unwrap();
         registration.publish_workers();
         registration.events.deliver(Event::Busy);
-        registration.children.remove("child");
+        registration.remove_worker("child");
         let mut later = Vec::new();
         registration.install_workers(&mut later).unwrap();
         registration
@@ -2141,7 +2180,7 @@ mod tests {
             .snapshot_reply(Snapshot::default())
             .accept()
             .unwrap();
-        registration.children.remove("child");
+        registration.remove_worker("child");
         registration.publish_workers();
         assert!(
             matches!(events.try_recv().unwrap().into_current(), Some(Event::WorkersChanged { workers }) if workers.is_empty())
@@ -2252,7 +2291,7 @@ mod tests {
             .unwrap();
         registration.publish_workers();
         registration.events.deliver(Event::Busy);
-        registration.children.remove("child");
+        registration.remove_worker("child");
         registration.publish_workers();
 
         // The reply can be queued successfully yet dropped before its caller
@@ -2326,7 +2365,7 @@ mod tests {
         for _ in 0..1024 {
             assert!(registration.events.deliver(Event::Busy));
         }
-        registration.children.remove("child");
+        registration.remove_worker("child");
         registration.publish_workers();
         assert!(!registration.workers_dirty);
         let mut later = Vec::new();
@@ -2354,9 +2393,69 @@ mod tests {
             .snapshot_reply(Snapshot::default())
             .accept()
             .unwrap();
-        registration.children.remove("child");
+        // A later snapshot began listing before the deletion was observed.
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        registration.remove_worker("child");
         let mut stale = vec![child];
         registration.install_workers(&mut stale).unwrap();
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn a_later_snapshot_discovers_a_missed_worker_but_not_a_deleted_one() {
+        let (mut registration, _events) = Registration::new();
+        let worker = |id: &str| Worker {
+            id: id.into(),
+            parent: Some("parent".into()),
+            title: id.into(),
+            state: WorkerState::Running,
+        };
+        let mut initial = vec![worker("deleted")];
+        registration.install_workers(&mut initial).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        // Outside a snapshot window, a deletion leaves no retained record.
+        let mut known = vec![worker("gone")];
+        registration.install_workers(&mut known).unwrap();
+        assert!(registration.remove_worker("gone"));
+        assert!(registration.snapshot_deletions.is_empty());
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        assert!(registration.remove_worker("deleted"));
+        let mut later = vec![worker("missed"), worker("deleted")];
+        registration.install_workers(&mut later).unwrap();
+        assert_eq!(
+            later
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            ["missed"]
+        );
+    }
+
+    #[test]
+    fn an_uncached_deletion_during_a_later_snapshot_is_not_resurrected() {
+        let mut registrations = registrations();
+        let parent = registrations.get_mut("parent").unwrap();
+        parent.install_workers(&mut Vec::new()).unwrap();
+        parent
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        parent.snapshot_in_flight = Some(Cancellation::new());
+        let deleted = json!({"type":"session.deleted","data":{"sessionID":"listed"}});
+        apply_worker_event(&deleted, &mut registrations);
+        let parent = registrations.get_mut("parent").unwrap();
+        let mut stale = vec![Worker {
+            id: "listed".into(),
+            parent: Some("parent".into()),
+            title: "Listed".into(),
+            state: WorkerState::Running,
+        }];
+        parent.install_workers(&mut stale).unwrap();
         assert!(stale.is_empty());
     }
 
@@ -2697,11 +2796,14 @@ mod tests {
         let server_stall_reconcile = stall_reconcile.clone();
         let stall_active = Arc::new(AtomicBool::new(false));
         let server_stall_active = stall_active.clone();
+        let delay_active = Arc::new(AtomicBool::new(false));
+        let server_delay_active = delay_active.clone();
         let (event_tx, event_rx) = mpsc::channel::<String>();
         let event_rx = Arc::new(Mutex::new(event_rx));
         let (stalled_tx, stalled_rx) = mpsc::channel();
         let (reconcile_tx, reconcile_rx) = mpsc::channel();
         let (active_tx, active_rx) = mpsc::channel();
+        let (delayed_tx, delayed_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
             while !server_stopped.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -2709,10 +2811,12 @@ mod tests {
                         let stopped = server_stopped.clone();
                         let stall_reconcile = server_stall_reconcile.clone();
                         let stall_active = server_stall_active.clone();
+                        let delay_active = server_delay_active.clone();
                         let event_rx = event_rx.clone();
                         let stalled = stalled_tx.clone();
                         let reconcile = reconcile_tx.clone();
                         let active = active_tx.clone();
+                        let delayed = delayed_tx.clone();
                         std::thread::spawn(move || {
                             socket
                                 .set_read_timeout(Some(Duration::from_secs(3)))
@@ -2794,6 +2898,10 @@ mod tests {
                                 let body = if path.starts_with("/api/agent?") {
                                     r#"{"data":[]}"#.to_owned()
                                 } else if path == "/api/session/active" {
+                                    if delay_active.load(Ordering::Acquire) {
+                                        let _ = delayed.send(());
+                                        std::thread::sleep(Duration::from_millis(1500));
+                                    }
                                     r#"{"data":{"child":{"type":"running"}}}"#.to_owned()
                                 } else if path.starts_with("/api/session?parentID=wide&") {
                                     let children: Vec<_> = (0..60).map(|index| json!({
@@ -2855,7 +2963,7 @@ mod tests {
                                     json!({"data":{"id":"stale","projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":20,"idle":10}}}).to_string()
                                 } else if path.starts_with("/api/session/") {
                                     let id = path.trim_start_matches("/api/session/");
-                                    json!({"data":{"id":id,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":0,"idle":0}}}).to_string()
+                                    json!({"data":{"id":id,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":0,"idle":1}}}).to_string()
                                 } else {
                                     panic!("unexpected path: {path}");
                                 };
@@ -3076,6 +3184,28 @@ mod tests {
             .unwrap();
         assert_eq!(stale.busy, Some(false));
         assert_eq!(stale.workers[0].state, WorkerState::Unknown);
+        // A slow but valid active response must win over the stale busy
+        // timestamp rather than falsely making this idle session busy.
+        while stale_events.try_recv().is_ok() {}
+        delay_active.store(true, Ordering::Release);
+        delayed_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the slow active lookup did not start");
+        let stale_watch = stale_events.clone();
+        let (false_busy_tx, false_busy_wait) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(event) = block_on(stale_watch.recv()) {
+                if matches!(event.into_current(), Some(Event::Busy)) {
+                    let _ = false_busy_tx.send(());
+                    return;
+                }
+            }
+        });
+        assert!(matches!(
+            false_busy_wait.recv_timeout(Duration::from_millis(2200)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        delay_active.store(false, Ordering::Release);
         close("stale", &stale_events);
         let (fast_reply, fast_wait) = async_channel::bounded(1);
         commands
@@ -3101,6 +3231,20 @@ mod tests {
         );
         // A stalled optional active-session lookup must not discard the
         // valid idle record used to recover a missed idle event.
+        stall_active.store(true, Ordering::Release);
+        let probe_events = attach("active-probe");
+        let (probe_reply, probe_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "active-probe".into(),
+                identity: probe_events.identity.clone(),
+                reply: probe_reply,
+            })
+            .unwrap();
+        active_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("active lookup did not stall");
         let busy_events = fast_events.clone();
         let (busy_tx, busy_wait) = mpsc::channel();
         std::thread::spawn(move || {
@@ -3119,10 +3263,6 @@ mod tests {
         busy_wait
             .recv_timeout(Duration::from_secs(2))
             .expect("the busy event was not delivered");
-        stall_active.store(true, Ordering::Release);
-        active_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("active lookup did not stall");
         let idle_events = fast_events.clone();
         let (idle_tx, idle_wait) = mpsc::channel();
         std::thread::spawn(move || {
@@ -3136,6 +3276,14 @@ mod tests {
         idle_wait
             .recv_timeout(Duration::from_secs(4))
             .expect("idle reconciliation did not fall back to the session record");
+        assert!(
+            block_on(probe_wait.recv())
+                .unwrap()
+                .unwrap()
+                .accept()
+                .is_ok()
+        );
+        close("active-probe", &probe_events);
         stall_active.store(false, Ordering::Release);
         let (slow_reply, slow_wait) = async_channel::bounded(1);
         commands

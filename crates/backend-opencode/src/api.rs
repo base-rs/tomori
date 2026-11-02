@@ -249,12 +249,13 @@ pub async fn active_sessions_with_timeout<S: Timers>(
     resolved: &Resolved,
     cancellation: &Cancellation,
     timers: &S,
+    timeout: Duration,
 ) -> Option<std::collections::HashSet<String>> {
     let local = cancellation.child();
     let result = futures_lite::future::race(
         async { active_sessions(client, resolved, &local).await.ok() },
         async {
-            let _ = timers.sleep(Duration::from_secs(1), &local).await;
+            let _ = timers.sleep(timeout, &local).await;
             None
         },
     )
@@ -870,9 +871,8 @@ pub struct SnapshotParts {
     pub permissions: Vec<Value>,
     pub forms: Vec<Value>,
     pub children: Vec<Value>,
-    /// Whether the session is currently running a turn, derived from the
-    /// session record's `time.busy` / `time.idle` timestamps.
-    pub busy: bool,
+    /// The record's running state; equal timestamps are ambiguous.
+    pub busy: Option<bool>,
     /// Child sessions may be background drains, whose absence from the active
     /// endpoint does not by itself establish that they are idle.
     pub has_parent: bool,
@@ -918,10 +918,7 @@ impl SnapshotParts {
                 message: "the server returned an invalid session record".into(),
             });
         }
-        let busy = running_from_record(&info).ok_or_else(|| Failure {
-            status: None,
-            message: "the server returned invalid session timing".into(),
-        })?;
+        let busy = running_from_record(&info);
         let messages = session_messages(client, resolved, session_id, cancellation).await?;
         let permissions = open_permissions(client, resolved, session_id, cancellation).await?;
         let forms = open_forms(client, resolved, session_id, cancellation).await?;
@@ -995,11 +992,24 @@ pub async fn session_running<'scope, S: Timers>(
     if !valid_session_record(&info) {
         return Ok(None);
     }
-    let active = active_sessions_with_timeout(client, resolved, cancellation, timers).await;
+    let recorded = running_from_record(&info);
+    if recorded == Some(false) {
+        // The idle record is sufficient for the missed-idle backstop. An
+        // optional active lookup must not delay it when that endpoint stalls.
+        return Ok(recorded);
+    }
+    let active = active_sessions_with_timeout(
+        client,
+        resolved,
+        cancellation,
+        timers,
+        Duration::from_secs(4),
+    )
+    .await;
     let running = match active {
         Some(active) if active.contains(session_id) => Some(true),
         Some(_) if info.get("parentID").is_none() => Some(false),
-        _ => running_from_record(&info),
+        _ => recorded,
     };
     Ok(running)
 }
@@ -1012,6 +1022,7 @@ fn running_from_record(info: &Value) -> Option<bool> {
         Some(value) => value.as_f64().map(Some),
     };
     match (timestamp("busy")?, timestamp("idle")?) {
+        (Some(busy), Some(idle)) if busy == idle => None,
         (Some(busy), Some(idle)) => Some(busy > idle),
         (Some(_), None) => Some(true),
         (None, _) => Some(false),
@@ -1090,6 +1101,10 @@ mod tests {
         assert_eq!(
             running_from_record(&json!({"time":{"busy":10,"idle":11}})),
             Some(false)
+        );
+        assert_eq!(
+            running_from_record(&json!({"time":{"busy":10,"idle":10}})),
+            None
         );
         assert_eq!(running_from_record(&json!({"time":{}})), Some(false));
         assert_eq!(
