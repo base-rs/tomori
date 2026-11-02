@@ -808,6 +808,20 @@ impl Conversation {
         }
     }
 
+    /// A while the ray highlights an arrival object chooses that object, as
+    /// the trigger does, so that A never acts on a different item from the one
+    /// pointed at. Otherwise A accepts as [`Self::accept`] does. Returns true
+    /// when A has nothing to do here, so it can keep its swarm-reset meaning.
+    pub fn press_a(&mut self, highlighted: Option<&arrival::Key>) -> bool {
+        match highlighted {
+            Some(key) if self.arrival().is_some() => {
+                self.choose_object(key);
+                false
+            }
+            _ => self.accept(),
+        }
+    }
+
     /// A: connect, join, or confirm the chosen approval option. Returns true when A has nothing to do here, so it can keep its swarm-reset meaning.
     pub fn accept(&mut self) -> bool {
         match self.mode {
@@ -2209,6 +2223,41 @@ mod tests {
             }]
         );
         assert_eq!(conversation.arrival().unwrap().ring, None);
+    }
+
+    #[test]
+    fn a_chooses_the_highlighted_session_not_the_ring_selection() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![summary("one", "One")]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        sent(&mut conversation);
+        conversation.apply(sessions());
+        // The ring's own selection is still "New session"; the ray highlights
+        // an existing session, and A must choose that one.
+        let highlighted = arrival::Key::Session(Some("ses_1".into()));
+        assert!(!conversation.press_a(Some(&highlighted)));
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { session: Some(session), .. }] if session == "ses_1"
+        ));
+    }
+
+    #[test]
+    fn a_without_a_highlight_accepts_the_ring_selection() {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![summary("one", "One")]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        sent(&mut conversation);
+        conversation.apply(sessions());
+        assert!(!conversation.press_a(None));
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { session: None, .. }]
+        ));
     }
 
     #[test]

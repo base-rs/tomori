@@ -174,6 +174,8 @@ pub fn run(
     // Ask for the microphone when the session first has focus, where the
     // headset can show the request, instead of on the first recording.
     let mut microphone_requested = false;
+    // The arrival object the ray met on the last frame, which A chooses.
+    let mut highlighted = None;
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
     let mut arrival_time = 0.0_f32;
@@ -206,6 +208,7 @@ pub fn run(
                         conversation.stop_live();
                         conversation.stop_talking();
                         pointer.release();
+                        highlighted = None;
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
@@ -254,6 +257,7 @@ pub fn run(
             conversation.stop_live();
             conversation.stop_talking();
             pointer.release();
+            highlighted = None;
             presentation_navigation.release();
         }
         if !running {
@@ -304,7 +308,9 @@ pub fn run(
             conversation.choose(if right.x > 0.0 { 1 } else { -1 });
         }
         choice_latched = choice_moving;
-        let reset = controls.reset && conversation.accept();
+        // A chooses the object the ray highlighted last frame, as the
+        // trigger does; with nothing highlighted it accepts or resets.
+        let reset = controls.reset && conversation.press_a(highlighted.as_ref());
         // Hold X to talk to the agent; releasing it while focused sends the utterance.
         if focused && !controls.talk {
             talk_blocked = false;
@@ -396,6 +402,7 @@ pub fn run(
         motion.update(&arrival_target(&conversation), arrival_time);
         let mut scene = motion.scene(arrival_time);
         let pointing = pointer.update(ray, controls.trigger, &scene.targets());
+        highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
         if let Some(key) = &pointing.chosen {
             conversation.choose_object(key);
             motion.update(&arrival_target(&conversation), arrival_time);
