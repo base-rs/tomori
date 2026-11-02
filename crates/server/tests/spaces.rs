@@ -1215,7 +1215,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         right: None,
         hands: None,
     });
-    bob.wait_for(|message| Some(()).filter(|_| matches!(message, ServerMessage::Presence { .. })));
+    bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {
         assert!(
             !matches!(message, ServerMessage::Presence { .. }),
