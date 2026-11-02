@@ -1469,13 +1469,14 @@ fn owns_registration(
     }
 }
 
-/// The sessions a participant can attach to. The listing asks for top-level
-/// sessions; a child session a server returns anyway is a subagent's worker
-/// and is left out.
+/// The sessions a participant can attach to. The listing asks for top-level,
+/// unarchived sessions; a child session (a subagent's worker) or an archived
+/// one that a server returns anyway is left out.
 fn session_summaries(sessions: &[Value]) -> Vec<SessionSummary> {
     sessions
         .iter()
         .filter(|info| info.get("parentID").is_none_or(Value::is_null))
+        .filter(|info| info.pointer("/time/archived").is_none_or(Value::is_null))
         .filter_map(|info| {
             Some(SessionSummary {
                 id: info.get("id")?.as_str()?.to_owned(),
@@ -1857,6 +1858,7 @@ mod tests {
             json!({"id":"root","title":"Support","location":{"directory":"/tmp"}}),
             json!({"id":"explicit","parentID":null,"title":"Explicit root"}),
             json!({"id":"child","parentID":"root","title":"Review commit"}),
+            json!({"id":"archived","title":"Old","time":{"created":1,"archived":2}}),
             json!({"title":"No identifier"}),
         ];
         let summaries = session_summaries(&sessions);

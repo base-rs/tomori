@@ -192,7 +192,8 @@ fn session_list_path(directory: &str) -> String {
     )
 }
 
-/// `GET /api/session?directory=`: the existing sessions in a directory.
+/// `GET /api/session?directory=&parentID=null&archived=false`: the existing
+/// top-level, unarchived sessions in a directory.
 pub async fn list_sessions<'scope>(
     client: &Client<'scope>,
     resolved: &Resolved,
@@ -1059,6 +1060,7 @@ fn urlencoding(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn session_listing_asks_for_top_level_unarchived_sessions() {
@@ -1067,7 +1069,6 @@ mod tests {
             "/api/session?directory=%2Fhome%2Fa%20b&parentID=null&archived=false"
         );
     }
-    use serde_json::json;
 
     #[test]
     fn response_bytes_are_bounded_without_truncating_valid_json() {
