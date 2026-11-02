@@ -987,8 +987,7 @@ impl SnapshotParts {
 /// answers, otherwise the record's `time.busy` / `time.idle` timestamps.
 ///
 /// The optional list is fetched alongside the record under a short bound, so
-/// a stalled endpoint adds no time beyond the record request itself and the
-/// reconciliation completes within its timeout whenever the record does.
+/// a stalled list adds at most that bound to the record request.
 pub async fn session_running<'scope, S: Timers>(
     client: &Client<'scope>,
     resolved: &Resolved,
