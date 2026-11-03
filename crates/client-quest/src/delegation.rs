@@ -387,6 +387,8 @@ pub struct Scene {
     coordinator_sample_count: usize,
     /// The worker pointed at, drawn highlighted.
     highlighted: Option<String>,
+    /// Where the headset's ray ends on the worker pointed at.
+    hit_point: Option<Vec3>,
 }
 
 impl Default for Scene {
@@ -408,6 +410,7 @@ impl Scene {
             coordinator_samples: [CENTER; MAX_COORDINATOR_SAMPLES],
             coordinator_sample_count: 0,
             highlighted: None,
+            hit_point: None,
         }
     }
 
@@ -432,7 +435,7 @@ impl Scene {
     /// identifier. Pointing only highlights; it never takes the trigger. See `design/interaction.md`.
     pub fn point(&mut self, ray: Option<Ray>) -> Option<&str> {
         // Each frame, without allocating: the same test as [`Self::targets`] with [`crate::pointing::nearest`].
-        let mut hit: Option<(f32, &str)> = None;
+        let mut hit: Option<(f32, &str, Vec3)> = None;
         if let Some(ray) = ray {
             for (id, worker) in &self.workers {
                 let shape = Shape::Sphere {
@@ -441,17 +444,26 @@ impl Scene {
                 };
                 if worker.retired.is_none()
                     && let Some(distance) = shape.intersect(&ray)
-                    && hit.is_none_or(|(nearest, _)| distance < nearest)
+                    && hit.is_none_or(|(nearest, _, _)| distance < nearest)
                 {
-                    hit = Some((distance, id));
+                    hit = Some((distance, id, worker.anchor));
                 }
             }
         }
-        let hit = hit.map(|(_, id)| id);
+        // The ray ends among the worker's flock, where it passes nearest its anchor, rather than where it enters the pointing sphere.
+        self.hit_point = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
+            ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
+        });
+        let hit = hit.map(|(_, id, _)| id);
         if self.highlighted.as_deref() != hit {
             self.highlighted = hit.map(str::to_owned);
         }
         self.highlighted.as_deref()
+    }
+
+    /// Where the last [`Self::point`] met the worker it highlights, or `None` when it met none.
+    pub fn hit_point(&self) -> Option<Vec3> {
+        self.hit_point
     }
 
     pub fn cubes(&self) -> &[Cube] {
@@ -3521,6 +3533,8 @@ mod space_tests {
             assert_eq!(scene.point(ray), expected.as_deref());
         }
         assert_eq!(scene.point(at(a)), Some("a"));
+        // The ray ends where it passes nearest the worker's anchor.
+        assert!(scene.hit_point().unwrap().distance(a) < 1e-4);
         assert_eq!(scene.point(at(b)), Some("b"));
         // Passing within the pointing radius of a worker's anchor still points at it; the floor is nothing.
         let aside = (b - eye).cross(Vec3::Y).normalize();
@@ -3528,8 +3542,10 @@ mod space_tests {
             scene.point(at(b + aside * (POINTING_RADIUS * 0.8))),
             Some("b")
         );
+        assert!(scene.hit_point().unwrap().distance(b) < POINTING_RADIUS * 0.8);
         assert_eq!(scene.point(Ray::new(eye, Vec3::NEG_Y)), None);
         assert_eq!(scene.point(None), None);
+        assert_eq!(scene.hit_point(), None);
 
         // The worker pointed at is drawn larger, and stays valid geometry.
         let size = |scene: &Scene| scene.cubes().iter().map(|cube| cube.scale[0]).sum::<f32>();

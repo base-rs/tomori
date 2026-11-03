@@ -587,18 +587,36 @@ pub fn run(
                 current_workspace,
             );
         }
-        // Arrival's objects are still drawn as they leave on entering a space, but the ray only outside one.
-        if in_arrival || menu_shown || !scene.objects.is_empty() || scene.heading.is_some() {
+        // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
+        let beam = if in_arrival || menu_shown {
+            ray.zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
+                .map(|(ray, end)| arrival_graphics::Beam {
+                    origin: ray.origin,
+                    end,
+                    hit: pointing.hit.is_some(),
+                })
+        } else {
+            let hit = delegation_scene.hit_point();
+            ray.filter(|_| in_space).map(|ray| arrival_graphics::Beam {
+                origin: ray.origin,
+                end: hit.unwrap_or_else(|| ray.at(arrival_graphics::SPACE_RAY_LENGTH)),
+                hit: hit.is_some(),
+            })
+        };
+        // Arrival's objects are still drawn as they leave on entering a space.
+        if in_arrival
+            || menu_shown
+            || beam.is_some()
+            || !scene.objects.is_empty()
+            || scene.heading.is_some()
+        {
             renderer.update_arrival(
                 &gpu.device,
                 &gpu.queue,
                 &arrival_graphics::Frame {
                     scene: &scene,
                     hovered: pointing.hit.as_ref().map(|hit| &hit.key),
-                    ray: ray
-                        .zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
-                        .map(|(ray, end)| (ray.origin, end))
-                        .filter(|_| in_arrival || menu_shown),
+                    ray: beam,
                     time: arrival_time,
                 },
             );
