@@ -37,6 +37,16 @@ jobs:
       - name: Run tests and require complete source-region coverage
         shell: bash
         run: cargo bake --locked test:coverage --all-targets true 2>&1 | tee coverage.log
+      # Bake reports a coverage failure as one line holding every uncovered region, often megabytes long, which the Actions log viewer doesn't show. This step extracts the counts, computes the percentage, and writes it to both the log and the job summary.
       - name: Summarize coverage
         if: always()
-        run: grep -o 'region coverage is [^;]*; [0-9]* source regions remain uncovered' coverage.log >> "$GITHUB_STEP_SUMMARY" || true
+        shell: bash
+        run: |
+          result=$(grep -o -E 'region coverage is [0-9]+/[0-9]+ measured source regions[^;]*; [0-9]+ source regions remain uncovered|Region coverage passed: [0-9]+/[0-9]+ measured source regions covered[^)]*\)' coverage.log | head -n 1 || true)
+          if [ -z "$result" ]; then
+            echo "No coverage result found in coverage.log." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          counts=$(grep -o -E '[0-9]+/[0-9]+' <<< "$result" | head -n 1)
+          percentage=$(awk -F / '{ if ($2 > 0) printf "%.2f", 100 * $1 / $2; else print "100.00" }' <<< "$counts")
+          echo "Source-region coverage: ${percentage}% (${result})." | tee -a "$GITHUB_STEP_SUMMARY"
