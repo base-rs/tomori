@@ -147,7 +147,7 @@ In OBS, add the spectator window as a window/screen capture. The spectator plays
 
 Instead of capturing a window, run `cargo run -p client-quest -- --spectator-pipewire --server 127.0.0.1:8765 --space SPACE_ID`. It publishes `Tomori-Spectator` (`tomori-spectator`) **without creating a window or display surface**. Press **Ctrl-C** to stop it. For an optional window showing the same direct output, use `cargo run -p client-quest -- --spectator-pipewire-preview --server 127.0.0.1:8765 --space SPACE_ID` instead; Escape closes that window and stops its output. Run only one direct-output spectator at a time.
 
-Both modes render to a fixed **1920×1080 RGBA** texture at up to 30 fps. The optional preview window requests 1920×1080; the `--spectator` window-capture fallback still renders at its actual window size. The Quest reports presence through the server. Audio plays through the spectator's desktop output; the PipeWire node carries video only. Any local client with PipeWire access may be able to view it.
+Both modes render to a fixed **1920×1080 RGBA** texture at up to 30 fps. The optional preview window requests 1920×1080; the `--spectator` window-capture fallback still renders at its actual window size. The Quest reports presence through the server. Audio plays through the spectator's desktop output, or the PipeWire output named with `--audio-output NAME` (see `pactl list short sinks`); the PipeWire node carries video only. Any local client with PipeWire access may be able to view it.
 
 For the direct virtual camera and microphone used to share this view in a Slack Huddle without OBS, see [the Linux setup notes](docs/slack-huddle.md).
 

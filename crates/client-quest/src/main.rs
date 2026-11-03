@@ -13,6 +13,7 @@ fn main() -> anyhow::Result<()> {
     };
     let mut space = None;
     let mut follow = None;
+    let mut audio_output = None;
     let mut mode = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -34,6 +35,13 @@ fn main() -> anyhow::Result<()> {
                     arguments
                         .next()
                         .context("--follow needs a participant name")?,
+                );
+            }
+            "--audio-output" => {
+                audio_output = Some(
+                    arguments
+                        .next()
+                        .context("--audio-output needs an output's name")?,
                 );
             }
             _ if mode.is_none() => mode = Some(argument),
@@ -70,6 +78,19 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("--space and --follow apply only to the spectator modes; use --help");
     }
     let spectator = SPECTATOR_MODES.contains(&mode.as_deref().unwrap_or(""));
+    if let Some(output) = &audio_output {
+        // The same setting would also choose the microphone, which only the participant modes open.
+        anyhow::ensure!(
+            spectator,
+            "--audio-output applies only to the spectator modes; use --help"
+        );
+        anyhow::ensure!(
+            cfg!(target_os = "linux"),
+            "--audio-output needs PipeWire, on Linux"
+        );
+        // SAFETY: the process has started no other thread yet, so nothing reads the environment concurrently.
+        unsafe { std::env::set_var("PIPEWIRE_NODE", output) };
+    }
     if let Some(properties) =
         tomori::pipewire_alsa_properties(spectator, std::env::var_os("PIPEWIRE_ALSA").is_some())
     {
@@ -106,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--help" | "-h") => {
             println!(
-                "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n  --licenses              show the bundled controller assets' license.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the desktop window's initial environment (default sky); with a server, the space chooses it.",
+                "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n  --licenses              show the bundled controller assets' license.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the desktop window's initial environment (default sky); with a server, the space chooses it.",
                 tomori::DESKTOP_CONTROLS
             );
             Ok(())
