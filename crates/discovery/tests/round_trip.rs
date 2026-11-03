@@ -36,6 +36,7 @@ fn finds_an_advertised_server_and_loses_it_when_withdrawn() {
         48765,
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         Counts::default(),
+        None,
     )
     .expect("advertise");
 
@@ -73,6 +74,7 @@ fn browsers_see_updated_counts() {
         48766,
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         Counts::default(),
+        None,
     )
     .expect("advertise");
     let counts = |spaces, participants| {

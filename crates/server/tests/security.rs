@@ -295,3 +295,70 @@ fn an_owners_identity_without_their_token_is_someone_else() {
     assert_eq!(state[0].id, space.id);
     assert_eq!(state[0].participants, 1);
 }
+
+/// A server that admits by tokens and serves only TLS, with a new certificate.
+fn tls_server(
+    configure: impl FnOnce(server::Server) -> server::Server + Send + 'static,
+) -> (TestServer, security::Fingerprint) {
+    let certificate = security::ServerCertificate::generate();
+    let fingerprint = certificate.fingerprint();
+    let config = certificate.server_config().unwrap();
+    (
+        TestServer::with_tokens(true, move |server| configure(server.with_tls(config))),
+        fingerprint,
+    )
+}
+
+/// `GET /health` over TLS, pinning `expected`: the status line, or the TLS error.
+fn health_over_tls(
+    address: std::net::SocketAddr,
+    expected: security::Fingerprint,
+) -> Result<String, std::io::Error> {
+    use std::io::{BufRead, BufReader, Write};
+    let pinned = security::Pinned::new(Some(expected));
+    let connection = rustls::ClientConnection::new(
+        security::client_config(pinned),
+        rustls::pki_types::ServerName::try_from("tomori").unwrap(),
+    )
+    .unwrap();
+    let mut stream = rustls::StreamOwned::new(connection, std::net::TcpStream::connect(address)?);
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: tomori\r\nConnection: close\r\n\r\n")?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    Ok(line)
+}
+
+#[test]
+fn a_server_with_tls_serves_only_tls_with_its_certificate() {
+    let (server, fingerprint) = tls_server(|server| server);
+    assert!(
+        health_over_tls(server.address, fingerprint)
+            .unwrap()
+            .starts_with("HTTP/1.1 200")
+    );
+    // A client pinning another certificate refuses the handshake.
+    let other = security::ServerCertificate::generate().fingerprint();
+    assert!(health_over_tls(server.address, other).is_err());
+    // Plain HTTP is not served.
+    use std::io::{Read, Write};
+    let mut plain = std::net::TcpStream::connect(server.address).unwrap();
+    plain.set_read_timeout(Some(TIMEOUT)).unwrap();
+    plain
+        .write_all(b"GET /health HTTP/1.1\r\nHost: tomori\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    let _ = plain.read_to_end(&mut response);
+    assert!(!response.starts_with(b"HTTP/1.1 200"));
+}
+
+#[test]
+fn a_stalled_handshake_is_closed_after_the_request_timeout() {
+    use std::io::Read;
+    let (server, _) = tls_server(|server| server.with_request_timeout(Duration::from_millis(200)));
+    let mut silent = std::net::TcpStream::connect(server.address).unwrap();
+    silent.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let started = std::time::Instant::now();
+    let mut buffer = [0_u8; 16];
+    assert_eq!(silent.read(&mut buffer).unwrap_or(0), 0);
+    assert!(started.elapsed() < TIMEOUT);
+}

@@ -27,11 +27,17 @@ struct Service {
     host: String,
     port: u16,
     address: IpAddr,
+    fingerprint: Option<String>,
 }
 
 impl Service {
     fn info(&self, counts: Counts) -> Result<ServiceInfo, mdns_sd::Error> {
-        let properties = properties(&self.name, PROTOCOL_VERSION, counts);
+        let properties = properties(
+            &self.name,
+            PROTOCOL_VERSION,
+            counts,
+            self.fingerprint.as_deref(),
+        );
         if self.address.is_unspecified() {
             let mut service = ServiceInfo::new(
                 SERVICE_TYPE,
@@ -97,7 +103,7 @@ impl Drop for Advertisement {
     }
 }
 
-/// Advertise a Tomori server called `name`, listening on `port` at `address`, with its current `counts`, until the returned [`Advertisement`] is dropped.
+/// Advertise a Tomori server called `name`, listening on `port` at `address`, with its current `counts` and, if it serves TLS, its certificate's `fingerprint`, until the returned [`Advertisement`] is dropped.
 ///
 /// `address` is the address the server is bound to. If it is unspecified (`0.0.0.0` or `::`), the server is advertised on every interface with that address family's addresses (`::` includes IPv4, as dual-stack sockets accept both), and the addresses follow interface changes. Otherwise only that address is advertised, on its interface.
 ///
@@ -107,6 +113,7 @@ pub fn advertise(
     port: u16,
     address: IpAddr,
     counts: Counts,
+    fingerprint: Option<String>,
 ) -> Result<Advertisement, Error> {
     let name = match name.trim() {
         "" => "Tomori",
@@ -119,6 +126,7 @@ pub fn advertise(
         instance,
         port,
         address,
+        fingerprint,
     };
     let daemon = ServiceDaemon::new()?;
     if address.is_unspecified() {

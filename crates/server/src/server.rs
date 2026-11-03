@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{Backend, Event, Session, SessionSpec};
+use base_endpoint::tls::TlsAcceptor;
+use base_endpoint::tls::rustls::RustlsAcceptor;
 use base_http_server::{Error, Statistics};
 use base_scheduler::{
     Cancellation, OperationError, OperationResult, SocketAccept, SocketAddress, SocketBind,
@@ -54,6 +56,8 @@ pub struct Server {
     /// Told the counts to advertise as they change; see [`Self::with_counts`].
     counts: Option<Box<dyn Fn(Counts) + Send + Sync>>,
     counts_interval: Duration,
+    /// Serve TLS with this configuration, rather than plain HTTP; see [`Self::with_tls`].
+    tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
@@ -116,7 +120,14 @@ impl Server {
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             counts: None,
             counts_interval: COUNTS_INTERVAL,
+            tls: None,
         }
+    }
+
+    /// Serve only TLS, with `config`, such as from [`security::ServerCertificate::server_config`]. A handshake that has not completed within the request timeout is closed, as a request head would be. See `design/security.md`.
+    pub fn with_tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
+        self.tls = Some(config);
+        self
     }
 
     /// How many spaces are listed and participants connected now, for advertising before [`run`](Self::run) starts.
@@ -323,7 +334,13 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
-        let options = base_http_server::Options::default().http1;
+        let server_options = base_http_server::Options::default();
+        let options = server_options.http1.clone();
+        let acceptor = self.tls.as_ref().map(|config| {
+            let mut config = (**config).clone();
+            config.alpn_protocols = server_options.protocols.alpn_protocols();
+            RustlsAcceptor::new(Arc::new(config))
+        });
         let connections_cancellation = cancellation.child();
         let mut connections = FuturesUnordered::new();
         let mut tracker = Tracker::default();
@@ -398,6 +415,8 @@ impl Server {
                 let serial = tracker.statistics.connections;
                 let connection = connections_cancellation.child();
                 let options = &options;
+                let server_options = &server_options;
+                let acceptor = acceptor.as_ref();
                 // Each connection is watched so that one which never completes a request is closed, freeing its slot.
                 let watch = self.admission.watch(connection.clone());
                 tracker.open.insert(
@@ -413,14 +432,32 @@ impl Server {
                     watch,
                 };
                 connections.push(async move {
-                    let outcome = base_http_server::serve_connection(
-                        scheduler,
-                        socket,
-                        &handler,
-                        options,
-                        &connection,
-                    )
-                    .await;
+                    let outcome = match acceptor {
+                        None => {
+                            base_http_server::serve_connection(
+                                scheduler,
+                                socket,
+                                &handler,
+                                options,
+                                &connection,
+                            )
+                            .await
+                        }
+                        // The handshake is cancelled with the connection, so the admission sweep closes one that stalls.
+                        Some(acceptor) => match acceptor.accept(scheduler, socket, &connection).await {
+                            Ok(tls) => {
+                                base_http_server::serve_tls_connection(
+                                    scheduler,
+                                    tls,
+                                    &handler,
+                                    server_options,
+                                    &connection,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error.into()),
+                        },
+                    };
                     (serial, outcome)
                 });
             }

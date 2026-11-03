@@ -319,13 +319,13 @@ fn workspace_roots(roots: &[PathBuf]) -> Result<WorkspaceRoots, String> {
     Ok(roots)
 }
 
-/// Configure who the server admits, and say so. See `design/security.md`.
-fn admission(server: Server, arguments: &Arguments) -> Result<Server, String> {
+/// Configure who the server admits, and say so. A server that accepts tokens serves only TLS, with the certificate in its state directory, whose fingerprint is returned for advertising. See `design/security.md`.
+fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<String>), String> {
     if arguments.open {
         let warning = "Anyone who can reach this server can create spaces and approve tool use (--auth open).";
         eprintln!("Warning: {warning}");
         log::warn!("{warning}");
-        return Ok(server);
+        return Ok((server, None));
     }
     let state = arguments
         .state_directory
@@ -360,9 +360,22 @@ fn admission(server: Server, arguments: &Arguments) -> Result<Server, String> {
             "No owner token is issued yet: run `tomori-server auth mint --owner --name NAME`."
         );
     }
-    Ok(server
+    let certificate = security::ServerCertificate::load_or_create(&state).map_err(|error| {
+        format!(
+            "Could not load or create the server's certificate in {}: {error}.",
+            state.display()
+        )
+    })?;
+    let config = certificate
+        .server_config()
+        .map_err(|error| format!("The server's certificate cannot be used: {error}."))?;
+    let fingerprint = certificate.fingerprint().to_string();
+    eprintln!("Serving TLS only; the certificate's fingerprint is {fingerprint}.");
+    let server = server
         .with_tokens(std::sync::Arc::new(store), arguments.visitors)
-        .with_max_visitors(arguments.max_visitors))
+        .with_max_visitors(arguments.max_visitors)
+        .with_tls(config);
+    Ok((server, Some(fingerprint)))
 }
 
 /// The default display name: the host name without its domain, such as `studio` for `studio.local`.
@@ -378,18 +391,19 @@ fn host_name() -> String {
 /// The running advertisement, if any, which the server updates as its counts change.
 type Advertised = Arc<Mutex<Option<discovery::Advertisement>>>;
 
-/// Advertise the bound `address`, with the server's current `counts`, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
+/// Advertise the bound `address`, with the server's current `counts` and its certificate's `fingerprint` if it serves TLS, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
 fn advertise(
     arguments: &Arguments,
     address: SocketAddr,
     counts: discovery::Counts,
+    fingerprint: Option<String>,
 ) -> Option<discovery::Advertisement> {
     if !arguments.advertise {
         eprintln!("Bonjour: not advertising (--no-advertise).");
         return None;
     }
     let name = arguments.name.clone().unwrap_or_else(host_name);
-    match discovery::advertise(&name, address.port(), address.ip(), counts) {
+    match discovery::advertise(&name, address.port(), address.ip(), counts, fingerprint) {
         Ok(advertisement) => {
             eprintln!(
                 "Bonjour: advertising {:?} as _tomori._tcp on port {}.",
@@ -709,8 +723,9 @@ fn main() -> ExitCode {
         .with_keepalive(arguments.keepalive)
         .with_workspace_roots(roots)
         .with_max_spaces(arguments.max_spaces);
-    server = match admission(server, &arguments) {
-        Ok(server) => server,
+    let fingerprint;
+    (server, fingerprint) = match admission(server, &arguments) {
+        Ok(admitted) => admitted,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::FAILURE;
@@ -754,14 +769,19 @@ fn main() -> ExitCode {
         let address = scheduler
             .socket_local_address(&listener)
             .map_err(|error| error.to_string())?;
+        let scheme = if fingerprint.is_some() {
+            "https"
+        } else {
+            "http"
+        };
         eprintln!(
-            "Tomori server listening on http://{address} (backends: {}). There is no authentication: anyone on this network can join.",
+            "Tomori server listening on {scheme}://{address} (backends: {}).",
             arguments.backends.join(", ")
         );
         *advertised
             .lock()
             .expect("the advertisement is never left poisoned") =
-            advertise(&arguments, address, server.counts());
+            advertise(&arguments, address, server.counts(), fingerprint.clone());
         let served = server.run(&scheduler, listener, &cancellation).await;
         // Withdraw the advertisement as soon as serving ends.
         drop(

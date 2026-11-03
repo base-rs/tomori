@@ -68,6 +68,7 @@ mod tests {
             protocol: Some(protocol),
             spaces: None,
             participants: None,
+            fingerprint: None,
         }
     }
 

@@ -458,6 +458,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5486363e111b27b2822657168f4cbd5875ce10528be61ad2f158e6715862732f"
 dependencies = [
  "base-scheduler",
+ "event-listener",
+ "futures-util",
+ "rustls",
 ]
 
 [[package]]
@@ -514,6 +517,7 @@ dependencies = [
  "base-http1",
  "base-scheduler",
  "futures-util",
+ "rustls",
 ]
 
 [[package]]
@@ -3175,6 +3179,7 @@ dependencies = [
  "backend",
  "backend-claude-code",
  "backend-opencode",
+ "base-endpoint",
  "base-http",
  "base-http-server",
  "base-scheduler",
@@ -3189,6 +3194,7 @@ dependencies = [
  "libc",
  "log",
  "protocol",
+ "rustls",
  "security",
  "serde",
  "serde_json",

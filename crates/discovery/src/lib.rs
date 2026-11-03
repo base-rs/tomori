@@ -79,6 +79,9 @@ pub const SPACES_KEY: &str = "spaces";
 /// The TXT key holding the number of connected participants as a decimal `u32`.
 pub const PARTICIPANTS_KEY: &str = "participants";
 
+/// The TXT key holding the SHA-256 fingerprint of the server's TLS certificate, as 64 lowercase hexadecimal digits, for a server that serves TLS. See `design/security.md`.
+pub const FINGERPRINT_KEY: &str = "fingerprint";
+
 /// A failure to start advertising or browsing, such as no usable network interface or socket.
 #[derive(Debug)]
 pub struct Error(mdns_sd::Error);

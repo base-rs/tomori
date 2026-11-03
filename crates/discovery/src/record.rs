@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use protocol::PROTOCOL_VERSION;
 
-use crate::{NAME_KEY, PARTICIPANTS_KEY, PROTOCOL_KEY, SERVICE_TYPE, SPACES_KEY};
+use crate::{FINGERPRINT_KEY, NAME_KEY, PARTICIPANTS_KEY, PROTOCOL_KEY, SERVICE_TYPE, SPACES_KEY};
 
 /// The longest DNS label, which bounds the instance name.
 pub(crate) const INSTANCE_LIMIT: usize = 63;
@@ -33,6 +33,8 @@ pub struct Server {
     pub spaces: Option<u32>,
     /// The advertised number of connected participants, or `None` if the TXT record has no valid one.
     pub participants: Option<u32>,
+    /// The fingerprint of the server's TLS certificate, as 64 lowercase hexadecimal digits, or `None` if it advertises none, as a server in `--auth open` mode does. Discovery is unauthenticated, so a client that has already pinned a certificate for the server keeps its pin.
+    pub fingerprint: Option<String>,
 }
 
 /// What a server advertises about its use: see the crate documentation.
@@ -68,13 +70,30 @@ pub enum Event {
 }
 
 /// The TXT properties a server advertises.
-pub(crate) fn properties(name: &str, protocol: u32, counts: Counts) -> Vec<(String, String)> {
-    vec![
+pub(crate) fn properties(
+    name: &str,
+    protocol: u32,
+    counts: Counts,
+    fingerprint: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut properties = vec![
         (PROTOCOL_KEY.to_owned(), protocol.to_string()),
         (NAME_KEY.to_owned(), truncate(name, NAME_LIMIT).to_owned()),
         (SPACES_KEY.to_owned(), counts.spaces.to_string()),
         (PARTICIPANTS_KEY.to_owned(), counts.participants.to_string()),
-    ]
+    ];
+    if let Some(fingerprint) = fingerprint {
+        properties.push((FINGERPRINT_KEY.to_owned(), fingerprint.to_owned()));
+    }
+    properties
+}
+
+/// A fingerprint TXT value: 64 hexadecimal digits, in lowercase. Anything else is none.
+fn fingerprint(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
 }
 
 /// A decimal `u32` TXT value; anything else, such as a sign, a fraction or an empty value, is unknown rather than a guess.
@@ -167,6 +186,7 @@ pub(crate) fn resolved<'a>(
         protocol: number(property(PROTOCOL_KEY)),
         spaces: number(property(SPACES_KEY)),
         participants: number(property(PARTICIPANTS_KEY)),
+        fingerprint: fingerprint(property(FINGERPRINT_KEY)),
     };
     if server.is_compatible() {
         Event::Found(server)
@@ -206,7 +226,7 @@ mod tests {
             participants: 1,
         };
         assert_eq!(
-            properties("Studio", 7, counts),
+            properties("Studio", 7, counts, None),
             vec![
                 ("protocol".to_owned(), "7".to_owned()),
                 ("name".to_owned(), "Studio".to_owned()),
@@ -214,6 +234,31 @@ mod tests {
                 ("participants".to_owned(), "1".to_owned()),
             ]
         );
+        let fingerprint = "ab".repeat(32);
+        assert_eq!(
+            properties("Studio", 7, counts, Some(&fingerprint)).last(),
+            Some(&("fingerprint".to_owned(), fingerprint))
+        );
+    }
+
+    #[test]
+    fn decodes_a_valid_fingerprint_only() {
+        let protocol = PROTOCOL_VERSION.to_string();
+        let fingerprint = |value: &str| {
+            let Event::Found(server) =
+                event(&lookup(&[("protocol", &protocol), ("fingerprint", value)]))
+            else {
+                panic!("expected Found");
+            };
+            server.fingerprint
+        };
+        assert_eq!(fingerprint(&"AB".repeat(32)), Some("ab".repeat(32)));
+        assert_eq!(fingerprint(&"ab".repeat(31)), None);
+        assert_eq!(fingerprint(&"zz".repeat(32)), None);
+        let Event::Found(server) = event(&lookup(&[("protocol", &protocol)])) else {
+            panic!("expected Found");
+        };
+        assert_eq!(server.fingerprint, None);
     }
 
     #[test]
@@ -222,7 +267,7 @@ mod tests {
             spaces: 3,
             participants: u32::MAX,
         };
-        let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts)
+        let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts, None)
             .into_iter()
             .collect();
         let Event::Found(server) = event(&txt) else {
@@ -268,7 +313,7 @@ mod tests {
     #[test]
     fn truncates_long_names_on_a_character_boundary() {
         let name = "é".repeat(200);
-        let encoded = &properties(&name, 1, Counts::default())[1].1;
+        let encoded = &properties(&name, 1, Counts::default(), None)[1].1;
         assert!(encoded.len() + "name=".len() <= 255);
         assert!(encoded.chars().all(|character| character == 'é'));
         assert_eq!(truncate("añb", 2), "a");
