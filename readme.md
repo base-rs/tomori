@@ -266,7 +266,7 @@ cargo run -p client-quest -- --xr        # use an active desktop OpenXR Vulkan r
 npm test --prefix bridge          # session routing, questions and permissions
 ```
 
-`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. These must pass before merging. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
+`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. The main branch requires these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
 
 For the PC streaming-recognition test (model + public sample required):
 
@@ -308,6 +308,8 @@ Original project code is released under the MIT License; see [license.md](licens
 ## Releasing
 
 Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
+
+No Tomori crate is published yet: which crates are published, and their names, are planned in [#73](https://github.com/ioquatix/tomori/issues/73).
 
 ## Releases
 

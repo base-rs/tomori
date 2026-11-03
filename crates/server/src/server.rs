@@ -1683,7 +1683,7 @@ mod tests {
         assert!(health(running.address).starts_with("HTTP/1.1 200"));
         let cancelled = Instant::now();
         running.cancellation.cancel();
-        // New peers are refused while the connection drains, rather than queued. A peer that connects as the server is cancelled may still be accepted, since an accept that completes wins over a concurrent cancellation, so each one that connected is allowed for below.
+        // New peers are refused while the connection drains, rather than queued. A peer that connects as the server is cancelled may still be accepted, since an accept that completes wins over a concurrent cancellation, but the accept after it is already cancelled, so at most one is.
         let mut probes = 0;
         while TcpStream::connect(running.address).is_ok() {
             probes += 1;
@@ -1703,7 +1703,7 @@ mod tests {
         assert!(elapsed < drain * 4, "the drain took {elapsed:?}");
         let connections = result.unwrap().connections;
         assert!(
-            (1..=1 + probes).contains(&connections),
+            connections == 1 || (connections == 2 && probes > 0),
             "{connections} connections served after {probes} peers connected while cancelling"
         );
     }

@@ -1,6 +1,6 @@
 name: Coverage
 
-# The Base 100% source-region coverage gate. Coverage is still far below 100% (see #55), so this workflow reports the uncovered regions but is not required: the main branch ruleset requires only test-result from test.yml, which does not depend on it. Once the workspace reaches 100%, move this job into test.yml and add it to test-result's needs. See the Tests section of readme.md.
+# The Base 100% source-region coverage gate. Coverage is still far below 100% (see #55), so this workflow reports the uncovered regions but is not required: the main branch ruleset requires test-result from test.yml and check from publish.yml, and neither depends on it. Once the workspace reaches 100%, move this job into test.yml and add it to test-result's needs. See the Tests section of readme.md.
 
 on:
   push:
@@ -35,4 +35,8 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
       # The project's test:before task fetches the sherpa-onnx libraries, restored from the cache above when unchanged.
       - name: Run tests and require complete source-region coverage
-        run: cargo bake --locked test:coverage --all-targets true
+        shell: bash
+        run: cargo bake --locked test:coverage --all-targets true 2>&1 | tee coverage.log
+      - name: Summarize coverage
+        if: always()
+        run: grep -o 'region coverage is [^;]*; [0-9]* source regions remain uncovered' coverage.log >> "$GITHUB_STEP_SUMMARY" || true

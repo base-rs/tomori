@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  # Formatting, Clippy and the workspace tests on current stable Rust, and the tests on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The 100% region-coverage gate runs in coverage.yml and is not yet required; see the Tests section of readme.md.
+  # Formatting, Clippy and the workspace tests on current stable Rust, and the tests on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The main branch ruleset requires test-result below and check from publish.yml. The 100% region-coverage gate runs in coverage.yml and is not yet required; see the Tests section of readme.md.
   test:
     name: test (${{ matrix.rust }})
     runs-on: ubuntu-latest
@@ -25,11 +25,18 @@ jobs:
       - name: Read the minimum supported Rust version
         id: version
         if: matrix.rust == 'minimum'
-        run: echo "rust=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          rust=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [[ ! "$rust" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error file=Cargo.toml::Expected rust-version = \"X.Y\" in [workspace.package], found '$rust'."
+            exit 1
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ steps.version.outputs.rust || 'stable' }}
-          components: clippy, rustfmt
+          # Formatting and Clippy run on stable only: their lints change between versions.
+          components: ${{ matrix.rust == 'stable' && 'clippy, rustfmt' || '' }}
       - name: Install the ALSA development files for the desktop client
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
       - uses: actions/cache@v6
@@ -69,12 +76,13 @@ jobs:
         # Fetches the Khronos OpenXR loader, checked against its published SHA-256, and packages it.
         run: bash scripts/android.sh build
       - name: Build the client core on its own
-        # After scripts/android.sh, which creates the directory cargo-apk needs for SHERPA_ONNX_ARCHIVE_DIR.
+        # Checks the core with only its own features, as design/clients.md requires, rather than those the headset unifies with it. After scripts/android.sh, which creates the directory cargo-apk needs for SHERPA_ONNX_ARCHIVE_DIR.
         run: cargo apk -- build --package client --target aarch64-linux-android --locked
       - uses: actions/upload-artifact@v7
         with:
           name: tomori-apk
           path: target/debug/apk/tomori.apk
+          if-no-files-found: error
           retention-days: 7
 
   test-result:

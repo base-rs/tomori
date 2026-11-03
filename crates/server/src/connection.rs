@@ -21,8 +21,8 @@ const CHUNK_TARGET: usize = 64 * 1024;
 /// The most request reads applied before each outgoing chunk when both directions are busy.
 const INPUT_READS_PER_OUTPUT: usize = 8;
 
-/// The most waits for output that may end with input already read, without returning, before yielding once. Every connection, the keepalive sweep and the space drivers are polled by one task, and a request read completes without waiting while the peer's data is buffered, so without this a peer that keeps sending faster than its input is applied would keep the rest of the server from running.
-const INPUT_WAITS_PER_YIELD: usize = 8;
+/// The most request reads applied before the connection yields once. Every connection, the keepalive sweep and the space drivers are polled by one task, and a request read completes without waiting while the peer's data is buffered, as does writing output while the socket has room. Without this, a peer that keeps sending faster than its input is applied, whether or not it reads what it is sent, would keep the rest of the server from running.
+const INPUT_READS_PER_YIELD: usize = 64;
 
 /// The response body of `POST /connect`: server frames out, while reading client frames from the request body it owns.
 ///
@@ -38,6 +38,8 @@ pub struct ConnectionBody<B: ReadableBody> {
     /// The request body. Its reads are raced against outgoing frames and dropped when those win, which the `ReadableBody` contract allows: a dropped read loses no input.
     request: B,
     decoder: FrameDecoder,
+    /// Request reads applied since the connection last yielded; see [`INPUT_READS_PER_YIELD`].
+    reads: usize,
     input_ended: bool,
     finished: bool,
 }
@@ -59,6 +61,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             output,
             request,
             decoder: FrameDecoder::new(),
+            reads: 0,
             input_ended: false,
             finished: false,
         })
@@ -82,6 +85,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
     }
 
     fn input<D: AsRef<[u8]>>(&mut self, frame: BodyFrame<D>) -> Result<(), BodyError> {
+        self.reads += 1;
         let end = frame.is_end();
         if let BodyFrame::Data { data, .. } = &frame {
             // Any data counts as liveness, even part of a frame.
@@ -153,10 +157,14 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
     async fn read(&mut self, cancellation: &Cancellation) -> Result<BodyFrame<Vec<u8>>, BodyError> {
         // The HTTP server reads the body again only once the previous chunk is written. Until then, the request body is not read either, so input from the peer is not seen while a write is blocked; the keepalive sweep releases a connection whose write makes no progress.
         self.output.asked();
-        let mut inputs = 0;
         loop {
             if self.finished {
                 return Ok(BodyFrame::End);
+            }
+            if self.reads >= INPUT_READS_PER_YIELD {
+                self.reads = 0;
+                // Nothing has been read since the last input was applied, so dropping this read while it yields loses nothing.
+                futures_lite::future::yield_now().await;
             }
             self.take_ready_input(cancellation)?;
             let mut output = Vec::new();
@@ -188,12 +196,114 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
             };
             if let Some(frame) = received {
                 self.input(frame)?;
-                inputs += 1;
-                if inputs % INPUT_WAITS_PER_YIELD == 0 {
-                    // Input already applied stays applied if this read is dropped meanwhile; the next read continues from the same position.
-                    futures_lite::future::yield_now().await;
-                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll, Waker};
+
+    use protocol::ClientMessage;
+
+    use super::*;
+    use crate::transcriber::NullTranscriber;
+    use crate::workspace::{DEFAULT_MAX_SPACES, SpaceSlots};
+    use crate::{Access, Backends};
+
+    /// More reads than a connection should ever apply without yielding. A flood stops being ready after this many, so that a connection that never yields fails the test rather than hanging it.
+    const FLOOD_LIMIT: usize = 10_000;
+
+    /// The most reads a connection applies before it yields: the limit is checked before each wait, and one wait reads at most `INPUT_READS_PER_OUTPUT + 1` times.
+    const MOST_READS_BEFORE_YIELDING: usize = INPUT_READS_PER_YIELD + INPUT_READS_PER_OUTPUT;
+
+    /// A request body whose every read completes at once with `message`, like a peer whose data is always buffered, for [`FLOOD_LIMIT`] reads.
+    struct Flood {
+        message: Vec<u8>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl ReadableBody for Flood {
+        type Data = Vec<u8>;
+        type Error = std::io::Error;
+
+        fn close(&mut self, _error: Option<Self::Error>) {}
+
+        async fn read(
+            &mut self,
+            _cancellation: &Cancellation,
+        ) -> Result<BodyFrame<Vec<u8>>, Self::Error> {
+            if self.reads.fetch_add(1, Ordering::Relaxed) >= FLOOD_LIMIT {
+                std::future::pending::<()>().await;
+            }
+            Ok(BodyFrame::Data {
+                data: self.message.clone(),
+                end: false,
+            })
+        }
+    }
+
+    /// A connection whose peer sends `message` without pause, and a count of the request reads.
+    fn flooded(message: &ClientMessage) -> (ConnectionBody<Flood>, Arc<AtomicUsize>) {
+        let (jobs, _) = async_channel::unbounded();
+        let hub = Hub::new(
+            Backends::new(),
+            Arc::new(NullTranscriber::new()),
+            jobs,
+            Vec::new(),
+            SpaceSlots::new(DEFAULT_MAX_SPACES),
+        );
+        let reads = Arc::new(AtomicUsize::new(0));
+        let request = Flood {
+            message: Frame::client(message).encode(),
+            reads: reads.clone(),
+        };
+        let body = ConnectionBody::new(hub, request, Cancellation::new(), Access::open())
+            .expect("an open server admits the connection");
+        (body, reads)
+    }
+
+    /// Poll one read of `body` once, as the HTTP server would.
+    fn poll_read(body: &mut ConnectionBody<Flood>) -> Poll<Result<BodyFrame<Vec<u8>>, BodyError>> {
+        let cancellation = Cancellation::new();
+        let mut read = pin!(body.read(&cancellation));
+        read.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn a_peer_whose_input_is_always_ready_and_needs_no_reply_lets_others_run() {
+        // A pong queues no output, so without yielding the read would loop for as long as input is ready.
+        let (mut body, reads) = flooded(&ClientMessage::Pong { nonce: 1 });
+        assert!(poll_read(&mut body).is_pending());
+        let applied = reads.load(Ordering::Relaxed);
+        assert!(
+            (INPUT_READS_PER_YIELD..=MOST_READS_BEFORE_YIELDING).contains(&applied),
+            "{applied} reads before yielding"
+        );
+    }
+
+    #[test]
+    fn a_peer_whose_input_is_always_ready_and_answered_lets_others_run() {
+        // Each ping queues a pong, so every read returns output, which the HTTP server may write without waiting; the connection still yields between reads.
+        let (mut body, reads) = flooded(&ClientMessage::Ping { nonce: 1 });
+        let mut outputs = 0;
+        loop {
+            match poll_read(&mut body) {
+                Poll::Ready(Ok(BodyFrame::Data { .. })) => outputs += 1,
+                Poll::Pending => break,
+                other => panic!("unexpected read: {other:?}"),
+            }
+            assert!(outputs <= INPUT_READS_PER_YIELD, "never yielded");
+        }
+        assert!(outputs > 0);
+        let applied = reads.load(Ordering::Relaxed);
+        assert!(
+            (INPUT_READS_PER_YIELD..=MOST_READS_BEFORE_YIELDING).contains(&applied),
+            "{applied} reads before yielding"
+        );
     }
 }
