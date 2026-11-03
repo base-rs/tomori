@@ -459,10 +459,15 @@ pub struct Registration {
     /// written: text streamed while the stream was down is in no event, so
     /// each is read again once it ends, when OpenCode records its text.
     restoring: HashSet<String>,
-    /// Messages that have ended and wait to be read again, and whether that
-    /// read is running.
+    /// Messages that have ended and wait to be read again, those being read,
+    /// and whether that read is running.
     restore_due: Vec<String>,
+    restore_reading: Vec<String>,
     restore_in_flight: bool,
+    /// Messages whose record had no text yet when read, retried at the
+    /// reconciliation cadence, with the attempts made for each.
+    restore_retry: Vec<String>,
+    restore_attempts: HashMap<String, u8>,
 }
 
 impl Resync {
@@ -569,7 +574,10 @@ impl Registration {
                 resync: None,
                 restoring: HashSet::new(),
                 restore_due: Vec::new(),
+                restore_reading: Vec::new(),
                 restore_in_flight: false,
+                restore_retry: Vec::new(),
+                restore_attempts: HashMap::new(),
             },
             rx,
         )
@@ -927,7 +935,11 @@ impl SnapshotReply {
 struct RestoreResult {
     id: String,
     registration: Arc<AtomicU64>,
+    /// The wanted messages whose text the record has.
     messages: Vec<backend::SnapshotMessage>,
+    /// The wanted messages it has no text for yet, or all of them if the read
+    /// failed.
+    unrecorded: Vec<String>,
 }
 
 struct ResyncResult {
@@ -1413,6 +1425,10 @@ fn connection_lost(registrations: &mut HashMap<String, Registration>) {
         // Their futures were dropped with the connection.
         registration.snapshot_in_flight = None;
         registration.reconcile_in_flight = None;
+        // A restore being read is read again on the next connection.
+        registration.restore_in_flight = false;
+        let reading = std::mem::take(&mut registration.restore_reading);
+        registration.restore_due.extend(reading);
         registration.snapshot_deletions.clear();
         registration.snapshot_deletions_overflow = false;
         if registration.workers_ready {
@@ -1772,7 +1788,13 @@ async fn connected<S: Timers>(
                                 ReconcileResult { id, registration: identity, revision, modes, running }
                             }));
                         }
-                        // Retry a session whose read again failed.
+                        // Retry a restore whose record had no text yet.
+                    for registration in registrations.values_mut() {
+                        let retry = std::mem::take(&mut registration.restore_retry);
+                        registration.restore_due.extend(retry);
+                    }
+                    start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                    // Retry a session whose read again failed.
                         start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
                         retry_worker_delivery(registrations);
                         next_reconcile = timers.now() + RECONCILE_INTERVAL;
@@ -2080,7 +2102,8 @@ fn finish_resync(
             registration.running = running;
             registration.event_revision = registration.event_revision.wrapping_add(1);
             registration.modes_dirty = false;
-            registration.restoring.extend(
+            // Only messages this read lists unfinished still wait to end.
+            registration.restoring = HashSet::from_iter(
                 snapshot
                     .messages
                     .iter()
@@ -2142,6 +2165,7 @@ fn start_restores<'a, S: Timers>(
         }
         registration.restore_in_flight = true;
         let wanted = std::mem::take(&mut registration.restore_due);
+        registration.restore_reading.clone_from(&wanted);
         let identity = registration.events.worker_epoch.clone();
         let id = id.clone();
         let local = cancellation.child();
@@ -2160,15 +2184,28 @@ fn start_restores<'a, S: Timers>(
             )
             .await;
             local.cancel();
-            let messages = listed
+            // The text is recorded when it ends, which may be before the
+            // message itself is marked completed, as when tools follow it.
+            let messages: Vec<_> = listed
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|message| message.completed && wanted.contains(&message.id))
+                .filter(|message| {
+                    wanted.contains(&message.id)
+                        && (message.completed
+                            || message.parts.iter().any(|part| {
+                                matches!(part, backend::Part::Text { text } if !text.is_empty())
+                            }))
+                })
+                .collect();
+            let unrecorded = wanted
+                .into_iter()
+                .filter(|id| !messages.iter().any(|message| message.id == *id))
                 .collect();
             RestoreResult {
                 id,
                 registration: identity,
                 messages,
+                unrecorded,
             }
         }));
     }
@@ -2183,19 +2220,39 @@ fn finish_restore(registrations: &mut HashMap<String, Registration>, completed: 
         return;
     };
     registration.restore_in_flight = false;
+    registration.restore_reading.clear();
+    for id in completed.unrecorded {
+        let attempts = registration.restore_attempts.entry(id.clone()).or_default();
+        *attempts += 1;
+        if *attempts < RESYNC_ATTEMPTS {
+            registration.restore_retry.push(id);
+        } else {
+            // The record never had its text; the space keeps what it has.
+            registration.restore_attempts.remove(&id);
+        }
+    }
+    let mut overflowed = false;
     for message in completed.messages {
+        registration.restore_attempts.remove(&message.id);
         let event = Event::MessageRestored { message };
         match registration.resync.as_mut() {
-            // A read after the next connection lists the message completed,
-            // with its text, so the restore is not needed then; holding it
-            // keeps it if that read fails to.
-            Some(resync) => {
-                let _ = resync.hold(u64::MAX, event);
-            }
+            // Held behind the read after the next connection, which delivers
+            // it after the state read again.
+            Some(resync) => overflowed |= !resync.hold(u64::MAX, event),
             None => {
                 registration.events.deliver(event);
             }
         }
+    }
+    if overflowed {
+        end_registration(
+            registrations,
+            &completed.id,
+            Some(
+                "too many OpenCode events arrived before the session could be read again after reconnecting"
+                    .to_owned(),
+            ),
+        );
     }
 }
 
@@ -6037,9 +6094,15 @@ mod tests {
             "the other message's end",
             |event| matches!(event, Event::MessageCompleted { message } if message == "n"),
         );
+        let listings = shared.state.lock().unwrap().listed["s1"].len();
         assert!(
             watched.recv_timeout(Duration::from_millis(300)).is_err(),
             "a message the read did not list unfinished was restored"
+        );
+        assert_eq!(
+            shared.state.lock().unwrap().listed["s1"].len(),
+            listings,
+            "the messages were read again for a message the read did not list unfinished"
         );
         drop(commands);
         join_within(connection, Duration::from_secs(5));
@@ -6653,7 +6716,7 @@ mod tests {
         assert_eq!(delivered.len(), 5, "{delivered:?}");
     }
     #[test]
-    fn a_restore_after_another_loss_is_held_until_the_session_is_read() {
+    fn a_restore_lost_with_the_connection_is_read_again_and_then_held() {
         let mut registrations = HashMap::new();
         let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
         let registration = registrations.get_mut("s").unwrap();
@@ -6668,25 +6731,39 @@ mod tests {
         assert_eq!(registrations["s"].restore_due, ["p"]);
         assert!(registrations["s"].restoring.is_empty());
         while events.try_recv().is_ok() {}
-        // The stream is lost before the read returns.
+        // Its read starts, as `start_restores` does, and the stream is lost
+        // before it returns: the read is dropped with the connection, and the
+        // message is due again rather than forgotten.
+        let registration = registrations.get_mut("s").unwrap();
+        registration.restore_in_flight = true;
+        let wanted = std::mem::take(&mut registration.restore_due);
+        registration.restore_reading = wanted;
         connection_lost(&mut registrations);
         while events.try_recv().is_ok() {}
+        assert!(!registrations["s"].restore_in_flight);
+        assert_eq!(registrations["s"].restore_due, ["p"]);
+        assert!(registrations["s"].restore_reading.is_empty());
+        // Read again on the next connection before the session itself is: the
+        // restore is held behind that read.
+        let registration = registrations.get_mut("s").unwrap();
+        registration.restore_in_flight = true;
+        registration.restore_reading = std::mem::take(&mut registration.restore_due);
         let identity = registrations["s"].events.worker_epoch.clone();
-        registrations.get_mut("s").unwrap().restore_in_flight = true;
         let restored = backend::SnapshotMessage {
             id: "p".into(),
             role: backend::Role::Assistant,
             parts: vec![backend::Part::Text {
                 text: "All of it".into(),
             }],
-            completed: true,
+            completed: false,
         };
         finish_restore(
             &mut registrations,
             RestoreResult {
                 id: "s".into(),
-                registration: identity,
+                registration: identity.clone(),
                 messages: vec![restored.clone()],
+                unrecorded: vec!["q".into()],
             },
         );
         assert!(events.try_recv().is_err(), "delivered ahead of the read");
@@ -6695,8 +6772,25 @@ mod tests {
             registrations["s"].resync.as_ref().unwrap().events.last(),
             Some((_, Event::MessageRestored { message })) if *message == restored
         ));
+        // A message whose record has no text yet is retried, a bounded number
+        // of times.
+        assert_eq!(registrations["s"].restore_retry, ["q"]);
+        for _ in 1..RESYNC_ATTEMPTS {
+            let registration = registrations.get_mut("s").unwrap();
+            registration.restore_retry.clear();
+            finish_restore(
+                &mut registrations,
+                RestoreResult {
+                    id: "s".into(),
+                    registration: identity.clone(),
+                    messages: Vec::new(),
+                    unrecorded: vec!["q".into()],
+                },
+            );
+        }
+        assert!(registrations["s"].restore_retry.is_empty());
+        assert!(registrations["s"].restore_attempts.is_empty());
     }
-
     #[test]
     fn closing_during_a_read_cancels_it_and_ignores_its_result() {
         let mut registrations = HashMap::new();

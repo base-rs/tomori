@@ -537,7 +537,21 @@ impl SpaceModel {
                     .iter()
                     .rposition(|shown| shown.id == message.id)
                 {
-                    self.messages[index] = message_model(message);
+                    let mut restored = message_model(message);
+                    let shown = &self.messages[index];
+                    // Its text may be recorded before the message is marked completed, and a record does not say
+                    // which tools failed: what the space already knows is kept.
+                    restored.completed |= shown.completed;
+                    for tool in &mut restored.tools {
+                        if shown
+                            .tools
+                            .iter()
+                            .any(|known| known.id == tool.id && known.state == "failed")
+                        {
+                            tool.state = "failed";
+                        }
+                    }
+                    self.messages[index] = restored;
                 }
             }
             Event::Resynchronized { snapshot } => {
@@ -1217,12 +1231,41 @@ mod tests {
         space.apply(Event::MessageCompleted {
             message: "p".into(),
         });
+        // Recorded before the message is marked completed, it stays completed.
         space.apply(Event::MessageRestored {
-            message: listed("Before the gap. During it. After.", true),
+            message: listed("Before the gap. During it. After.", false),
         });
         assert_eq!(space.messages.len(), 1);
         assert_eq!(space.messages[0].text, "Before the gap. During it. After.");
         assert!(space.messages[0].completed);
+        // A failed tool stays failed when its message is restored.
+        space.apply(Event::ToolStarted {
+            message: "p".into(),
+            tool: "bash".into(),
+            id: "t".into(),
+            input: serde_json::Value::Null,
+        });
+        space.apply(Event::ToolFinished {
+            id: "t".into(),
+            error: Some("no".into()),
+        });
+        space.apply(Event::MessageRestored {
+            message: backend::SnapshotMessage {
+                parts: vec![
+                    Part::Text {
+                        text: "Before the gap. During it. After.".into(),
+                    },
+                    Part::Tool {
+                        id: "t".into(),
+                        tool: "bash".into(),
+                        input: serde_json::Value::Null,
+                        finished: true,
+                    },
+                ],
+                ..listed("", true)
+            },
+        });
+        assert_eq!(space.messages[0].tools[0].state, "failed");
         // Listed text that differs from what is shown replaces it.
         space.apply(Event::Resynchronized {
             snapshot: Snapshot {
