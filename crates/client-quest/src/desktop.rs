@@ -483,7 +483,7 @@ impl State {
                 &[target],
                 &[matrix],
                 Mat4::IDENTITY,
-                None,
+                &[],
             );
         }
         if let Some(video) = &mut self.video {

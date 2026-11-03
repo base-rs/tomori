@@ -13,6 +13,7 @@ mod connection;
 mod console;
 mod controller;
 mod controller_graphics;
+mod controller_ui;
 mod conversation;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod delegation;
@@ -37,6 +38,7 @@ mod panel_anchor;
 mod pipewire_video;
 mod playback;
 mod pointing;
+mod recording;
 mod server_choice;
 #[cfg(not(target_os = "android"))]
 mod spectator;
@@ -45,6 +47,8 @@ mod spectator_feed;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
 mod swarm;
+mod ui_panel;
+mod ui_text;
 mod vulkan;
 mod workspace_graphics;
 mod xr;

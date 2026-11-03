@@ -1742,6 +1742,10 @@ impl Hub {
             backends,
             roots,
             environments: self.environments.clone(),
+            utterance_limit: self
+                .transcriber
+                .utterance_limit()
+                .map(|limit| limit.as_secs().min(u64::from(u32::MAX)) as u32),
         });
         match rejoin.filter(|space| state.space(space).is_some()) {
             Some(space) => state.join(&participant, &space),
@@ -3348,6 +3352,57 @@ mod tests {
             Vec::new(),
             SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
         )
+    }
+
+    /// A transcriber that takes utterances of up to a minute.
+    #[cfg(feature = "fake")]
+    #[derive(Default)]
+    struct Limited(crate::test_support::TextTranscriber);
+
+    #[cfg(feature = "fake")]
+    impl Transcriber for Limited {
+        fn begin(&self, utterance: UtteranceId, sink: TranscriptSink) {
+            self.0.begin(utterance, sink)
+        }
+        fn push(&self, utterance: UtteranceId, frame: &protocol::AudioFrame) {
+            self.0.push(utterance, frame)
+        }
+        fn end(&self, utterance: UtteranceId) {
+            self.0.end(utterance)
+        }
+        fn cancel(&self, utterance: UtteranceId) {
+            self.0.cancel(utterance)
+        }
+        fn utterance_limit(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(60))
+        }
+    }
+
+    #[cfg(feature = "fake")]
+    #[test]
+    fn the_welcome_says_how_long_an_utterance_may_be() {
+        use crate::test_support::{TestClient, TestServer};
+        let welcome = |server: &TestServer| {
+            let mut client = TestClient::open(server.address);
+            client.send(&ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                participant: "ada".into(),
+                name: "Ada".into(),
+            });
+            client.wait_for(|message| match message {
+                ServerMessage::Welcome {
+                    utterance_limit, ..
+                } => Some(*utterance_limit),
+                _ => None,
+            })
+        };
+        // Recognition without a limit gives none.
+        let server = TestServer::start();
+        assert_eq!(welcome(&server), None);
+        let server = TestServer::with_server(crate::fake::FakeBackend::new(), |backends| {
+            crate::Server::new(backends, Arc::new(Limited::default()))
+        });
+        assert_eq!(welcome(&server), Some(60));
     }
 
     #[cfg(feature = "fake")]

@@ -213,6 +213,9 @@ pub enum ServerMessage {
         /// The environments a space may be bound to, the first being the one bound when a `CreateSpace` names none. Absent from older servers.
         #[serde(default)]
         environments: Vec<EnvironmentInfo>,
+        /// The longest utterance, in seconds, that the server's speech recognition takes, so that a client can warn before it is reached. Absent from older servers and for recognition without a limit. See `design/speech.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        utterance_limit: Option<u32>,
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
@@ -559,7 +562,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             welcome,
-            ServerMessage::Welcome { environments, .. } if environments.is_empty()
+            ServerMessage::Welcome { environments, utterance_limit: None, .. } if environments.is_empty()
         ));
     }
 

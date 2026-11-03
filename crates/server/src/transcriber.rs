@@ -28,6 +28,11 @@ pub trait Transcriber: Send + Sync {
 
     /// Discard the utterance without a transcript.
     fn cancel(&self, utterance: UtteranceId);
+
+    /// The longest utterance it takes, which the server tells clients in its `Welcome` so that they can warn before it; `None` without a limit.
+    fn utterance_limit(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// Where a [`Transcriber`] reports results for one utterance. Cheap to clone.

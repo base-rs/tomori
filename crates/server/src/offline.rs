@@ -102,6 +102,13 @@ impl Transcriber for OfflineTranscriber {
             handle.cancel();
         }
     }
+
+    /// The whole clip is buffered, up to [`speech::stt::MAX_UTTERANCE`].
+    fn utterance_limit(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(
+            (speech::stt::MAX_UTTERANCE / RATE as usize) as u64,
+        ))
+    }
 }
 
 /// An [`OfflineRecognizer`] for the in-process Whisper model: it decodes each buffered clip, or segment of a long one, whole, once.

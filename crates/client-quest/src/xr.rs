@@ -173,8 +173,9 @@ pub fn run(
         Renderer::with_samples(&gpu.device, &gpu.queue, format, width, height, samples);
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
-    let mut caption = Caption::new(&gpu.device, format);
-    caption.set_recording_progress(&gpu.queue, None, Duration::ZERO);
+    let mut caption = Caption::new(&gpu.device, &renderer);
+    // The recording indicator and the live badge on the left controller.
+    let mut indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
     // Runs on every return/unwind, before imported image wrappers and the XR
     // swapchain are dropped, including if a frame fails after queue submission.
     let _gpu_idle = WaitForGpu(&gpu.device);
@@ -430,7 +431,6 @@ pub fn run(
             if choosing || selecting { 0.0 } else { right.y },
         );
         caption.set_text(&gpu.queue, &conversation.text());
-        caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
         if !frame.should_render {
             stream.end(frame.predicted_display_time, BLEND, &[])?;
             continue;
@@ -509,9 +509,29 @@ pub fn run(
                     .as_ref()
                     .and_then(Palm::from_left_controller)
             });
-        let head = scene_anchor
+        let scene_head = scene_anchor
             .to_scene_transform(head_pose(&views))
-            .map(|pose| Vec3::from_array(pose.position));
+            .map(|pose| pose.transform());
+        let head = scene_head.map(|head| head.transform_point3(Vec3::ZERO));
+        // While recording, the indicator rises from the left controller, or the left wrist, or else stands low in the view. See `design/hand-menu.md`.
+        indicator.update(
+            &gpu.queue,
+            &conversation,
+            crate::recording::Trackers {
+                grip: controller_poses[controller::LEFT],
+                wrist: tracked_hands[controller::LEFT]
+                    .as_ref()
+                    .and_then(|hand| hand.joints[1])
+                    .map(|joint| Vec3::from_array(joint.position)),
+                view: scene_head.map(crate::controller_ui::view_spot),
+            },
+            head,
+            crate::controller_ui::Moment {
+                now,
+                dt,
+                time: arrival_time,
+            },
+        );
         let menu_shown = focused && hand_menu.update(palm, head, Instant::now());
         menu_was_shown = menu_shown;
         let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
@@ -650,7 +670,17 @@ pub fn run(
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
             // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
-            (!in_arrival && !menu_shown).then_some((&caption, panel_pose)),
+            &if !in_arrival && !menu_shown {
+                caption.panels(
+                    panel_pose
+                        * Mat4::from_translation(Vec3::new(0.0, renderer.caption_offset(), 0.0)),
+                )
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .chain(indicator.panels(scene_anchor.transform()))
+            .collect::<Vec<_>>(),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,

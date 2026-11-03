@@ -418,6 +418,7 @@ fn welcome(
             backends,
             roots,
             environments,
+            utterance_limit,
         } => {
             if protocol != PROTOCOL_VERSION {
                 return Err(Disconnect::Protocol(format!(
@@ -432,6 +433,7 @@ fn welcome(
                 backends,
                 roots,
                 environments,
+                utterance_limit: utterance_limit.map(|seconds| Duration::from_secs(seconds.into())),
             });
             Ok(source)
         }
