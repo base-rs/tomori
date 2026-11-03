@@ -1180,7 +1180,7 @@ fn taking_the_headset_off_mid_reply_replays_that_reply_from_its_start_on_return(
     ada.say("u1", "tell me everything");
     ada.space(|state| state.activity == protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
-    let sentence = "This reply goes on for a while so that somebody can take their headset off and put it back on again before it ends, which is exactly the point.";
+    let sentence = "This reply goes on for quite a while so that somebody can take their headset off, wait a moment with it on the desk, and put it back on again well before the reply has ended, which is exactly the situation this test is about.";
     session.stream(&[sentence]);
     let frames = words(&[sentence]) * FRAMES_PER_WORD;
 
@@ -1188,9 +1188,21 @@ fn taking_the_headset_off_mid_reply_replays_that_reply_from_its_start_on_return(
         .next_audio(Duration::from_secs(5))
         .expect("speech starts");
     report(&mut ada, Engagement::Away);
-    std::thread::sleep(Duration::from_millis(300));
+    let source = ada.source;
+    bob.space(|state| {
+        state.participants.iter().any(|participant| {
+            participant.source == source && participant.engagement == Some(Engagement::Away)
+        })
+    });
+    // Frames already on their way may still arrive, but no more are sent while she is away.
+    let mut before = Vec::new();
+    while let Some(frame) = ada.next_audio(Duration::from_millis(250)) {
+        before.push(frame);
+    }
+    assert!(ada.next_audio(Duration::from_millis(300)).is_none());
     report(&mut ada, Engagement::Engaged);
-    let (heard, announcements) = listen(&ada, Duration::from_millis(400));
+    let (after, announcements) = listen(&ada, Duration::from_millis(400));
+    let heard: Vec<AudioFrame> = before.into_iter().chain(after).collect();
     // She heard the start live, then the whole reply again from its start, and never both at once.
     assert_eq!(from(&heard, REPLAY_SOURCE), frames);
     assert!(from(&heard, AGENT_SOURCE) + 1 < frames);

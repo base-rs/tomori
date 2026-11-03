@@ -2919,7 +2919,7 @@ impl Hub {
             record.model.apply(Event::Closed { reason: error });
         }
         // A closed space keeps no speech, so that up to [`CLOSED_SPACES`] closed spaces hold no audio, and its pacer stops once what is still queued has been spoken.
-        record.speech.clear();
+        record.speech.close();
         record.waker = None;
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
@@ -2940,10 +2940,13 @@ impl Hub {
         let state = &*state;
         let record = state.space(space).expect("found above");
         // Visitors have no place in the kept speech, so they always hear it live.
-        for member in record.model.members() {
-            if record.speech.hears_live(member)
-                && let Some(outbox) = state.outbox(member)
-            {
+        let participants = record
+            .model
+            .participants
+            .iter()
+            .filter(|participant| record.speech.hears_live(participant));
+        for member in participants.chain(&record.model.visitors) {
+            if let Some(outbox) = state.outbox(member) {
                 send(outbox);
             }
         }

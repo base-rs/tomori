@@ -567,6 +567,8 @@ impl Conversation {
                 if !role.participates() {
                     self.stop_live();
                     self.stop_talking();
+                    // The server ignores a visitor's engagement, so it is reported again on taking part.
+                    self.reported = None;
                 }
                 // Admitted to act here, the participant's engagement now counts.
                 self.report();
@@ -811,8 +813,8 @@ impl Conversation {
             return;
         }
         if self.replaying {
-            self.actions.push(Action::Send(ClientMessage::StopReplay));
             self.notice = None;
+            self.send(ClientMessage::StopReplay);
             return;
         }
         if self.muted {
@@ -1051,6 +1053,7 @@ impl Conversation {
                 | ClientMessage::DecideKnock { .. }
                 | ClientMessage::SetSpeech { .. }
                 | ClientMessage::Replay { .. }
+                | ClientMessage::StopReplay
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());

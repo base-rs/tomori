@@ -296,10 +296,11 @@ mod enabled {
                     message,
                     role: Role::Assistant,
                 } => {
-                    if std::mem::take(&mut self.idle) {
-                        self.reply += 1;
-                    }
+                    // A message already being spoken, as when the backend reads the session again, continues its reply.
                     if !self.speaking.contains_key(message) {
+                        if std::mem::take(&mut self.idle) {
+                            self.reply += 1;
+                        }
                         let brief = self.hub.upgrade().is_some_and(|hub| {
                             hub.speech_setting(&self.space) == SpeechSetting::Brief
                         });

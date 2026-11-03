@@ -117,6 +117,8 @@ pub struct Retention {
     /// The reply number and first entry index of each retained reply, oldest first. A reply's start may have been dropped.
     replies: VecDeque<(u64, u64)>,
     listeners: HashMap<String, Listener>,
+    /// Set once the space has closed: nothing more is kept, and nothing is played again.
+    closed: bool,
 }
 
 impl Retention {
@@ -154,6 +156,9 @@ impl Retention {
 
     /// Record one item of live speech, part of reply number `reply`. A replay of an earlier reply stops when a later one starts, and its listener hears the new reply live from its start.
     pub fn record(&mut self, reply: u64, item: Item) {
+        if self.closed {
+            return;
+        }
         if self
             .replies
             .back()
@@ -314,6 +319,9 @@ impl Retention {
 
     /// Play the reply with an announcement for `message`, or the latest reply, again to `participant` from its start. Refused while they are away, as nothing is played to them then.
     pub fn replay(&mut self, participant: &str, message: Option<&str>) -> Result<(), &'static str> {
+        if self.closed {
+            return Err("The agent session has stopped, so its replies are no longer kept.");
+        }
         if self.listeners.get(participant).is_some_and(|listener| {
             matches!(listener.state, State::Away { .. } | State::Absent { .. })
         }) {
@@ -355,11 +363,10 @@ impl Retention {
         }
     }
 
-    /// Forget everything kept and every listener, as when the space closes: its speech is no longer kept. Listeners hear what is still spoken live.
-    pub fn clear(&mut self) {
-        let end = self.end();
+    /// Forget everything kept and every listener, and keep nothing more, as when the space closes. Everyone hears what is still spoken live.
+    pub fn close(&mut self) {
         *self = Self {
-            first: end,
+            closed: true,
             ..Self::default()
         };
     }
@@ -707,15 +714,22 @@ mod tests {
     }
 
     #[test]
-    fn clearing_forgets_what_was_kept_and_who_heard_it() {
+    fn closing_forgets_what_was_kept_and_keeps_nothing_more() {
         let mut retention = Retention::default();
         retention.joined("ada", Some(Engagement::Away));
         speak(&mut retention, 1, "m1", 1, 2);
-        retention.clear();
+        retention.close();
         assert_eq!(retention.retained(), (Duration::ZERO, 0));
         assert!(retention.hears_live("ada"));
-        assert!(retention.replay("ada", None).is_err());
+        // What is still spoken as the space closes is heard live, but not kept.
+        speak(&mut retention, 2, "m2", 2, 2);
+        assert_eq!(retention.retained(), (Duration::ZERO, 0));
+        assert_eq!(
+            retention.replay("ada", None),
+            Err("The agent session has stopped, so its replies are no longer kept.")
+        );
         assert!(!retention.joined("bob", Some(Engagement::Engaged)));
+        assert!(retention.hears_live("bob"));
     }
 
     #[test]
