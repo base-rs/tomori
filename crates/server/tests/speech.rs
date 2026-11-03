@@ -1257,7 +1257,7 @@ fn a_replay_plays_the_latest_reply_to_the_participant_who_asked_only() {
     let (mut ada, mut bob) = pair(&server);
     report(&mut ada, Engagement::Engaged);
     report(&mut bob, Engagement::Engaged);
-    ada.space(|state| state.speech == SpeechSetting::Brief);
+    ada.space(|state| state.speech == SpeechSetting::Full);
 
     ada.send(&ClientMessage::Replay { message: None });
     assert_eq!(ada.error(), "There is no spoken reply to play again yet.");
@@ -1301,11 +1301,12 @@ fn synthesized(synthesizer: &FakeSynthesizer, count: usize) -> Vec<String> {
 }
 
 #[test]
-fn brief_speech_speaks_the_start_of_a_reply_and_full_speech_all_of_it() {
+fn a_new_space_speaks_replies_in_full_and_brief_speech_the_start_of_them() {
     let synthesizer = FakeSynthesizer::default();
     let server = speaking_server(FakeBackend::manual(), synthesizer.clone());
     let mut ada = server.connect("ada", "Ada");
-    ada.create_space("Brief");
+    let created = ada.create_space("Speech");
+    assert_eq!(created.speech, SpeechSetting::Full);
     ada.say("u1", "explain");
     ada.space(|state| state.activity == protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
@@ -1318,24 +1319,25 @@ fn brief_speech_speaks_the_start_of_a_reply_and_full_speech_all_of_it() {
     let reply = paragraphs.join("\n\n");
     session.stream(&[&reply]);
     let spoken = synthesized(&synthesizer, 3);
+    assert_eq!(spoken, paragraphs);
+
+    // Chosen brief, the next reply speaks its first paragraphs and points to the panel for the rest.
+    ada.send(&ClientMessage::SetSpeech {
+        speech: SpeechSetting::Brief,
+    });
+    ada.space(|state| state.speech == SpeechSetting::Brief);
+    ada.say("u2", "again, briefly");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    session.stream(&[&reply]);
+    let spoken = synthesized(&synthesizer, 6);
     assert_eq!(
-        spoken,
+        &spoken[3..],
         [
             paragraphs[0].as_str(),
             paragraphs[1].as_str(),
             "More on the panel."
         ]
     );
-
-    ada.send(&ClientMessage::SetSpeech {
-        speech: SpeechSetting::Full,
-    });
-    ada.space(|state| state.speech == SpeechSetting::Full);
-    ada.say("u2", "again, in full");
-    ada.space(|state| state.activity == protocol::Activity::Running);
-    session.stream(&[&reply]);
-    let spoken = synthesized(&synthesizer, 6);
-    assert_eq!(&spoken[3..], paragraphs);
 
     ada.send(&ClientMessage::SetSpeech {
         speech: SpeechSetting::Unknown,
@@ -1446,9 +1448,9 @@ fn engagement_is_shared_and_forgotten_with_the_connection_and_the_speech_setting
     ada.space(|state| engagement(state).is_none());
 
     bob.send(&ClientMessage::SetSpeech {
-        speech: SpeechSetting::Full,
+        speech: SpeechSetting::Brief,
     });
-    ada.space(|state| state.speech == SpeechSetting::Full);
+    ada.space(|state| state.speech == SpeechSetting::Brief);
 }
 
 #[test]
