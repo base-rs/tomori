@@ -78,8 +78,8 @@ Options:
   --no-visitors        Refuse connections without a token, instead of admitting them as visitors.
   --max-visitors COUNT The most visitors connected at once (default 64).
   --state-directory PATH
-                       Where the token store is kept (default $XDG_STATE_HOME/tomori, or
-                       ~/.local/state/tomori).
+                                              Where the token store, the certificate and the spaces kept across restarts
+                       are (default $XDG_STATE_HOME/tomori, or ~/.local/state/tomori).
   --help               Show this help.";
 
 /// The modes `claude --permission-mode` accepts.
@@ -320,6 +320,36 @@ fn workspace_roots(roots: &[PathBuf]) -> Result<WorkspaceRoots, String> {
     Ok(roots)
 }
 
+/// The state directory given, or else the default.
+fn state_directory(arguments: &Arguments) -> Result<PathBuf, String> {
+    arguments
+        .state_directory
+        .clone()
+        .or_else(default_state_directory)
+        .ok_or_else(|| {
+            "No state directory: give --state-directory, or set XDG_STATE_HOME or HOME.".to_owned()
+        })
+}
+
+/// Keep spaces across restarts in the state directory, and list again those kept there. A record that cannot be read stops the server from starting, rather than losing every space and the admissions to them. See `design/spaces.md`.
+fn keep_spaces(server: Server, arguments: &Arguments) -> Result<Server, String> {
+    let state = state_directory(arguments)?;
+    let store = server::kept::SpaceStore::open(&state).map_err(|error| {
+        format!(
+            "Could not open the spaces kept in {}: {error}.",
+            state.display()
+        )
+    })?;
+    let kept = store.spaces();
+    let open = kept.iter().filter(|space| space.closed.is_none()).count();
+    eprintln!(
+        "Keeping spaces in {}: {open} to bind again, and {} closed.",
+        store.path().display(),
+        kept.len() - open
+    );
+    Ok(server.with_kept_spaces(std::sync::Arc::new(store)))
+}
+
 /// Configure who the server admits, and say so. A server that accepts tokens serves only TLS, with the certificate in its state directory, whose fingerprint is returned for advertising. See `design/security.md`.
 fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<String>), String> {
     if arguments.open {
@@ -328,11 +358,7 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
         log::warn!("{warning}");
         return Ok((server, None));
     }
-    let state = arguments
-        .state_directory
-        .clone()
-        .or_else(default_state_directory)
-        .ok_or("No state directory for the token store: give --state-directory, or set XDG_STATE_HOME or HOME.")?;
+    let state = state_directory(arguments)?;
     let store = security::TokenStore::open(&state).map_err(|error| {
         format!(
             "Could not open the token store in {}: {error}.",
@@ -791,6 +817,13 @@ fn main() -> ExitCode {
     let fingerprint;
     (server, fingerprint) = match admission(server, &arguments) {
         Ok(admitted) => admitted,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    server = match keep_spaces(server, &arguments) {
+        Ok(server) => server,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::FAILURE;

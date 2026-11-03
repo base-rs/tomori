@@ -364,6 +364,32 @@ impl SpaceModel {
         self.attribution = enabled;
     }
 
+    pub fn attribution(&self) -> bool {
+        self.attribution
+    }
+
+    /// Why the space closed, once it has.
+    pub fn closed_reason(&self) -> Option<&str> {
+        if self.closed {
+            self.error.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Bind a space listed again after a restart, which waits as reconnecting, to its session as the backend read it: like reading it again after a gap, but with the workers it reports, since none of their events were seen. See `design/spaces.md`.
+    pub fn bind(&mut self, session: String, snapshot: Snapshot) {
+        self.workers = snapshot
+            .workers
+            .iter()
+            .cloned()
+            .map(|entry| worker(entry, &session))
+            .collect();
+        self.workers_authoritative = true;
+        self.session = session;
+        self.resynchronize(snapshot);
+    }
+
     /// Whether `mode` is one the space shows as offered, so a participant may choose it.
     pub fn offers_mode(&self, mode: &str) -> bool {
         self.shown_modes().iter().any(|offered| offered.id == mode)

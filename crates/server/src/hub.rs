@@ -194,6 +194,20 @@ pub enum Job {
     },
 }
 
+/// A space listed again after a restart, for the supervisor to bind to its session. See `design/spaces.md`.
+#[derive(Debug)]
+pub struct Restore {
+    pub id: String,
+    pub backend: String,
+    pub directory: String,
+    pub session: String,
+    /// The space's commands, which wait until it is bound.
+    pub commands: async_channel::Receiver<SpaceCommand>,
+}
+
+/// What a space listed again after a restart says until it is bound to its session.
+pub const RESTORING: &str = "Reconnecting to the agent after the server restarted.";
+
 pub struct Hub {
     state: Mutex<HubState>,
     pub(crate) backends: Backends,
@@ -213,6 +227,8 @@ pub struct Hub {
     max_visitors: AtomicUsize,
     /// Issues collaborator tokens to admitted visitors; see [`Hub::set_tokens`].
     tokens: RwLock<Option<Arc<security::TokenStore>>>,
+    /// Where the spaces are kept across restarts; see [`Hub::restore`].
+    kept: RwLock<Option<Arc<crate::kept::SpaceStore>>>,
     /// Whether the server serves only TLS, which pairing needs: the token it issues must not cross the network in the clear.
     encrypted: AtomicBool,
     pairing: RwLock<Option<PairingSetup>>,
@@ -242,6 +258,8 @@ struct HubState {
     utterances: HashMap<UtteranceId, UtteranceRecord>,
     /// Set once shutdown has begun: no further spaces are registered.
     shutting_down: bool,
+    /// Set when a space was forgotten, so that the kept spaces are written once the lock is released.
+    unkept: bool,
     /// The one pairing pending, if any; see `design/security.md`.
     pairing: Option<PendingPairing>,
     next_pairing: u64,
@@ -367,6 +385,8 @@ enum Deferred {
     Cancel(UtteranceId),
     /// Show something about pairing on the console.
     PairingPrompt(PairingEvent),
+    /// Write the kept spaces, if they changed.
+    Keep,
     /// Issue a collaborator token for an admitted knock, outside the lock, and admit its visitor.
     Admit(KnockRecord),
 }
@@ -510,6 +530,26 @@ impl HubState {
         }
     }
 
+    /// What is kept of the spaces listed.
+    fn kept(&self) -> Vec<crate::kept::KeptSpace> {
+        self.spaces
+            .iter()
+            .map(|space| {
+                let model = &space.model;
+                crate::kept::KeptSpace {
+                    id: model.id.clone(),
+                    title: model.title.clone(),
+                    backend: model.backend.clone(),
+                    directory: model.directory.clone(),
+                    session: model.session.clone(),
+                    environment: model.environment.clone(),
+                    attribution: model.attribution(),
+                    closed: model.closed_reason().map(str::to_owned),
+                }
+            })
+            .collect()
+    }
+
     /// Forget the least recently closed spaces that nobody is in, beyond [`CLOSED_SPACES`]. Returns whether any were forgotten.
     fn forget_closed(&mut self) -> bool {
         self.stamp_closed();
@@ -534,6 +574,7 @@ impl HubState {
         let forgotten: HashSet<&String> = forgettable[..excess].iter().map(|(_, id)| id).collect();
         self.spaces
             .retain(|space| !forgotten.contains(&space.model.id));
+        self.unkept |= excess > 0;
         excess > 0
     }
 
@@ -814,6 +855,7 @@ impl Hub {
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
             tokens: RwLock::new(None),
+            kept: RwLock::new(None),
             encrypted: AtomicBool::new(false),
             pairing: RwLock::new(None),
             pairing_prompt: RwLock::new(None),
@@ -1108,6 +1150,7 @@ impl Hub {
                 Deferred::End(id) => self.transcriber.end(id),
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
                 Deferred::Admit(knock) => self.admit(knock),
+                Deferred::Keep => self.keep(),
                 Deferred::PairingPrompt(event) => {
                     if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
                     {
@@ -1278,6 +1321,8 @@ impl Hub {
             self.disconnect(id);
             cancellation.cancel();
         }
+        // Such as after a closed space was forgotten.
+        self.keep();
     }
 
     /// Forget participants whose last connection ended at least `retention` before `now`. Until then, a participant who reconnects keeps their audio source and rejoins their space; afterwards they are a new participant. See `design/spaces.md`.
@@ -1335,6 +1380,9 @@ impl Hub {
                 }
             }
             self.recount(&mut state);
+            if std::mem::take(&mut state.unkept) {
+                deferred.push(Deferred::Keep);
+            }
         }
         self.run(deferred);
     }
@@ -1407,6 +1455,9 @@ impl Hub {
             }
             // Hello connects a participant, and joining or leaving may forget a closed space.
             self.recount(&mut state);
+            if std::mem::take(&mut state.unkept) {
+                deferred.push(Deferred::Keep);
+            }
         }
         self.run(deferred);
     }
@@ -1888,6 +1939,7 @@ impl Hub {
                     .model
                     .set_attribution(enabled);
                 state.touch_space(&space);
+                deferred.push(Deferred::Keep);
             }
             ClientMessage::PairBegin { commitment } => {
                 if security::pairing::Nonce::parse(&commitment).is_none() {
@@ -2370,7 +2422,108 @@ impl Hub {
         state.forget_closed();
         state.touch_lobby();
         self.recount(&mut state);
+        drop(state);
+        self.keep();
         Some(id)
+    }
+
+    /// List again the spaces `store` keeps, and keep spaces there from now on. Each space that was open waits as reconnecting until the supervisor binds it to its session, so that clients restoring it, and collaborators admitted to it, find it meanwhile; each that was closed is listed closed. Returns the spaces to bind. See `design/spaces.md`.
+    pub(crate) fn restore(&self, store: Arc<crate::kept::SpaceStore>) -> Vec<Restore> {
+        let mut restores = Vec::new();
+        {
+            let mut state = self.lock();
+            for kept in store.spaces() {
+                if state.space(&kept.id).is_some() {
+                    continue;
+                }
+                let mut model = SpaceModel::new(
+                    kept.id.clone(),
+                    kept.title,
+                    kept.backend.clone(),
+                    kept.directory.clone(),
+                    kept.environment,
+                    kept.session.clone(),
+                    Snapshot::default(),
+                );
+                model.set_attribution(kept.attribution);
+                let (commands, receiver) = async_channel::unbounded();
+                match kept.closed {
+                    Some(reason) => model.apply(Event::Closed {
+                        reason: Some(reason),
+                    }),
+                    None => {
+                        model.apply(Event::Reconnecting {
+                            reason: RESTORING.to_owned(),
+                        });
+                        restores.push(Restore {
+                            id: kept.id,
+                            backend: kept.backend,
+                            directory: kept.directory,
+                            session: kept.session,
+                            commands: receiver,
+                        });
+                    }
+                }
+                state.spaces.push(SpaceRecord {
+                    model,
+                    commands,
+                    touched: Cell::new(None),
+                    deferred: Cell::new(false),
+                    closed: None,
+                });
+            }
+            state.stamp_closed();
+            state.touch_lobby();
+            self.recount(&mut state);
+        }
+        *self.kept.write().expect("never left poisoned") = Some(store);
+        restores
+    }
+
+    /// Bind the space `id`, listed again after a restart, to its session. Returns false, binding nothing, once shutdown has begun: the caller must close the session.
+    pub(crate) fn bound(&self, id: &str, session: String, snapshot: Snapshot) -> bool {
+        let mut state = self.lock();
+        if state.shutting_down {
+            return false;
+        }
+        let Some(record) = state.space_mut(id) else {
+            return false;
+        };
+        record.model.bind(session, snapshot);
+        log::info!(
+            "Space {id} {:?} is bound again to {} session {}.",
+            record.model.title,
+            record.model.backend,
+            record.model.session
+        );
+        state.pump(id);
+        state.touch_space(id);
+        drop(state);
+        self.keep();
+        true
+    }
+
+    /// The space `id`, listed again after a restart, could not be bound to its session: list it as closed, with `reason`.
+    pub(crate) fn restore_failed(&self, id: &str, reason: String) {
+        log::warn!("Space {id} could not be bound again: {reason}");
+        self.space_ended(id, Some(reason));
+    }
+
+    /// Write the kept spaces, if there is somewhere to keep them and they changed. Nothing is written once shutdown has begun, since closing the sessions then does not close their spaces.
+    pub(crate) fn keep(&self) {
+        let Some(store) = self.kept.read().expect("never left poisoned").clone() else {
+            return;
+        };
+        let written = store.keep(|| {
+            let state = self.lock();
+            (!state.shutting_down).then(|| state.kept())
+        });
+        if let Err(error) = written {
+            log::error!(
+                "Could not keep the spaces in {}: {error}.",
+                store.path().display()
+            );
+        }
     }
 
     pub(crate) fn create_failed(&self, creator: &str, error: String) {
@@ -2558,6 +2711,8 @@ impl Hub {
         state.forget_closed();
         state.touch_space(space);
         self.recount(&mut state);
+        drop(state);
+        self.keep();
     }
 
     /// Announce an agent speech segment to everyone in the space now, in order with its frames.
@@ -2635,12 +2790,12 @@ impl Hub {
     /// Ask every space driver to close its session, and end every connection.
     pub fn shutdown(&self) {
         self.jobs.close();
+        // Spaces still being created are closed as soon as their session starts; see `register_space`. Set first, so that nothing the spaces closing cause is kept: closing their sessions does not close them.
+        self.lock().shutting_down = true;
         // Requests waiting on an agent, such as for its connection to return, fail at once rather than hold up the
         // spaces closing.
         self.backends.shutdown();
-        let mut state = self.lock();
-        // Spaces still being created are closed as soon as their session starts; see `register_space`.
-        state.shutting_down = true;
+        let state = self.lock();
         for space in &state.spaces {
             let _ = space.commands.try_send(SpaceCommand::Close);
         }

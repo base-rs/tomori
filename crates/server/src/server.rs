@@ -28,7 +28,7 @@ use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT, Watch};
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
 use crate::door::Door;
-use crate::hub::{CreateRequest, Hub, Job, SpaceCommand};
+use crate::hub::{CreateRequest, Hub, Job, Restore, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
 use crate::workspace::{
@@ -58,6 +58,8 @@ pub struct Server {
     counts_interval: Duration,
     /// Serve TLS with this configuration, rather than plain HTTP; see [`Self::with_tls`].
     tls: Option<Arc<rustls::ServerConfig>>,
+    /// Spaces listed again from the record of kept spaces, for the supervisor to bind to their sessions once it runs; see [`Self::with_kept_spaces`].
+    restoring: std::sync::Mutex<Vec<Restore>>,
 }
 
 /// Confirms or declines the pairing waiting, from outside the server, such as its console. See `design/security.md`.
@@ -153,6 +155,7 @@ impl Server {
             counts: None,
             counts_interval: COUNTS_INTERVAL,
             tls: None,
+            restoring: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -160,6 +163,16 @@ impl Server {
     pub fn with_tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
         self.tls = Some(config);
         self.hub.set_encrypted(true);
+        self
+    }
+
+    /// Keep spaces across restarts in `store`, and list again those it kept, which are bound to their sessions once the server runs. They are listed at once, so that clients restoring them and collaborators admitted to them find them. See `design/spaces.md`.
+    pub fn with_kept_spaces(self, store: Arc<crate::kept::SpaceStore>) -> Self {
+        let restores = self.hub.restore(store);
+        self.restoring
+            .lock()
+            .expect("never left poisoned")
+            .extend(restores);
         self
     }
 
@@ -679,6 +692,22 @@ impl Server {
         }
         let resolving = Arc::new(Resolving::default());
         let mut spaces = FuturesUnordered::new();
+        let restores = std::mem::take(&mut *self.restoring.lock().expect("never left poisoned"));
+        for restore in restores {
+            let places = Places {
+                roots: &roots,
+                resolving: &resolving,
+                slots: &self.slots,
+            };
+            spaces.push(Box::pin(run_restored(
+                scheduler,
+                self.hub.clone(),
+                restore,
+                self.voices.clone(),
+                places,
+                cancellation,
+            )) as Pin<Box<dyn Future<Output = ()>>>);
+        }
         let mut cancelled = pin!(cancellation.cancelled());
         loop {
             let job = {
@@ -976,11 +1005,95 @@ async fn run_space<S: Timers>(
         }
         return;
     };
-    let voice = voices.start(&hub, &space);
+    run_session(&hub, &space, session, receiver, voices, cancellation).await;
+    drop(slot);
+}
+
+/// Bind a space listed again after a restart to its session, then drive it until it closes or the server shuts down. A space whose session cannot be bound again is listed as closed, with the reason. See `design/spaces.md`.
+async fn run_restored<S: Timers>(
+    scheduler: &S,
+    hub: Arc<Hub>,
+    restore: Restore,
+    voices: Voices,
+    places: Places<'_>,
+    cancellation: &Cancellation,
+) {
+    let Restore {
+        id,
+        backend,
+        directory,
+        session,
+        commands,
+    } = restore;
+    let Some(found) = hub.backends.get(&backend) else {
+        hub.restore_failed(
+            &id,
+            format!("The {backend} backend is not enabled on this server."),
+        );
+        return;
+    };
+    let Some(directory) = resolve(scheduler, &places, &directory, cancellation).await else {
+        if !cancellation.is_cancelled() {
+            hub.restore_failed(&id, DIRECTORY_UNAVAILABLE.to_owned());
+        }
+        return;
+    };
+    let Some(slot) = places.slots.acquire() else {
+        hub.restore_failed(&id, places.slots.full_error());
+        return;
+    };
+    let session = match found.attach(&session, &directory).await {
+        Ok(session) => session,
+        Err(error) => {
+            hub.restore_failed(
+                &id,
+                format!("Could not resume the {backend} session: {}", error.message),
+            );
+            return;
+        }
+    };
+    let snapshot = match session.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            if let Err(error) = session.close().await {
+                log::warn!("Closing a session after snapshot failure failed: {error}");
+            }
+            drop(slot);
+            hub.restore_failed(
+                &id,
+                format!(
+                    "Could not read the {backend} session again: {}",
+                    error.message
+                ),
+            );
+            return;
+        }
+    };
+    if !hub.bound(&id, session.id(), snapshot) {
+        // The server began shutting down while the session was bound again.
+        if let Err(error) = session.close().await {
+            log::warn!("Closing a session bound during shutdown failed: {error}");
+        }
+        return;
+    }
+    run_session(&hub, &id, session, commands, voices, cancellation).await;
+    drop(slot);
+}
+
+/// Drive the session of `space`, which is listed, until it closes or the server shuts down, then close it.
+async fn run_session(
+    hub: &Arc<Hub>,
+    space: &str,
+    session: AnySession,
+    receiver: async_channel::Receiver<SpaceCommand>,
+    voices: Voices,
+    cancellation: &Cancellation,
+) {
+    let voice = voices.start(hub, space);
     // A command the session is performing, such as a decision waiting for the agent's connection to return, does not
     // hold up shutdown: the space stops as soon as shutdown begins, and its session is closed below.
     let error = match select(
-        pin!(drive(&hub, &space, &session, receiver, voice)),
+        pin!(drive(hub, space, &session, receiver, voice)),
         pin!(cancellation.cancelled()),
     )
     .await
@@ -988,7 +1101,7 @@ async fn run_space<S: Timers>(
         Either::Left((error, _)) => error,
         Either::Right(_) => None,
     };
-    hub.space_ended(&space, error);
+    hub.space_ended(space, error);
     if let Err(error) = session.close().await {
         log::warn!("Closing the session of {space} failed: {error}");
     }

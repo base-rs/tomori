@@ -14,6 +14,8 @@ mod connection;
 mod door;
 mod environments;
 mod hub;
+pub mod kept;
+
 mod limits;
 #[cfg(feature = "speech")]
 pub mod offline;
@@ -42,7 +44,7 @@ pub use backends::{AnyBackend, AnySession, Backends};
 pub use hub::CLOSED_SPACES;
 pub use hub::{
     KNOCK_COOLDOWN, KNOCK_TIMEOUT, KNOCKS_PER_SPACE, PAIRING_ATTEMPTS, PAIRING_TIMEOUT,
-    PAIRING_WINDOW, PairingEvent, PairingView, REVEAL_TIMEOUT,
+    PAIRING_WINDOW, PairingEvent, PairingView, RESTORING, REVEAL_TIMEOUT,
 };
 #[cfg(feature = "speech")]
 pub use offline::OfflineTranscriber;

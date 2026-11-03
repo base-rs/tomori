@@ -69,7 +69,7 @@ impl FakeBackend {
         self.shared.snapshot_failure.store(fail, Ordering::SeqCst);
     }
 
-    /// Make session creation wait until [`release_creation`](Self::release_creation), as a slow agent start would.
+    /// Make creating and attaching sessions wait until [`release_creation`](Self::release_creation), as a slow agent start would.
     pub fn hold_creation(&self) {
         self.shared.held.store(true, Ordering::SeqCst);
     }
@@ -93,6 +93,17 @@ impl FakeBackend {
     /// Sessions whose creation is waiting.
     pub fn creating(&self) -> u64 {
         self.shared.creating.load(Ordering::SeqCst)
+    }
+
+    /// Wait while creating and attaching are held.
+    async fn released(&self) {
+        while self.shared.held.load(Ordering::SeqCst) {
+            let listener = self.shared.released.listen();
+            if !self.shared.held.load(Ordering::SeqCst) {
+                break;
+            }
+            listener.await;
+        }
     }
 
     /// Every session created or attached so far, oldest first.
@@ -173,18 +184,13 @@ impl Backend for FakeBackend {
 
     async fn create(&self, spec: SessionSpec) -> Result<FakeSession> {
         self.shared.creating.fetch_add(1, Ordering::SeqCst);
-        while self.shared.held.load(Ordering::SeqCst) {
-            let listener = self.shared.released.listen();
-            if !self.shared.held.load(Ordering::SeqCst) {
-                break;
-            }
-            listener.await;
-        }
+        self.released().await;
         self.shared.creating.fetch_sub(1, Ordering::SeqCst);
         Ok(self.start(&spec.title, &spec.directory))
     }
 
     async fn attach(&self, id: &str, _directory: &str) -> Result<FakeSession> {
+        self.released().await;
         let session = self
             .started()
             .into_iter()
