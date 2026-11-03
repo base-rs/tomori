@@ -48,6 +48,8 @@ pub enum Phase {
         elapsed: Duration,
         heard: String,
         answering: Option<String>,
+        /// The worker pointed at, which the words will be sent about. See `design/interaction.md`.
+        about: Option<String>,
     },
     /// X was released; the server is transcribing.
     Sending { heard: String, answering: bool },
@@ -125,6 +127,7 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             elapsed,
             heard,
             answering,
+            about,
         } => {
             let (color, left) = warning(*elapsed, limit);
             let (label, label_color) = match answering {
@@ -160,6 +163,14 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
                     &[
                         Span::new("Answering: ", Style::plain(DIM)),
                         Span::new(field.as_str(), Style::plain(TEXT)),
+                    ],
+                    COLUMNS,
+                )));
+            } else if let Some(worker) = about {
+                rows.push(Row::new(cut(
+                    &[
+                        Span::new("About: ", Style::plain(DIM)),
+                        Span::new(worker.as_str(), Style::plain(TEXT)),
                     ],
                     COLUMNS,
                 )));
@@ -353,6 +364,7 @@ mod tests {
             elapsed: Duration::from_secs(seconds),
             heard: heard.into(),
             answering: None,
+            about: None,
         }
     }
 
@@ -421,7 +433,15 @@ mod tests {
             elapsed: Duration::from_secs(3),
             heard: "main".into(),
             answering: Some("which branch?".into()),
+            about: Some("ignored while answering".into()),
         };
+        let about = Phase::Recording {
+            elapsed: Duration::from_secs(3),
+            heard: String::new(),
+            answering: None,
+            about: Some("Fix the lexer".into()),
+        };
+        assert!(text(&canvas(&about, None, 0.0)).contains("\nAbout: Fix the lexer\n"));
         let shown = text(&canvas(&answering, None, 0.0));
         assert!(shown.starts_with("● ANSWER 0:03\nAnswering: which branch?"));
         assert!(shown.ends_with("Release X to answer"));

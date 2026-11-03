@@ -2,9 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::{
-    arrival, arrival_graphics, arrival_motion,
-    caption::Caption,
-    controller,
+    arrival, arrival_graphics, arrival_motion, controller,
     graphics::Renderer,
     hand_menu::{self, HandMenu, Palm},
     hands,
@@ -173,7 +171,8 @@ pub fn run(
         Renderer::with_samples(&gpu.device, &gpu.queue, format, width, height, samples);
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
-    let mut caption = Caption::new(&gpu.device, &renderer);
+    // What is left of the floating panel in a space: the status pill. See `design/interaction.md`.
+    let mut pill = crate::controller_ui::Pill::new(&gpu.device, &renderer);
     // The recording indicator and the live badge on the left controller.
     let mut indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
     // The conversation on the right wrist, where approvals are decided and queued entries removed. See `design/wrist-transcript.md`.
@@ -343,7 +342,8 @@ pub fn run(
         let moving = stick.x.abs() > 0.6 || stick.y.abs() > 0.6;
         let navigate = moving && !stick_latched;
         stick_latched = moving;
-        if navigate {
+        // In a space the left stick is free: the panel it paged is now the transcript on the right wrist.
+        if navigate && conversation.joined_space().is_none() {
             if stick.y.abs() >= stick.x.abs() {
                 conversation.navigate(0, if stick.y > 0.0 { -1 } else { 1 });
             } else {
@@ -353,13 +353,15 @@ pub fn run(
         // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
         let wrist_active = wrist.state().active();
         let right = controls.presentation_navigation;
+        // B lets go of a menu pinned with Y first.
+        let unpinned = controls.back && hand_menu.unpin();
         let back_taken = wrist.input(
             &mut conversation,
             glam::Vec2::new(right.x, right.y),
             controls.reset && !menu_was_shown,
-            controls.back,
+            controls.back && !unpinned,
             now,
-        );
+        ) || unpinned;
         if controls.back && !back_taken {
             conversation.back();
         }
@@ -379,8 +381,16 @@ pub fn run(
             None => {}
         }
         conversation.tick_space(now);
+        // Y in a space pins the hand menu open at its Space section, until Y or B; elsewhere it browses or lists again. See `design/hand-menu.md`.
+        if conversation.joined_space().is_none() {
+            hand_menu.unpin();
+        }
         if controls.refresh {
-            conversation.refresh();
+            if conversation.joined_space().is_some() {
+                hand_menu.toggle_pin();
+            } else {
+                conversation.refresh();
+            }
         }
         // A chooses the object the ray highlighted last frame, as the
         // trigger does; with nothing highlighted it accepts. Inside a space it
@@ -421,7 +431,6 @@ pub fn run(
             if wrist_active { 0.0 } else { right.x },
             if wrist_active { 0.0 } else { right.y },
         );
-        caption.set_text(&gpu.queue, &conversation.text());
         if !frame.should_render {
             stream.end(frame.predicted_display_time, BLEND, &[])?;
             continue;
@@ -492,31 +501,45 @@ pub fn run(
         motion.update(&arrival_target(&conversation), arrival_time);
         let mut scene = motion.scene(arrival_time);
         // The hand menu shows above the left wrist while the left palm faces the head, from hand tracking or else the left controller. While it shows, the trigger chooses only in it. See `design/hand-menu.md`.
-        let palm = tracked_hands[controller::LEFT]
-            .as_ref()
-            .and_then(Palm::from_left_hand)
-            .or_else(|| {
-                controller_poses[controller::LEFT]
-                    .as_ref()
-                    .and_then(Palm::from_left_controller)
-            });
         let scene_head = scene_anchor
             .to_scene_transform(head_pose(&views))
             .map(|pose| pose.transform());
         // What faces the head faces the middle of it, which stays put as the head turns, rather than the eyes, which swing about the neck.
         let head = scene_head.map(hand_menu::head_centre);
+        let left_trackers = crate::recording::Trackers {
+            grip: controller_poses[controller::LEFT],
+            wrist: tracked_hands[controller::LEFT]
+                .as_ref()
+                .and_then(|hand| hand.joints[1])
+                .map(|joint| Vec3::from_array(joint.position)),
+            view: scene_head.map(crate::controller_ui::view_spot),
+        };
+        // Pinned with Y, the menu stands above the left controller facing the head, whatever its angle.
+        let palm = if hand_menu.pinned() {
+            left_trackers
+                .target(Vec3::new(0.0, 0.03, 0.0))
+                .zip(head)
+                .and_then(|(at, head)| {
+                    Some(Palm {
+                        wrist: at,
+                        normal: (head - at).try_normalize()?,
+                    })
+                })
+        } else {
+            tracked_hands[controller::LEFT]
+                .as_ref()
+                .and_then(Palm::from_left_hand)
+                .or_else(|| {
+                    controller_poses[controller::LEFT]
+                        .as_ref()
+                        .and_then(Palm::from_left_controller)
+                })
+        };
         // While recording, the indicator rises from the left controller, or the left wrist, or else stands low in the view. See `design/hand-menu.md`.
         indicator.update(
             &gpu.queue,
             &conversation,
-            crate::recording::Trackers {
-                grip: controller_poses[controller::LEFT],
-                wrist: tracked_hands[controller::LEFT]
-                    .as_ref()
-                    .and_then(|hand| hand.joints[1])
-                    .map(|joint| Vec3::from_array(joint.position)),
-                view: scene_head.map(crate::controller_ui::view_spot),
-            },
+            left_trackers,
             head,
             crate::controller_ui::Moment {
                 now,
@@ -551,6 +574,7 @@ pub fn run(
                 viewer: head,
                 in_space,
                 menu_shown,
+                menu_pinned: hand_menu.pinned(),
                 pointing: controls.trigger.is_some_and(|trigger| trigger > 0.2)
                     || matches!(highlighted, Some(arrival::Key::Menu(_))),
                 grip: controls.transcript_grip,
@@ -563,8 +587,14 @@ pub fn run(
         );
         let wrist_shown = wrist.state().on_hand();
         let wrist_active = wrist.state().active();
+        // What the ray pointed at last frame, so that a mode's description shows beneath it.
+        let pointed = match &highlighted {
+            Some(arrival::Key::Menu(key)) => Some(key.clone()),
+            _ => None,
+        };
         let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
-            let model = conversation.menu_model();
+            let mut model = conversation.menu_model();
+            model.pointed = pointed.clone();
             let mut objects = match palm {
                 Some(palm) if menu_shown => {
                     hand_menu.objects(&palm, &model, head.unwrap_or(arrival::HOME))
@@ -699,6 +729,12 @@ pub fn run(
             panel.reset();
         }
         let panel_pose = panel.update(head_pose(&views), dt);
+        pill.update(
+            &gpu.queue,
+            &mut conversation,
+            now,
+            in_arrival || menu_shown || wrist_shown,
+        );
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
         let submission = renderer.render(
@@ -709,18 +745,13 @@ pub fn run(
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
             // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
-            &if !in_arrival && !menu_shown && !wrist_shown {
-                caption.panels(
-                    panel_pose
-                        * Mat4::from_translation(Vec3::new(0.0, renderer.caption_offset(), 0.0)),
-                )
-            } else {
-                Vec::new()
-            }
-            .into_iter()
-            .chain(indicator.panels(scene_anchor.transform()))
-            .chain(wrist.panels(scene_anchor.transform()))
-            .collect::<Vec<_>>(),
+            // Arrival has no pill, and it hides while a hand's panel shows, so that it does not cover it.
+            &pill
+                .panels(panel_pose)
+                .into_iter()
+                .chain(indicator.panels(scene_anchor.transform()))
+                .chain(wrist.panels(scene_anchor.transform()))
+                .collect::<Vec<_>>(),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,

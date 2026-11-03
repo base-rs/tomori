@@ -164,6 +164,10 @@ impl Visibility {
 /// A section of the hand menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
+    /// The space's title, mode and speech, this headset's settings, and leaving; shown inside a space.
+    Space,
+    /// Asking whether to leave the space, opened from [`Section::Space`].
+    Leave,
     PeopleAndSecurity,
     /// What Tomori tells the space's agent, in layers; shown inside a space.
     Agent,
@@ -210,6 +214,18 @@ pub enum MenuKey {
     Layer(Layer),
     /// Remove the space's own instructions, as an owner.
     ClearInstructions,
+    /// Switch the agent to the mode with this id.
+    Mode(String),
+    /// Switch the space's speech between brief and full, for everyone.
+    Speech,
+    /// Mute or unmute spoken replies on this headset.
+    Mute,
+    /// Turn the status pill on or off on this headset.
+    Pill,
+    /// Ask whether to leave the space.
+    Leave,
+    /// Leave the space, once asked.
+    ConfirmLeave,
     /// A row that is only read, by its place.
     Text(usize),
     /// The cue on the wrist.
@@ -219,7 +235,7 @@ pub enum MenuKey {
 }
 
 /// How an item of the hand menu looks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MenuKind {
     Section {
         flashing: bool,
@@ -227,6 +243,8 @@ pub enum MenuKind {
     Button,
     Heading,
     Text,
+    /// A participant, with a swatch of their colour.
+    Person([f32; 3]),
     Cue,
     /// The right wrist's cue for a problem, in red.
     ProblemCue,
@@ -248,6 +266,42 @@ pub struct Model {
     pub notice: Option<String>,
     /// The instructions the joined space's agent is given, or `None` when it takes none or the server does not say.
     pub instructions: Option<AgentInstructions>,
+    /// The joined space, for the header and the Space section.
+    pub space: Option<SpaceInfo>,
+    /// The people in the space, with their colours.
+    pub people: Vec<Person>,
+    /// Whether spoken replies are muted on this headset.
+    pub muted: bool,
+    /// Whether the status pill shows on this headset.
+    pub pill: bool,
+    /// The item the ray points at, so that a mode's description shows beneath it.
+    pub pointed: Option<MenuKey>,
+}
+
+/// The joined space, as the menu shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpaceInfo {
+    pub title: String,
+    /// The backend and the directory's last part, such as "opencode in tomori".
+    pub running: String,
+    /// What the agent is doing, in a word.
+    pub activity: String,
+    /// The agent's modes, in order: id, name, description, and whether it is the current one.
+    pub modes: Vec<(String, String, Option<String>, bool)>,
+    /// The current mode's name, even when it is not one Tomori can switch to.
+    pub mode: Option<String>,
+    pub speech: protocol::SpeechSetting,
+    /// How many are here, and away.
+    pub here: String,
+}
+
+/// A participant, as People & security shows them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Person {
+    pub name: String,
+    pub colour: [f32; 3],
+    pub you: bool,
+    pub away: bool,
 }
 
 impl Model {
@@ -266,6 +320,16 @@ pub enum Choice {
     Pair,
     /// Remove the space's own instructions to the agent.
     ClearInstructions,
+    /// Switch the agent to this mode.
+    Mode(String),
+    /// Switch the space's speech between brief and full.
+    Speech,
+    /// Mute or unmute spoken replies here.
+    Mute,
+    /// Turn the status pill on or off here.
+    Pill,
+    /// Leave the space.
+    Leave,
 }
 
 /// One row of the menu.
@@ -288,9 +352,10 @@ fn role_label(role: ConnectionRole) -> &'static str {
 
 /// The rows of `section`, or of the top level, for `model`.
 pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
-    // The Agent section applies only inside a space, so leaving one returns to the top level.
+    // The Space and Agent sections apply only inside a space, so leaving one returns to the top level.
     let section =
         section.filter(|section| model.in_space || *section == Section::PeopleAndSecurity);
+    let space = model.space.as_ref().filter(|_| model.in_space);
     let mut items = Vec::new();
     let text = |items: &mut Vec<Item>, kind: MenuKind, text: String| {
         let key = MenuKey::Text(items.len());
@@ -303,22 +368,118 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
             text,
         });
     };
+    // Inside a space, the header says where the participant is and what the agent is doing, whenever the menu opens on the top level or the Space section.
+    if let Some(space) = space.filter(|_| matches!(section, None | Some(Section::Space))) {
+        for line in wrap(&space.title, WIDTH).into_iter().take(2) {
+            text(&mut items, MenuKind::Heading, line);
+        }
+        let mut status = vec![space.activity.clone()];
+        status.extend(space.mode.clone());
+        if space.speech == protocol::SpeechSetting::Brief {
+            status.push("brief".into());
+        }
+        status.push(space.here.clone());
+        text(&mut items, MenuKind::Text, status.join(" | "));
+    }
+    let section_item = |items: &mut Vec<Item>, section: Section, flashing: bool, label: &str| {
+        items.push(Item {
+            key: MenuKey::Section(section),
+            kind: MenuKind::Section { flashing },
+            text: label.into(),
+        });
+    };
     match section {
         None => {
-            items.push(Item {
-                key: MenuKey::Section(Section::PeopleAndSecurity),
-                kind: MenuKind::Section {
-                    flashing: model.waiting(),
-                },
-                text: "People & security".into(),
-            });
             if model.in_space {
-                items.push(Item {
-                    key: MenuKey::Section(Section::Agent),
-                    kind: MenuKind::Section { flashing: false },
-                    text: "Agent".into(),
-                });
+                section_item(&mut items, Section::Space, false, "Space");
+                section_item(&mut items, Section::Agent, false, "Agent");
             }
+            section_item(
+                &mut items,
+                Section::PeopleAndSecurity,
+                model.waiting(),
+                "People & security",
+            );
+        }
+        Some(Section::Space) => {
+            button(&mut items, MenuKey::Back, "< Back".into());
+            if let Some(space) = space {
+                for line in wrap(&space.title, WIDTH).into_iter().skip(2) {
+                    text(&mut items, MenuKind::Text, line);
+                }
+                text(&mut items, MenuKind::Text, space.running.clone());
+                text(&mut items, MenuKind::Heading, "Mode".into());
+                if space.modes.is_empty() {
+                    let mode = space.mode.as_deref().unwrap_or("none offered");
+                    text(&mut items, MenuKind::Text, format!("Mode: {mode}"));
+                }
+                for (id, name, description, current) in &space.modes {
+                    let label = if *current {
+                        format!("* {name} (now)")
+                    } else {
+                        format!("  {name}")
+                    };
+                    let key = MenuKey::Mode(id.clone());
+                    // Only a participant switches it; a visitor reads it.
+                    if model.role.participates() {
+                        button(&mut items, key.clone(), label);
+                    } else {
+                        text(&mut items, MenuKind::Text, label);
+                    }
+                    if model.pointed.as_ref() == Some(&key)
+                        && let Some(description) = description
+                    {
+                        for line in wrap(description, WIDTH).into_iter().take(4) {
+                            text(&mut items, MenuKind::Text, format!("  {line}"));
+                        }
+                    }
+                }
+                if space.speech != protocol::SpeechSetting::Unknown {
+                    text(&mut items, MenuKind::Heading, "Speech, for everyone".into());
+                    let said = match space.speech {
+                        protocol::SpeechSetting::Brief => "Brief: switch to full",
+                        _ => "Full: switch to brief",
+                    };
+                    if model.role.participates() {
+                        button(&mut items, MenuKey::Speech, said.into());
+                    } else {
+                        text(
+                            &mut items,
+                            MenuKind::Text,
+                            said.split(':').next().unwrap_or(said).into(),
+                        );
+                    }
+                }
+                text(&mut items, MenuKind::Heading, "On this headset".into());
+                button(
+                    &mut items,
+                    MenuKey::Mute,
+                    if model.muted {
+                        "Spoken replies: muted".into()
+                    } else {
+                        "Spoken replies: on".into()
+                    },
+                );
+                button(
+                    &mut items,
+                    MenuKey::Pill,
+                    if model.pill {
+                        "Status pill: on".into()
+                    } else {
+                        "Status pill: off".into()
+                    },
+                );
+                button(&mut items, MenuKey::Leave, "Leave space".into());
+            }
+        }
+        Some(Section::Leave) => {
+            text(&mut items, MenuKind::Heading, "Leave this space?".into());
+            let title = space.map_or("", |space| space.title.as_str());
+            for line in wrap(title, WIDTH).into_iter().take(2) {
+                text(&mut items, MenuKind::Text, line);
+            }
+            button(&mut items, MenuKey::ConfirmLeave, "Leave".into());
+            button(&mut items, MenuKey::Back, "Stay".into());
         }
         Some(Section::Agent) => {
             button(&mut items, MenuKey::Back, "< Back".into());
@@ -431,12 +592,32 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 format!("You: {} ({})", model.name, role_label(model.role)),
             );
             if model.in_space {
-                let here = if model.participants.is_empty() {
-                    "nobody".to_owned()
+                if model.people.is_empty() {
+                    let here = if model.participants.is_empty() {
+                        "nobody".to_owned()
+                    } else {
+                        model.participants.join(", ")
+                    };
+                    text(&mut items, MenuKind::Text, format!("Here: {here}"));
                 } else {
-                    model.participants.join(", ")
-                };
-                text(&mut items, MenuKind::Text, format!("Here: {here}"));
+                    // Each with a swatch of their colour, the key to the transcript's colours.
+                    text(&mut items, MenuKind::Text, "Here:".into());
+                    for person in &model.people {
+                        let mut label = person.name.clone();
+                        if person.you {
+                            label = format!("You ({label})");
+                        }
+                        if person.away {
+                            label.push_str(", away");
+                        }
+                        let key = MenuKey::Text(items.len());
+                        items.push(Item {
+                            key,
+                            kind: MenuKind::Person(person.colour),
+                            text: label,
+                        });
+                    }
+                }
                 text(
                     &mut items,
                     MenuKind::Text,
@@ -449,6 +630,39 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
         }
     }
     items
+}
+
+/// The rows of `section`, or of the top level, for `model`, as text: each row's label, with a mark for those that can be chosen, as the console prints them.
+#[cfg(any(not(target_os = "android"), test))]
+pub fn text(section: Option<Section>, model: &Model) -> Vec<String> {
+    items(section, model)
+        .into_iter()
+        .filter(|item| item.key != MenuKey::Back)
+        .map(|item| match item.kind {
+            MenuKind::Section { .. } | MenuKind::Button => format!("[{}]", item.text),
+            MenuKind::Heading => item.text.to_uppercase(),
+            MenuKind::Person(_) => format!("  {}", item.text),
+            _ => item.text,
+        })
+        .collect()
+}
+
+/// How wide the menu's wrapped rows are, in characters.
+const WIDTH: usize = 32;
+
+/// `text` wrapped to `width` characters, at words.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.chars().take(width).collect()),
+        }
+    }
+    lines
 }
 
 /// The start of `text`, on one line, cut at a word with "..." when longer than [`PREVIEW`].
@@ -469,13 +683,33 @@ fn preview(text: &str) -> String {
 pub struct HandMenu {
     visibility: Visibility,
     section: Option<Section>,
+    /// Pinned open by Y, whatever the hand's pose, until Y or B.
+    pinned: bool,
 }
 
 impl HandMenu {
     /// Update with the left palm and the head at `now`. Returns whether the menu is shown.
     pub fn update(&mut self, palm: Option<Palm>, head: Option<Vec3>, now: Instant) -> bool {
         let angle = palm.zip(head).and_then(|(palm, head)| palm.angle_to(head));
-        self.visibility.update(angle, now)
+        let shown = self.visibility.update(angle, now);
+        shown || self.pinned
+    }
+
+    /// Y in a space: pin the menu open at its Space section, whatever the hand's pose, or let go of it. See `design/hand-menu.md`.
+    pub fn toggle_pin(&mut self) {
+        self.pinned = !self.pinned;
+        if self.pinned {
+            self.section = Some(Section::Space);
+        }
+    }
+
+    /// Let go of a pinned menu, as B does, or on leaving a space. Returns whether it was pinned.
+    pub fn unpin(&mut self) -> bool {
+        std::mem::take(&mut self.pinned)
+    }
+
+    pub fn pinned(&self) -> bool {
+        self.pinned
     }
 
     /// Choose `key`: open or leave a section, or ask the conversation to act.
@@ -486,13 +720,27 @@ impl HandMenu {
                 None
             }
             MenuKey::Back => {
-                // A layer steps back to the Agent section, and a section to the top level.
+                // A layer steps back to the Agent section, asking to leave to the Space section, and a section to the top level.
                 self.section = match self.section {
                     Some(Section::Layer(_)) => Some(Section::Agent),
+                    Some(Section::Leave) => Some(Section::Space),
                     _ => None,
                 };
                 None
             }
+            MenuKey::Leave => {
+                self.section = Some(Section::Leave);
+                None
+            }
+            MenuKey::ConfirmLeave => {
+                self.section = None;
+                self.pinned = false;
+                Some(Choice::Leave)
+            }
+            MenuKey::Mode(id) => Some(Choice::Mode(id.clone())),
+            MenuKey::Speech => Some(Choice::Speech),
+            MenuKey::Mute => Some(Choice::Mute),
+            MenuKey::Pill => Some(Choice::Pill),
             MenuKey::Layer(layer) => {
                 self.section = Some(Section::Layer(*layer));
                 None
@@ -788,7 +1036,10 @@ mod tests {
             ["People & security"]
         );
         model.in_space = true;
-        assert_eq!(texts(&items(None, &model)), ["People & security", "Agent"]);
+        assert_eq!(
+            texts(&items(None, &model)),
+            ["Space", "Agent", "People & security"]
+        );
         assert_eq!(
             texts(&items(Some(Section::Agent), &model)),
             [
@@ -852,6 +1103,201 @@ mod tests {
         );
         assert_eq!(menu.choose(&MenuKey::Back), None);
         assert_eq!(menu.section, None);
+    }
+
+    fn in_space(role: ConnectionRole) -> Model {
+        Model {
+            name: "Ada".into(),
+            role,
+            in_space: true,
+            space: Some(SpaceInfo {
+                title: "Fix the parser in the lexer before the release goes out".into(),
+                running: "opencode in tomori".into(),
+                activity: "running".into(),
+                modes: vec![
+                    (
+                        "build".into(),
+                        "build".into(),
+                        Some("Makes changes.".into()),
+                        true,
+                    ),
+                    (
+                        "plan".into(),
+                        "plan".into(),
+                        Some("Plans without changing files.".into()),
+                        false,
+                    ),
+                ],
+                mode: Some("build".into()),
+                speech: protocol::SpeechSetting::Brief,
+                here: "2 here".into(),
+            }),
+            people: vec![
+                Person {
+                    name: "Ada".into(),
+                    colour: [0.7, 0.5, 1.0],
+                    you: true,
+                    away: false,
+                },
+                Person {
+                    name: "Bob".into(),
+                    colour: [0.4, 0.9, 0.5],
+                    you: false,
+                    away: true,
+                },
+            ],
+            pill: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_header_says_where_you_are_and_what_the_agent_does() {
+        let model = in_space(ConnectionRole::Owner);
+        let rows = items(None, &model);
+        assert_eq!(
+            texts(&rows),
+            [
+                "Fix the parser in the lexer",
+                "before the release goes out",
+                "running | build | brief | 2 here",
+                "Space",
+                "Agent",
+                "People & security",
+            ]
+        );
+        assert_eq!(rows[0].kind, MenuKind::Heading);
+        assert!(!matches!(
+            rows[2].kind,
+            MenuKind::Button | MenuKind::Section { .. }
+        ));
+        // Outside a space there is none.
+        assert_eq!(
+            texts(&items(None, &Model::default())),
+            ["People & security"]
+        );
+    }
+
+    #[test]
+    fn the_space_section_switches_modes_speech_and_this_headsets_settings() {
+        let mut model = in_space(ConnectionRole::Collaborator);
+        let rows = items(Some(Section::Space), &model);
+        assert_eq!(
+            texts(&rows)[3..],
+            [
+                "< Back",
+                "opencode in tomori",
+                "Mode",
+                "* build (now)",
+                "  plan",
+                "Speech, for everyone",
+                "Brief: switch to full",
+                "On this headset",
+                "Spoken replies: on",
+                "Status pill: on",
+                "Leave space",
+            ]
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.key == MenuKey::Mode("plan".into()))
+        );
+        // Pointing at a mode shows its description beneath it.
+        model.pointed = Some(MenuKey::Mode("plan".into()));
+        let shown = texts(&items(Some(Section::Space), &model))
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>();
+        let plan = shown.iter().position(|text| text == "  plan").unwrap();
+        assert_eq!(shown[plan + 1], "  Plans without changing files.");
+        let mut menu = HandMenu::default();
+        assert_eq!(
+            menu.choose(&MenuKey::Mode("plan".into())),
+            Some(Choice::Mode("plan".into()))
+        );
+        assert_eq!(menu.choose(&MenuKey::Speech), Some(Choice::Speech));
+        assert_eq!(menu.choose(&MenuKey::Mute), Some(Choice::Mute));
+        assert_eq!(menu.choose(&MenuKey::Pill), Some(Choice::Pill));
+        model.muted = true;
+        model.pill = false;
+        let shown = texts(&items(Some(Section::Space), &model))
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>();
+        assert!(shown.contains(&"Spoken replies: muted".to_owned()));
+        assert!(shown.contains(&"Status pill: off".to_owned()));
+        // A visitor reads the mode and speech, and cannot switch them.
+        let visitor = in_space(ConnectionRole::Visitor);
+        let rows = items(Some(Section::Space), &visitor);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.key, MenuKey::Mode(_) | MenuKey::Speech))
+        );
+        assert!(texts(&rows).contains(&"* build (now)"));
+        assert!(texts(&rows).contains(&"Brief"));
+    }
+
+    #[test]
+    fn leaving_from_the_menu_asks_first() {
+        let model = in_space(ConnectionRole::Owner);
+        let mut menu = HandMenu::default();
+        menu.choose(&MenuKey::Section(Section::Space));
+        assert_eq!(menu.choose(&MenuKey::Leave), None);
+        let rows = items(menu.section, &model);
+        assert_eq!(
+            texts(&rows),
+            [
+                "Leave this space?",
+                "Fix the parser in the lexer",
+                "before the release goes out",
+                "Leave",
+                "Stay",
+            ]
+        );
+        // Stay steps back to the Space section without leaving.
+        assert_eq!(menu.choose(&MenuKey::Back), None);
+        assert_eq!(menu.section, Some(Section::Space));
+        menu.choose(&MenuKey::Leave);
+        assert_eq!(menu.choose(&MenuKey::ConfirmLeave), Some(Choice::Leave));
+        assert_eq!(menu.section, None);
+    }
+
+    #[test]
+    fn y_pins_the_menu_open_at_the_space_section_until_y_or_b() {
+        let start = Instant::now();
+        let mut menu = HandMenu::default();
+        assert!(!menu.update(None, None, start));
+        menu.toggle_pin();
+        assert!(menu.pinned());
+        assert_eq!(menu.section, Some(Section::Space));
+        // Shown whatever the hand's pose, or with no hand at all.
+        assert!(menu.update(None, None, start));
+        menu.toggle_pin();
+        assert!(!menu.update(None, None, start));
+        menu.toggle_pin();
+        assert!(menu.unpin());
+        assert!(!menu.unpin());
+        assert!(!menu.update(None, None, start));
+    }
+
+    #[test]
+    fn people_have_swatches_with_you_and_away_marked() {
+        let model = in_space(ConnectionRole::Owner);
+        let rows = items(Some(Section::PeopleAndSecurity), &model);
+        let people: Vec<_> = rows
+            .iter()
+            .filter(|row| matches!(row.kind, MenuKind::Person(_)))
+            .collect();
+        assert_eq!(people.len(), 2);
+        assert_eq!(people[0].text, "You (Ada)");
+        assert_eq!(people[0].kind, MenuKind::Person([0.7, 0.5, 1.0]));
+        assert_eq!(people[1].text, "Bob, away");
+        // The console's text marks what can be chosen.
+        let shown = text(Some(Section::Space), &model);
+        assert!(shown.contains(&"[Leave space]".to_owned()));
+        assert!(shown.contains(&"MODE".to_owned()));
+        assert!(text(Some(Section::PeopleAndSecurity), &model).contains(&"  Bob, away".to_owned()));
     }
 
     #[test]

@@ -17,10 +17,9 @@ use protocol::{
     QueueState, Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, SpeechSetting,
     WorkspaceRoot,
 };
-use std::{
-    sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+#[cfg(any(not(target_os = "android"), test))]
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BODY_ROWS: usize = ROWS - 4;
 
@@ -259,7 +258,8 @@ pub struct Conversation {
     menu_create: Option<ClientMessage>,
     error: Option<String>,
     actions: Vec<Action>,
-    /// The last body paginated, since the panel is drawn every frame.
+    /// The last body paginated, since the console's panel is drawn every frame.
+    #[cfg(any(not(target_os = "android"), test))]
     paged: Option<Paged>,
     talk: Option<Talk>,
     /// The worker the participant points at now, by identifier, as the frame loop or console last reported.
@@ -302,6 +302,8 @@ pub struct Conversation {
     revision: u64,
     /// The transcript last laid out, and what it was laid out from.
     laid_out: Option<(TranscriptKey, Vec<crate::ui_text::Row>)>,
+    /// Whether the status pill shows, a setting of this headset's. See `design/interaction.md`.
+    pill: bool,
     /// Approvals are decided and queued entries removed on the right wrist, so A elsewhere does neither, as on the headset and desktop window; the console decides with its own commands.
     decide_on_wrist: bool,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
@@ -310,6 +312,7 @@ pub struct Conversation {
 }
 
 /// A body's text, the rows it was paginated into, and its pages.
+#[cfg(any(not(target_os = "android"), test))]
 struct Paged {
     text: String,
     rows: usize,
@@ -364,6 +367,7 @@ impl Conversation {
             menu_create: None,
             error: None,
             actions: Vec::new(),
+            #[cfg(any(not(target_os = "android"), test))]
             paged: None,
             talk: None,
             pointing_at: None,
@@ -388,6 +392,7 @@ impl Conversation {
             revision: 0,
             laid_out: None,
             decide_on_wrist: false,
+            pill: true,
             launch: format!(
                 "{:x}",
                 SystemTime::now()
@@ -1076,6 +1081,58 @@ impl Conversation {
             pairing: self.pairable().then(|| self.pairing_item().label),
             notice: self.notice.clone(),
             instructions: space.and_then(|space| space.instructions.clone()),
+            space: space.map(|space| crate::hand_menu::SpaceInfo {
+                title: space.title.clone(),
+                running: format!(
+                    "{} in {}",
+                    space.backend,
+                    space
+                        .directory
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                ),
+                activity: activity_label(space.activity).into(),
+                modes: space
+                    .modes
+                    .iter()
+                    .map(|mode| {
+                        (
+                            mode.id.clone(),
+                            mode.name.clone(),
+                            mode.description.clone(),
+                            Some(&mode.id) == space.mode.as_ref(),
+                        )
+                    })
+                    .collect(),
+                mode: space
+                    .current_mode()
+                    .map(|mode| mode.name.clone())
+                    .or_else(|| space.mode.clone().filter(|_| !space.modes.is_empty())),
+                speech: space.speech,
+                here: here(space),
+            }),
+            people: space
+                .map(|space| {
+                    space
+                        .participants
+                        .iter()
+                        .map(|participant| {
+                            let colour = crate::speakers::colour(participant.source);
+                            crate::hand_menu::Person {
+                                name: participant.name.clone(),
+                                colour: [colour[0], colour[1], colour[2]],
+                                you: Some(participant.source) == self.source,
+                                away: participant.engagement == Some(Engagement::Away),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            muted: self.muted,
+            pill: self.pill,
+            pointed: None,
         }
     }
 
@@ -1087,6 +1144,22 @@ impl Conversation {
             crate::hand_menu::Choice::Decline(id) => self.decide_knock(&id, false),
             crate::hand_menu::Choice::Pair => self.pair(),
             crate::hand_menu::Choice::ClearInstructions => self.instruct(""),
+            crate::hand_menu::Choice::Mode(mode) => {
+                self.send(ClientMessage::SetMode { mode });
+            }
+            crate::hand_menu::Choice::Speech => {
+                if let Some(space) = self.space.as_ref() {
+                    let speech = match space.speech {
+                        SpeechSetting::Brief => SpeechSetting::Full,
+                        _ => SpeechSetting::Brief,
+                    };
+                    self.send(ClientMessage::SetSpeech { speech });
+                }
+            }
+            crate::hand_menu::Choice::Mute => self.toggle_mute(),
+            crate::hand_menu::Choice::Pill => self.toggle_pill(),
+            crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
+            crate::hand_menu::Choice::Leave => {}
         }
     }
 
@@ -1315,6 +1388,7 @@ impl Conversation {
     }
 
     /// The joined space's environment, when this build cannot draw it and shows the grid instead.
+    #[cfg(any(not(target_os = "android"), test))]
     fn missing_environment(&self) -> Option<&str> {
         self.space
             .as_ref()
@@ -1977,6 +2051,60 @@ impl Conversation {
         }
     }
 
+    /// What the status pill shows at `now`, while in a space and it is not turned off. See `design/interaction.md`.
+    pub fn pill_status(&mut self, now: Instant) -> Option<crate::pill::Status> {
+        use crate::pill::{Need, Status};
+        if !self.pill {
+            return None;
+        }
+        self.observe_problem(now);
+        let problem = self.problem_text(now);
+        let space = self.space.as_ref().filter(|_| self.mode == Mode::Space)?;
+        let connection = match &self.state {
+            None | Some(ConnectionState::Connecting { attempt: 1 }) => Some("Connecting...".into()),
+            Some(ConnectionState::Connecting { attempt }) => {
+                Some(format!("Connecting (attempt {attempt})..."))
+            }
+            Some(ConnectionState::Disconnected { retry_in, .. }) => Some(format!(
+                "Offline, retrying in {} s",
+                retry_in.as_secs_f32().ceil()
+            )),
+            Some(ConnectionState::Closed) => Some("Disconnected.".into()),
+            Some(ConnectionState::Connected { .. }) => None,
+        };
+        let leaving = self
+            .leave_hold
+            .is_some_and(|(held, left)| !left && held >= Duration::from_millis(150));
+        let need = if self.approval().is_some() {
+            Some(Need::Approval)
+        } else if space.question.is_some() {
+            Some(Need::Question)
+        } else if let Some(problem) = problem {
+            Some(Need::Problem(problem))
+        } else if let Some(connection) = connection {
+            Some(Need::Connection(connection))
+        } else if leaving {
+            Some(Need::Leaving)
+        } else {
+            self.notice.clone().map(Need::Notice)
+        };
+        Some(Status {
+            activity: space.activity,
+            mode: space
+                .current_mode()
+                .map(|mode| mode.name.clone())
+                .or_else(|| space.mode.clone().filter(|_| !space.modes.is_empty())),
+            title: space.title.clone(),
+            replaying: self.replaying,
+            need,
+        })
+    }
+
+    /// Turn the status pill on or off, on this headset.
+    pub fn toggle_pill(&mut self) {
+        self.pill = !self.pill;
+    }
+
     /// The problem with how long it has been shown, on one line, for the transcript.
     fn problem_text(&self, now: Instant) -> Option<String> {
         let problem = self.problem()?;
@@ -2290,9 +2418,23 @@ impl Conversation {
                 started,
                 heard,
                 answering,
+                pointed,
                 ..
             }) => {
+                // The worker the words will be about, which an answer never is.
+                let about = pointed
+                    .as_ref()
+                    .filter(|_| !answering)
+                    .and_then(|pointed| {
+                        self.space
+                            .as_ref()?
+                            .workers
+                            .iter()
+                            .find(|worker| &worker.id == pointed)
+                    })
+                    .map(|worker| worker.title.clone());
                 return Some(Phase::Recording {
+                    about,
                     elapsed: now.saturating_duration_since(*started),
                     heard: heard.clone(),
                     answering: answering
@@ -2425,6 +2567,7 @@ impl Conversation {
     }
 
     /// The panel text, at most [`ROWS`] lines of at most [`COLUMNS`] characters.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn text(&mut self) -> String {
         let lines = match self.mode {
             Mode::Servers => self.servers_text(),
@@ -2463,6 +2606,7 @@ impl Conversation {
         self.notice.clone()
     }
 
+    #[cfg(any(not(target_os = "android"), test))]
     fn servers_text(&self) -> Vec<String> {
         let mut lines = vec![
             short(&format!(
@@ -2495,6 +2639,7 @@ impl Conversation {
         lines
     }
 
+    #[cfg(any(not(target_os = "android"), test))]
     fn lobby_text(&self) -> Vec<String> {
         match self.step {
             LobbyStep::Spaces => self.spaces_text(),
@@ -2503,6 +2648,7 @@ impl Conversation {
     }
 
     /// The lobby at its spaces list.
+    #[cfg(any(not(target_os = "android"), test))]
     fn spaces_text(&self) -> Vec<String> {
         let server = self
             .connected
@@ -2590,6 +2736,7 @@ impl Conversation {
     }
 
     /// The creation rings, as a list, at one of their steps.
+    #[cfg(any(not(target_os = "android"), test))]
     fn menu_text(&self, step: LobbyStep) -> Vec<String> {
         let label = match step {
             LobbyStep::Backend => "NEW SPACE: BACKEND",
@@ -3058,6 +3205,7 @@ impl Conversation {
     }
 
     /// The status line in a space: what the microphone is doing, the connection, a notice, a replay, or the counts. Problems have their own line.
+    #[cfg(any(not(target_os = "android"), test))]
     fn space_status(&self, space: &SpaceState) -> String {
         let talking = match &self.talk {
             // Until words are heard, the line says which worker they will be about.
@@ -3221,6 +3369,7 @@ impl Conversation {
             })
     }
 
+    #[cfg(any(not(target_os = "android"), test))]
     fn space_text(&mut self) -> Vec<String> {
         let now = Instant::now();
         self.observe_problem(now);
@@ -3399,6 +3548,7 @@ fn window(selected: usize, count: usize, rows: usize) -> usize {
 }
 
 /// The end of `text` within `width` columns, so that words still being heard stay in view.
+#[cfg(any(not(target_os = "android"), test))]
 fn tail(text: &str, width: usize) -> String {
     let ascii = wrapped_lines(&text.replace('\n', " ")).join(" ");
     if ascii.len() <= width {
@@ -6579,6 +6729,107 @@ mod tests {
     }
 
     #[test]
+    fn the_status_pill_says_what_the_agent_does_and_what_needs_you_first() {
+        use crate::pill::Need;
+        let mut conversation = on_wrist(|space| {
+            space.activity = Activity::Running;
+            space.title = "Fix the parser".into();
+        });
+        let now = Instant::now();
+        let status = conversation.pill_status(now).unwrap();
+        assert_eq!(status.activity, Activity::Running);
+        assert_eq!(status.title, "Fix the parser");
+        assert_eq!(status.need, None);
+        conversation.apply(space(|space| {
+            space.error = Some("Lost the agent".into());
+            space.approval = Some(approval(&[]));
+        }));
+        // A request first, then a problem, then a notice.
+        assert_eq!(
+            conversation.pill_status(now).unwrap().need,
+            Some(Need::Approval)
+        );
+        conversation.apply(space(|space| space.error = Some("Lost the agent".into())));
+        assert_eq!(
+            conversation.pill_status(now).unwrap().need,
+            Some(Need::Problem("! 0s Lost the agent".into()))
+        );
+        // B lets go of the card's focus, then dismisses the problem.
+        conversation.wrist_back();
+        conversation.wrist_back();
+        conversation.notice = Some("Not removed.".into());
+        assert_eq!(
+            conversation.pill_status(now).unwrap().need,
+            Some(Need::Notice("Not removed.".into()))
+        );
+        // Holding B says that it leaves.
+        conversation.hold_back(Some(Duration::from_millis(300)));
+        assert_eq!(
+            conversation.pill_status(now).unwrap().need,
+            Some(Need::Leaving)
+        );
+        conversation.hold_back(None);
+        // The Space section turns it off on this headset.
+        conversation.choose_menu(crate::hand_menu::Choice::Pill);
+        assert_eq!(conversation.pill_status(now), None);
+        assert!(!conversation.menu_model().pill);
+        conversation.choose_menu(crate::hand_menu::Choice::Pill);
+        assert!(conversation.pill_status(now).is_some());
+    }
+
+    #[test]
+    fn the_space_section_switches_mode_and_speech_and_leaves_once_confirmed() {
+        let mut conversation = joined(|space| {
+            space.speech = SpeechSetting::Brief;
+            space.participants.push(Participant {
+                name: "Bob".into(),
+                source: 2,
+                engagement: Some(Engagement::Away),
+            });
+        });
+        let model = conversation.menu_model();
+        let space = model.space.as_ref().unwrap();
+        assert_eq!(space.running, "opencode in tomori");
+        assert_eq!(space.here, "1 here, 1 away");
+        assert_eq!(model.people.len(), 2);
+        assert!(model.people[0].you && !model.people[0].away);
+        assert!(!model.people[1].you && model.people[1].away);
+        let colour = crate::speakers::colour(2);
+        assert_eq!(model.people[1].colour, [colour[0], colour[1], colour[2]]);
+        conversation.choose_menu(crate::hand_menu::Choice::Mode("plan".into()));
+        conversation.choose_menu(crate::hand_menu::Choice::Speech);
+        assert_eq!(
+            sent(&mut conversation),
+            [
+                ClientMessage::SetMode {
+                    mode: "plan".into()
+                },
+                ClientMessage::SetSpeech {
+                    speech: SpeechSetting::Full
+                }
+            ]
+        );
+        conversation.choose_menu(crate::hand_menu::Choice::Mute);
+        assert_eq!(conversation.take_actions(), [Action::SetAgentMuted(true)]);
+        assert!(conversation.menu_model().muted);
+        conversation.choose_menu(crate::hand_menu::Choice::Leave);
+        assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+        assert!(conversation.joined_space().is_none());
+    }
+
+    #[test]
+    fn a_visitor_cannot_switch_modes_from_the_menu() {
+        let mut conversation = joined(|_| {});
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        conversation.take_actions();
+        conversation.choose_menu(crate::hand_menu::Choice::Mode("plan".into()));
+        conversation.choose_menu(crate::hand_menu::Choice::Speech);
+        assert!(sent(&mut conversation).is_empty());
+    }
+
+    #[test]
     fn the_recording_indicator_follows_an_utterance_to_the_queue() {
         use crate::recording::Phase;
         let mut conversation = joined(|space| {
@@ -6611,7 +6862,7 @@ mod tests {
         let later = Instant::now() + Duration::from_secs(2);
         assert!(matches!(
             conversation.recording_phase(later),
-            Some(Phase::Recording { elapsed, heard, answering: None })
+            Some(Phase::Recording { elapsed, heard, answering: None, about: None })
                 if elapsed >= Duration::from_secs(2) && heard == "check the"
         ));
         conversation.talk(false);
