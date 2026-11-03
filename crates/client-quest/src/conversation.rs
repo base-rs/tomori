@@ -430,6 +430,11 @@ impl Conversation {
             ServerMessage::Role { role } => {
                 log::info!("Now {role:?}");
                 self.role = role;
+                // A visitor sends no audio, so the microphone closes as the role changes.
+                if !role.participates() {
+                    self.stop_live();
+                    self.stop_talking();
+                }
             }
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
@@ -2248,8 +2253,14 @@ mod tests {
         conversation.accept();
         assert!(sent(&mut conversation).is_empty());
 
-        // Admitted as a collaborator, they can.
+        // Admitted as a collaborator, they can, until they become a visitor again, which closes the microphone.
         conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.toggle_live();
+        assert!(conversation.live);
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert!(!conversation.live);
+        conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.take_actions();
         conversation.accept();
         assert!(matches!(
             sent(&mut conversation)[..],

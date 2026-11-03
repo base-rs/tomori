@@ -162,14 +162,15 @@ async fn connection(
 
 /// The transport for the next connection: the options' choice, pinning the certificate `learned` from an earlier connection if the options pin none.
 fn effective(transport: Transport, learned: Option<Fingerprint>) -> Transport {
-    match (transport, learned) {
-        (Transport::Plain, _) => Transport::Plain,
-        (Transport::Tls { pin }, learned) | (Transport::Automatic { pin }, learned @ Some(_)) => {
-            Transport::Tls {
-                pin: pin.or(learned),
-            }
+    match transport {
+        Transport::Plain => Transport::Plain,
+        // Once a certificate is known, whether given or learned, the server speaks TLS: never fall back to plain HTTP, so that a changed certificate is reported.
+        Transport::Automatic { pin: None } if learned.is_none() => {
+            Transport::Automatic { pin: None }
         }
-        (Transport::Automatic { pin }, None) => Transport::Automatic { pin },
+        Transport::Tls { pin } | Transport::Automatic { pin } => Transport::Tls {
+            pin: pin.or(learned),
+        },
     }
 }
 
@@ -525,6 +526,16 @@ mod tests {
     }
 
     #[test]
+    fn debugging_options_never_shows_secrets() {
+        let mut options = Options::new("studio:8765", "device-secret", "Ada");
+        options.token = Some("tomori_secret".into());
+        let debugged = format!("{options:?}");
+        assert!(!debugged.contains("tomori_secret"), "{debugged}");
+        assert!(!debugged.contains("device-secret"), "{debugged}");
+        assert!(debugged.contains("studio:8765"));
+    }
+
+    #[test]
     fn the_token_is_presented_only_over_tls() {
         assert_eq!(
             authorization(Some("tomori_abc"), true),
@@ -579,6 +590,11 @@ mod tests {
         );
         assert_eq!(
             effective(Transport::Tls { pin: given }, learned),
+            Transport::Tls { pin: given }
+        );
+        // An automatic connection given a pin speaks TLS from the start.
+        assert_eq!(
+            effective(Transport::Automatic { pin: given }, None),
             Transport::Tls { pin: given }
         );
     }

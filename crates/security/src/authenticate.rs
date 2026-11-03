@@ -1,14 +1,24 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-/// The cookie in which a browser holds its token, set by the server's sign-in page.
-pub const TOKEN_COOKIE: &str = "tomori-token";
+/// The cookie in which a browser holds its token, set by the server's sign-in page. The `__Host-` prefix makes browsers keep it only as set: secure, for the whole server and no other host.
+pub const TOKEN_COOKIE: &str = "__Host-tomori-token";
 
 /// The credentials presented on the HTTP request that opens a connection or asks for a page. See `design/security.md`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Credentials {
     /// The bearer token from the `Authorization` header, or else from the [`TOKEN_COOKIE`] cookie.
     pub token: Option<String>,
+}
+
+/// Written without the token, so that logging credentials cannot reveal it.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Credentials")
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -112,7 +122,7 @@ mod tests {
 
     #[test]
     fn reads_a_bearer_token_before_the_cookie() {
-        let cookies = ["theme=dark; tomori-token=from-cookie"];
+        let cookies = ["theme=dark; __Host-tomori-token=from-cookie"];
         assert_eq!(
             Credentials::from_fields(Some("Bearer from-header"), cookies),
             token("from-header")
@@ -126,7 +136,7 @@ mod tests {
             token("from-cookie")
         );
         assert_eq!(
-            Credentials::from_fields(None, ["a=1", "tomori-token=second"]),
+            Credentials::from_fields(None, ["a=1", "__Host-tomori-token=second"]),
             token("second")
         );
         assert_eq!(
@@ -136,9 +146,16 @@ mod tests {
     }
 
     #[test]
+    fn debugging_never_shows_the_token() {
+        let debugged = format!("{:?}", token("tomori_secret"));
+        assert!(!debugged.contains("tomori_secret"), "{debugged}");
+        assert!(debugged.contains("[redacted]"));
+    }
+
+    #[test]
     fn an_authorization_that_is_not_a_bearer_token_is_presented_empty() {
         assert_eq!(
-            Credentials::from_fields(Some("Basic dXNlcg=="), ["tomori-token=cookie"]),
+            Credentials::from_fields(Some("Basic dXNlcg=="), ["__Host-tomori-token=cookie"]),
             token("")
         );
         assert_eq!(Credentials::from_fields(Some("Bearer"), []), token(""));

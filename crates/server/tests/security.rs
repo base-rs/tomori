@@ -116,7 +116,7 @@ fn refused_credentials_get_the_same_reply_whatever_the_reason() {
     // A cookie is a credential too.
     assert_eq!(
         server
-            .refused(&[("Cookie", &format!("tomori-token={unknown}"))])
+            .refused(&[("Cookie", &format!("__Host-tomori-token={unknown}"))])
             .0,
         401
     );
@@ -558,14 +558,14 @@ fn an_owner_signs_in_and_sees_the_status_page() {
     assert_eq!((status, field(&fields, "location")), (303, Some("/")));
     let cookie = field(&fields, "set-cookie").unwrap();
     assert!(
-        cookie.starts_with(&format!("tomori-token={token};")),
+        cookie.starts_with(&format!("__Host-tomori-token={token};")),
         "{cookie}"
     );
     for attribute in ["Secure", "HttpOnly", "SameSite=Strict", "Path=/"] {
         assert!(cookie.contains(attribute), "{cookie}");
     }
 
-    let signed_in = format!("tomori-token={token}");
+    let signed_in = format!("__Host-tomori-token={token}");
     let (status, _, page) = exchange(&server, "GET", "/", &[("Cookie", &signed_in)], "");
     assert_eq!(status, 200);
     assert!(page.contains("Studio"));
@@ -595,7 +595,7 @@ fn only_an_owner_sees_the_status_page_or_revokes_a_token() {
             space: "studio".into(),
         },
     );
-    let bob_cookie = format!("tomori-token={bob_token}");
+    let bob_cookie = format!("__Host-tomori-token={bob_token}");
     let (status, _, page) = exchange(&server, "GET", "/", &[("Cookie", &bob_cookie)], "");
     assert_eq!(status, 403);
     assert!(page.contains("for owners"));
@@ -610,7 +610,7 @@ fn only_an_owner_sees_the_status_page_or_revokes_a_token() {
     assert_eq!(status, 403);
 
     // A form from another site is refused, whoever sends it.
-    let owner_cookie = format!("tomori-token={owner_token}");
+    let owner_cookie = format!("__Host-tomori-token={owner_token}");
     let (status, _, _) = exchange(
         &server,
         "POST",
@@ -659,4 +659,62 @@ fn in_open_mode_everyone_sees_the_status_page() {
     assert_eq!((status, field(&fields, "location")), (303, Some("/")));
     let (status, _, _) = exchange(&server, "DELETE", "/sign-in", &[], "");
     assert_eq!(status, 405);
+}
+
+#[test]
+fn a_form_that_trickles_is_closed_after_the_request_timeout() {
+    use std::io::{Read, Write};
+    let server = TestServer::with_tokens(true, |server| {
+        server.with_request_timeout(Duration::from_millis(200))
+    });
+    let mut stream = std::net::TcpStream::connect(server.address).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write!(
+        stream,
+        "POST /sign-in HTTP/1.1\r\nHost: tomori\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 4096\r\n\r\ntoken="
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    assert!(started.elapsed() < TIMEOUT, "the connection was held");
+    assert!(!response.starts_with(b"HTTP/1.1 303"));
+}
+
+#[test]
+fn an_automatic_client_never_sends_its_token_over_plain_http() {
+    use std::io::Read;
+    // A listener that speaks neither TLS nor Tomori, and records the first bytes of each connection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(2) {
+            let mut stream = stream.unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let mut buffer = vec![0_u8; 4096];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            buffer.truncate(read);
+            let _ = sender.send(buffer);
+        }
+    });
+    let token = security::generate_token();
+    let mut options = client::Options::new(address.to_string(), "ada", "Ada");
+    options.transport = client::Transport::Automatic { pin: None };
+    options.token = Some(token.clone());
+    let client = client::Client::connect(options).unwrap();
+
+    // First a TLS handshake, which the listener does not answer, then plain HTTP without the token.
+    let handshake = received.recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(handshake.first(), Some(&0x16), "a TLS handshake record");
+    let plain = String::from_utf8_lossy(&received.recv_timeout(TIMEOUT).unwrap()).into_owned();
+    assert!(plain.starts_with("POST /connect"), "{plain}");
+    assert!(!plain.contains(&token), "{plain}");
+    assert!(
+        !plain.to_ascii_lowercase().contains("authorization"),
+        "{plain}"
+    );
+    client.close();
 }

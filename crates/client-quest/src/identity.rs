@@ -20,7 +20,7 @@ const SERVER_FILE: &str = "server";
 const CREDENTIALS_FILE: &str = "credentials.json";
 
 /// Settings given when the app starts, which take precedence over the defaults.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
     /// A server address to connect to straight away.
     pub server: Option<String>,
@@ -29,7 +29,7 @@ pub struct Overrides {
     pub token: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Identity {
     /// A random identity, so the server recognizes a reconnect, or a restart where it is stored, as the same participant.
     pub participant: String,
@@ -39,6 +39,44 @@ pub struct Identity {
     pub server: Option<String>,
     /// A token given at startup, presented to the server this device connects to and then kept for it.
     pub token: Option<String>,
+}
+
+/// The participant identity and tokens are secrets, so debugging these shows only whether they are set.
+fn secret(value: &Option<String>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[redacted]")
+}
+
+impl std::fmt::Debug for Overrides {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Overrides")
+            .field("server", &self.server)
+            .field("name", &self.name)
+            .field("token", &secret(&self.token))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Identity")
+            .field("participant", &"[redacted]")
+            .field("name", &self.name)
+            .field("server", &self.server)
+            .field("token", &secret(&self.token))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Credential")
+            .field("certificate", &self.certificate)
+            .field("token", &secret(&self.token))
+            .finish()
+    }
 }
 
 impl Identity {
@@ -85,7 +123,7 @@ pub struct Store {
 }
 
 /// What this device keeps for one server: the certificate it pinned and the token it presents. See `design/security.md`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     /// The fingerprint of the server's TLS certificate, pinned the first time this device connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +319,29 @@ mod tests {
         assert_eq!(identity.name, "Ada");
         assert_eq!(identity.server.as_deref(), Some("10.0.0.1:8765"));
         assert_eq!(identity.token.as_deref(), Some("tomori_abc"));
+    }
+
+    #[test]
+    fn debugging_never_shows_secrets() {
+        let store = Store::new(None);
+        let overrides = Overrides {
+            server: None,
+            name: None,
+            token: Some("tomori_secret".into()),
+        };
+        let identity = Identity::new(&store, None, overrides.clone());
+        let credential = Credential {
+            certificate: None,
+            token: Some("tomori_secret".into()),
+        };
+        for debugged in [
+            format!("{overrides:?}"),
+            format!("{identity:?}"),
+            format!("{credential:?}"),
+        ] {
+            assert!(!debugged.contains("tomori_secret"), "{debugged}");
+            assert!(!debugged.contains(&identity.participant), "{debugged}");
+        }
     }
 
     #[test]

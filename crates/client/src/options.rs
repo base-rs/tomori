@@ -14,12 +14,12 @@ pub enum Transport {
     Plain,
     /// TLS, accepting only the certificate with `pin`'s fingerprint, or, without one, whichever certificate the server presents, which [`crate::ConnectionState::Connected`] reports so that it can be pinned from then on.
     Tls { pin: Option<security::Fingerprint> },
-    /// TLS as [`Self::Tls`], or plain HTTP if the server presents no certificate, for an address nothing is known about yet, such as one typed in. No token is presented over plain HTTP.
+    /// TLS as [`Self::Tls`], or plain HTTP if the server presents no certificate, for an address nothing is known about yet, such as one typed in. No token is presented over plain HTTP. With a pin, or once a connection has learned the server's certificate, it is TLS only.
     Automatic { pin: Option<security::Fingerprint> },
 }
 
 /// How a [`crate::Client`] reaches and identifies itself to the server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Options {
     /// `host:port`, or a host alone for [`protocol::DEFAULT_PORT`]. Resolved again on every connection attempt.
     pub address: String,
@@ -47,6 +47,31 @@ pub struct Options {
     /// Require a new explicit microphone activation after a connection ends.
     /// Disabled by default for clients that restore their microphone gate.
     pub microphone_rearm_on_disconnect: bool,
+}
+
+/// Written without the participant identity or the token, which are secrets, so that logging options cannot reveal them.
+impl std::fmt::Debug for Options {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Options")
+            .field("address", &self.address)
+            .field("participant", &"[redacted]")
+            .field("name", &self.name)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("transport", &self.transport)
+            .field("backoff", &self.backoff)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("close_timeout", &self.close_timeout)
+            .field("keepalive", &self.keepalive)
+            .field("outgoing_audio_limit", &self.outgoing_audio_limit)
+            .field("outgoing_utterance_limit", &self.outgoing_utterance_limit)
+            .field("incoming_audio_limit", &self.incoming_audio_limit)
+            .field(
+                "microphone_rearm_on_disconnect",
+                &self.microphone_rearm_on_disconnect,
+            )
+            .finish()
+    }
 }
 
 impl Options {

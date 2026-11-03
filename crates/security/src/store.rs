@@ -77,8 +77,6 @@ impl From<io::Error> for StoreError {
 
 struct State {
     entries: Vec<Entry>,
-    /// When the file was last read or written, so that changes made by another process are noticed.
-    modified: Option<SystemTime>,
 }
 
 /// The tokens a server has issued, kept in a file readable only by the server's user. The `tomori-server auth` commands and the running server share the file: each change is made under an exclusive lock on a lock file beside it, against the file as it is then, and [`reload`](Self::reload) picks up changes made by another process. See `design/security.md`.
@@ -95,10 +93,10 @@ impl TokenStore {
     pub fn open(directory: &Path) -> Result<Self, StoreError> {
         create_private_directory(directory)?;
         let path = directory.join(TOKENS_FILE);
-        let (entries, modified) = read(&path)?;
+        let entries = read(&path)?;
         Ok(Self {
             path,
-            state: RwLock::new(State { entries, modified }),
+            state: RwLock::new(State { entries }),
         })
     }
 
@@ -145,16 +143,14 @@ impl TokenStore {
             .cloned()
     }
 
-    /// Read the file again if another process changed it since. Returns whether it changed.
+    /// Read the file again, for changes another process made. Returns whether the tokens changed. The file is read whole rather than trusting its modification time, which may not change between two quick writes.
     pub fn reload(&self) -> Result<bool, StoreError> {
-        let modified = modified(&self.path)?;
-        if modified == self.read_state().modified {
+        let entries = read(&self.path)?;
+        let mut state = self.write_state();
+        if entries == state.entries {
             return Ok(false);
         }
-        let (entries, modified) = read(&self.path)?;
-        let mut state = self.write_state();
         state.entries = entries;
-        state.modified = modified;
         Ok(true)
     }
 
@@ -162,14 +158,10 @@ impl TokenStore {
     fn change(&self, change: impl FnOnce(&mut Vec<Entry>)) -> Result<(), StoreError> {
         let lock = File::create(self.path.with_extension("lock"))?;
         lock.lock()?;
-        let (mut entries, _) = read(&self.path)?;
+        let mut entries = read(&self.path)?;
         change(&mut entries);
         write(&self.path, &entries)?;
-        let modified = modified(&self.path)?;
-        let mut state = self.write_state();
-        state.entries = entries;
-        state.modified = modified;
-        drop(state);
+        self.write_state().entries = entries;
         lock.unlock()?;
         Ok(())
     }
@@ -209,23 +201,14 @@ impl Authenticator for TokenStore {
     }
 }
 
-fn modified(path: &Path) -> io::Result<Option<SystemTime>> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(Some(metadata.modified()?)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn read(path: &Path) -> Result<(Vec<Entry>, Option<SystemTime>), StoreError> {
-    let modified = modified(path)?;
+fn read(path: &Path) -> Result<Vec<Entry>, StoreError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
     let file: Stored = serde_json::from_str(&text).map_err(StoreError::Format)?;
-    Ok((file.tokens, modified))
+    Ok(file.tokens)
 }
 
 /// Write through a temporary file readable only by its user, so that the store is never partly written or readable by others.

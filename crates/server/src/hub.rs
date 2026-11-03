@@ -61,6 +61,9 @@ pub struct SpaceStatus {
     pub visitors: usize,
 }
 
+/// The most disconnected visitors remembered. Anyone can connect as a visitor with a new identity, so beyond this the longest gone are forgotten, rather than kept for the whole retention. See `design/spaces.md`.
+pub const RETAINED_VISITORS: usize = 256;
+
 /// Work for a space's driver, which owns the backend session.
 #[derive(Debug)]
 pub enum SpaceCommand {
@@ -141,6 +144,8 @@ struct HubState {
     next_ping: u64,
     /// Orders closed spaces by when they closed; see [`SpaceRecord::closed`].
     next_closed: u64,
+    /// Orders disconnections; see [`ParticipantRecord::departure`].
+    next_departure: u64,
     connections: HashMap<ConnectionId, ConnectionRecord>,
     participants: HashMap<String, ParticipantRecord>,
     /// In creation order.
@@ -221,6 +226,10 @@ struct OpenUtterance {
 }
 
 struct ParticipantRecord {
+    /// Admitted as a visitor, so forgotten sooner when many have come and gone; see [`RETAINED_VISITORS`].
+    visitor: bool,
+    /// The order in which participants last disconnected, so that the longest gone are forgotten first.
+    departure: u64,
     name: String,
     source: u32,
     connection: Option<ConnectionId>,
@@ -514,6 +523,23 @@ impl HubState {
         self.update_role(participant);
         self.forget_closed();
         self.touch_space(space);
+    }
+
+    /// Forget the longest gone disconnected visitors beyond [`RETAINED_VISITORS`].
+    fn forget_excess_visitors(&mut self) {
+        let mut departed: Vec<(u64, String)> = self
+            .participants
+            .iter()
+            .filter(|(_, record)| record.visitor && record.connection.is_none())
+            .map(|(key, record)| (record.departure, key.clone()))
+            .collect();
+        let Some(excess) = departed.len().checked_sub(RETAINED_VISITORS) else {
+            return;
+        };
+        departed.sort_unstable();
+        for (_, key) in departed.into_iter().take(excess) {
+            self.participants.remove(&key);
+        }
     }
 
     /// The greeted participant of a connection and their current space.
@@ -824,10 +850,14 @@ impl Hub {
                     .is_some_and(|record| record.connection == Some(connection));
                 if current {
                     state.leave(&participant);
+                    state.next_departure += 1;
+                    let departure = state.next_departure;
                     if let Some(record) = state.participants.get_mut(&participant) {
                         record.connection = None;
                         record.departed = Some(Instant::now());
+                        record.departure = departure;
                     }
+                    state.forget_excess_visitors();
                 }
             }
             self.recount(&mut state);
@@ -962,6 +992,8 @@ impl Hub {
             state.participants.insert(
                 participant.clone(),
                 ParticipantRecord {
+                    visitor: access.is_visitor(),
+                    departure: 0,
                     name: String::new(),
                     source,
                     connection: None,
@@ -2031,6 +2063,40 @@ mod tests {
             hub.connect(Cancellation::new(), Access::visitor())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn only_so_many_disconnected_visitors_are_remembered() {
+        let hub = hub();
+        let visit = |identity: &str| {
+            let (connection, ..) = hub.connect(Cancellation::new(), Access::visitor()).unwrap();
+            hub.handle(
+                connection,
+                ClientMessage::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    participant: identity.to_owned(),
+                    name: identity.to_owned(),
+                },
+            );
+            connection
+        };
+        let owner = greet(&hub, "ada");
+        hub.disconnect(owner);
+        for index in 0..=RETAINED_VISITORS {
+            let connection = visit(&format!("visitor-{index}"));
+            hub.disconnect(connection);
+        }
+        let state = hub.lock();
+        let visitors = state
+            .participants
+            .values()
+            .filter(|record| record.visitor)
+            .count();
+        assert_eq!(visitors, RETAINED_VISITORS);
+        // The first to leave was forgotten; the owner, not a visitor, is kept for the whole retention.
+        assert!(!state.participants.contains_key("/visitor-0"));
+        assert!(state.participants.contains_key("/visitor-1"));
+        assert!(state.participants.contains_key("/ada"));
     }
 
     #[test]

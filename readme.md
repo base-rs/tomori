@@ -83,8 +83,11 @@ that server:
 
 ```sh
 cargo run -p server --bin tomori-server -- auth mint --owner --name "Sam's Quest"
-TOMORI_TOKEN=tomori_… bash scripts/android.sh run     # or: tomori --xr --token tomori_…
+TOMORI_TOKEN=tomori_… bash scripts/android.sh run     # or: tomori --xr --server HOST:8765 --token tomori_…
 ```
+
+A token given this way goes only to the server given with `TOMORI_SERVER` or
+`--server`, or over USB, never to a server found on the network.
 
 `tomori-server auth list` lists the tokens and `auth revoke ID` revokes one.
 The server keeps its tokens and TLS certificate in `~/.local/state/tomori`

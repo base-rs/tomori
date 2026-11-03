@@ -466,13 +466,14 @@ impl Connection {
         playback: Box<dyn Playback>,
         conversation: &mut Conversation,
     ) -> Self {
-        log::info!(
-            "Participant {} as {:?}",
-            identity.participant,
-            identity.name
-        );
+        // The participant identity is a secret of this device, so it is not logged.
+        log::info!("Participant {:?}", identity.name);
         if let Some(address) = &identity.server {
             conversation.connect(Choice::new(address, address, Source::Override));
+        } else if identity.token.is_some() {
+            log::info!(
+                "The token given is presented only to a server given at startup, or over USB."
+            );
         }
         let remembered = store.server();
         Self {
@@ -638,12 +639,18 @@ impl Connection {
                     let kept = self.store.credential(&key);
                     let (transport, pinned) =
                         transport(kept.certificate.as_deref(), choice.fingerprint.as_deref());
-                    let pending_token = kept.token.is_none() && self.identity.token.is_some();
+                    // A token given at startup goes only to the server given at startup, or over USB to this computer: never to a discovered server, whose advertisement anyone on the network could make.
+                    let startup = self
+                        .identity
+                        .token
+                        .clone()
+                        .filter(|_| matches!(choice.source, Source::Override | Source::Usb));
+                    let pending_token = kept.token.is_none() && startup.is_some();
                     let link = Link {
                         address: choice.address,
                         key,
                         transport,
-                        token: kept.token.or_else(|| self.identity.token.clone()),
+                        token: kept.token.or(startup),
                         pending_token,
                         pinned,
                         distrusted: false,

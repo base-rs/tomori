@@ -556,18 +556,16 @@ impl Server {
         }
     }
 
-    /// End the connections whose tokens were revoked since the token store was last read, such as by `tomori-server auth revoke` in another process. See `design/security.md`.
+    /// End the connections whose tokens are no longer issued, such as after `tomori-server auth revoke` in another process. Every connection is checked each sweep, not only after the store changes, so that one admitted just before a revocation is ended too. See `design/security.md`.
     fn revoke_withdrawn(&self) {
         let Some(store) = self.application.door().store() else {
             return;
         };
-        match store.reload() {
-            Ok(true) => self
-                .hub
-                .revoke(|principal| store.entry(principal).is_some()),
-            Ok(false) => {}
-            Err(error) => log::warn!("Could not read the token store: {error}."),
+        if let Err(error) = store.reload() {
+            log::warn!("Could not read the token store: {error}.");
         }
+        self.hub
+            .revoke(|principal| store.entry(principal).is_some());
     }
 
     /// Start requested spaces and drive their sessions until cancelled.

@@ -85,7 +85,9 @@ fn print_servers(servers: &discovery::Servers) {
 
 /// Connect to `address` and print its spaces, with the id to join by.
 fn list_spaces(address: &str) -> anyhow::Result<()> {
-    let options = Options::new(address, "discover", "discover");
+    let mut options = Options::new(address, "discover", "discover");
+    // Listing needs no token: it connects as a visitor, over TLS to a server that admits by token, or plain HTTP to one in `--auth open` mode.
+    options.transport = client::Transport::Automatic { pin: None };
     let client = Client::connect(options)?;
     // The connection thread sends Hello and reconnects; only the space list is wanted.
     if let Err(error) = client.send(ClientMessage::ListSpaces) {

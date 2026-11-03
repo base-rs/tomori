@@ -212,7 +212,9 @@ fn main() -> std::io::Result<()> {
     };
     let mut options = Options::new(address, participant, name);
     options.transport = client::Transport::Automatic { pin: None };
-    options.token = std::env::var("TOMORI_TOKEN").ok().filter(|token| !token.is_empty());
+    options.token = std::env::var("TOMORI_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
     let client = Client::connect(options)?;
 
     let sender = client.sender();
