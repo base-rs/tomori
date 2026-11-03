@@ -1431,3 +1431,35 @@ fn engagement_is_shared_and_forgotten_with_the_connection_and_the_speech_setting
     });
     ada.space(|state| state.speech == SpeechSetting::Full);
 }
+
+#[test]
+fn being_away_neither_raises_nor_clears_attention() {
+    let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
+    let mut ada = server.connect("ada", "Ada");
+    let space = ada.create_space("Attention").id;
+    let mut bob = server.connect("bob", "Bob");
+    let attention = |client: &mut TestClient| {
+        client.send(&ClientMessage::ListSpaces);
+        client.wait_for(|message| match message {
+            ServerMessage::Spaces { spaces } => spaces
+                .iter()
+                .find(|summary| summary.id == space)
+                .map(|summary| summary.attention),
+            _ => None,
+        })
+    };
+    // Ada takes her headset off, and the agent replies while she is away: she is still in the space, so the reply is
+    // not unheard for attention, and she hears it from the catch-up instead.
+    report(&mut ada, Engagement::Away);
+    ada.say("u1", "go on");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    let session = server.backend.started()[0].clone();
+    session.stream(&["Done, and nothing else to report."]);
+    ada.space(|state| state.activity == protocol::Activity::Idle);
+    assert_eq!(attention(&mut bob), None);
+    // Putting the headset back on plays the reply, and changes no attention.
+    report(&mut ada, Engagement::Engaged);
+    let (heard, _) = listen(&ada, Duration::from_millis(400));
+    assert!(from(&heard, REPLAY_SOURCE) > 0);
+    assert_eq!(attention(&mut bob), None);
+}
