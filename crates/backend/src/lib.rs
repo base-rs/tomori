@@ -321,6 +321,25 @@ pub enum Event {
     Error {
         message: String,
     },
+    /// The backend's connection to the agent was lost, so events are being missed. The session's state is uncertain
+    /// until [`Event::Resynchronized`] follows, or [`Event::Closed`] if the session cannot be read again. `reason` says
+    /// what happened, for participants.
+    Reconnecting {
+        reason: String,
+    },
+    /// The backend lost events, such as when its connection to the agent dropped, and has read the session again.
+    /// The snapshot replaces the conversation, running state, modes and pending requests, as when the session was
+    /// first opened; requests the snapshot does not list are no longer pending. Events reported after this one follow
+    /// it. Its `workers` are not used: workers keep travelling as [`Event::WorkersChanged`] and
+    /// [`Event::WorkersUnavailable`], so a resynchronization never retires one.
+    Resynchronized {
+        snapshot: Snapshot,
+    },
+    /// A message whose streamed text was partly missed while the backend reconnected, as the agent recorded it once
+    /// it ended. It replaces that message's text and tools; a message the space does not hold is ignored.
+    MessageRestored {
+        message: SnapshotMessage,
+    },
     /// The session ended and produces no more events.
     Closed {
         reason: Option<String>,
@@ -389,6 +408,11 @@ pub trait Backend: Send + Sync {
         id: &str,
         directory: &str,
     ) -> impl Future<Output = Result<Self::Session>> + Send;
+
+    /// The server is shutting down: stop waiting for the agent. Requests still waiting for it, such as for a
+    /// connection to return, fail at once, and so do later ones, so that shutdown never waits on the agent. Sessions
+    /// are closed separately. Must not block.
+    fn shutdown(&self) {}
 }
 
 /// One live agent session, bound to one space.

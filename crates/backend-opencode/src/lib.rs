@@ -6,7 +6,9 @@
 //! One backend binds to one running `opencode serve` process. It owns a
 //! dedicated thread that holds the scheduler, HTTP client, driver, and the
 //! server's one global event stream; sessions are `'static` handles that talk
-//! to that thread over channels. Permissions and questions are answered only
+//! to that thread over channels. When the service restarts or its event
+//! stream ends, the thread finds the service again and reconnects, and re-reads
+//! each attached session. Permissions and questions are answered only
 //! when a participant acts. See `design/agent-backends.md`.
 
 use std::sync::Mutex;
@@ -49,6 +51,9 @@ pub struct OpenCode {
     connection: Mutex<Option<std::result::Result<Connection, Error>>>,
 }
 
+/// Why a request fails once the backend has been shut down.
+const SHUT_DOWN: &str = "the OpenCode backend is shutting down";
+
 impl OpenCode {
     pub fn new(config: Config) -> Self {
         Self {
@@ -69,12 +74,15 @@ impl OpenCode {
             Some(Ok(connection)) => Ok(connection.commands.clone()),
             Some(Err(error)) => Err(error.clone()),
             None => {
-                let resolved = endpoint::resolve(self.config.url.as_deref());
+                // Resolved again before every connection attempt: a restarted
+                // service may record another port and password.
+                let mut resolver = endpoint::Resolver::new(self.config.url.clone());
+                let resolve: connection::Resolve = Box::new(move || resolver.next());
                 let (commands, receiver) = connection::Commands::new();
                 let thread = std::thread::Builder::new()
                     .name("opencode-connection".to_owned())
                     .spawn(move || {
-                        connection::run_thread(resolved, receiver);
+                        connection::run_thread(resolve, receiver);
                     })
                     .map_err(|error| {
                         Error::new(
@@ -123,6 +131,18 @@ impl Backend for OpenCode {
             .reply_with(move |reply| connection::Command::Create { spec, reply })
             .await?;
         Ok(OpenCodeSession::new(id, events, commands))
+    }
+
+    fn shutdown(&self) {
+        let mut guard = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_ref() {
+            Some(Ok(connection)) => connection.commands.shutdown(),
+            // Never start a connection once shutting down.
+            _ => *guard = Some(Err(Error::new(ErrorKind::Closed, SHUT_DOWN))),
+        }
     }
 
     async fn attach(&self, id: &str, directory: &str) -> Result<OpenCodeSession> {

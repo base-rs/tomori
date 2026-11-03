@@ -959,7 +959,17 @@ async fn run_space<S: Timers>(
         return;
     };
     let voice = voices.start(&hub, &space);
-    let error = drive(&hub, &space, &session, receiver, voice).await;
+    // A command the session is performing, such as a decision waiting for the agent's connection to return, does not
+    // hold up shutdown: the space stops as soon as shutdown begins, and its session is closed below.
+    let error = match select(
+        pin!(drive(&hub, &space, &session, receiver, voice)),
+        pin!(cancellation.cancelled()),
+    )
+    .await
+    {
+        Either::Left((error, _)) => error,
+        Either::Right(_) => None,
+    };
     hub.space_ended(&space, error);
     if let Err(error) = session.close().await {
         log::warn!("Closing the session of {space} failed: {error}");

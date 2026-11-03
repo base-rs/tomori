@@ -44,6 +44,9 @@ struct FakeShared {
     held: AtomicBool,
     released: event_listener::Event,
     creating: AtomicU64,
+    /// While set, decisions wait; see [`FakeBackend::hold_commands`].
+    commands_held: Arc<AtomicBool>,
+    commands_released: Arc<event_listener::Event>,
     next: AtomicU64,
     sessions: Mutex<Vec<FakeSession>>,
 }
@@ -76,6 +79,17 @@ impl FakeBackend {
         self.shared.released.notify(usize::MAX);
     }
 
+    /// Make decisions wait until [`release_commands`](Self::release_commands), as an agent whose connection has
+    /// dropped would.
+    pub fn hold_commands(&self) {
+        self.shared.commands_held.store(true, Ordering::SeqCst);
+    }
+
+    pub fn release_commands(&self) {
+        self.shared.commands_held.store(false, Ordering::SeqCst);
+        self.shared.commands_released.notify(usize::MAX);
+    }
+
     /// Sessions whose creation is waiting.
     pub fn creating(&self) -> u64 {
         self.shared.creating.load(Ordering::SeqCst)
@@ -97,6 +111,8 @@ impl FakeBackend {
                 directory: directory.to_owned(),
                 manual: self.shared.manual.load(Ordering::SeqCst),
                 snapshot_failure: self.shared.snapshot_failure.clone(),
+                commands_held: self.shared.commands_held.clone(),
+                commands_released: self.shared.commands_released.clone(),
                 outbound: Mutex::new(FakeOutbound {
                     current: Some(handle),
                     backlog: VecDeque::new(),
@@ -235,6 +251,8 @@ struct FakeSessionInner {
     directory: String,
     manual: bool,
     snapshot_failure: Arc<AtomicBool>,
+    commands_held: Arc<AtomicBool>,
+    commands_released: Arc<event_listener::Event>,
     outbound: Mutex<FakeOutbound>,
     busy: AtomicBool,
     bound: Mutex<Option<u64>>,
@@ -417,6 +435,16 @@ impl Session for FakeSession {
     }
 
     async fn decide(&self, permission: &str, decision: Decision) -> Result<()> {
+        loop {
+            if !self.inner.commands_held.load(Ordering::SeqCst) {
+                break;
+            }
+            let released = self.inner.commands_released.listen();
+            if !self.inner.commands_held.load(Ordering::SeqCst) {
+                break;
+            }
+            released.await;
+        }
         let _binding = self.current_binding()?;
         self.inner
             .log

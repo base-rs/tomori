@@ -51,7 +51,8 @@ Options:
   --speech-backend NAME
                        How utterances are transcribed: streaming (default, a transducer that reports
                        words as you speak) or offline (a whole-clip model, more accurate, that reports
-                       the transcript a couple of seconds after you stop).
+                       the transcript a couple of seconds after you stop, for messages of up to 5
+                       minutes).
   --speech-segmentation NAME
                        How a reply is spoken, by document-level block: block (default, a whole block
                        in one go) or sentence (each sentence separately, so a long block starts sooner).
@@ -587,7 +588,7 @@ fn offline_transcriber(
     provider: &str,
     engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
-    use speech::stt::WhisperConfig;
+    use speech::stt::{SileroVad, SileroVadConfig, WhisperConfig};
 
     let mut config = WhisperConfig::from_root(root);
     config.provider = provider.to_owned();
@@ -603,10 +604,28 @@ fn offline_transcriber(
         }
     };
     eprintln!(
-        "Speech recognition: offline whole-clip model from {} ({provider}).",
-        config.model.display()
+        "Speech recognition: offline whole-clip model from {} ({provider}), for utterances of up to {} minutes.",
+        config.model.display(),
+        speech::stt::MAX_UTTERANCE / speech::stt::RATE as usize / 60
     );
-    let transcriber = server::OfflineTranscriber::new(recognizer);
+    let vad = SileroVadConfig::from_root(root);
+    let segment = speech::stt::MAX_SEGMENT / speech::stt::RATE as usize;
+    let voice: Option<Box<dyn speech::stt::VoiceActivity>> = match SileroVad::new(&vad) {
+        Ok(voice) => {
+            eprintln!(
+                "Pauses in utterances longer than {segment} seconds: Silero voice activity detector from {} (cpu).",
+                vad.model.display()
+            );
+            Some(Box::new(voice))
+        }
+        Err(error) => {
+            eprintln!(
+                "Pauses in utterances longer than {segment} seconds: found by loudness alone ({error})."
+            );
+            None
+        }
+    };
+    let transcriber = server::OfflineTranscriber::new(recognizer, voice);
     engines.stoppers.push(transcriber.stopper());
     Ok(Arc::new(transcriber))
 }

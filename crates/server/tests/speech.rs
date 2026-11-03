@@ -988,3 +988,91 @@ fn a_synthesizer_crash_in_one_space_disables_speech_in_every_space() {
     }
     assert_eq!(*synthesizer.spoken.lock().unwrap(), ["This will crash."]);
 }
+
+/// An offline recognizer that answers each clip with its length in seconds, and records the length of each clip in samples.
+#[derive(Clone, Default)]
+struct FakeOfflineRecognizer {
+    clips: Arc<Mutex<Vec<usize>>>,
+}
+
+impl speech::stt::OfflineRecognizer for FakeOfflineRecognizer {
+    fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error> {
+        self.clips.lock().unwrap().push(samples.len());
+        Ok(format!("{} seconds.", samples.len() / RATE as usize))
+    }
+}
+
+fn offline_server(backend: FakeBackend, recognizer: FakeOfflineRecognizer) -> TestServer {
+    TestServer::with_server(backend, move |backends| {
+        Server::new(
+            backends,
+            Arc::new(server::OfflineTranscriber::new(recognizer, None)),
+        )
+    })
+}
+
+/// Send `seconds` of steady audio, with no pause in it, in one second frames.
+fn speak_steadily(client: &mut TestClient, seconds: usize) {
+    for _ in 0..seconds {
+        client.send_audio(Gate::Agent, vec![3000; RATE as usize]);
+    }
+}
+
+#[test]
+fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_parts() {
+    let recognizer = FakeOfflineRecognizer::default();
+    let server = offline_server(FakeBackend::manual(), recognizer.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Long");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    speak_steadily(&mut ada, 65);
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
+    });
+    assert_eq!(
+        transcript(&mut ada, "u1"),
+        "28 seconds. 28 seconds. 9 seconds."
+    );
+    assert_eq!(
+        *recognizer.clips.lock().unwrap(),
+        vec![
+            speech::stt::MAX_SEGMENT,
+            speech::stt::MAX_SEGMENT,
+            65 * RATE as usize - 2 * speech::stt::MAX_SEGMENT
+        ]
+    );
+}
+
+#[test]
+fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
+    let recognizer = FakeOfflineRecognizer::default();
+    let server = offline_server(FakeBackend::manual(), recognizer.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Too long");
+    ada.send(&ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+    });
+    // One second more than the limit; the failure arrives before the utterance ends.
+    speak_steadily(&mut ada, speech::stt::MAX_UTTERANCE / RATE as usize + 1);
+    let error = failure(&mut ada, "u1");
+    assert_eq!(
+        error,
+        "Nothing was sent: the speech was longer than 5 minutes, the most that is transcribed at once. Say it in shorter messages."
+    );
+    // An end already on its way is ignored, and nothing is decoded or queued.
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
+    });
+    while let Some(message) = ada.next_message(Duration::from_millis(200)) {
+        match message {
+            ServerMessage::Space { state } => assert!(state.queue.is_empty()),
+            ServerMessage::Error { error, .. } => panic!("{error}"),
+            ServerMessage::Transcript { text, .. } => panic!("transcribed as {text:?}"),
+            _ => {}
+        }
+    }
+    assert!(recognizer.clips.lock().unwrap().is_empty());
+    assert!(server.backend.started()[0].log().prompts.is_empty());
+}

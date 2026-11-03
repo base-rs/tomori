@@ -228,7 +228,9 @@ mod enabled {
                     }
                 }
                 // An incomplete message's unclosed block is not stable, so it is not spoken. Queued segments still finish.
-                Event::Closed { .. } => self.speaking.clear(),
+                // After a resynchronization the deltas of a message being spoken were lost, so the rest of it is not
+                // spoken either; messages that start afterwards are.
+                Event::Closed { .. } | Event::Resynchronized { .. } => self.speaking.clear(),
                 _ => {}
             }
         }
