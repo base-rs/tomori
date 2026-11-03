@@ -10,9 +10,11 @@ use base_http_server::Handler;
 use base_scheduler::Cancellation;
 use security::Credentials;
 
+use crate::access::Grant;
 use crate::connection::ConnectionBody;
 use crate::door::Door;
 use crate::hub::Hub;
+use crate::pages;
 
 /// The HTTP routes of the server: `POST /connect` for client connections and `GET /health`.
 ///
@@ -36,6 +38,192 @@ impl Application {
 
     pub(crate) fn door(&self) -> &Door {
         &self.door
+    }
+}
+
+/// A web page, with headers that keep scripts, frames and other origins out of it.
+fn html<B: ReadableBody>(status: u16, page: String) -> Response<ResponseBody<B>> {
+    let mut response = response(
+        Status::new(status).expect("valid status"),
+        "text/html; charset=utf-8",
+        ResponseBody::fixed(page),
+    );
+    response
+        .fields
+        .add("Content-Security-Policy", pages::CONTENT_SECURITY_POLICY)
+        .expect("valid policy");
+    response
+        .fields
+        .add("X-Content-Type-Options", "nosniff")
+        .expect("valid option");
+    response
+}
+
+/// Send the browser to `location`, setting `cookie` if given.
+fn redirect<B: ReadableBody>(location: &str, cookie: Option<String>) -> Response<ResponseBody<B>> {
+    let mut response = response(
+        Status::new(303).expect("valid status"),
+        "text/plain",
+        ResponseBody::fixed(""),
+    );
+    response
+        .fields
+        .add("Location", location)
+        .expect("valid location");
+    if let Some(cookie) = cookie {
+        // A cookie holding a token has only token characters, which are valid field syntax.
+        response
+            .fields
+            .add("Set-Cookie", cookie)
+            .expect("valid cookie");
+    }
+    response
+}
+
+/// The cookie that holds a browser's token, or clears it. See `design/security.md`.
+fn token_cookie(token: Option<&str>) -> String {
+    let attributes = "Path=/; Secure; HttpOnly; SameSite=Strict";
+    match token {
+        Some(token) => format!("{}={token}; {attributes}", security::TOKEN_COOKIE),
+        None => format!("{}=; {attributes}; Max-Age=0", security::TOKEN_COOKIE),
+    }
+}
+
+/// Whether a form was posted from this server's own pages: its `Origin`, when given, names the host the request was sent to, its `authority`. The cookie's `SameSite=Strict` already keeps other sites' forms from carrying it.
+fn same_origin(fields: &Fields, authority: Option<&str>) -> bool {
+    let origin = fields
+        .values("origin")
+        .next()
+        .map(|value| std::str::from_utf8(value).unwrap_or_default());
+    match origin {
+        None => true,
+        Some(origin) => {
+            let host = origin.split_once("://").map_or(origin, |(_, host)| host);
+            authority.is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+        }
+    }
+}
+
+/// Read a form body of at most [`pages::FORM_LIMIT`] bytes.
+async fn read_form<B: ReadableBody>(mut body: B, cancellation: &Cancellation) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    loop {
+        match body.read(cancellation).await.ok()? {
+            BodyFrame::Data { data, end } => {
+                bytes.extend_from_slice(data.as_ref());
+                if bytes.len() > pages::FORM_LIMIT {
+                    return None;
+                }
+                if end {
+                    return Some(bytes);
+                }
+            }
+            BodyFrame::Headers { end: false, .. } => {}
+            BodyFrame::Headers { end: true, .. } | BodyFrame::End => return Some(bytes),
+        }
+    }
+}
+
+/// Who a page request is from.
+enum Viewer {
+    /// An owner, as everyone is in `--auth open` mode.
+    Owner,
+    /// Signed in, but not as an owner.
+    Other,
+    /// Not signed in, or with a token that is no longer accepted.
+    Nobody,
+}
+
+impl Application {
+    fn viewer(&self, fields: &Fields) -> Viewer {
+        let credentials = credentials(fields);
+        match self.door.admit(&credentials) {
+            Some(access) if access.grant == Grant::Owner => Viewer::Owner,
+            Some(_) if credentials.token.is_some() => Viewer::Other,
+            _ => Viewer::Nobody,
+        }
+    }
+
+    /// Whether the request carries a token cookie, so that signing out is offered.
+    fn signed_in(fields: &Fields) -> bool {
+        credentials(fields).token.is_some()
+    }
+
+    fn status_page<B: ReadableBody>(&self, fields: &Fields) -> Response<ResponseBody<B>> {
+        match self.viewer(fields) {
+            Viewer::Owner => {
+                let tokens = self.door.store().map(|store| store.entries());
+                html(
+                    200,
+                    pages::status(
+                        &self.hub.status(),
+                        tokens.as_deref(),
+                        Self::signed_in(fields),
+                    ),
+                )
+            }
+            Viewer::Other => html(403, pages::not_an_owner()),
+            Viewer::Nobody => redirect(pages::SIGN_IN_PATH, None),
+        }
+    }
+
+    /// Answer a form posted to `path`. The form has been read first, whatever the answer, since a request body left unread would reset the connection and lose the answer.
+    fn form<B: ReadableBody>(
+        &self,
+        path: &str,
+        fields: &Fields,
+        authority: Option<&str>,
+        form: Option<Vec<u8>>,
+    ) -> Response<ResponseBody<B>> {
+        if !same_origin(fields, authority) {
+            return html(
+                403,
+                pages::sign_in(Some("That form came from another site.")),
+            );
+        }
+        match path {
+            pages::SIGN_IN_PATH => self.sign_in(form.as_deref()),
+            pages::SIGN_OUT_PATH => redirect(pages::SIGN_IN_PATH, Some(token_cookie(None))),
+            _ => self.revoke(fields, form.as_deref()),
+        }
+    }
+
+    fn sign_in<B: ReadableBody>(&self, form: Option<&[u8]>) -> Response<ResponseBody<B>> {
+        let token = form
+            .and_then(|form| pages::form_value(form, "token"))
+            .map(|token| token.trim().to_owned());
+        let credentials = Credentials {
+            token: token.clone(),
+        };
+        match (token, self.door.admit(&credentials)) {
+            (Some(token), Some(access)) if access.principal.is_some() => {
+                redirect(pages::STATUS_PATH, Some(token_cookie(Some(&token))))
+            }
+            _ => html(401, pages::sign_in(Some("That token is not accepted."))),
+        }
+    }
+
+    fn revoke<B: ReadableBody>(
+        &self,
+        fields: &Fields,
+        form: Option<&[u8]>,
+    ) -> Response<ResponseBody<B>> {
+        if !matches!(self.viewer(fields), Viewer::Owner) {
+            return html(403, pages::not_an_owner());
+        }
+        let id = form.and_then(|form| pages::form_value(form, "id"));
+        if let (Some(store), Some(id)) = (self.door.store(), id) {
+            match store.revoke(&id) {
+                Ok(true) => {
+                    log::info!("Revoked token {id} from the status page.");
+                    self.hub
+                        .revoke(|principal| store.entry(principal).is_some());
+                }
+                Ok(false) => {}
+                Err(error) => log::warn!("Could not revoke token {id}: {error}."),
+            }
+        }
+        redirect(pages::STATUS_PATH, None)
     }
 }
 
@@ -175,6 +363,21 @@ impl Handler for Application {
                     ),
                 }
             }
+            pages::STATUS_PATH if get => self.status_page(&request.fields),
+            pages::SIGN_IN_PATH if get => match self.door {
+                Door::Open => redirect(pages::STATUS_PATH, None),
+                Door::Tokens { .. } => html(200, pages::sign_in(None)),
+            },
+            pages::SIGN_IN_PATH | pages::SIGN_OUT_PATH | pages::REVOKE_PATH if post => {
+                let path = path.to_owned();
+                let fields = request.fields.clone();
+                let authority = request
+                    .authority
+                    .as_ref()
+                    .map(|authority| authority.as_str().to_owned());
+                let form = read_form(request.body, cancellation).await;
+                self.form(&path, &fields, authority.as_deref(), form)
+            }
             "/health" if get => response(
                 Status::OK,
                 "application/json",
@@ -184,7 +387,12 @@ impl Handler for Application {
                     protocol::PROTOCOL_VERSION
                 )),
             ),
-            protocol::CONNECT_PATH | "/health" => response(
+            protocol::CONNECT_PATH
+            | "/health"
+            | pages::STATUS_PATH
+            | pages::SIGN_IN_PATH
+            | pages::SIGN_OUT_PATH
+            | pages::REVOKE_PATH => response(
                 Status::new(405).expect("valid status"),
                 "text/plain",
                 ResponseBody::fixed("Method not allowed.\n"),

@@ -479,3 +479,184 @@ fn a_refused_token_is_reported_as_unauthorized() {
     assert_eq!(reason, client::Disconnect::Status(401));
     client.close();
 }
+
+/// A raw HTTP exchange with the server: the status, the response fields, lowercased, and the body.
+fn exchange(
+    server: &TestServer,
+    method: &str,
+    path: &str,
+    fields: &[(&str, &str)],
+    body: &str,
+) -> (u16, Vec<(String, String)>, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(server.address).unwrap();
+    let fields: String = fields
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: tomori\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n{fields}\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let mut lines = head.lines();
+    let status = lines.next().unwrap()[9..12].parse().unwrap();
+    let fields = lines
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_owned()))
+        .collect();
+    (status, fields, body.to_owned())
+}
+
+fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(field, _)| field == name)
+        .map(|(_, value)| value.as_str())
+}
+
+#[test]
+fn an_owner_signs_in_and_sees_the_status_page() {
+    let server = TestServer::with_tokens(true, |server| server);
+    let (mut ada, space) = owned_space(&server);
+    let _vic = {
+        let mut vic = server.connect("vic", "Vic");
+        vic.send(&ClientMessage::Join {
+            space: space.id.clone(),
+        });
+        vic.space(|state| state.id == space.id);
+        vic
+    };
+    let (owner, token) = server.issue("Ada's browser", Grant::Owner);
+
+    // Without signing in, the status page sends the browser to sign in.
+    let (status, fields, _) = exchange(&server, "GET", "/", &[], "");
+    assert_eq!(
+        (status, field(&fields, "location")),
+        (303, Some("/sign-in"))
+    );
+    let (status, fields, page) = exchange(&server, "GET", "/sign-in", &[], "");
+    assert_eq!(status, 200);
+    assert!(page.contains("name=\"token\""));
+    assert!(
+        field(&fields, "content-security-policy")
+            .unwrap()
+            .contains("default-src 'none'")
+    );
+
+    // A token that is not accepted is refused.
+    let (status, fields, _) = exchange(&server, "POST", "/sign-in", &[], "token=tomori_nope");
+    assert_eq!(status, 401);
+    assert_eq!(field(&fields, "set-cookie"), None);
+
+    // Signing in sets a cookie holding the token.
+    let (status, fields, _) = exchange(&server, "POST", "/sign-in", &[], &format!("token={token}"));
+    assert_eq!((status, field(&fields, "location")), (303, Some("/")));
+    let cookie = field(&fields, "set-cookie").unwrap();
+    assert!(
+        cookie.starts_with(&format!("tomori-token={token};")),
+        "{cookie}"
+    );
+    for attribute in ["Secure", "HttpOnly", "SameSite=Strict", "Path=/"] {
+        assert!(cookie.contains(attribute), "{cookie}");
+    }
+
+    let signed_in = format!("tomori-token={token}");
+    let (status, _, page) = exchange(&server, "GET", "/", &[("Cookie", &signed_in)], "");
+    assert_eq!(status, 200);
+    assert!(page.contains("Studio"));
+    assert!(page.contains("Ada (owner)"));
+    assert!(page.contains("1 visitors connected"));
+    assert!(page.contains(&owner.id));
+    assert!(page.contains("Ada&#39;s browser"));
+    assert!(!page.contains(&token));
+
+    // Signing out clears the cookie.
+    let (status, fields, _) = exchange(&server, "POST", "/sign-out", &[], "");
+    assert_eq!(
+        (status, field(&fields, "location")),
+        (303, Some("/sign-in"))
+    );
+    assert!(field(&fields, "set-cookie").unwrap().contains("Max-Age=0"));
+    ada.send(&ClientMessage::Leave);
+}
+
+#[test]
+fn only_an_owner_sees_the_status_page_or_revokes_a_token() {
+    let server = TestServer::with_tokens(true, |server| server);
+    let (_, owner_token) = server.issue("Ada", Grant::Owner);
+    let (bob, bob_token) = server.issue(
+        "Bob",
+        Grant::Collaborator {
+            space: "studio".into(),
+        },
+    );
+    let bob_cookie = format!("tomori-token={bob_token}");
+    let (status, _, page) = exchange(&server, "GET", "/", &[("Cookie", &bob_cookie)], "");
+    assert_eq!(status, 403);
+    assert!(page.contains("for owners"));
+    let revoke = format!("id={}", bob.id);
+    let (status, _, _) = exchange(
+        &server,
+        "POST",
+        "/tokens/revoke",
+        &[("Cookie", &bob_cookie)],
+        &revoke,
+    );
+    assert_eq!(status, 403);
+
+    // A form from another site is refused, whoever sends it.
+    let owner_cookie = format!("tomori-token={owner_token}");
+    let (status, _, _) = exchange(
+        &server,
+        "POST",
+        "/tokens/revoke",
+        &[
+            ("Cookie", &owner_cookie),
+            ("Origin", "https://elsewhere.example"),
+        ],
+        &revoke,
+    );
+    assert_eq!(status, 403);
+    assert_eq!(server.tokens.as_ref().unwrap().entries().len(), 2);
+
+    // The owner revokes Bob's token, which ends his connection at once.
+    let connected = server.connect_with_token("bob", "Bob", &bob_token);
+    let (status, fields, page) = exchange(
+        &server,
+        "POST",
+        "/tokens/revoke",
+        &[("Cookie", &owner_cookie), ("Origin", "https://tomori")],
+        &revoke,
+    );
+    assert_eq!(
+        (status, field(&fields, "location")),
+        (303, Some("/")),
+        "{page}"
+    );
+    assert!(connected.is_closed(TIMEOUT));
+    assert_eq!(server.tokens.as_ref().unwrap().entries().len(), 1);
+    assert_eq!(
+        server
+            .refused(&[("Authorization", &format!("Bearer {bob_token}"))])
+            .0,
+        401
+    );
+}
+
+#[test]
+fn in_open_mode_everyone_sees_the_status_page() {
+    let server = TestServer::start();
+    let (status, _, page) = exchange(&server, "GET", "/", &[], "");
+    assert_eq!(status, 200);
+    assert!(page.contains("No spaces."));
+    assert!(!page.contains("Tokens"));
+    let (status, fields, _) = exchange(&server, "GET", "/sign-in", &[], "");
+    assert_eq!((status, field(&fields, "location")), (303, Some("/")));
+    let (status, _, _) = exchange(&server, "DELETE", "/sign-in", &[], "");
+    assert_eq!(status, 405);
+}

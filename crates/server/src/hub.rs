@@ -20,7 +20,7 @@ use protocol::{
     PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
 };
 
-use crate::access::{self, Access};
+use crate::access::{self, Access, Grant};
 use crate::backends::Backends;
 use crate::environments;
 use crate::limits;
@@ -39,6 +39,27 @@ pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The most closed spaces kept that nobody is in. Beyond this, the oldest are forgotten, so that sessions ending repeatedly cannot grow the server's memory without bound. See `design/spaces.md`.
 pub const CLOSED_SPACES: usize = 32;
+
+/// Who is where, for the status page. See `design/security.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub spaces: Vec<SpaceStatus>,
+    /// The display names and roles of the connected participants in the lobby.
+    pub lobby: Vec<(String, ConnectionRole)>,
+    /// Visitors connected, wherever they are.
+    pub visitors: usize,
+}
+
+/// One space on the status page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceStatus {
+    pub title: String,
+    pub activity: protocol::Activity,
+    /// The display names and roles of its participants.
+    pub participants: Vec<(String, ConnectionRole)>,
+    /// How many visitors are watching it.
+    pub visitors: usize,
+}
 
 /// Work for a space's driver, which owns the backend session.
 #[derive(Debug)]
@@ -561,6 +582,56 @@ impl Hub {
     /// How many spaces are listed and participants connected, as advertised; see `design/server.md`.
     pub fn counts(&self) -> Counts {
         self.lock().counts()
+    }
+
+    /// Who is where now, for the status page.
+    pub fn status(&self) -> Status {
+        let state = self.lock();
+        let role = |key: &str, space: Option<&str>| {
+            let record = state.participants.get(key)?;
+            let connection = state.connections.get(&record.connection?)?;
+            Some((record.name.clone(), connection.access.role(space)))
+        };
+        let spaces = state
+            .spaces
+            .iter()
+            .map(|space| SpaceStatus {
+                title: space.model.title.clone(),
+                activity: space.model.activity(),
+                participants: space
+                    .model
+                    .participants
+                    .iter()
+                    .filter_map(|key| role(key, Some(&space.model.id)))
+                    .collect(),
+                visitors: space.model.visitors.len(),
+            })
+            .collect();
+        // In the lobby, people are listed by what they were admitted as; visitors are only counted.
+        let lobby = state
+            .participants
+            .values()
+            .filter(|record| record.space.is_none())
+            .filter_map(|record| {
+                let connection = state.connections.get(&record.connection?)?;
+                let role = match connection.access.grant {
+                    Grant::Owner => ConnectionRole::Owner,
+                    Grant::Collaborator { .. } => ConnectionRole::Collaborator,
+                    Grant::Visitor => return None,
+                };
+                Some((record.name.clone(), role))
+            })
+            .collect();
+        let visitors = state
+            .connections
+            .values()
+            .filter(|record| record.participant.is_some() && record.access.is_visitor())
+            .count();
+        Status {
+            spaces,
+            lobby,
+            visitors,
+        }
     }
 
     /// Wait for [`counts`](Self::counts) to change. Check them after creating the listener to avoid a lost wakeup.

@@ -18,6 +18,7 @@ mod limits;
 #[cfg(feature = "speech")]
 pub mod offline;
 mod outbox;
+mod pages;
 mod projection;
 mod queue;
 #[cfg(feature = "speech")]

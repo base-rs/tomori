@@ -281,6 +281,17 @@ async fn exchange(
     };
     let certificate = pinned.and_then(Pinned::seen);
     opened.set(true);
+    // Wait for the server's answer before sending anything. A server that refuses the connection, such as with 401, closes it after answering, and data it has not read would reset the connection and lose the answer. The server sends its response head at once, before any frame.
+    let response = context
+        .within(context.options.connect_timeout, async {
+            response.await.map_err(transport)
+        })
+        .await;
+    let mut response = match response {
+        Ok(response) if response.status.is_success() => response,
+        Ok(response) => return Disconnect::Status(response.status.as_u16()),
+        Err(reason) => return reason,
+    };
 
     let upload = async {
         let options = context.options;
@@ -302,14 +313,7 @@ async fn exchange(
         }
         .await;
         match result {
-            // A server that refuses the connection, such as with 401, answers and closes while the request body is still being written. Give its answer the close timeout to arrive, so that the refusal is reported rather than the failed write.
-            Err(reason) => {
-                let _ = context
-                    .scheduler
-                    .sleep(context.options.close_timeout, &Cancellation::never())
-                    .await;
-                reason
-            }
+            Err(reason) => reason,
             // Closing, with queued control sent: wait for the server to end its response, which `session` bounds by the close timeout.
             Ok(()) => std::future::pending().await,
         }
@@ -317,14 +321,6 @@ async fn exchange(
 
     let download = async {
         let result: Result<Infallible, Disconnect> = async {
-            let mut response = context
-                .within(context.options.connect_timeout, async {
-                    response.await.map_err(transport)
-                })
-                .await?;
-            if !response.status.is_success() {
-                return Err(Disconnect::Status(response.status.as_u16()));
-            }
             let received = Cell::new(context.scheduler.now());
             let mut reader = FrameReader {
                 body: &mut response.body,
