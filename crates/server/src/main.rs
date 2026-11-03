@@ -376,10 +376,14 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
         .with_max_visitors(arguments.max_visitors)
         .with_tls(config)
         .with_pairing(certificate.fingerprint())
-        .with_pairing_prompt(|name, code| {
-            eprintln!(
+        .with_pairing_prompt(|event| match event {
+            server::PairingEvent::Began { name } => eprintln!("{name:?} began pairing."),
+            server::PairingEvent::Waiting { name, code } => eprintln!(
                 "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
-            );
+            ),
+            server::PairingEvent::Paused => eprintln!(
+                "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again."
+            ),
         });
     confirm_pairings_on_console(server.pairing());
     Ok((server, Some(fingerprint)))
@@ -397,7 +401,10 @@ fn confirm_pairings_on_console(pairing: server::Pairing) {
                 if line.is_empty() {
                     continue;
                 }
-                if pairing.pending().is_none() {
+                if line.eq_ignore_ascii_case("allow") {
+                    pairing.allow();
+                    eprintln!("Pairing is allowed again.");
+                } else if pairing.pending().is_none() {
                     eprintln!("No pairing is waiting.");
                 } else if line.eq_ignore_ascii_case("decline") {
                     pairing.decline();

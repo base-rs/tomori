@@ -158,6 +158,7 @@ impl Application {
                     pages::status(
                         &self.hub.status(),
                         self.hub.pending_pairing().as_ref(),
+                        self.hub.pairing_paused(),
                         tokens.as_deref(),
                         Self::signed_in(fields),
                     ),
@@ -185,6 +186,14 @@ impl Application {
         match path {
             pages::SIGN_IN_PATH => self.sign_in(form.as_deref()),
             pages::SIGN_OUT_PATH => redirect(pages::SIGN_IN_PATH, Some(token_cookie(None))),
+            pages::ALLOW_PAIRING_PATH => {
+                if !matches!(self.viewer(fields), Viewer::Owner) {
+                    return html(403, pages::not_an_owner());
+                }
+                self.hub.allow_pairing();
+                log::info!("Allowed pairing again from the status page.");
+                redirect(pages::STATUS_PATH, None)
+            }
             pages::CONFIRM_PAIRING_PATH | pages::DECLINE_PAIRING_PATH => {
                 self.decide_pairing(fields, form.as_deref(), path == pages::CONFIRM_PAIRING_PATH)
             }
@@ -413,6 +422,7 @@ impl Handler for Application {
             | pages::REVOKE_PATH
             | pages::CONFIRM_PAIRING_PATH
             | pages::DECLINE_PAIRING_PATH
+            | pages::ALLOW_PAIRING_PATH
                 if post =>
             {
                 let path = path.to_owned();
@@ -440,7 +450,8 @@ impl Handler for Application {
             | pages::SIGN_OUT_PATH
             | pages::REVOKE_PATH
             | pages::CONFIRM_PAIRING_PATH
-            | pages::DECLINE_PAIRING_PATH => response(
+            | pages::DECLINE_PAIRING_PATH
+            | pages::ALLOW_PAIRING_PATH => response(
                 Status::new(405).expect("valid status"),
                 "text/plain",
                 ResponseBody::fixed("Method not allowed.\n"),

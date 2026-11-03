@@ -17,6 +17,7 @@ pub const SIGN_OUT_PATH: &str = "/sign-out";
 pub const REVOKE_PATH: &str = "/tokens/revoke";
 pub const CONFIRM_PAIRING_PATH: &str = "/pairing/confirm";
 pub const DECLINE_PAIRING_PATH: &str = "/pairing/decline";
+pub const ALLOW_PAIRING_PATH: &str = "/pairing/allow";
 
 /// The most bytes of a form body read.
 pub const FORM_LIMIT: usize = 4096;
@@ -140,6 +141,7 @@ fn people(people: &[(String, ConnectionRole)]) -> String {
 pub fn status(
     status: &Status,
     pairing: Option<&PairingView>,
+    paused: bool,
     tokens: Option<&[Entry]>,
     signed_in: bool,
 ) -> String {
@@ -197,6 +199,12 @@ pub fn status(
             }
         }
         None => body.push_str("<p>No pairing is pending.</p>\n"),
+    }
+    if paused {
+        let _ = writeln!(
+            body,
+            "<p>Pairing is paused, since too many pairings began recently.</p>\n<form method=\"post\" action=\"{ALLOW_PAIRING_PATH}\"><button>Allow pairing</button></form>"
+        );
     }
     if let Some(tokens) = tokens {
         body.push_str("<h2>Tokens</h2>\n");
@@ -288,20 +296,24 @@ mod tests {
         assert!(page.contains("No tokens are issued"));
         assert!(page.contains("Sign out"));
 
-        let empty = super::status(&Status::default(), None, None, false);
+        let empty = super::status(&Status::default(), None, false, None, false);
+        assert!(!empty.contains("paused"));
+        let paused = super::status(&Status::default(), None, true, None, false);
+        assert!(paused.contains("Pairing is paused"));
+        assert!(paused.contains("action=\"/pairing/allow\""));
         assert!(empty.contains("No pairing is pending"));
         let mut view = PairingView {
             serial: 7,
             name: "<Quest>".into(),
             code: Some("042 917".into()),
         };
-        let pairing = super::status(&Status::default(), Some(&view), None, false);
+        let pairing = super::status(&Status::default(), Some(&view), false, None, false);
         assert!(pairing.contains("&lt;Quest&gt; asks to pair with code <strong>042 917</strong>"));
         assert!(pairing.contains("action=\"/pairing/confirm\""));
         assert!(pairing.contains("action=\"/pairing/decline\""));
         assert!(pairing.contains("name=\"pairing\" value=\"7\""));
         view.code = None;
-        let unrevealed = super::status(&Status::default(), Some(&view), None, false);
+        let unrevealed = super::status(&Status::default(), Some(&view), false, None, false);
         assert!(unrevealed.contains("is pairing; its code is not shown yet"));
         assert!(!unrevealed.contains("/pairing/confirm"));
         assert!(unrevealed.contains("/pairing/decline"));
@@ -326,6 +338,6 @@ mod tests {
     }
 
     fn status_page(status: &Status) -> String {
-        super::status(status, None, Some(&[]), true)
+        super::status(status, None, false, Some(&[]), true)
     }
 }

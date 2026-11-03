@@ -107,8 +107,19 @@ pub struct PairingSetup {
     pub tokens: Arc<security::TokenStore>,
 }
 
-/// Called with the device's name and the code when a pairing waits to be confirmed, so the server can show it on its console.
-pub type PairingPrompt = Box<dyn Fn(&str, &str) + Send + Sync>;
+/// Something about pairing to show on the server's console. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PairingEvent {
+    /// A device began pairing.
+    Began { name: String },
+    /// A pairing waits to be confirmed, with the code written as the device shows it.
+    Waiting { name: String, code: String },
+    /// Pairings are paused, since too many began recently.
+    Paused,
+}
+
+/// Shows [`PairingEvent`]s on the server's console.
+pub type PairingPrompt = Box<dyn Fn(&PairingEvent) + Send + Sync>;
 
 /// The most disconnected visitors remembered. Anyone can connect as a visitor with a new identity, so beyond this the longest gone are forgotten, rather than kept for the whole retention. See `design/spaces.md`.
 pub const RETAINED_VISITORS: usize = 256;
@@ -325,8 +336,8 @@ enum Deferred {
     Push(UtteranceId, AudioFrame),
     End(UtteranceId),
     Cancel(UtteranceId),
-    /// Show a pairing waiting to be confirmed on the console: the device's name and the code.
-    PairingPrompt(String, String),
+    /// Show something about pairing on the console.
+    PairingPrompt(PairingEvent),
 }
 
 /// A token for this server run, so space identifiers are not reused after a restart: 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
@@ -770,6 +781,23 @@ impl Hub {
         }
     }
 
+    /// Whether pairings are paused, since [`PAIRING_ATTEMPTS`] began within [`PAIRING_WINDOW`].
+    pub fn pairing_paused(&self) -> bool {
+        let state = self.lock();
+        let now = Instant::now();
+        state
+            .pairing_attempts
+            .iter()
+            .filter(|began| now.saturating_duration_since(**began) < PAIRING_WINDOW)
+            .count()
+            >= PAIRING_ATTEMPTS
+    }
+
+    /// Allow pairings again, forgetting those that began recently, as the operator or an owner may when pairing is paused, such as by someone using up the attempts.
+    pub fn allow_pairing(&self) {
+        self.lock().pairing_attempts.clear();
+    }
+
     /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
     pub fn decline_pairing(&self, serial: Option<u64>) -> bool {
         let mut state = self.lock();
@@ -875,10 +903,10 @@ impl Hub {
                 Deferred::Push(id, frame) => self.transcriber.push(id, &frame),
                 Deferred::End(id) => self.transcriber.end(id),
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
-                Deferred::PairingPrompt(name, code) => {
+                Deferred::PairingPrompt(event) => {
                     if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
                     {
-                        prompt(&name, &code);
+                        prompt(&event);
                     }
                 }
             }
@@ -1673,6 +1701,7 @@ impl Hub {
                     outbox.message(failed(
                         "Too many pairings began recently; try again in a few minutes.",
                     ));
+                    deferred.push(Deferred::PairingPrompt(PairingEvent::Paused));
                     return;
                 }
                 state.pairing_attempts.push_back(now);
@@ -1680,6 +1709,9 @@ impl Hub {
                 let server = security::pairing::Nonce::generate();
                 let name = state.participants[participant].name.clone();
                 log::info!("{name:?} began pairing.");
+                deferred.push(Deferred::PairingPrompt(PairingEvent::Began {
+                    name: name.clone(),
+                }));
                 state.pairing = Some(PendingPairing {
                     serial: state.next_pairing,
                     connection,
@@ -1718,7 +1750,10 @@ impl Hub {
                 outbox.message(ServerMessage::PairWaiting);
                 let shown = security::pairing::display(&code);
                 log::info!("Pairing request from {name:?}: code {shown}.");
-                deferred.push(Deferred::PairingPrompt(name, shown));
+                deferred.push(Deferred::PairingPrompt(PairingEvent::Waiting {
+                    name,
+                    code: shown,
+                }));
             }
             ClientMessage::PairCancel => {
                 state.end_pairing(Some(connection), "The pairing was cancelled.");

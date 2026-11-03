@@ -40,7 +40,9 @@ pub use access::{Access, Grant};
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use hub::CLOSED_SPACES;
-pub use hub::{PAIRING_ATTEMPTS, PAIRING_TIMEOUT, PAIRING_WINDOW, PairingView, REVEAL_TIMEOUT};
+pub use hub::{
+    PAIRING_ATTEMPTS, PAIRING_TIMEOUT, PAIRING_WINDOW, PairingEvent, PairingView, REVEAL_TIMEOUT,
+};
 #[cfg(feature = "speech")]
 pub use offline::OfflineTranscriber;
 #[cfg(feature = "speech")]

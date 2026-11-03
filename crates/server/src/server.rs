@@ -80,6 +80,16 @@ impl Pairing {
     pub fn decline(&self) -> bool {
         self.0.decline_pairing(None)
     }
+
+    /// Whether pairings are paused, since too many began recently.
+    pub fn paused(&self) -> bool {
+        self.0.pairing_paused()
+    }
+
+    /// Allow pairings again after they were paused.
+    pub fn allow(&self) {
+        self.0.allow_pairing();
+    }
 }
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
@@ -220,8 +230,11 @@ impl Server {
         self
     }
 
-    /// Call `prompt` with the device's name and the code whenever a pairing waits to be confirmed, so that the server shows it on its console.
-    pub fn with_pairing_prompt(self, prompt: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
+    /// Call `prompt` with each [`crate::PairingEvent`], such as a pairing that waits to be confirmed, so that the server shows it on its console.
+    pub fn with_pairing_prompt(
+        self,
+        prompt: impl Fn(&crate::PairingEvent) + Send + Sync + 'static,
+    ) -> Self {
         self.hub.set_pairing_prompt(Box::new(prompt));
         self
     }

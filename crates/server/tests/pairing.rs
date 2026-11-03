@@ -228,6 +228,25 @@ fn only_so_many_pairings_begin_within_the_window() {
         failed(&quest),
         "Too many pairings began recently; try again in a few minutes."
     );
+    assert!(pairing.paused());
+
+    // An owner who sees it on the status page, or the operator on the console, allows pairing again.
+    let (_, owner) = server.issue("Ada", security::Grant::Owner);
+    let owner = format!("__Host-tomori-token={owner}");
+    assert!(get(&server, "/", &owner).contains("Pairing is paused"));
+    assert_eq!(post(&server, "/pairing/allow", &owner, "").0, 303);
+    assert!(!pairing.paused());
+    pair(&mut quest);
+    pairing.decline();
+    failed(&quest);
+    for _ in 1..server::PAIRING_ATTEMPTS {
+        pair(&mut quest);
+        pairing.decline();
+        failed(&quest);
+    }
+    assert!(pairing.paused());
+    pairing.allow();
+    pair(&mut quest);
 }
 
 #[test]

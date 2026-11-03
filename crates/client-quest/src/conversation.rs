@@ -60,10 +60,13 @@ pub enum Action {
 #[derive(Clone, Debug, PartialEq)]
 enum Pairing {
     /// Committed to this value, waiting for the server's.
-    Committed(security::pairing::Nonce),
+    Committed(security::pairing::Nonce, Instant),
     /// Both sides have the code, written for reading, which waits to be confirmed on the server.
-    Waiting(String),
+    Waiting(String, Instant),
 }
+
+/// How long the device waits for a pairing to be confirmed before it gives up itself: the server's timeout and a margin. A pairing the device gives up on is cancelled, so one choice of the pairing object allows the server one try. See `design/security.md`.
+const PAIRING_PATIENCE: Duration = Duration::from_secs(135);
 
 /// Push-to-talk, from pressing X until the server's transcript or failure. See `design/speech.md`.
 #[derive(Clone, Debug, PartialEq)]
@@ -666,8 +669,8 @@ impl Conversation {
     /// The pairing object: its code while pairing, which is compared with the server's. See `design/arrival.md`.
     fn pairing_item(&self) -> arrival::Item {
         let (label, detail, pending) = match &self.pairing {
-            Some(Pairing::Waiting(code)) => (code.clone(), "Confirm on the server", true),
-            Some(Pairing::Committed(_)) => ("Pairing...".to_owned(), "Choose to cancel", true),
+            Some(Pairing::Waiting(code, _)) => (code.clone(), "Confirm on the server", true),
+            Some(Pairing::Committed(..)) => ("Pairing...".to_owned(), "Choose to cancel", true),
             None => ("Pair".to_owned(), "Become an owner", false),
         };
         arrival::Item {
@@ -700,14 +703,14 @@ impl Conversation {
         self.actions.push(Action::Send(ClientMessage::PairBegin {
             commitment: device.commitment(),
         }));
-        self.pairing = Some(Pairing::Committed(device));
+        self.pairing = Some(Pairing::Committed(device, Instant::now()));
         self.error = None;
         self.notice = Some("Pairing...".into());
     }
 
     /// The server sent its value: reveal ours, and derive the code from both and the certificate this connection presented.
     fn pair_with(&mut self, nonce: &str) {
-        let (Some(Pairing::Committed(device)), Some(certificate), Some(server)) = (
+        let (Some(Pairing::Committed(device, began)), Some(certificate), Some(server)) = (
             self.pairing.clone(),
             self.certificate,
             security::pairing::Nonce::parse(nonce),
@@ -720,7 +723,20 @@ impl Conversation {
         let code =
             security::pairing::display(&security::pairing::code(certificate, device, server));
         self.notice = Some(format!("Pairing code {code}: confirm it on the server."));
-        self.pairing = Some(Pairing::Waiting(code));
+        self.pairing = Some(Pairing::Waiting(code, began));
+    }
+
+    /// Give up on a pairing that has waited longer than [`PAIRING_PATIENCE`] at `now`, cancelling it on the server. Called every frame.
+    pub fn expire_pairing(&mut self, now: Instant) {
+        let began = match &self.pairing {
+            Some(Pairing::Committed(_, began) | Pairing::Waiting(_, began)) => *began,
+            None => return,
+        };
+        if now.saturating_duration_since(began) >= PAIRING_PATIENCE {
+            self.pairing = None;
+            self.actions.push(Action::Send(ClientMessage::PairCancel));
+            self.notice = Some("The pairing was not confirmed in time.".into());
+        }
     }
 
     /// Send `message`, unless it acts in the space and this connection only watches. Returns whether it was sent.
@@ -2397,6 +2413,25 @@ mod tests {
             }]
         );
         assert!(conversation.status().unwrap().contains("now an owner"));
+    }
+
+    #[test]
+    fn the_device_gives_up_on_a_pairing_left_unconfirmed() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.expire_pairing(Instant::now());
+        assert!(conversation.take_actions().is_empty());
+        conversation.expire_pairing(Instant::now() + PAIRING_PATIENCE);
+        assert_eq!(sent(&mut conversation), [ClientMessage::PairCancel]);
+        assert_eq!(
+            conversation.status().as_deref(),
+            Some("The pairing was not confirmed in time.")
+        );
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+        conversation.expire_pairing(Instant::now() + PAIRING_PATIENCE);
+        assert!(conversation.take_actions().is_empty());
     }
 
     #[test]
