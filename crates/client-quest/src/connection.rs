@@ -637,10 +637,13 @@ impl Connection {
                         .clone()
                         .unwrap_or_else(|| choice.address.clone());
                     let mut kept = self.store.credential(&key);
-                    // A server reached another way, such as over USB and then over Wi-Fi, is recognized by the certificate it advertises. That certificate is then pinned, so only the server holding its key receives what is kept for it.
-                    if kept == Default::default()
-                        && let Some((server, credential)) =
-                            choice.fingerprint.as_deref().and_then(|fingerprint| {
+                    // A server reached another way, such as over USB and then over Wi-Fi, is recognized by its certificate: the one kept for this name, or else the one it advertises. That certificate is then pinned, so only the server holding its key receives the token kept for it.
+                    if kept.token.is_none()
+                        && let Some((server, credential)) = kept
+                            .certificate
+                            .as_deref()
+                            .or(choice.fingerprint.as_deref())
+                            .and_then(|fingerprint| {
                                 self.store.credential_for_certificate(fingerprint)
                             })
                     {

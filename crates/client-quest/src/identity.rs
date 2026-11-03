@@ -145,12 +145,15 @@ impl Store {
         self.with_credentials(|credentials| credentials.get(server).cloned().unwrap_or_default())
     }
 
-    /// The server kept with the certificate `fingerprint`, and what is kept for it, so that a server reached another way, such as over USB and then over Wi-Fi, is recognized by its certificate.
+    /// The server kept with the certificate `fingerprint` and a token, and what is kept for it, so that a server reached another way, such as over USB and then over Wi-Fi, is recognized by its certificate.
     pub fn credential_for_certificate(&self, fingerprint: &str) -> Option<(String, Credential)> {
         self.with_credentials(|credentials| {
             credentials
                 .iter()
-                .find(|(_, credential)| credential.certificate.as_deref() == Some(fingerprint))
+                .find(|(_, credential)| {
+                    credential.certificate.as_deref() == Some(fingerprint)
+                        && credential.token.is_some()
+                })
                 .map(|(server, credential)| (server.clone(), credential.clone()))
         })
     }
@@ -399,6 +402,9 @@ mod tests {
         assert_eq!(server, "127.0.0.1:8765");
         assert_eq!(credential.token.as_deref(), Some("tomori_usb"));
         assert_eq!(store.credential_for_certificate("cd"), None);
+        // Only a server with a token is worth finding.
+        store.remember_certificate("Studio", "ef");
+        assert_eq!(store.credential_for_certificate("ef"), None);
 
         // Without storage, they are kept while the app runs.
         let memory = Store::new(None);
