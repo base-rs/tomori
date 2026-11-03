@@ -1,0 +1,89 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Formatting, Clippy and the workspace tests on current stable Rust, and the tests on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The 100% region-coverage gate runs in coverage.yml and is not yet required; see the Tests section of readme.md.
+  test:
+    name: test (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, minimum]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the minimum supported Rust version
+        id: version
+        if: matrix.rust == 'minimum'
+        run: echo "rust=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ steps.version.outputs.rust || 'stable' }}
+          components: clippy, rustfmt
+      - name: Install the ALSA development files for the desktop client
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      - uses: actions/cache@v6
+        with:
+          path: .tools/sherpa-onnx
+          key: sherpa-onnx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
+      - name: Fetch the sherpa-onnx libraries
+        run: bash scripts/fetch-sherpa-onnx.sh
+      - name: Check formatting
+        if: matrix.rust == 'stable'
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        if: matrix.rust == 'stable'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  # The client core and the headset application for the Quest, as scripts/android.sh builds them.
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The NDK, platform and build tools named in readme.md.
+      ANDROID_NDK_VERSION: 29.0.14206865
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: aarch64-linux-android
+      - name: Install the Android NDK, platform and build tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ANDROID_NDK_VERSION" "platforms;android-32" "build-tools;35.0.0" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+      - name: Build the client core
+        run: cargo apk -- build --package client --target aarch64-linux-android --locked
+      - name: Build the headset application
+        # Fetches the Khronos OpenXR loader, checked against its published SHA-256, and packages it.
+        run: bash scripts/android.sh build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tomori-apk
+          path: target/debug/apk/tomori.apk
+          retention-days: 7
+
+  test-result:
+    if: always()
+    needs: [test, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful tests
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS" | jq -e 'all(.[]; .result == "success")'

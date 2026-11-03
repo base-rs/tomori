@@ -1,7 +1,7 @@
 /target/
 /android/libs/
 /.android-env
-/.tools/
+/.tools
 /bridge/node_modules/
 /.space/
 

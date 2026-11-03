@@ -2,7 +2,7 @@
 name = "backend-opencode"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version.workspace = true
 description = "The OpenCode backend for the Tomori server: sessions on a running `opencode serve` process, driven over its HTTP and SSE APIs"
 repository = "https://github.com/ioquatix/tomori"
 license = "MIT"
