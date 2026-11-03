@@ -7,7 +7,7 @@
 //!
 //! [`OfflineRecognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`OfflineUtterance`]: audio is buffered and resampled to 16 kHz, and when the participant stops the clip is decoded and reported through the utterance's sink as exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. There are no partial events.
 //!
-//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. A segment of a long clip that the voice activity detector hears no speech in is not decoded, as Whisper would write a word for it. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
+//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. In a long clip, what Whisper writes for a segment without speech, a bracketed note or a word or two the voice activity detector heard no speech for, is left out. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
 //!
 //! A panic in the recognizer disables recognition until the process restarts: it is logged once, and every open and later utterance fails with [`Error::Stopped`]. A panic in the voice activity detector disables only the detector, and long utterances are then split by loudness alone.
 
@@ -148,7 +148,7 @@ struct OfflineEntry {
     decoded: usize,
     /// The transcript of each segment decoded so far, in order, without the empty ones.
     texts: Vec<String>,
-    /// How many segments have been decoded, how many of them ended at their limit because there was no pause, and how many were not decoded as the detector heard no speech in them.
+    /// How many segments have been decoded, how many of them ended at their limit because there was no pause, and how many were left out of the transcript as having no speech in them.
     segments: usize,
     hard: usize,
     skipped: usize,
@@ -266,30 +266,8 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         let cut = self.segmenter.cut(&entry.samples, entry.decoded);
         let end = cut.end();
         let segment = &entry.samples[entry.decoded..end];
-        // Whisper writes a word such as "you" for a clip with no speech in it. A long utterance can hold a segment without speech, where the participant paused for longer than the search for a pause, so one the detector hears no speech in is not decoded. An utterance that fits in one segment is decoded as it is.
-        let long = entry.samples.len() > super::MAX_SEGMENT;
-        if long && self.segmenter.silent(segment) {
-            log::info!(
-                "Utterance {}: segment {} has no speech in it, so it was not decoded.",
-                entry.key,
-                entry.segments + 1
-            );
-            entry.segments += 1;
-            entry.skipped += 1;
-            entry.decoded = end;
-            return self.complete(entry);
-        }
-        let text = match panic::catch_unwind(AssertUnwindSafe(|| self.decode(segment))) {
-            Ok(text) => text,
-            Err(panic) => {
-                self.disable(&panic_message(&*panic));
-                (entry.sink)(TranscriptEvent::Failed(Error::Stopped(
-                    STOPPED_MESSAGE.into(),
-                )));
-                return false;
-            }
-        };
-        let text = match text {
+        // A panic here is caught by `step`, which disables recognition and fails the utterance.
+        let text = match self.decode(segment) {
             Ok(text) => text,
             Err(error) => {
                 log::warn!(
@@ -306,8 +284,20 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
             entry.hard += 1;
         }
         let text = text.trim();
-        // In a long utterance, a segment heard only as a note of noise, such as "(static)", has no words to send.
-        if !text.is_empty() && !(long && annotation(text)) {
+        // Whisper writes a note such as "[BLANK_AUDIO]", or a word or two such as "you", for a clip without speech. A long utterance can hold such a segment, where the participant paused for longer than the search for a pause, so in a long utterance a note is left out, and so are a word or two the detector heard no speech for. Anything longer is kept, in case the detector missed quiet speech. An utterance that fits in one segment is reported as it is.
+        let long = entry.samples.len() > super::MAX_SEGMENT;
+        if long
+            && !text.is_empty()
+            && (annotation(text)
+                || (text.split_whitespace().count() <= 2 && self.segmenter.silent(segment)))
+        {
+            log::info!(
+                "Utterance {}: segment {} was heard as {text:?} with no speech in it, so it was left out.",
+                entry.key,
+                entry.segments
+            );
+            entry.skipped += 1;
+        } else if !text.is_empty() {
             entry.texts.push(text.to_owned());
         }
         entry.decoded = end;
@@ -1014,6 +1004,36 @@ mod tests {
         assert_eq!(order, vec![1000, 2000, 1000, 2000, 1000, 2000]);
     }
 
+    #[test]
+    fn short_utterances_do_not_hold_up_a_long_one() {
+        let (started, decoding) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let (recorder, _) = Recorder::new(move |_, samples| {
+            let _ = started.send(samples[0]);
+            let _ = gate.lock().unwrap().recv();
+            Ok(String::new())
+        });
+        let mut offline = OfflineRecognition::spawn(recorder);
+        let mut long = offline.begin(RATE, |_| {});
+        long.push(&vec![1000; RATE as usize * 40]);
+        long.end();
+        let mut order = vec![decoding.recv_timeout(Duration::from_secs(10)).unwrap()];
+        // Each short utterance ends while the previous segment is being decoded.
+        for value in [2000, 3000] {
+            let mut short = offline.begin(RATE, |_| {});
+            short.push(&vec![value; RATE as usize]);
+            short.end();
+            release.send(()).unwrap();
+            order.push(decoding.recv_timeout(Duration::from_secs(10)).unwrap());
+        }
+        release.send(()).unwrap();
+        order.push(decoding.recv_timeout(Duration::from_secs(10)).unwrap());
+        release.send(()).unwrap();
+        // The first short one ended before the long one's first segment was decoded, so it goes first; the second ended after, so it waits.
+        assert_eq!(order, vec![1000, 2000, 1000, 3000]);
+    }
+
     /// A fake detector that hears speech in any audio that is not silent.
     struct Loud;
 
@@ -1028,27 +1048,65 @@ mod tests {
     }
 
     #[test]
-    fn a_segment_without_speech_in_a_long_utterance_is_not_decoded() {
-        let (recorder, calls) = Recorder::new(|_, _| Ok("you".to_owned()));
-        let mut offline = OfflineRecognition::with_voice_activity(recorder, Loud);
+    fn a_word_or_two_for_a_segment_without_speech_in_a_long_utterance_is_left_out() {
+        for (heard, expected) in [
+            ("you", "Speech. Speech."),
+            ("Thank you.", "Speech. Speech."),
+            (
+                "Something said very quietly.",
+                "Speech. Something said very quietly. Speech.",
+            ),
+        ] {
+            let (recorder, calls) = Recorder::new(move |_, samples| {
+                Ok(if samples.iter().all(|&sample| sample == 0) {
+                    heard.to_owned()
+                } else {
+                    "Speech.".to_owned()
+                })
+            });
+            let mut offline = OfflineRecognition::with_voice_activity(recorder, Loud);
+            let (sender, receiver) = mpsc::channel();
+            let mut handle = offline.begin(RATE, move |event| {
+                let _ = sender.send(event);
+            });
+            // Speech, a pause longer than a segment, and speech again.
+            handle.push(&steady(20));
+            handle.push(&vec![0; RATE as usize * 30]);
+            handle.push(&steady(20));
+            handle.end();
+            assert_eq!(
+                collect(&receiver),
+                TranscriptEvent::Final(expected.to_owned())
+            );
+            // Every segment is decoded, and together they are the whole utterance.
+            let calls = calls.lock().unwrap().clone();
+            assert_eq!(calls.len(), 3, "{calls:?}");
+            assert_eq!(calls.iter().sum::<usize>(), RATE as usize * 70);
+        }
+    }
+
+    #[test]
+    fn without_a_detector_a_word_for_a_pause_is_kept() {
+        let (recorder, _) = Recorder::new(|_, samples| {
+            Ok(if samples.iter().all(|&sample| sample == 0) {
+                "you".to_owned()
+            } else {
+                "Speech.".to_owned()
+            })
+        });
+        let mut offline = OfflineRecognition::spawn(recorder);
         let (sender, receiver) = mpsc::channel();
         let mut handle = offline.begin(RATE, move |event| {
             let _ = sender.send(event);
         });
-        // Speech, a pause longer than a segment, and speech again.
         handle.push(&steady(20));
         handle.push(&vec![0; RATE as usize * 30]);
         handle.push(&steady(20));
         handle.end();
         assert_eq!(
             collect(&receiver),
-            TranscriptEvent::Final("you you".to_owned())
+            TranscriptEvent::Final("Speech. you Speech.".to_owned())
         );
-        // The segment of the pause was not decoded, and the decoded ones and it are the whole utterance.
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 2, "{calls:?}");
-        assert_eq!(calls[0], MAX_SEGMENT);
-        assert!(calls[1] >= RATE as usize * 20, "{calls:?}");
     }
 
     #[test]
