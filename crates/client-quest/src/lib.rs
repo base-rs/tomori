@@ -27,6 +27,7 @@ mod hands;
 mod headless_spectator;
 mod identity;
 mod interaction;
+mod log_cadence;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
 mod playback;

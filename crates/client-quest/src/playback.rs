@@ -158,9 +158,11 @@ mod desktop {
                 },
                 move |error: cpal::Error| match error.kind() {
                     // The stream keeps playing; a glitch in real-time audio is not worth reopening for.
-                    ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied | ErrorKind::Xrun => {
+                    ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => {
                         log::info!("Speaker: {error}");
                     }
+                    // Underruns can come in bursts whenever the system is busy.
+                    ErrorKind::Xrun => log::debug!("Speaker: {error}"),
                     _ => failed(format!("The speaker failed: {error}")),
                 },
                 None,

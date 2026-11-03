@@ -104,6 +104,10 @@ const READ_TIMEOUT_NS: i64 = 100_000_000;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const MAX_DRAIN_READS: usize = 64;
 
+/// The shortest interval between warnings that the live microphone lost audio.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const OVERRUN_LOG: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Capture until `stop` is set or, for live audio, `active` reports that the
 /// connection ended.
 ///
@@ -126,6 +130,7 @@ fn run_capture<S: InputStream>(
     active: Option<&Active>,
     buffer: &mut [f32],
 ) -> Result<(), String> {
+    use crate::log_cadence::Cadence;
     use std::sync::atomic::Ordering;
     let current = || active.is_none_or(|active| active());
     if !current() {
@@ -142,6 +147,8 @@ fn run_capture<S: InputStream>(
     }
     stream.start()?;
     let overruns = std::cell::Cell::new(stream.overruns());
+    // Overruns that keep recurring would otherwise warn on every read; see `design/client-logging.md`.
+    let unreported = std::cell::RefCell::new((Cadence::new(OVERRUN_LOG), 0_u64));
     // Push-to-talk (no `active`) must reach recognition intact.
     let intact = |stream: &S| -> Result<(), String> {
         let count = stream.overruns();
@@ -150,8 +157,12 @@ fn run_capture<S: InputStream>(
             if active.is_none() {
                 return Err("Microphone lost audio; not sent.".into());
             }
-            log::warn!("The live microphone lost audio ({lost} overruns).");
             overruns.set(count);
+            let (cadence, pending) = &mut *unreported.borrow_mut();
+            *pending += u64::from(lost.unsigned_abs());
+            if cadence.record(std::time::Instant::now()).is_some() {
+                warn_overruns(std::mem::take(pending));
+            }
         }
         Ok(())
     };
@@ -177,7 +188,16 @@ fn run_capture<S: InputStream>(
         }
     };
     stream.stop();
+    let (_, pending) = unreported.into_inner();
+    if pending > 0 {
+        warn_overruns(pending);
+    }
     result
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn warn_overruns(lost: u64) {
+    log::warn!("The live microphone lost audio ({lost} overruns).");
 }
 
 /// Deliver what the device captured before the boundary, without waiting.
