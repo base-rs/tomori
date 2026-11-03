@@ -193,7 +193,8 @@ fn a_refusal_is_shown_and_the_space_works_without_them() {
     });
 
     // Removing the space's layer alone cannot show that the agent took the rest, so while the warning stands an
-    // owner's change gives every layer, which is refused again.
+    // owner's change gives every layer, starting with Tomori's, which is refused again.
+    let tried = session.log().instructions.len();
     ada.send(&ClientMessage::SetInstructions {
         text: String::new(),
     });
@@ -205,6 +206,10 @@ fn a_refusal_is_shown_and_the_space_works_without_them() {
     });
     // The refusal of every layer follows.
     assert!(ada.space(|_| true).instructions.unwrap().error.is_some());
+    assert_eq!(
+        session.log().instructions[tried..],
+        [("tomori".to_owned(), Some(tomori().to_owned()))]
+    );
 
     // Once the agent takes them, after it is read again, the warning clears.
     backend.fail_instructions(false);

@@ -27,7 +27,7 @@ pub struct FakeLog {
     pub interrupts: usize,
     /// The modes the server asked for, in order.
     pub modes: Vec<String>,
-    /// The instruction entries the server set, or removed with `None`, in order.
+    /// The instruction entries the server set, or removed with `None`, in order, including those refused.
     pub instructions: Vec<(String, Option<String>)>,
     /// How many of [`Self::instructions`] the server had given when each prompt was delivered.
     pub instructed_at_prompts: Vec<usize>,
@@ -570,18 +570,18 @@ impl Session for FakeSession {
         if !backend::valid_instruction_key(key) {
             return Err(Error::new(ErrorKind::Invalid, "not an instruction key"));
         }
-        if self.inner.instruction_failure.load(Ordering::SeqCst) {
-            return Err(Error::new(
-                ErrorKind::Unavailable,
-                "the fake agent refused the instructions",
-            ));
-        }
         self.inner
             .log
             .lock()
             .unwrap()
             .instructions
             .push((key.to_owned(), value.map(str::to_owned)));
+        if self.inner.instruction_failure.load(Ordering::SeqCst) {
+            return Err(Error::new(
+                ErrorKind::Unavailable,
+                "the fake agent refused the instructions",
+            ));
+        }
         let mut entries = self.inner.instructions.lock().unwrap();
         match value {
             Some(value) => entries.insert(key.to_owned(), value.to_owned()),
