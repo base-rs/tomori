@@ -60,8 +60,9 @@ pub enum Action {
     Send(ClientMessage),
     /// Open the microphone and send what it hears to the agent as this utterance, or as the answer to the presented question's field, when given.
     BeginUtterance(String, u64, Option<protocol::AnswerTarget>),
-    /// Close the microphone and finish the utterance, for the server to transcribe.
-    EndUtterance,
+    /// Close the microphone and finish the utterance, for the server to transcribe, with what the participant pointed
+    /// at while speaking.
+    EndUtterance(Option<protocol::Pointed>),
     /// Close the microphone and abandon the utterance.
     CancelUtterance,
     /// Close the microphone and forget the utterance, which the server has already ended.
@@ -106,6 +107,9 @@ enum Talk {
         heard: String,
         /// Whether the words answer the presented question rather than being queued.
         answering: bool,
+        /// The worker pointed at most recently since X was pressed, including as it was pressed, which is sent with
+        /// the words. See `design/interaction.md`.
+        pointed: Option<String>,
     },
     /// X was released; waiting for the server's final transcript.
     Sending { utterance: String, heard: String },
@@ -228,6 +232,8 @@ pub struct Conversation {
     /// The last body paginated, since the panel is drawn every frame.
     paged: Option<Paged>,
     talk: Option<Talk>,
+    /// The worker the participant points at now, by identifier, as the frame loop or console last reported.
+    pointing_at: Option<String>,
     live: bool,
     /// Whether the participant is wearing the device and attending. See `design/spaces.md`.
     engagement: Engagement,
@@ -316,6 +322,7 @@ impl Conversation {
             actions: Vec::new(),
             paged: None,
             talk: None,
+            pointing_at: None,
             live: false,
             engagement: Engagement::Engaged,
             reported: None,
@@ -1765,10 +1772,15 @@ impl Conversation {
     pub fn talk(&mut self, pressed: bool) {
         if !pressed {
             if let Some(Talk::Recording {
-                utterance, heard, ..
+                utterance,
+                heard,
+                pointed,
+                ..
             }) = self.talk.take()
             {
-                self.actions.push(Action::EndUtterance);
+                self.actions.push(Action::EndUtterance(
+                    pointed.map(|worker| protocol::Pointed::Worker { worker }),
+                ));
                 self.talk = Some(Talk::Sending { utterance, heard });
             }
             return;
@@ -1802,12 +1814,43 @@ impl Conversation {
             self.capture_generation,
             answer,
         ));
+        let pointed = self.pointing_at.clone().filter(|id| self.has_worker(id));
         self.talk = Some(Talk::Recording {
             utterance,
             started: Instant::now(),
             heard: String::new(),
             answering,
+            pointed,
         });
+    }
+
+    /// The worker the participant points at now, by identifier, or `None`: from the headset's ray each frame, or a
+    /// console command. While X is held, the most recent worker pointed at is remembered and sent with the words, so
+    /// pointing away, or at nothing, before letting go keeps it. See `design/interaction.md`.
+    pub fn point_at(&mut self, worker: Option<&str>) {
+        if self.pointing_at.as_deref() != worker {
+            self.pointing_at = worker.map(str::to_owned);
+        }
+        let Some(worker) = worker.filter(|id| self.has_worker(id)) else {
+            return;
+        };
+        if let Some(Talk::Recording { pointed, .. }) = &mut self.talk
+            && pointed.as_deref() != Some(worker)
+        {
+            *pointed = Some(worker.to_owned());
+        }
+    }
+
+    /// The worker the participant points at now, as the console shows it.
+    #[cfg(not(target_os = "android"))]
+    pub fn pointing_at(&self) -> Option<&str> {
+        self.pointing_at.as_deref()
+    }
+
+    /// Whether the joined space has the worker identified by `id`.
+    fn has_worker(&self, id: &str) -> bool {
+        self.joined_space()
+            .is_some_and(|(space, _)| space.workers.iter().any(|worker| worker.id == id))
     }
 
     /// The presented question, when this participant can answer it by voice: Tomori supports it, and the server says it routes spoken answers. See `design/spaces.md`.
@@ -1863,7 +1906,7 @@ impl Conversation {
                 let before_end = self
                     .actions
                     .iter()
-                    .position(|action| matches!(action, Action::EndUtterance))
+                    .position(|action| matches!(action, Action::EndUtterance(_)))
                     .unwrap_or(self.actions.len());
                 self.actions.insert(before_end, Action::StopLive);
             }
@@ -1900,7 +1943,7 @@ impl Conversation {
             && self
                 .actions
                 .iter()
-                .any(|action| matches!(action, Action::EndUtterance))
+                .any(|action| matches!(action, Action::EndUtterance(_)))
         {
             cancelled = true;
             let pending = self
@@ -1908,7 +1951,7 @@ impl Conversation {
                 .iter()
                 .any(|action| matches!(action, Action::BeginUtterance(id, ..) if id == utterance));
             self.actions.retain(|action| {
-                !matches!(action, Action::EndUtterance)
+                !matches!(action, Action::EndUtterance(_))
                     && !matches!(action, Action::BeginUtterance(id, ..) if id == utterance)
             });
             if !pending {
@@ -2616,6 +2659,19 @@ impl Conversation {
     /// The status line in a space: what the microphone is doing, the connection, a notice, a replay, or the counts. Problems have their own line.
     fn space_status(&self, space: &SpaceState) -> String {
         let talking = match &self.talk {
+            // Until words are heard, the line says which worker they will be about.
+            Some(Talk::Recording {
+                heard,
+                answering: false,
+                pointed: Some(pointed),
+                ..
+            }) if heard.is_empty() && space.workers.iter().any(|worker| &worker.id == pointed) => {
+                let worker = space.workers.iter().find(|worker| &worker.id == pointed);
+                Some(short(&format!(
+                    "MIC AGENT about {}",
+                    worker.map_or("", |worker| worker.title.as_str())
+                )))
+            }
             Some(Talk::Recording {
                 heard, answering, ..
             }) if heard.is_empty() => Some(
@@ -5481,7 +5537,7 @@ mod tests {
         conversation.apply(transcript(&utterance, "hello the", false));
         assert!(conversation.text().contains("MIC AGENT: hello the"));
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
         assert_eq!(conversation.recording(), None);
         assert!(conversation.text().contains("Sending: hello the..."));
         conversation.apply(transcript(&utterance, "hello there", false));
@@ -5494,6 +5550,56 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_pointed_at_while_talking_is_sent_with_the_words() {
+        let worker = |id: &str, title: &str| protocol::Worker {
+            id: id.into(),
+            parent: None,
+            title: title.into(),
+            state: protocol::WorkerState::Running,
+        };
+        let mut conversation = joined(|space| {
+            space.workers = vec![
+                worker("ses_a", "Review commit 2657a52"),
+                worker("ses_b", "Run the tests"),
+            ]
+        });
+        let sent =
+            |id: &str| Action::EndUtterance(Some(protocol::Pointed::Worker { worker: id.into() }));
+
+        // Pointed at as X is pressed, then away before letting go: the worker is kept.
+        conversation.point_at(Some("ses_a"));
+        press(&mut conversation);
+        assert!(
+            conversation
+                .text()
+                .contains("MIC AGENT about Review commit 2657a52"),
+            "{}",
+            conversation.text()
+        );
+        assert_fits(&mut conversation);
+        conversation.point_at(None);
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [sent("ses_a")]);
+
+        // Pointed at only while talking: the most recent worker wins.
+        press(&mut conversation);
+        assert!(conversation.text().contains("MIC AGENT: listening..."));
+        conversation.point_at(Some("ses_a"));
+        conversation.point_at(Some("ses_b"));
+        conversation.point_at(None);
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [sent("ses_b")]);
+
+        // Pointing that ended before X was pressed, or at a worker the space does not have, sends nothing.
+        conversation.point_at(Some("ses_a"));
+        conversation.point_at(None);
+        press(&mut conversation);
+        conversation.point_at(Some("ses_gone"));
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+    }
+
+    #[test]
     fn live_toggle_stays_visible_and_x_returns_to_live() {
         let mut conversation = joined(|_| {});
         conversation.toggle_live();
@@ -5502,7 +5608,7 @@ mod tests {
         let utterance = press(&mut conversation);
         assert!(conversation.text().contains("MIC AGENT"));
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
         assert!(conversation.text().contains("MIC LIVE"));
         conversation.apply(transcript(&utterance, "hello", true));
         assert!(conversation.text().contains("MIC LIVE"));
@@ -5730,7 +5836,7 @@ mod tests {
         conversation.stop_live();
         assert_eq!(
             conversation.take_actions(),
-            [Action::StopLive, Action::EndUtterance]
+            [Action::StopLive, Action::EndUtterance(None)]
         );
     }
 
@@ -5798,7 +5904,7 @@ mod tests {
         press(&mut conversation);
         conversation.talk(false);
         // The end was taken to be performed, and failed while stopping.
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
         conversation.utterance_not_sent("Microphone lost audio; not sent.");
         assert!(conversation.talk.is_none());
         assert_eq!(conversation.take_actions(), [Action::StopLive]);
@@ -5823,7 +5929,7 @@ mod tests {
         conversation.talk(false);
         assert!(matches!(
             conversation.next_action(),
-            Some(Action::EndUtterance)
+            Some(Action::EndUtterance(None))
         ));
         conversation.utterance_not_sent("Microphone lost audio; not sent.");
         assert!(conversation.talk.is_none());

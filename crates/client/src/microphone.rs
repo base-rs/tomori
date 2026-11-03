@@ -135,13 +135,18 @@ impl Microphone {
 
     /// Finish push-to-talk: send the audio captured so far, then `UtteranceEnd`. The server transcribes it and queues the text for the agent. Does nothing without an open utterance.
     pub fn end(&mut self) -> Result<(), SendError> {
+        self.end_pointing(None)
+    }
+
+    /// Finish push-to-talk as [`Self::end`] does, telling the server what the participant pointed at while they spoke, when given, so that it reaches the agent with their words.
+    pub fn end_pointing(&mut self, pointed: Option<protocol::Pointed>) -> Result<(), SendError> {
         if self.utterance.is_none() {
             return Ok(());
         }
         self.flush()?;
         let utterance = self.utterance.take().expect("checked above");
         self.sender
-            .send(ClientMessage::UtteranceEnd { utterance })?;
+            .send(ClientMessage::UtteranceEnd { utterance, pointed })?;
         self.sender.send(ClientMessage::Gate { gate: self.gate })
     }
 
@@ -324,6 +329,21 @@ mod tests {
     }
 
     #[test]
+    fn an_utterance_ends_with_what_was_pointed_at() {
+        let (mut microphone, sender) = microphone();
+        microphone.begin("u1").unwrap();
+        let pointed = protocol::Pointed::Worker {
+            worker: "ses_1".into(),
+        };
+        microphone.end_pointing(Some(pointed.clone())).unwrap();
+        let items = sent(sender.outbox());
+        assert!(controls(&items).contains(&ClientMessage::UtteranceEnd {
+            utterance: "u1".into(),
+            pointed: Some(pointed),
+        }));
+    }
+
+    #[test]
     fn push_to_talk_sends_an_utterance_of_agent_frames_with_its_tail() {
         let (mut microphone, sender) = microphone();
         microphone.push(&[1; 100]).unwrap();
@@ -347,7 +367,8 @@ mod tests {
                     answer: None,
                 },
                 ClientMessage::UtteranceEnd {
-                    utterance: "u1".into()
+                    utterance: "u1".into(),
+                    pointed: None,
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]

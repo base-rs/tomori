@@ -558,6 +558,10 @@ pub fn run(
             },
             attracting,
         );
+        // In a space, the ray points at workers too, which only highlights them: the trigger still attracts the swarm, and holding X sends the worker pointed at with the words. See `design/interaction.md`.
+        let in_space =
+            focused && !in_arrival && !menu_shown && conversation.joined_space().is_some();
+        conversation.point_at(delegation_scene.point(ray.filter(|_| in_space)));
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {
             renderer.set_presentation_page(presentation_navigation.card);

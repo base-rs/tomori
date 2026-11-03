@@ -583,6 +583,58 @@ fn worker_freshness_is_shared_without_clearing_an_unrelated_error() {
 }
 
 #[test]
+fn pointing_at_a_worker_while_speaking_tells_the_agent_which() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (mut ada, bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::WorkersChanged {
+        workers: vec![Worker {
+            id: "ses_child".into(),
+            parent: Some(session.id()),
+            title: "Review commit 2657a52".into(),
+            state: WorkerState::Running,
+        }],
+    });
+    ada.space(|state| state.workers.len() == 1);
+    let worker = |id: &str| {
+        Some(protocol::Pointed::Worker {
+            worker: id.to_owned(),
+        })
+    };
+    ada.say_pointing("u1", "how is this one doing", worker("ses_child"));
+    // Everyone's queue shows only the words.
+    let state = bob.space(|state| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.state == QueueState::Delivered)
+    });
+    assert_eq!(state.queue[0].text, "how is this one doing");
+    session.reply("done");
+    // A worker the space does not have, as a client might claim, is not described to the agent.
+    ada.say_pointing("u2", "and this one", worker("ses_forged"));
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.text == "and this one" && entry.state == QueueState::Delivered)
+    });
+    let prompts: Vec<String> = session
+        .log()
+        .prompts
+        .into_iter()
+        .map(|prompt| prompt.text)
+        .collect();
+    assert_eq!(
+        prompts,
+        [
+            "Ada: how is this one doing\n\n[Pointing at worker \"Review commit 2657a52\" (fake session ses_child, running)]",
+            "Ada: and this one",
+        ]
+    );
+}
+
+#[test]
 fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
     let server = TestServer::with_backend(FakeBackend::manual());
     let (mut ada, mut bob, _) = pair(&server);
@@ -1315,6 +1367,7 @@ fn say_answer(
     client.send_audio(protocol::Gate::Agent, server::test_support::speech(text));
     client.send(&ClientMessage::UtteranceEnd {
         utterance: utterance.to_owned(),
+        pointed: None,
     });
     client.wait_for(|message| match message {
         ServerMessage::Transcript {
@@ -1563,6 +1616,7 @@ fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
     ada.send_audio(Gate::Agent, speech("llo"));
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".to_owned(),
+        pointed: None,
     });
     let text = ada.wait_for(|message| match message {
         ServerMessage::Transcript {
@@ -1591,6 +1645,7 @@ fn a_lost_frame_fails_the_utterance() {
     ada.send_audio(Gate::Agent, speech("cd"));
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".to_owned(),
+        pointed: None,
     });
     let error = ada.wait_for(|message| match message {
         ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {

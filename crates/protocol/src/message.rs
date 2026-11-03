@@ -34,6 +34,18 @@ pub struct AnswerTarget {
     pub field: String,
 }
 
+/// Something a participant pointed at, by identity only: the server describes it from its own state, never from the
+/// client. A kind a server does not know is read as [`Pointed::Unknown`] and ignored, so new kinds need no new
+/// protocol version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Pointed {
+    /// A delegated worker in the space, by its [`crate::Worker::id`].
+    Worker { worker: String },
+    #[serde(other)]
+    Unknown,
+}
+
 /// Control messages sent by a client.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,6 +98,11 @@ pub enum ClientMessage {
     /// Finalize the utterance; the server finishes recognition and queues the transcript.
     UtteranceEnd {
         utterance: String,
+        /// What the participant pointed at while they spoke, which the server resolves and tells the agent with
+        /// their words. Absent from older clients, and ignored by older servers. A prototype of shared attention
+        /// (issue #81); see `design/interaction.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pointed: Option<Pointed>,
     },
     UtteranceCancel {
         utterance: String,
@@ -426,6 +443,51 @@ mod tests {
             replay: true,
         };
         assert_eq!(serde_json::to_value(&replayed).unwrap()["replay"], true);
+    }
+
+    #[test]
+    fn pointing_is_optional_and_tolerates_new_kinds() {
+        // An older client sends no pointing, and nothing is added for none.
+        let bare: ClientMessage =
+            serde_json::from_value(serde_json::json!({"type": "utterance_end", "utterance": "u"}))
+                .unwrap();
+        assert_eq!(
+            bare,
+            ClientMessage::UtteranceEnd {
+                utterance: "u".into(),
+                pointed: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"type": "utterance_end", "utterance": "u"})
+        );
+        let pointed = ClientMessage::UtteranceEnd {
+            utterance: "u".into(),
+            pointed: Some(Pointed::Worker {
+                worker: "ses_1".into(),
+            }),
+        };
+        let json = serde_json::json!({
+            "type": "utterance_end", "utterance": "u", "pointed": {"kind": "worker", "worker": "ses_1"}
+        });
+        assert_eq!(serde_json::to_value(&pointed).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            pointed
+        );
+        // A kind from a newer client is read as unknown rather than refusing the utterance.
+        let newer: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "utterance_end", "utterance": "u", "pointed": {"kind": "window", "window": 42}
+        }))
+        .unwrap();
+        assert_eq!(
+            newer,
+            ClientMessage::UtteranceEnd {
+                utterance: "u".into(),
+                pointed: Some(Pointed::Unknown)
+            }
+        );
     }
 
     #[test]

@@ -679,6 +679,10 @@ impl State {
         self.swarm.step(dt, attractor);
         self.renderer
             .update(queue, &self.swarm, attractor, attracting);
+        // The mouse points at workers in a space as the headset's ray does; see `xr::run`.
+        let in_space =
+            focused && !in_arrival && !menu_shown && conversation.joined_space().is_some();
+        conversation.point_at(self.delegation_scene.point(ray.filter(|_| in_space)));
         let (root, current_workspace) = self.workers.update(conversation.joined_space());
         self.renderer
             .set_presentation_page(self.presentation_navigation.card);
