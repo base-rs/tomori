@@ -11,6 +11,8 @@ use std::ffi::{c_char, c_void};
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// The runtime's physical device, for the sample counts it can draw with.
+    pub adapter: wgpu::Adapter,
     pub binding: xr::vulkan::SessionCreateInfo,
     _instance: wgpu::Instance,
 }
@@ -152,6 +154,7 @@ impl Gpu {
         Ok(Self {
             device,
             queue,
+            adapter,
             _instance: instance,
             binding: xr::vulkan::SessionCreateInfo {
                 instance: instance_handle,

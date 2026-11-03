@@ -92,7 +92,7 @@ pub fn run_spectator_pipewire_preview(options: SpectatorOptions) -> anyhow::Resu
 #[cfg(not(target_os = "android"))]
 pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
-    xr::run(&(), || false, conversation, connection)
+    xr::run(&(), graphics::SAMPLES, || false, conversation, connection)
 }
 
 /// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls.
@@ -274,9 +274,11 @@ fn android_main(app: android_activity::AndroidApp) {
         Ok(_) if pump.destroyed => Ok(()),
         // xr::run owns the connection, so it closes before Destroy is acknowledged.
         Ok(android) => {
+            let samples = android_samples(&android);
             let (conversation, connection) = android_connection(android);
             xr::run(
                 &platform,
+                samples,
                 || pump.poll(Duration::ZERO),
                 conversation,
                 connection,
@@ -292,6 +294,16 @@ fn android_main(app: android_activity::AndroidApp) {
     while !pump.destroyed {
         pump.poll(Duration::from_millis(100));
     }
+}
+
+/// The samples per pixel the headset draws with: the intent extra `tomori.msaa`, as with `am start -e tomori.msaa off`, or 4 for multisample anti-aliasing.
+#[cfg(target_os = "android")]
+fn android_samples(android: &android::Android) -> u32 {
+    let value = android.intent_extra("tomori.msaa").unwrap_or_else(|error| {
+        log::warn!("Cannot read the tomori.msaa intent extra: {error:#}");
+        None
+    });
+    graphics::requested_samples(value.as_deref())
 }
 
 /// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.

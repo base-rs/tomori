@@ -106,18 +106,7 @@ impl WindowGpu {
 
     /// The samples per pixel to draw `format` with: 4, for multisample anti-aliasing, where the adapter supports it, or else 1.
     pub(crate) fn samples(&self, format: wgpu::TextureFormat) -> u32 {
-        const SAMPLES: u32 = 4;
-        let supported = |format: wgpu::TextureFormat| {
-            self.adapter
-                .get_texture_format_features(format)
-                .flags
-                .sample_count_supported(SAMPLES)
-        };
-        if supported(format) && supported(wgpu::TextureFormat::Depth32Float) {
-            SAMPLES
-        } else {
-            1
-        }
+        crate::graphics::supported_samples(&self.adapter, format, crate::graphics::SAMPLES)
     }
 }
 

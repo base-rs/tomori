@@ -28,8 +28,10 @@ const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 /// How often an applied recenter is logged at info, when the runtime repeats them.
 const RECENTER_LOG: Duration = Duration::from_secs(60);
 
+/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot.
 pub fn run(
     platform: &impl xr::PlatformInfo,
+    samples: u32,
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
@@ -161,7 +163,14 @@ pub fn run(
         mip_count: 1,
     })?;
     let images = gpu.import_images(&swapchain, format, width, height)?;
-    let mut renderer = Renderer::new(&gpu.device, &gpu.queue, format, width, height);
+    let samples = crate::graphics::supported_samples(&gpu.adapter, format, samples);
+    // Each eye's scene pass resolves its samples into the swapchain image before it ends, so the multisampled colour and depth stay in tile memory where the GPU allows, as transient attachments; see `design/desktop.md`.
+    log::info!(
+        "Drawing {samples}x multisampled; transient attachments save memory: {:?}",
+        gpu.adapter.get_info().transient_saves_memory
+    );
+    let mut renderer =
+        Renderer::with_samples(&gpu.device, &gpu.queue, format, width, height, samples);
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
     let mut caption = Caption::new(&gpu.device, format);
