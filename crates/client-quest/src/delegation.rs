@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use crate::pointing::Target;
+use crate::pointing::{Ray, Shape};
 use crate::swarm::CENTER;
 
 pub const MAX_CUBES: usize = 4096;
@@ -34,6 +37,13 @@ const COMPLETED_PIECE: Vec3 = Vec3::new(
     COMPLETED_SIDE / 2.0,
 );
 const SPLIT_SECONDS: f32 = 0.35;
+/// How near a worker's anchor the ray must pass to point at it: a little beyond its flock or completed cube, so that a
+/// worker 3 m away is easy to hold. See `design/interaction.md`.
+pub const POINTING_RADIUS: f32 = 0.3;
+/// How much paler the worker pointed at is drawn, towards white.
+const HIGHLIGHT_WHITENING: f32 = 0.45;
+/// How much larger the worker pointed at is drawn.
+const HIGHLIGHT_SCALE: f32 = 1.25;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -375,6 +385,10 @@ pub struct Scene {
     previous_trusted: bool,
     coordinator_samples: [Vec3; MAX_COORDINATOR_SAMPLES],
     coordinator_sample_count: usize,
+    /// The worker pointed at, drawn highlighted.
+    highlighted: Option<String>,
+    /// Where the headset's ray ends on the worker pointed at.
+    hit_point: Option<Vec3>,
 }
 
 impl Default for Scene {
@@ -395,7 +409,61 @@ impl Scene {
             previous_trusted: false,
             coordinator_samples: [CENTER; MAX_COORDINATOR_SAMPLES],
             coordinator_sample_count: 0,
+            highlighted: None,
+            hit_point: None,
         }
+    }
+
+    /// The workers that can be pointed at, keyed by identifier, where they stand now: each live worker's anchor, as a
+    /// sphere a little larger than its flock. Workers leaving cannot be pointed at. [`Self::point`] tests the same.
+    #[cfg(test)]
+    pub fn targets(&self) -> Vec<Target<String>> {
+        self.workers
+            .iter()
+            .filter(|(_, worker)| worker.retired.is_none())
+            .map(|(id, worker)| Target {
+                key: id.clone(),
+                shape: Shape::Sphere {
+                    center: worker.anchor,
+                    radius: POINTING_RADIUS,
+                },
+            })
+            .collect()
+    }
+
+    /// Point at the workers with `ray`, or with nothing: highlight the nearest worker it meets and return its
+    /// identifier. Pointing only highlights; it never takes the trigger. See `design/interaction.md`.
+    pub fn point(&mut self, ray: Option<Ray>) -> Option<&str> {
+        // Each frame, without allocating: the same test as [`Self::targets`] with [`crate::pointing::nearest`].
+        let mut hit: Option<(f32, &str, Vec3)> = None;
+        if let Some(ray) = ray {
+            for (id, worker) in &self.workers {
+                let shape = Shape::Sphere {
+                    center: worker.anchor,
+                    radius: POINTING_RADIUS,
+                };
+                if worker.retired.is_none()
+                    && let Some(distance) = shape.intersect(&ray)
+                    && hit.is_none_or(|(nearest, _, _)| distance < nearest)
+                {
+                    hit = Some((distance, id, worker.anchor));
+                }
+            }
+        }
+        // The ray ends among the worker's flock, where it passes nearest its anchor, rather than where it enters the pointing sphere.
+        self.hit_point = ray.zip(hit).map(|(ray, (distance, _, anchor))| {
+            ray.at((anchor - ray.origin).dot(ray.direction).max(distance))
+        });
+        let hit = hit.map(|(_, id, _)| id);
+        if self.highlighted.as_deref() != hit {
+            self.highlighted = hit.map(str::to_owned);
+        }
+        self.highlighted.as_deref()
+    }
+
+    /// Where the last [`Self::point`] met the worker it highlights, or `None` when it met none.
+    pub fn hit_point(&self) -> Option<Vec3> {
+        self.hit_point
     }
 
     pub fn cubes(&self) -> &[Cube] {
@@ -659,11 +727,19 @@ impl Scene {
                 worker.terminal_motion = None;
             }
             let color = worker.color * (0.70 + 0.30 * worker.visual_opacity);
+            // The worker pointed at glows paler and a little larger, so the participant sees what they would ask about.
+            let pointed =
+                worker.retired.is_none() && self.highlighted.as_deref() == Some(id.as_str());
+            let (color, emphasis) = if pointed {
+                (color.lerp(Vec3::ONE, HIGHLIGHT_WHITENING), HIGHLIGHT_SCALE)
+            } else {
+                (color, 1.0)
+            };
             if solid_completed(worker) {
                 push_cube(
                     &mut self.cubes,
                     worker.anchor,
-                    Vec3::splat(COMPLETED_SIDE * worker.visual_opacity),
+                    Vec3::splat(COMPLETED_SIDE * worker.visual_opacity * emphasis),
                     color,
                     worker.orientation,
                 );
@@ -673,15 +749,15 @@ impl Scene {
                 // boundary, rather than opening gaps between shrinking pieces.
                 let center = worker.particles.iter().copied().sum::<Vec3>() / PARTICLES as f32;
                 for (position, scale) in worker.particles.iter().zip(worker.particle_scales) {
-                    let position = if worker.visual_opacity == 1.0 {
+                    let position = if worker.visual_opacity == 1.0 && emphasis == 1.0 {
                         *position
                     } else {
-                        center + (*position - center) * worker.visual_opacity
+                        center + (*position - center) * worker.visual_opacity * emphasis
                     };
                     push_cube(
                         &mut self.cubes,
                         position,
-                        scale * worker.visual_opacity,
+                        scale * worker.visual_opacity * emphasis,
                         color,
                         worker.orientation,
                     );
@@ -3424,6 +3500,68 @@ mod space_tests {
         show(&mut scene, &mut workers, Some((&failed, true)));
         assert_eq!(scene.workers["a"].state, State::Error);
         assert!(scene.workers["b"].retired.is_some());
+    }
+
+    #[test]
+    fn workers_are_pointed_at_where_they_stand_and_only_while_they_stay() {
+        let mut workers = Workers::default();
+        let mut scene = Scene::new();
+        let both = space(vec![
+            worker("a", None, WorkerState::Running),
+            worker("b", None, WorkerState::Running),
+        ]);
+        show(&mut scene, &mut workers, Some((&both, true)));
+        let anchor = |scene: &Scene, id: &str| {
+            Vec3::from_array(
+                scene
+                    .stations()
+                    .iter()
+                    .find(|station| station.id == id)
+                    .unwrap()
+                    .position,
+            )
+        };
+        let (a, b) = (anchor(&scene, "a"), anchor(&scene, "b"));
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let at = |target: Vec3| Ray::new(eye, target - eye);
+        assert_eq!(scene.targets().len(), 2);
+        // Pointing tests what the targets describe.
+        for ray in [at(a), at(b), at(Vec3::ZERO), at((a + b) / 2.0)] {
+            let expected = ray
+                .and_then(|ray| crate::pointing::nearest(&ray, &scene.targets()))
+                .map(|hit| hit.key);
+            assert_eq!(scene.point(ray), expected.as_deref());
+        }
+        assert_eq!(scene.point(at(a)), Some("a"));
+        // The ray ends where it passes nearest the worker's anchor.
+        assert!(scene.hit_point().unwrap().distance(a) < 1e-4);
+        assert_eq!(scene.point(at(b)), Some("b"));
+        // Passing within the pointing radius of a worker's anchor still points at it; the floor is nothing.
+        let aside = (b - eye).cross(Vec3::Y).normalize();
+        assert_eq!(
+            scene.point(at(b + aside * (POINTING_RADIUS * 0.8))),
+            Some("b")
+        );
+        assert!(scene.hit_point().unwrap().distance(b) < POINTING_RADIUS * 0.8);
+        assert_eq!(scene.point(Ray::new(eye, Vec3::NEG_Y)), None);
+        assert_eq!(scene.point(None), None);
+        assert_eq!(scene.hit_point(), None);
+
+        // The worker pointed at is drawn larger, and stays valid geometry.
+        let size = |scene: &Scene| scene.cubes().iter().map(|cube| cube.scale[0]).sum::<f32>();
+        show(&mut scene, &mut workers, Some((&both, true)));
+        let plain = size(&scene);
+        scene.point(at(a));
+        show(&mut scene, &mut workers, Some((&both, true)));
+        assert!(size(&scene) > plain * 1.05, "{} {plain}", size(&scene));
+        assert!(scene.cubes().iter().all(Cube::valid));
+
+        // A worker that leaves can no longer be pointed at.
+        let only_b = space(vec![worker("b", None, WorkerState::Running)]);
+        show(&mut scene, &mut workers, Some((&only_b, true)));
+        assert!(scene.workers["a"].retired.is_some());
+        assert_eq!(scene.targets().len(), 1);
+        assert_ne!(scene.point(at(a)), Some("a"));
     }
 
     #[test]

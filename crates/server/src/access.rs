@@ -152,6 +152,7 @@ mod tests {
             },
             ClientMessage::UtteranceEnd {
                 utterance: "u".into(),
+                pointed: None,
             },
             ClientMessage::UtteranceCancel {
                 utterance: "u".into(),

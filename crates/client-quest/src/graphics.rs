@@ -1752,7 +1752,11 @@ mod tests {
                     &crate::arrival_graphics::Frame {
                         scene: &scene,
                         hovered: Some(&hovered),
-                        ray: Some((origin, target)),
+                        ray: Some(crate::arrival_graphics::Beam {
+                            origin,
+                            end: target,
+                            hit: true,
+                        }),
                         time: 1.0,
                     },
                 );
@@ -1846,7 +1850,11 @@ mod tests {
                     &crate::arrival_graphics::Frame {
                         scene: &scene,
                         hovered: Some(&Key::Create),
-                        ray: Some((glam::Vec3::new(0.2, 1.1, -0.3), crate::arrival::CREATE)),
+                        ray: Some(crate::arrival_graphics::Beam {
+                            origin: glam::Vec3::new(0.2, 1.1, -0.3),
+                            end: crate::arrival::CREATE,
+                            hit: true,
+                        }),
                         time: 1.0,
                     },
                 );
@@ -2065,7 +2073,11 @@ mod tests {
                     &crate::arrival_graphics::Frame {
                         scene: &arrival,
                         hovered: Some(&Key::Create),
-                        ray: Some((glam::Vec3::new(0.2, 1.1, -0.3), crate::arrival::CREATE)),
+                        ray: Some(crate::arrival_graphics::Beam {
+                            origin: glam::Vec3::new(0.2, 1.1, -0.3),
+                            end: crate::arrival::CREATE,
+                            hit: true,
+                        }),
                         time: 1.0,
                     },
                 );

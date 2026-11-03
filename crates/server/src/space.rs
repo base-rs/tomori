@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
 use protocol::{
@@ -79,6 +79,69 @@ pub struct SpaceModel {
     takes_instructions: bool,
     /// Why the agent may not have the instructions shown, until they are next given successfully.
     instructions_error: Option<String>,
+    /// The worker each waiting queue entry's speaker pointed at, by entry key, as the space knew it when the entry
+    /// was queued. Told to the agent with the entry. See `design/interaction.md`.
+    pointing: BTreeMap<String, PointedWorker>,
+}
+
+/// A worker a participant pointed at while speaking, as the space knew it when they stopped speaking: never as their
+/// client described it. Made only by [`SpaceModel::pointed_worker`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointedWorker {
+    id: String,
+    title: String,
+}
+
+/// The longest worker title told to the agent, in characters.
+const POINTED_TITLE_CHARS: usize = 160;
+
+/// `text` on one line, without control characters or double quotes, at most `limit` characters, so that it cannot
+/// break out of the context line it is quoted in.
+fn one_line(text: &str, limit: usize) -> String {
+    let mut line: String = text
+        .chars()
+        .map(|c| match c {
+            '"' => '\'',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .take(limit)
+        .collect();
+    if text.chars().count() > limit {
+        line.push('…');
+    }
+    line
+}
+
+/// The context line told to the agent after the words of a participant who pointed at `pointed`, describing it from
+/// `workers`, the space's workers when the words are delivered, or saying that it is no longer present.
+fn pointing_context(
+    backend: &str,
+    pointed: &PointedWorker,
+    workers: &[protocol::Worker],
+) -> String {
+    use protocol::WorkerState;
+    let title = one_line(&pointed.title, POINTED_TITLE_CHARS);
+    let session = one_line(&pointed.id, limits::SESSION_BYTES);
+    let backend = one_line(backend, limits::NAME_BYTES);
+    match workers.iter().find(|worker| worker.id == pointed.id) {
+        Some(worker) => {
+            let state = match worker.state {
+                WorkerState::Running => "running",
+                WorkerState::Waiting => "waiting",
+                WorkerState::Idle => "idle",
+                WorkerState::Completed => "completed",
+                WorkerState::Error => "failed",
+                WorkerState::Stopped => "stopped",
+                WorkerState::Unknown => "state unknown",
+            };
+            let title = one_line(&worker.title, POINTED_TITLE_CHARS);
+            format!("[Pointing at worker \"{title}\" ({backend} session {session}, {state})]")
+        }
+        None => format!(
+            "[Pointing at worker \"{title}\" ({backend} session {session}), which is no longer present]"
+        ),
+    }
 }
 
 #[derive(Debug)]
@@ -255,6 +318,7 @@ impl SpaceModel {
             instructions: String::new(),
             takes_instructions: false,
             instructions_error: None,
+            pointing: BTreeMap::new(),
         };
         model.load_messages(snapshot.messages);
         model
@@ -786,6 +850,7 @@ impl SpaceModel {
                 }
                 // Nothing waiting can be delivered any more, so say so rather than leave it queued.
                 self.queue.fail_waiting();
+                self.pointing.clear();
                 // A closed session can no longer receive decisions or answers.
                 self.approvals.clear();
                 self.deciding.clear();
@@ -811,8 +876,40 @@ impl SpaceModel {
     }
 
     /// Queue finalized input from the participant numbered `source`, shown as spoken by `speaker`. Returns false if this key was already queued.
+    #[cfg(test)]
     pub fn enqueue(&mut self, key: String, source: u32, speaker: String, text: String) -> bool {
-        self.queue.push(key, source, speaker, text)
+        self.enqueue_pointing(key, source, speaker, text, None)
+    }
+
+    /// The worker identified by `id`, as the space knows it now, for telling the agent that a participant pointed at
+    /// it; `None` if the space does not have it, whatever a client claims.
+    pub fn pointed_worker(&self, id: &str) -> Option<PointedWorker> {
+        self.workers
+            .iter()
+            .find(|known| known.id == id)
+            .map(|known| PointedWorker {
+                id: known.id.clone(),
+                title: known.title.clone(),
+            })
+    }
+
+    /// Queue input as [`Self::enqueue`] does, from a speaker who pointed at `pointed` while speaking. The queue shows
+    /// only the words; the agent is told about the worker with them, as it is when they are delivered.
+    pub fn enqueue_pointing(
+        &mut self,
+        key: String,
+        source: u32,
+        speaker: String,
+        text: String,
+        pointed: Option<PointedWorker>,
+    ) -> bool {
+        if !self.queue.push(key.clone(), source, speaker, text) {
+            return false;
+        }
+        if let Some(pointed) = pointed {
+            self.pointing.insert(key, pointed);
+        }
+        true
     }
 
     /// Entries waiting to be delivered.
@@ -821,7 +918,9 @@ impl SpaceModel {
     }
 
     pub fn cancel(&mut self, key: &str) -> Result<(), &'static str> {
-        self.queue.cancel(key)
+        self.queue.cancel(key)?;
+        self.pointing.remove(key);
+        Ok(())
     }
 
     /// The next prompt to deliver, if the agent is idle, nothing is pending and input is queued. Marks the entry as sending.
@@ -835,10 +934,24 @@ impl SpaceModel {
         }
         let attribution = self.attribution;
         let entry = self.queue.begin_next()?;
-        let prompt = Prompt {
-            key: entry.id.clone(),
-            text: attributed(&entry.speaker, &entry.text, attribution),
-        };
+        let key = entry.id.clone();
+        let mut text = attributed(&entry.speaker, &entry.text, attribution);
+        // What the speaker pointed at follows their words, described as the space knows it now.
+        if let Some(pointed) = self.pointing.remove(&key) {
+            text.push_str("\n\n");
+            text.push_str(&pointing_context(&self.backend, &pointed, &self.workers));
+        }
+        // Entries that failed or were dropped without being delivered take their pointing with them.
+        let waiting: HashSet<&str> = self
+            .queue
+            .entries()
+            .iter()
+            .filter(|entry| entry.state == QueueState::Queued)
+            .map(|entry| entry.id.as_str())
+            .collect();
+        self.pointing
+            .retain(|key, _| waiting.contains(key.as_str()));
+        let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
         Some(prompt)
     }
@@ -1942,6 +2055,96 @@ mod tests {
             title: id.into(),
             state,
         }
+    }
+
+    #[test]
+    fn a_pointed_worker_reaches_the_agent_as_the_space_describes_it() {
+        let mut space = model();
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend::Worker {
+                id: "ses_review".into(),
+                parent: None,
+                title: "Review commit \"2657a52\"\nnow".into(),
+                state: backend::WorkerState::Running,
+            }],
+        });
+        assert!(space.enqueue_pointing(
+            "a".into(),
+            1,
+            "Ada".into(),
+            "how is this one doing?".into(),
+            space.pointed_worker("ses_review"),
+        ));
+        // The queue shows only the words.
+        assert_eq!(
+            space.state(Vec::new()).queue[0].text,
+            "how is this one doing?"
+        );
+        // The worker finishes before the words are delivered: the agent hears how it is now, quoted on one line.
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend::Worker {
+                id: "ses_review".into(),
+                parent: None,
+                title: "Review commit \"2657a52\"\nnow".into(),
+                state: backend::WorkerState::Completed,
+            }],
+        });
+        assert_eq!(
+            space.next_prompt().unwrap().text,
+            "Ada: how is this one doing?\n\n[Pointing at worker \"Review commit '2657a52' now\" (fake session ses_review, completed)]"
+        );
+    }
+
+    #[test]
+    fn unknown_and_departed_workers_are_not_described_from_the_client() {
+        let mut space = model();
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend_worker("ses_1", backend::WorkerState::Running)],
+        });
+        // A worker the space never had resolves to nothing, whatever the client claims.
+        assert_eq!(space.pointed_worker("ses_forged"), None);
+        // One that leaves after the words were queued is named as the space knew it, and said to be gone.
+        space.enqueue_pointing(
+            "b".into(),
+            1,
+            "Ada".into(),
+            "and this?".into(),
+            space.pointed_worker("ses_1"),
+        );
+        space.apply(Event::WorkersChanged { workers: vec![] });
+        assert_eq!(
+            space.next_prompt().unwrap().text,
+            "Ada: and this?\n\n[Pointing at worker \"ses_1\" (fake session ses_1), which is no longer present]"
+        );
+        space.apply(Event::Delivered { key: "b".into() });
+        space.apply(Event::Idle);
+        // A cancelled entry forgets its pointing, and a later entry without pointing has none.
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend_worker("ses_1", backend::WorkerState::Running)],
+        });
+        space.enqueue_pointing(
+            "c".into(),
+            1,
+            "Ada".into(),
+            "x".into(),
+            space.pointed_worker("ses_1"),
+        );
+        space.cancel("c").unwrap();
+        assert!(space.pointing.is_empty());
+        space.set_attribution(false);
+        space.enqueue("d".into(), 1, "Ada".into(), "plain".into());
+        assert_eq!(space.next_prompt().unwrap().text, "plain");
+    }
+
+    #[test]
+    fn long_titles_are_bounded_in_the_context_line() {
+        let pointed = PointedWorker {
+            id: "ses_1".into(),
+            title: "t".repeat(500),
+        };
+        let line = pointing_context("opencode", &pointed, &[]);
+        assert!(line.contains(&format!("\"{}…\"", "t".repeat(POINTED_TITLE_CHARS))));
+        assert!(line.len() < 300, "{line}");
     }
 
     #[test]

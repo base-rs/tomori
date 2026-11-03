@@ -293,6 +293,16 @@ impl Voice {
 
     /// Close the microphone, after which every captured sample has been passed on, then end or cancel the utterance.
     fn finish(&mut self, client: Option<&Client>, send: bool) -> Result<(), Finish> {
+        self.finish_pointing(client, send, None)
+    }
+
+    /// Finish as [`Self::finish`] does, sending what the participant pointed at with an utterance that is ended.
+    fn finish_pointing(
+        &mut self,
+        client: Option<&Client>,
+        send: bool,
+        pointed: Option<protocol::Pointed>,
+    ) -> Result<(), Finish> {
         let resume_live = self.live;
         let generation = self.generation;
         // Join the capture thread before changing the gate or checking for
@@ -310,7 +320,7 @@ impl Voice {
             return Err(Finish::Utterance(error));
         }
         let result = if send {
-            microphone.end()
+            microphone.end_pointing(pointed)
         } else {
             microphone.cancel()
         };
@@ -744,11 +754,16 @@ impl Connection {
                         conversation.microphone_failed(error);
                     }
                 }
-                Action::EndUtterance => match self.voice.finish(self.client.as_ref(), true) {
-                    Ok(()) => {}
-                    Err(Finish::Utterance(error)) => conversation.utterance_not_sent(error),
-                    Err(Finish::Live(error)) => conversation.microphone_failed(error),
-                },
+                Action::EndUtterance(pointed) => {
+                    match self
+                        .voice
+                        .finish_pointing(self.client.as_ref(), true, pointed)
+                    {
+                        Ok(()) => {}
+                        Err(Finish::Utterance(error)) => conversation.utterance_not_sent(error),
+                        Err(Finish::Live(error)) => conversation.microphone_failed(error),
+                    }
+                }
                 Action::CancelUtterance => {
                     if let Err(error) = self.voice.finish(self.client.as_ref(), false) {
                         conversation.fail(String::from(error));

@@ -493,6 +493,7 @@ fn begin(utterance: &str) -> ClientMessage {
 fn end(utterance: &str) -> ClientMessage {
     ClientMessage::UtteranceEnd {
         utterance: utterance.into(),
+        pointed: None,
     }
 }
 
