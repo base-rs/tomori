@@ -512,7 +512,8 @@ pub fn run(
         let scene_head = scene_anchor
             .to_scene_transform(head_pose(&views))
             .map(|pose| pose.transform());
-        let head = scene_head.map(|head| head.transform_point3(Vec3::ZERO));
+        // What faces the head faces the middle of it, which stays put as the head turns, rather than the eyes, which swing about the neck.
+        let head = scene_head.map(hand_menu::head_centre);
         // While recording, the indicator rises from the left controller, or the left wrist, or else stands low in the view. See `design/hand-menu.md`.
         indicator.update(
             &gpu.queue,
