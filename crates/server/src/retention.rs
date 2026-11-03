@@ -295,7 +295,8 @@ impl Retention {
                 Some(State::Away { heard } | State::Absent { heard }) => {
                     self.resume(heard, self.end())
                 }
-                None => self.resume(0, self.end()),
+                // In the space without having joined it, as a visitor admitted where they watched, who heard everything live.
+                None => State::Live,
                 Some(State::Live | State::Streaming(_)) => return false,
             }
         } else {
@@ -647,6 +648,20 @@ mod tests {
         assert!(retention.engagement("ada", Engagement::Engaged));
         let (texts, _, _) = drain(&mut retention, "ada", now);
         assert_eq!(texts, ["Segment 3."]);
+    }
+
+    #[test]
+    fn a_visitor_admitted_in_place_has_heard_everything_said_while_they_watched() {
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 3);
+        // Admitted by a knock, they take part without joining again, and so have no place yet.
+        assert!(retention.hears_live("vic"));
+        assert!(!retention.engagement("vic", Engagement::Engaged));
+        assert!(retention.hears_live("vic"));
+        // Taking the headset off afterwards keeps where they heard up to, as for anyone.
+        assert!(!retention.engagement("vic", Engagement::Away));
+        speak(&mut retention, 2, "m2", 2, 3);
+        assert!(retention.engagement("vic", Engagement::Engaged));
     }
 
     #[test]
