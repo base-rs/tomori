@@ -159,6 +159,8 @@ pub struct Conversation {
     /// The selected space; one past the last is the create object.
     selected: usize,
     joining: Option<String>,
+    /// A jump is under way: once the server lists its spaces, join the one that most needs attention. See `design/arrival.md`.
+    jumping: bool,
     /// Space updates sent before the server handled our leave are ignored until it confirms.
     leaving: bool,
     space: Option<SpaceState>,
@@ -236,6 +238,7 @@ impl Conversation {
             listed: false,
             selected: 0,
             joining: None,
+            jumping: false,
             leaving: false,
             space: None,
             message: 0,
@@ -350,6 +353,7 @@ impl Conversation {
         self.pairing = None;
         self.knocks.clear();
         self.knock = None;
+        self.jumping = false;
 
         self.spaces.clear();
         self.listed = false;
@@ -526,9 +530,13 @@ impl Conversation {
             }
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
+                let urgent = arrival::most_urgent(&spaces).filter(|_| !self.listed);
                 self.selected = if self.listed && self.selected == self.spaces.len() {
                     // The create object stays selected, after however many spaces there now are.
                     spaces.len()
+                } else if let Some(index) = urgent {
+                    // A fresh listing starts on the space that most needs attention, so A goes there.
+                    index
                 } else {
                     selected
                         .and_then(|id| spaces.iter().position(|space| &space.id == id))
@@ -536,6 +544,9 @@ impl Conversation {
                 };
                 self.spaces = spaces;
                 self.listed = true;
+                if std::mem::take(&mut self.jumping) {
+                    self.land();
+                }
             }
             ServerMessage::Space { state } => self.update_space(*state),
             // The answer to a session list, shown on the session ring after "New session".
@@ -687,6 +698,54 @@ impl Conversation {
             self.message = self.message.min(items(&state).saturating_sub(1));
         }
         self.space = Some(state);
+    }
+
+    /// Finish a jump with the first listing: join the space that most needs attention, unless already in it. If someone dealt with it meanwhile, stay in the lobby and say so.
+    fn land(&mut self) {
+        let current = self
+            .space
+            .as_ref()
+            .filter(|_| self.mode == Mode::Space)
+            .map(|space| space.id.clone());
+        match arrival::most_urgent(&self.spaces) {
+            Some(index) => {
+                let space = self.spaces[index].id.clone();
+                log::info!("Jumping to space {space}");
+                if current.as_ref() != Some(&space) {
+                    self.selected = index;
+                    self.join(space);
+                }
+            }
+            None if self.mode == Mode::Lobby => {
+                let server = self
+                    .connected
+                    .as_ref()
+                    .map_or("the server", |choice| choice.label.as_str());
+                self.notice = Some(format!("Nothing on {server} needs you now."));
+            }
+            None => {}
+        }
+    }
+
+    /// Ask to join `space`, from the lobby or from another space.
+    fn join(&mut self, space: String) {
+        self.joining = Some(space.clone());
+        self.leaving = false;
+        self.error = None;
+        self.ended = None;
+        self.send(ClientMessage::Join { space });
+    }
+
+    /// What the most urgent space needs, said in a few words for the lobby's status, such as "Deploy needs you".
+    fn attention_status(&self) -> Option<String> {
+        let space = &self.spaces[arrival::most_urgent(&self.spaces)?];
+        let title = &space.title;
+        Some(match space.attention? {
+            protocol::Attention::Input => format!("{title} needs you"),
+            protocol::Attention::Problem => format!("{title} has a problem"),
+            protocol::Attention::Reply => format!("{title} has a new reply"),
+            protocol::Attention::Unknown => format!("{title} needs attention"),
+        })
     }
 
     fn close_space(&mut self) {
@@ -1029,6 +1088,7 @@ impl Conversation {
     fn leave_server(&mut self) {
         self.actions.push(Action::Disconnect);
         self.connected = None;
+        self.jumping = false;
         self.state = None;
         self.spaces.clear();
         self.listed = false;
@@ -1118,6 +1178,8 @@ impl Conversation {
 
     /// A: connect, join, or confirm the chosen approval option. Returns true when A has nothing to do here, so it can keep its swarm-reset meaning.
     pub fn accept(&mut self) -> bool {
+        // Choosing anything takes over from a jump still waiting for the listing.
+        self.jumping = false;
         match self.mode {
             Mode::Servers => {
                 match self.servers.get(self.server).cloned() {
@@ -1138,11 +1200,7 @@ impl Conversation {
                     LobbyStep::Spaces => match self.spaces.get(self.selected) {
                         Some(space) => {
                             let space = space.id.clone();
-                            self.joining = Some(space.clone());
-                            self.leaving = false;
-                            self.error = None;
-                            self.ended = None;
-                            self.send(ClientMessage::Join { space });
+                            self.join(space);
                         }
                         // The create object opens its first ring.
                         None if self.creates() => {
@@ -1220,6 +1278,7 @@ impl Conversation {
 
     /// B: deny the pending approval, cancel your newest queued input, or leave the space; in the lobby, dismiss what is shown or return to the server list.
     pub fn back(&mut self) {
+        self.jumping = false;
         match self.mode {
             Mode::Servers => {}
             Mode::Lobby if self.dismissable() => {
@@ -1563,8 +1622,8 @@ impl Conversation {
         for (index, choice) in self.servers.iter().enumerate().skip(start).take(rows) {
             let marker = if index == self.server { '>' } else { ' ' };
             lines.push(short(&match &choice.unavailable {
-                // A row has no room for both, and the counts say more about a discovered server than its address.
-                None => match choice.counts() {
+                // A row has no room for both, and what needs attention, then the counts, say more about a discovered server than its address.
+                None => match choice.needs().or_else(|| choice.counts()) {
                     Some(counts) => format!("{marker} {} ({counts})", choice.label),
                     None => format!("{marker} {} {}", choice.label, choice.address),
                 },
@@ -1615,7 +1674,8 @@ impl Conversation {
                     } else if self.spaces.is_empty() {
                         "No spaces yet.".into()
                     } else {
-                        format!("You are {}.", self.name)
+                        self.attention_status()
+                            .unwrap_or_else(|| format!("You are {}.", self.name))
                     }
                 }),
         ));
@@ -1628,7 +1688,9 @@ impl Conversation {
                 format!(
                     "{} [{}{}]",
                     space.title,
-                    activity_label(space.activity),
+                    space
+                        .attention
+                        .map_or(activity_label(space.activity), arrival::attention_label),
                     match space.participants {
                         0 => String::new(),
                         count => format!(", {count} here"),
@@ -1788,21 +1850,28 @@ impl Conversation {
                     .servers
                     .iter()
                     .enumerate()
-                    .map(|(index, choice)| arrival::Item {
-                        key: arrival::Key::Server(choice.address.clone()),
-                        kind: arrival::Kind::Server {
-                            source: choice.source,
-                            available: choice.is_available(),
-                        },
-                        label: choice.label.clone(),
-                        detail: Some(
-                            choice
-                                .unavailable
-                                .clone()
-                                .or_else(|| choice.counts())
-                                .unwrap_or_else(|| choice.address.clone()),
-                        ),
-                        selected: index == self.server,
+                    .flat_map(|(index, choice)| {
+                        let attention = choice.attention();
+                        let server = arrival::Item {
+                            key: arrival::Key::Server(choice.address.clone()),
+                            kind: arrival::Kind::Server {
+                                source: choice.source,
+                                available: choice.is_available(),
+                                attention,
+                            },
+                            label: choice.label.clone(),
+                            detail: Some(choice.detail()),
+                            selected: index == self.server,
+                        };
+                        // A server whose spaces need attention has a jump object beside it.
+                        let jump = attention.map(|attention| arrival::Item {
+                            key: arrival::Key::Jump(choice.address.clone()),
+                            kind: arrival::Kind::Jump { attention },
+                            label: "Jump".into(),
+                            detail: Some(format!("join what needs you on {}", choice.label)),
+                            selected: false,
+                        });
+                        std::iter::once(server).chain(jump)
                     })
                     .collect(),
                 ring: None,
@@ -1829,7 +1898,7 @@ impl Conversation {
                     } else if self.spaces.is_empty() {
                         Some("No spaces yet.".into())
                     } else {
-                        None
+                        self.attention_status()
                     }
                 });
                 let items = self
@@ -1842,9 +1911,15 @@ impl Conversation {
                             activity: space.activity,
                             participants: space.participants,
                             hue: arrival::hue(&space.id),
+                            attention: space.attention,
                         },
                         label: space.title.clone(),
-                        detail: Some(activity_label(space.activity).into()),
+                        detail: Some(
+                            space
+                                .attention
+                                .map_or(activity_label(space.activity), arrival::attention_label)
+                                .into(),
+                        ),
                         selected: spaces && index == self.selected,
                     })
                     .chain(self.creates().then(|| arrival::Item {
@@ -1894,6 +1969,22 @@ impl Conversation {
     /// Choose an arrival object, as by pointing at it and pulling the trigger.
     pub fn choose_object(&mut self, key: &arrival::Key) {
         match (self.mode, key) {
+            // Connect, then join the space that most needs attention once the server lists them.
+            (Mode::Servers, arrival::Key::Jump(address)) => {
+                if let Some(index) = self
+                    .servers
+                    .iter()
+                    .position(|choice| &choice.address == address && choice.is_available())
+                {
+                    self.server = index;
+                    self.chosen = true;
+                    let choice = self.servers[index].clone();
+                    let label = choice.label.clone();
+                    self.connect(choice);
+                    self.jumping = true;
+                    self.notice = Some(format!("Jumping to what needs you on {label}..."));
+                }
+            }
             (Mode::Servers, arrival::Key::Server(address)) => {
                 if let Some(index) = self
                     .servers
@@ -2388,6 +2479,8 @@ mod tests {
                 environment: "sky".into(),
                 activity: Activity::Running,
                 participants: 2,
+                attention: None,
+                attention_age: None,
             }],
         }));
         assert!(conversation.text().contains("> Tomori [running, 2 here]"));
@@ -2415,8 +2508,309 @@ mod tests {
             directory: "/work/tomori".into(),
             activity: Activity::Idle,
             participants: 1,
+            attention: None,
+            attention_age: None,
             environment: "sky".into(),
         }
+    }
+
+    /// A space listed as needing `attention` for `age` seconds.
+    fn needing(id: &str, title: &str, attention: protocol::Attention, age: u32) -> SpaceSummary {
+        SpaceSummary {
+            attention: Some(attention),
+            attention_age: Some(age),
+            participants: 0,
+            ..summary(id, title)
+        }
+    }
+
+    /// A discovered server advertising that `waiting` of its spaces need input and `replies` have a reply.
+    fn advertising(label: &str, address: &str, waiting: u32, replies: u32) -> Choice {
+        Choice {
+            spaces: Some(3),
+            participants: Some(0),
+            waiting: Some(waiting),
+            problems: Some(0),
+            replies: Some(replies),
+            ..Choice::new(label, address, Source::Discovered)
+        }
+    }
+
+    #[test]
+    fn a_server_needing_attention_glows_and_offers_a_jump() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![
+            advertising("Laptop", "10.0.0.2:8765", 1, 2),
+            advertising("Desktop", "10.0.0.1:8765", 0, 0),
+        ]);
+        let view = conversation.arrival().unwrap();
+        let keys: Vec<_> = view.items.iter().map(|item| item.key.clone()).collect();
+        assert_eq!(
+            keys,
+            [
+                arrival::Key::Server("10.0.0.2:8765".into()),
+                arrival::Key::Jump("10.0.0.2:8765".into()),
+                arrival::Key::Server("10.0.0.1:8765".into()),
+            ]
+        );
+        assert_eq!(
+            view.items[0].kind,
+            arrival::Kind::Server {
+                source: Source::Discovered,
+                available: true,
+                attention: Some(protocol::Attention::Input),
+            }
+        );
+        assert_eq!(
+            view.items[0].detail.as_deref(),
+            Some("1 needs you, 2 replies")
+        );
+        assert_eq!(view.items[2].detail.as_deref(), Some("3 spaces, 0 people"));
+        assert!(
+            conversation
+                .text()
+                .contains("Laptop (1 needs you, 2 replies)")
+        );
+        assert_fits(&mut conversation);
+    }
+
+    #[test]
+    fn a_jump_connects_and_joins_the_most_urgent_space_in_one_choice() {
+        let mut conversation = Conversation::new("Ada");
+        let laptop = advertising("Laptop", "10.0.0.2:8765", 1, 1);
+        conversation.set_servers(vec![laptop.clone()]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Connect(laptop.clone())]
+        );
+        assert_eq!(conversation.server(), Some(&laptop));
+        conversation.apply(connected());
+        assert_eq!(sent(&mut conversation), [ClientMessage::ListSpaces]);
+        assert!(
+            conversation
+                .arrival()
+                .unwrap()
+                .status
+                .unwrap()
+                .contains("Jumping to what needs you on Laptop")
+        );
+        listed(
+            &mut conversation,
+            vec![
+                summary("idle", "Idle"),
+                needing("reply", "Notes", protocol::Attention::Reply, 600),
+                needing("deploy", "Deploy", protocol::Attention::Input, 30),
+            ],
+        );
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: "deploy".into()
+            }]
+        );
+        // The space comes towards the participant as it is joined, as when chosen by hand.
+        assert_eq!(
+            conversation.arrival().unwrap().joining,
+            Some(arrival::Key::Space("deploy".into()))
+        );
+        // A later listing does not jump again.
+        listed(&mut conversation, vec![summary("idle", "Idle")]);
+        assert!(sent(&mut conversation).is_empty());
+        conversation.apply(space(|state| state.id = "deploy".into()));
+        assert_eq!(conversation.mode(), Mode::Space);
+    }
+
+    #[test]
+    fn a_jump_whose_attention_was_dealt_with_stays_in_the_lobby_and_says_so() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.take_actions();
+        listed(&mut conversation, vec![summary("deploy", "Deploy")]);
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert_eq!(
+            conversation.arrival().unwrap().status.as_deref(),
+            Some("Nothing on Laptop needs you now.")
+        );
+        assert_fits(&mut conversation);
+    }
+
+    #[test]
+    fn a_jump_moves_on_from_a_space_the_server_rejoined() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.take_actions();
+        // The server put this participant back in the space they were last in, before listing.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.mode(), Mode::Space);
+        listed(
+            &mut conversation,
+            vec![
+                summary(SPACE, "Tomori"),
+                needing("notes", "Notes", protocol::Attention::Reply, 5),
+            ],
+        );
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: "notes".into()
+            }]
+        );
+        conversation.apply(space(|state| {
+            state.id = "notes".into();
+            state.title = "Notes".into();
+        }));
+        assert_eq!(
+            conversation.entered(),
+            Some(arrival::Key::Space("notes".into()))
+        );
+
+        // Already in the space that needs attention: nothing more to do.
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.take_actions();
+        conversation.apply(space(|_| {}));
+        listed(
+            &mut conversation,
+            vec![needing(SPACE, "Tomori", protocol::Attention::Input, 5)],
+        );
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(conversation.mode(), Mode::Space);
+    }
+
+    #[test]
+    fn a_jump_to_a_space_that_has_gone_says_it_ended() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.take_actions();
+        listed(
+            &mut conversation,
+            vec![needing("deploy", "Deploy", protocol::Attention::Input, 1)],
+        );
+        conversation.take_actions();
+        conversation.apply(refused("deploy"));
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert_eq!(
+            conversation.arrival().unwrap().status.as_deref(),
+            Some("Deploy has ended.")
+        );
+    }
+
+    #[test]
+    fn another_choice_before_the_listing_takes_over_from_a_jump() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.take_actions();
+        // Going back to the servers and connecting by hand is no jump.
+        conversation.back();
+        assert_eq!(conversation.take_actions(), [Action::Disconnect]);
+        conversation.choose_object(&arrival::Key::Server("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.take_actions();
+        listed(
+            &mut conversation,
+            vec![
+                summary("idle", "Idle"),
+                needing("deploy", "Deploy", protocol::Attention::Input, 1),
+            ],
+        );
+        assert!(sent(&mut conversation).is_empty());
+        // The selection starts on the space that needs attention, so A joins it.
+        assert!(conversation.text().contains("> Deploy [needs you]"));
+        // A jump object for a server that cannot be joined does nothing.
+        let mut conversation = Conversation::new("Ada");
+        let mut old = advertising("Old", "10.0.0.3:8765", 1, 0);
+        old.unavailable = Some("protocol 2, needs 1".into());
+        conversation.set_servers(vec![old]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.3:8765".into()));
+        assert!(conversation.take_actions().is_empty());
+        assert_eq!(conversation.mode(), Mode::Servers);
+    }
+
+    #[test]
+    fn spaces_are_marked_in_place_and_the_selection_starts_on_the_most_urgent() {
+        let mut conversation = in_lobby(backends(), roots());
+        let spaces = vec![
+            summary("idle", "Idle"),
+            needing("notes", "Notes", protocol::Attention::Reply, 900),
+            needing("broken", "Broken", protocol::Attention::Problem, 10),
+            needing("deploy", "Deploy", protocol::Attention::Input, 20),
+            needing("tests", "Tests", protocol::Attention::Input, 120),
+        ];
+        listed(&mut conversation, spaces.clone());
+        let view = conversation.arrival().unwrap();
+        // The listing's order is kept; only the selection moves.
+        let keys: Vec<_> = view.items.iter().map(|item| item.key.clone()).collect();
+        assert_eq!(
+            keys[..5],
+            spaces
+                .iter()
+                .map(|space| arrival::Key::Space(space.id.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(view.items[4].selected);
+        let details: Vec<_> = view
+            .items
+            .iter()
+            .take(5)
+            .map(|item| item.detail.clone().unwrap())
+            .collect();
+        assert_eq!(
+            details,
+            ["idle", "new reply", "problem", "needs you", "needs you"]
+        );
+        assert!(matches!(
+            view.items[2].kind,
+            arrival::Kind::Space {
+                attention: Some(protocol::Attention::Problem),
+                ..
+            }
+        ));
+        assert_eq!(view.status.as_deref(), Some("Tests needs you"));
+        assert!(conversation.text().contains("Tests needs you"));
+        assert_fits(&mut conversation);
+
+        // A later listing keeps the participant's own selection, even as attention moves.
+        conversation.navigate(0, -1);
+        listed(&mut conversation, spaces.iter().rev().cloned().collect());
+        assert!(conversation.text().contains("> Deploy [needs you]"));
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: "deploy".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_remembered_server_is_not_connected_while_only_another_needs_attention() {
+        let mut conversation = Conversation::new("Ada");
+        let mut remembered = advertising("Desktop", "10.0.0.1:8765", 0, 0);
+        remembered.source = Source::Remembered;
+        conversation.set_servers(vec![
+            remembered.clone(),
+            advertising("Laptop", "10.0.0.2:8765", 1, 0),
+        ]);
+        assert!(conversation.take_actions().is_empty());
+        assert_eq!(conversation.mode(), Mode::Servers);
+        // Once nothing elsewhere needs attention, it is connected as before.
+        conversation.set_servers(vec![
+            remembered.clone(),
+            advertising("Laptop", "10.0.0.2:8765", 0, 0),
+        ]);
+        assert_eq!(conversation.take_actions(), [Action::Connect(remembered)]);
     }
 
     fn sessions() -> Event {
@@ -2988,7 +3382,8 @@ mod tests {
             view.items[0].kind,
             arrival::Kind::Server {
                 source: Source::Discovered,
-                available: false
+                available: false,
+                attention: None,
             }
         );
         // An incompatible server is shown but can't be chosen.
@@ -3529,6 +3924,8 @@ mod tests {
                 environment: "sky".into(),
                 activity: Activity::Idle,
                 participants: 0,
+                attention: None,
+                attention_age: None,
             }],
         }));
         conversation.take_actions();
@@ -3776,6 +4173,8 @@ mod tests {
                     environment: "sky".into(),
                     activity: Activity::Unknown,
                     participants: 0,
+                    attention: None,
+                    attention_age: None,
                 })
                 .collect(),
         }));

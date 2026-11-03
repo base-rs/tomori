@@ -97,6 +97,7 @@ fn browsers_see_updated_counts() {
             .update(Counts {
                 spaces,
                 participants,
+                attention: None,
             })
             .expect("update");
         assert!(

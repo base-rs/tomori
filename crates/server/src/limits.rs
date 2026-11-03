@@ -207,10 +207,18 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
             size -= before.saturating_sub(json_len(&space.directory));
         }
     }
+    // A closed space that needs attention, because it closed while nobody was in it, is left out after the others.
     while size > SNAPSHOT_BUDGET
         && let Some(index) = spaces
             .iter()
-            .position(|space| space.activity == protocol::Activity::Closed)
+            .position(|space| {
+                space.activity == protocol::Activity::Closed && space.attention.is_none()
+            })
+            .or_else(|| {
+                spaces
+                    .iter()
+                    .position(|space| space.activity == protocol::Activity::Closed)
+            })
     {
         let space = spaces.remove(index);
         size -= json_len(&space) + 1;
@@ -312,6 +320,8 @@ mod tests {
                 environment: "sky".into(),
                 activity: protocol::Activity::Idle,
                 participants: 0,
+                attention: None,
+                attention_age: None,
             })
             .collect()
     }

@@ -1560,6 +1560,7 @@ mod tests {
                     activity,
                     participants,
                     hue: crate::arrival::hue(id),
+                    attention: None,
                 },
                 label: title.into(),
                 detail: Some(format!("{activity:?}").to_lowercase()),
