@@ -16,6 +16,9 @@ use crate::Error;
 /// The samples Silero decides on at once, at 16 kHz.
 const WINDOW: usize = 512;
 
+/// The most audio the detector hears at once: one segment, which is more than the search for a pause and the audio around it.
+const LONGEST: usize = MAX_SEGMENT;
+
 /// Where to find the Silero voice activity model and how to run it.
 #[derive(Clone, Debug)]
 pub struct SileroVadConfig {
@@ -55,7 +58,7 @@ impl SileroVadConfig {
                 min_speech_duration: self.min_speech,
                 window_size: WINDOW as i32,
                 // Longer than anything it is given, so it never splits speech itself.
-                max_speech_duration: (2 * MAX_SEGMENT) as f32 / RATE as f32,
+                max_speech_duration: LONGEST as f32 / RATE as f32 + 1.0,
             },
             sample_rate: RATE as i32,
             num_threads: 1,
@@ -74,7 +77,7 @@ impl SileroVad {
     /// Load the model.
     pub fn new(config: &SileroVadConfig) -> Result<Self, Error> {
         // The detector buffers the speech it has heard until it is taken, which is at most what it is given at once.
-        let buffer = (2 * MAX_SEGMENT) as f32 / RATE as f32;
+        let buffer = LONGEST as f32 / RATE as f32 + 1.0;
         let detector =
             VoiceActivityDetector::create(&config.sherpa()?, buffer).ok_or_else(|| {
                 Error::Unavailable(format!(
@@ -98,25 +101,28 @@ impl SileroVad {
 
 impl VoiceActivity for SileroVad {
     fn speech(&mut self, samples: &[i16]) -> Result<Vec<Range<usize>>, Error> {
-        if samples.len() > 2 * MAX_SEGMENT {
-            return Err(Error::Engine(
-                "the voice activity detector hears at most 56 seconds at once".into(),
-            ));
+        if samples.len() > LONGEST {
+            return Err(Error::Engine(format!(
+                "the voice activity detector hears at most {} seconds at once",
+                LONGEST / RATE as usize
+            )));
         }
         self.detector.reset();
         let mut speech = Vec::new();
         for window in samples.chunks(WINDOW) {
-            let window: Vec<f32> = window
+            // The last window is padded with silence to a whole window, so none of it is left in the detector for the next call.
+            let mut window: Vec<f32> = window
                 .iter()
                 .map(|&sample| f32::from(sample) / 32768.0)
                 .collect();
+            window.resize(WINDOW, 0.0);
             self.detector.accept_waveform(&window);
             self.take(&mut speech);
         }
         self.detector.flush();
         self.take(&mut speech);
         self.detector.reset();
-        // Keep within the audio, in order, as the cut expects.
+        // Keep within the audio, without the padding, in order, as the cut expects.
         for range in &mut speech {
             range.end = range.end.min(samples.len());
             range.start = range.start.min(range.end);
@@ -182,5 +188,18 @@ mod tests {
         assert!(speech.iter().any(|range| range.end > first.len() + gap));
         // Hearing the same audio again gives the same answer.
         assert_eq!(vad.speech(&samples).unwrap(), speech);
+        // A whole segment of silence or faint noise holds no speech.
+        assert!(vad.speech(&vec![0; MAX_SEGMENT]).unwrap().is_empty());
+        let noise: Vec<i16> = (0..MAX_SEGMENT)
+            .map(|index| ((index * 7919 % 401) as i16 - 200) / 4)
+            .collect();
+        assert!(vad.speech(&noise).unwrap().is_empty());
+        let started = std::time::Instant::now();
+        vad.speech(&samples).unwrap();
+        eprintln!(
+            "Heard {:.1} seconds in {:.3} seconds.",
+            samples.len() as f64 / f64::from(RATE),
+            started.elapsed().as_secs_f64()
+        );
     }
 }

@@ -448,17 +448,18 @@ fn offline_transcriber(
         speech::stt::MAX_UTTERANCE / speech::stt::RATE as usize / 60
     );
     let vad = SileroVadConfig::from_root(root);
+    let segment = speech::stt::MAX_SEGMENT / speech::stt::RATE as usize;
     let voice: Option<Box<dyn speech::stt::VoiceActivity>> = match SileroVad::new(&vad) {
         Ok(voice) => {
             eprintln!(
-                "Pauses in utterances longer than 28 seconds: Silero voice activity detector from {} (cpu).",
+                "Pauses in utterances longer than {segment} seconds: Silero voice activity detector from {} (cpu).",
                 vad.model.display()
             );
             Some(Box::new(voice))
         }
         Err(error) => {
             eprintln!(
-                "Pauses in utterances longer than 28 seconds: found by loudness alone ({error})."
+                "Pauses in utterances longer than {segment} seconds: found by loudness alone ({error})."
             );
             None
         }

@@ -77,7 +77,13 @@ pub fn listen(samples: &[i16], start: usize) -> Option<Range<usize>> {
 
 /// Where the segment of `samples` that starts at `start` ends.
 ///
-/// `speech` lists the ranges of `samples` known to hold speech, in clip indices, or is empty when no detector heard them. If the rest of the clip is at most [`MAX_SEGMENT`] long, it is one segment. Otherwise the segment ends at a candidate point, every 10 ms in the last [`SEARCH`] before its limit, whose surrounding 250 ms holds the least detected speech, and of those the least energy; the latest wins a tie, so segments stay as long as they can. If that point is not markedly quieter than most of the search, and no detector heard it as a pause, the audio has no pause, and the segment ends at its limit.
+/// `speech` lists the ranges of `samples` known to hold speech, in clip indices, or is empty when no detector heard them. If the rest of the clip is at most [`MAX_SEGMENT`] long, it is one segment. Otherwise the segment ends at a candidate point, every 10 ms in the last [`SEARCH`] before its limit:
+///
+/// - If the detector heard speech in the search, and none in the 250 ms around some candidates, the quietest of those.
+/// - Otherwise, the candidate with the least energy in the 250 ms around it, if that is markedly quieter than most of the search. A detector that heard speech throughout, as when it merged a short pause into the words around it, does not decide.
+/// - Otherwise the audio has no pause, and the segment ends at its limit.
+///
+/// The latest of equally quiet candidates wins, so segments stay as long as they can.
 pub fn cut(samples: &[i16], start: usize, speech: &[Range<usize>]) -> Cut {
     let limit = start + MAX_SEGMENT;
     if samples.len() <= limit {
@@ -118,21 +124,28 @@ pub fn cut(samples: &[i16], start: usize, speech: &[Range<usize>]) -> Cut {
             )
         })
         .collect();
-    let Some(&(point, speech, quietest)) = candidates.iter().min_by(|a, b| {
-        a.1.cmp(&b.1)
-            .then(a.2.total_cmp(&b.2))
-            // The later of two equal candidates is preferred.
-            .then(b.0.cmp(&a.0))
-    }) else {
-        return Cut::Hard(limit);
+    // The quietest of `candidates`, the latest of equals.
+    let quietest = |candidates: &mut dyn Iterator<Item = &(usize, u64, f64)>| {
+        candidates
+            .min_by(|a, b| a.2.total_cmp(&b.2).then(b.0.cmp(&a.0)))
+            .copied()
     };
 
+    // The detector heard speech in the search, and none around some candidates.
+    if candidates.iter().any(|candidate| candidate.1 > 0)
+        && let Some((point, _, _)) =
+            quietest(&mut candidates.iter().filter(|candidate| candidate.1 == 0))
+    {
+        return Cut::Pause(point);
+    }
+
+    let Some((point, _, level)) = quietest(&mut candidates.iter()) else {
+        return Cut::Hard(limit);
+    };
     let mut levels: Vec<f64> = candidates.iter().map(|candidate| candidate.2).collect();
     levels.sort_by(f64::total_cmp);
     let typical = levels[levels.len() / 2];
-    // The detector heard speech in the search, but none around this point.
-    let heard_pause = speech == 0 && candidates.iter().any(|candidate| candidate.1 > 0);
-    if heard_pause || quietest * QUIETER <= typical {
+    if level * QUIETER <= typical {
         Cut::Pause(point)
     } else {
         Cut::Hard(limit)
@@ -294,6 +307,43 @@ mod tests {
             "cut at {}",
             seconds(end)
         );
+    }
+
+    #[test]
+    fn a_detector_that_hears_speech_throughout_leaves_the_cut_to_loudness() {
+        let mut samples = voice(40.0, 8000.0);
+        quieten(&mut samples, 23.0, 23.5, 0.0);
+        // The detector merged the pause into the speech around it, but one point overlaps less speech than the rest.
+        let at = |seconds: f64| (seconds * f64::from(RATE)) as usize;
+        let speech = [0..at(26.0), at(26.1)..samples.len()];
+        let end = cut(&samples, 0, &speech);
+        assert!(matches!(end, Cut::Pause(_)), "{end:?}");
+        assert!(
+            (23.0..=23.5).contains(&seconds(end.end())),
+            "cut at {}",
+            seconds(end.end())
+        );
+        // With no pause at all, it is cut at the limit, not where the detector heard least speech.
+        let samples = voice(40.0, 8000.0);
+        assert_eq!(cut(&samples, 0, &speech), Cut::Hard(MAX_SEGMENT));
+    }
+
+    #[test]
+    fn a_clip_just_longer_than_a_segment_is_cut_at_a_pause_or_the_limit() {
+        let samples = voice(28.0, 8000.0);
+        let mut longer = samples.clone();
+        longer.push(8000);
+        assert_eq!(
+            segments(&longer),
+            vec![0..MAX_SEGMENT, MAX_SEGMENT..MAX_SEGMENT + 1]
+        );
+        let mut paused = samples;
+        quieten(&mut paused, 25.0, 25.4, 0.0);
+        paused.push(8000);
+        let segments = segments(&paused);
+        assert_eq!(segments.len(), 2);
+        assert!((25.0..=25.4).contains(&seconds(segments[0].end)));
+        assert_eq!(segments[1].end, paused.len());
     }
 
     #[test]

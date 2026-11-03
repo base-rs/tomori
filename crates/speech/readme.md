@@ -21,9 +21,10 @@ The streaming recognizer decodes each utterance once, as the audio arrives, so p
 
 Whisper decodes at most 30 seconds at once. `stt::OfflineRecognition` decodes an utterance of up to 28 seconds (`stt::MAX_SEGMENT`) whole, and splits a longer one into consecutive segments with `stt::segment::cut`, decoding them in order and joining their transcripts with spaces:
 
-- Each segment but the last ends at the point, every 10 ms in the last 10 seconds before its limit, whose surrounding 250 ms holds the least speech heard by the Silero detector, and of those the least energy. Without the detector, energy alone decides. A signal with no pause at all is cut at the limit.
-- The detector hears only the search and a second either side of it, not the whole utterance. If it fails or panics, the cut is placed by energy alone, and after a panic the detector is not used again.
-- Utterances that have ended are decoded a segment at a time, the one with the fewest segments decoded first, so a short utterance waits for at most one segment of a long one.
+- Each segment but the last ends at a point, every 10 ms in the last 10 seconds before its limit: the quietest point whose surrounding 250 ms holds no speech heard by the Silero detector. If the detector is not installed, or hears speech throughout, the point with the least energy in its 250 ms, if that is markedly quieter than most of the search. A signal with no pause at all is cut at the limit.
+- For a cut, the detector hears only the search and a second either side of it. If it fails or panics, the cut is placed by energy alone, and after a panic the detector is not used again.
+- Whisper writes words for audio without speech, such as "you" for silence. In an utterance longer than one segment, a segment the detector hears no speech in is not decoded, and a transcript that is only a bracketed note such as "[BLANK_AUDIO]" or "(static)" is left out. An utterance that fits in one segment is decoded and reported as before.
+- Utterances that have ended take turns a segment at a time, the one that has waited longest first, so a short utterance waits for at most one segment of a long one, and two long ones alternate.
 - An utterance that passes 5 minutes (`stt::MAX_UTTERANCE`) fails at once with `Error::TooLong`, and nothing of it is decoded.
 
 On a 32-core Linux PC, the ignored test `transcribes_a_long_utterance_with_whisper` decodes 58.7 seconds of LibriSpeech, in three segments, in about 8.6 seconds, with or without the detector, and the transcripts match the reference apart from British spellings.
