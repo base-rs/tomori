@@ -5,7 +5,7 @@
 //!
 //! [`cubes`] and [`label_mesh`] are pure, so they are tested without a GPU. Every object's form comes from [`form`] alone, so the placeholders can be replaced, for example by server constellations or environment previews, without touching the layout or the pointing.
 use crate::{
-    arrival::{Align, Key, Kind, Label, Object, Scene, clip, facing},
+    arrival::{Align, Key, Kind, Label, Object, Scene, clip, facing_from},
     delegation::Cube,
     hand_menu::MenuKind,
     server_choice::Source,
@@ -82,10 +82,10 @@ fn hsv(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
 }
 
 /// An object's placeholder form, in the world. Replace this to change how arrival looks.
-fn form(object: &Object, time: f32, out: &mut Vec<Cube>) {
+fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
     let p = object.position;
     let s = object.size;
-    let face = Quat::from_rotation_arc(Vec3::Z, facing(p));
+    let face = Quat::from_rotation_arc(Vec3::Z, facing_from(p, viewer, object.label.tilt));
     match object.kind {
         Kind::Server { source, available } => {
             let color = match (available, source) {
@@ -251,7 +251,7 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
         let hovered = object.choosable && frame.hovered == Some(&object.key);
         let fade = object.presence * (1.0 - 0.7 * object.dim);
         let start = out.len();
-        form(object, frame.time, &mut out);
+        form(object, frame.time, frame.scene.viewer, &mut out);
         for cube in &mut out[start..] {
             if hovered {
                 let position = Vec3::from_array(cube.position);
@@ -261,7 +261,10 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
             }
             cube.color = cube.color.map(|v| v * fade);
         }
-        let face = Quat::from_rotation_arc(Vec3::Z, facing(object.position));
+        let face = Quat::from_rotation_arc(
+            Vec3::Z,
+            facing_from(object.position, frame.scene.viewer, object.label.tilt),
+        );
         if hovered {
             for n in 0..16 {
                 let angle = n as f32 * TAU / 16.0 + frame.time;
@@ -314,6 +317,8 @@ const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
 /// A label and how to draw it.
 struct Styled<'a> {
     label: &'a Label,
+    /// Where the viewer is, which the label faces.
+    viewer: Option<Vec3>,
     hovered: bool,
     /// How opaque it is, from its own alpha and its object's dimming.
     alpha: f32,
@@ -332,8 +337,10 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
     if columns == 0 {
         return;
     }
-    let normal = facing(label.anchor);
-    let right = Vec3::Y.cross(normal);
+    let normal = facing_from(label.anchor, styled.viewer, label.tilt);
+    let right = Vec3::Y.cross(normal).try_normalize().unwrap_or(Vec3::X);
+    // Upright unless the label tilts to face the viewer.
+    let up = normal.cross(right);
     let width = columns as f32 * 9.0 * p;
     let height = label.lines.len() as f32 * 11.0 * p;
     let origin = match label.align {
@@ -350,7 +357,7 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
         if mesh.len() + 6 > MAX_VERTICES {
             return;
         }
-        let corner = origin + right * x - Vec3::Y * y + normal * z;
+        let corner = origin + right * x - up * y + normal * z;
         for [u, v] in [
             [0.0, 0.0],
             [1.0, 0.0],
@@ -434,16 +441,19 @@ pub fn label_mesh(scene: &Scene, hovered: Option<&Key>) -> Vec<Vertex> {
         .iter()
         .map(|object| Styled {
             label: &object.label,
+            viewer: scene.viewer,
             hovered: object.choosable && hovered == Some(&object.key),
             alpha: object.label.alpha * (1.0 - 0.65 * object.dim),
         })
         .chain(heading.iter().map(|label| Styled {
             label,
+            viewer: scene.viewer,
             hovered: false,
             alpha: label.alpha,
         }))
         .collect();
-    let distance = |styled: &Styled| styled.label.anchor.distance(crate::arrival::HOME);
+    let viewer = scene.viewer.unwrap_or(crate::arrival::HOME);
+    let distance = |styled: &Styled| styled.label.anchor.distance(viewer);
     labels.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
     let mut mesh = Vec::new();
     for styled in &labels {
@@ -579,7 +589,7 @@ impl ArrivalLabels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrival::{HOME, Item, View};
+    use crate::arrival::{HOME, Item, View, facing};
 
     fn view() -> View {
         let space = |id: &str, participants| Item {
@@ -716,7 +726,7 @@ mod tests {
         let colour = |scene: &Scene, id: &str| {
             let object = scene.object(&Key::Space(id.into())).unwrap().clone();
             let mut cubes = Vec::new();
-            form(&object, 0.0, &mut cubes);
+            form(&object, 0.0, None, &mut cubes);
             cubes[0].color
         };
         assert_eq!(colour(&a, "one"), colour(&b, "one"));

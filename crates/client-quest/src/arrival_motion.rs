@@ -411,6 +411,7 @@ impl Motion {
                 .as_ref()
                 .map(|target| target.stage.clone())
                 .unwrap_or_default(),
+            viewer: None,
         }
     }
 

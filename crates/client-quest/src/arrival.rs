@@ -164,7 +164,7 @@ pub enum Align {
     Right,
 }
 
-/// Text anchored to a point in the world, which turns to face [`HOME`].
+/// Text anchored to a point in the world, which turns to face the viewer, or [`HOME`] when the viewer is not known.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
     /// The top of the label, at the side given by `align`.
@@ -175,6 +175,8 @@ pub struct Label {
     pub pixel: f32,
     /// How opaque it is, from 0 to 1, as it fades in or out with its object.
     pub alpha: f32,
+    /// Whether it tilts to face the viewer fully, as text held close does, such as the hand menu's, rather than only turning upright.
+    pub tilt: bool,
 }
 
 /// An arrival object, placed in the world.
@@ -218,6 +220,8 @@ pub struct Scene {
     pub objects: Vec<Object>,
     pub heading: Option<Label>,
     pub stage: Stage,
+    /// Where the viewer's head is, which labels and forms face, or `None` for [`HOME`].
+    pub viewer: Option<Vec3>,
 }
 
 impl Scene {
@@ -286,8 +290,10 @@ impl Scene {
                 align: Align::Centre,
                 pixel: 0.0032,
                 alpha: 1.0,
+                tilt: false,
             }),
             stage,
+            viewer: None,
         }
     }
 
@@ -449,6 +455,7 @@ fn row_object(item: &Item, position: Vec3, dimmed: bool) -> Object {
             align: Align::Centre,
             pixel: 0.0026,
             alpha: 1.0,
+            tilt: false,
         },
         description: description(item),
         selected: item.selected,
@@ -493,6 +500,7 @@ fn ring_objects(ring: &Ring, centre: Vec3) -> Vec<Object> {
                     align,
                     pixel: 0.0022,
                     alpha: 1.0,
+                    tilt: false,
                 },
                 description: description(item),
                 selected: item.selected,
@@ -506,9 +514,14 @@ fn ring_objects(ring: &Ring, centre: Vec3) -> Vec<Object> {
 
 /// The horizontal direction from `point` towards [`HOME`], which labels face.
 pub fn facing(point: Vec3) -> Vec3 {
-    Vec3::new(HOME.x - point.x, 0.0, HOME.z - point.z)
-        .try_normalize()
-        .unwrap_or(Vec3::Z)
+    facing_from(point, None, false)
+}
+
+/// The direction from `point` towards `viewer`, or [`HOME`]: horizontal unless `tilt`.
+pub fn facing_from(point: Vec3, viewer: Option<Vec3>, tilt: bool) -> Vec3 {
+    let towards = viewer.unwrap_or(HOME) - point;
+    let towards = if tilt { towards } else { towards.with_y(0.0) };
+    towards.try_normalize().unwrap_or(Vec3::Z)
 }
 
 /// A hue in `0..1` from `id` alone, using FNV-1a so it is the same on every build and device.
@@ -925,6 +938,12 @@ mod tests {
             assert!(facing.distance(towards) < 1e-5);
         }
         assert_eq!(facing(HOME), Vec3::Z);
+        // Towards the viewer when known: level unless tilted.
+        let below = Vec3::new(0.0, 1.0, -0.5);
+        let viewer = Vec3::new(0.0, 1.5, 0.0);
+        assert_eq!(facing_from(below, Some(viewer), false), Vec3::Z);
+        let tilted = facing_from(below, Some(viewer), true);
+        assert!(tilted.y > 0.6 && (tilted - (viewer - below).normalize()).length() < 1e-5);
         let heading = scene.heading.unwrap();
         assert_eq!(heading.lines, ["Studio"]);
     }

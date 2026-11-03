@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec3};
 use protocol::{ConnectionRole, KnockRequest, KnockState};
 
-use crate::arrival::{Align, Key, Kind, Label, Object, facing};
+use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
 use crate::hands::Hand;
 
@@ -27,7 +27,7 @@ const INDEX_KNUCKLE: usize = 7;
 const LITTLE_KNUCKLE: usize = 22;
 
 /// How far apart the menu's rows are, how far each reaches to the right to be pointed at, and how large their markers.
-pub const ROW: f32 = 0.032;
+pub const ROW: f32 = 0.024;
 pub const ROW_LENGTH: f32 = 0.2;
 const MARKER: f32 = 0.009;
 const PIXEL: f32 = 0.0011;
@@ -307,15 +307,27 @@ impl HandMenu {
         }
     }
 
-    /// The menu's rows for `model`, laid out above the wrist of `palm`, facing the participant.
-    pub fn objects(&self, palm: &Palm, model: &Model) -> Vec<Object> {
+    /// The menu's rows for `model`, laid out above the wrist of `palm` on a plane facing `head`.
+    pub fn objects(&self, palm: &Palm, model: &Model, head: Vec3) -> Vec<Object> {
         let rows = items(self.section, model);
-        let top = palm.wrist + palm.normal * 0.05 + Vec3::Y * (0.06 + ROW * rows.len() as f32);
-        let right = Vec3::Y.cross(facing(top)).normalize_or_zero();
+        let base = palm.wrist + palm.normal * 0.05;
+        // The plane is aimed at the head from the menu's middle, so that the whole of it faces the participant; the middle depends on the aim, so it is refined once.
+        let height = 0.04 + ROW * rows.len() as f32;
+        let basis = |normal: Vec3| {
+            let right = Vec3::Y.cross(normal).try_normalize().unwrap_or(Vec3::X);
+            (normal, right, normal.cross(right))
+        };
+        let (_, _, up) = basis(facing_from(
+            base + Vec3::Y * (height / 2.0),
+            Some(head),
+            true,
+        ));
+        let (_, right, up) = basis(facing_from(base + up * (height / 2.0), Some(head), true));
+        let top = base + up * height;
         rows.into_iter()
             .enumerate()
             .map(|(index, item)| {
-                let position = top - Vec3::Y * ROW * index as f32;
+                let position = top - up * ROW * index as f32;
                 let choosable = matches!(item.kind, MenuKind::Section { .. } | MenuKind::Button);
                 Object {
                     key: Key::Menu(item.key),
@@ -323,11 +335,12 @@ impl HandMenu {
                     position,
                     size: MARKER,
                     label: Label {
-                        anchor: position + right * (MARKER * 2.0) + Vec3::Y * (5.5 * PIXEL),
+                        anchor: position + right * (MARKER * 2.0) + up * (5.5 * PIXEL),
                         lines: vec![item.text.clone()],
                         align: Align::Left,
                         pixel: PIXEL,
                         alpha: 1.0,
+                        tilt: true,
                     },
                     description: item.text,
                     selected: false,
@@ -353,6 +366,7 @@ pub fn cue(palm: &Palm) -> Object {
             align: Align::Centre,
             pixel: PIXEL,
             alpha: 0.0,
+            tilt: true,
         },
         description: String::new(),
         selected: false,
@@ -566,7 +580,7 @@ mod tests {
             role: ConnectionRole::Owner,
             ..Default::default()
         };
-        let objects = menu.objects(&palm, &model);
+        let objects = menu.objects(&palm, &model, Vec3::new(0.0, 1.6, 0.0));
         assert!(
             objects
                 .iter()
@@ -584,6 +598,30 @@ mod tests {
         let cue = cue(&palm);
         assert!(!cue.choosable);
         assert_eq!(cue.kind, Kind::Menu(MenuKind::Cue));
+    }
+
+    #[test]
+    fn the_menu_lies_on_a_plane_facing_the_head() {
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.0, -0.3),
+            normal: Vec3::new(0.2, 0.8, 0.4).normalize(),
+        };
+        let head = Vec3::new(0.1, 1.65, 0.05);
+        let model = Model {
+            role: ConnectionRole::Owner,
+            ..Default::default()
+        };
+        let menu = HandMenu {
+            section: Some(Section::PeopleAndSecurity),
+            ..Default::default()
+        };
+        let objects = menu.objects(&palm, &model, head);
+        let middle = objects[objects.len() / 2].position;
+        let towards = (head - middle).normalize();
+        // Rows run down the plane, across the line of sight.
+        let down = (objects[1].position - objects[0].position).normalize();
+        assert!(down.dot(towards).abs() < 0.06, "{down:?} {towards:?}");
+        assert!(objects.iter().all(|object| object.label.tilt));
     }
 
     #[test]

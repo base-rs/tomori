@@ -438,12 +438,17 @@ pub fn run(
         let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
             let model = conversation.menu_model();
             match palm {
-                Some(palm) if menu_shown => hand_menu.objects(&palm, &model),
+                Some(palm) if menu_shown => {
+                    hand_menu.objects(&palm, &model, head.unwrap_or(arrival::HOME))
+                }
                 Some(palm) if model.waiting() => vec![hand_menu::cue(&palm)],
                 _ => Vec::new(),
             }
         };
         scene.objects.extend(menu(&hand_menu, &conversation));
+        // Labels and forms face the participant's head, in steps of 5 cm so that they are not rebuilt every frame as the head sways.
+        let viewer = head.map(|head| (head * 20.0).round() / 20.0);
+        scene.viewer = viewer;
         let targets: Vec<_> = scene
             .targets()
             .into_iter()
@@ -463,6 +468,7 @@ pub fn run(
             motion.update(&arrival_target(&conversation), arrival_time);
             scene = motion.scene(arrival_time);
             scene.objects.extend(menu(&hand_menu, &conversation));
+            scene.viewer = viewer;
         }
         let in_arrival = conversation.arrival().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
@@ -537,7 +543,8 @@ pub fn run(
             &[view_projection(&views[0]), view_projection(&views[1])],
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
-            (!in_arrival).then(|| (&caption, head_pose(&views))),
+            // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
+            (!in_arrival && !menu_shown).then(|| (&caption, head_pose(&views))),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
