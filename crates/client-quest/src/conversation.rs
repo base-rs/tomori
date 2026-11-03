@@ -33,6 +33,9 @@ pub const LEAVE_HOLD: Duration = Duration::from_secs(1);
 /// How long a queued entry's cancellation can be undone before it is sent.
 pub const CANCEL_UNDO: Duration = Duration::from_secs(3);
 
+/// How long A does nothing after an approval or question appears, so that a press meant for what was shown before it, such as undoing a cancellation, never decides it.
+pub const REQUEST_GRACE: Duration = Duration::from_millis(600);
+
 /// The most panel rows the problem line and the queue strip each take.
 const PROBLEM_ROWS: usize = 2;
 const QUEUE_ROWS: usize = 2;
@@ -243,6 +246,8 @@ pub struct Conversation {
     cancelling: Option<(String, Instant)>,
     /// How long B has been held in a space, while it is, and whether that hold has already left.
     leave_hold: Option<(Duration, bool)>,
+    /// When the approval or question shown appeared, until [`REQUEST_GRACE`] has passed.
+    request_at: Option<Instant>,
     capture_generation: u64,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
     launch: String,
@@ -317,6 +322,7 @@ impl Conversation {
             queue_selected: None,
             cancelling: None,
             leave_hold: None,
+            request_at: None,
             capture_generation: 0,
             launch: format!(
                 "{:x}",
@@ -783,6 +789,7 @@ impl Conversation {
         }
         self.space = Some(state);
         if arrived {
+            self.request_at = Some(Instant::now());
             // A request takes A: the list closes, a selected entry is let go, and a cancellation still in its undo time is sent now, so that an A meant for them cannot decide it.
             self.space_menu = None;
             self.queue_selected = None;
@@ -791,11 +798,8 @@ impl Conversation {
             }
         }
         if let Some(selected) = self.space_menu {
-            self.space_menu = Some(selected.min(self.menu_items().len().saturating_sub(1)));
-        }
-        if self.follow && self.request.is_none() {
-            let rows = self.body_rows();
-            self.page = paginate(&self.body().1, rows).len() - 1;
+            let count = self.menu_items().len();
+            self.space_menu = (count > 0).then(|| selected.min(count - 1));
         }
         self.report();
     }
@@ -1426,6 +1430,7 @@ impl Conversation {
     /// Whether the right stick up and down selects queued entries now, rather than doing anything else.
     pub fn selects_queue(&self) -> bool {
         self.mode == Mode::Space
+            && self.role.participates()
             && !self.is_choosing()
             && self.space_menu.is_none()
             && !self.waiting().is_empty()
@@ -1567,6 +1572,17 @@ impl Conversation {
                     self.space_menu = None;
                     return false;
                 }
+                if self
+                    .space
+                    .as_ref()
+                    .is_some_and(|space| space.approval.is_some() || space.question.is_some())
+                    && self
+                        .request_at
+                        .is_some_and(|at| at.elapsed() < REQUEST_GRACE)
+                {
+                    self.notice = Some("Read the request before choosing.".into());
+                    return false;
+                }
                 if let Some(approval) = self.approval() {
                     let request = approval.id.clone();
                     let (decision, option) = match self.option.checked_sub(1) {
@@ -1676,7 +1692,6 @@ impl Conversation {
                 let Some(space) = &self.space else {
                     return;
                 };
-                self.page = 0;
                 let items = self.menu_items();
                 if items.is_empty() {
                     let space = space.id.clone();
@@ -2719,7 +2734,17 @@ impl Conversation {
                 pages
             }
         };
-        self.page = self.page.min(pages.len() - 1);
+        // The list fits its rows, and leaves the reader's page as it was for when it closes.
+        let page = if self.space_menu.is_some() {
+            0
+        } else {
+            // Following, the newest page is shown at the rows there are now, which a problem or the strip can change without the space changing.
+            if self.follow && self.request.is_none() {
+                self.page = pages.len() - 1;
+            }
+            self.page = self.page.min(pages.len() - 1);
+            self.page
+        };
         let Some(space) = &self.space else {
             return vec![
                 "SPACE".into(),
@@ -2746,12 +2771,8 @@ impl Conversation {
             short(&status),
         ];
         lines.extend(problem.iter().cloned());
-        lines.push(short(&format!(
-            "p{}/{} {label}",
-            self.page + 1,
-            pages.len()
-        )));
-        lines.extend(pages[self.page].iter().cloned());
+        lines.push(short(&format!("p{}/{} {label}", page + 1, pages.len())));
+        lines.extend(pages[page].iter().cloned());
         let footer = if matches!(self.talk, Some(Talk::Recording { .. })) {
             "Release X to send"
         } else if self.space_menu.is_some() {
@@ -3044,14 +3065,20 @@ mod tests {
         })
     }
 
-    /// A conversation connected to a server and joined to [`SPACE`].
+    /// A conversation connected to a server and joined to [`SPACE`], with any request it shows there long enough to be chosen.
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
         let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(space(change));
         conversation.take_actions();
+        settle(&mut conversation);
         conversation
+    }
+
+    /// Let the request shown have been there for longer than [`REQUEST_GRACE`].
+    fn settle(conversation: &mut Conversation) {
+        conversation.request_at = None;
     }
 
     /// Hold B long enough to leave a space, then release it.
@@ -4406,6 +4433,11 @@ mod tests {
             state.approval = Some(next);
         }));
         assert!(conversation.text().contains("1/3: Allow once"));
+        // A pressed as it appears does nothing, then decides once it has been shown for a moment.
+        conversation.accept();
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("Read the request"));
+        settle(&mut conversation);
         conversation.accept();
         assert_eq!(
             sent(&mut conversation),
@@ -4730,12 +4762,29 @@ mod tests {
     }
 
     #[test]
+    fn following_shows_the_newest_lines_when_a_problem_takes_rows() {
+        let long: String = (0..30).map(|line| format!("line {line}\n")).collect();
+        let mut conversation =
+            joined(|state| state.messages = vec![message("m1", Role::Assistant, &long)]);
+        assert!(conversation.text().contains("line 29"));
+        // A problem arrives without the space changing.
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "Something went wrong.".into(),
+            space: None,
+        }));
+        assert!(conversation.text().contains("line 29"));
+        conversation.back();
+        assert!(conversation.text().contains("line 29"));
+    }
+
+    #[test]
     fn a_visitor_cannot_select_or_cancel_queued_entries() {
         let mut conversation =
             joined(|state| state.queue = vec![entry("1", "Bea", QueueState::Queued)]);
         conversation.apply(Event::Message(ServerMessage::Role {
             role: ConnectionRole::Visitor,
         }));
+        assert!(!conversation.selects_queue());
         conversation.select_queued(1);
         conversation.accept();
         conversation.tick_space(Instant::now() + CANCEL_UNDO);

@@ -9,7 +9,7 @@ This describes how the headset presents a space and what its controls do there. 
 - **B** closes or backs out of what is open: the list of modes, a selected queue entry, or the problem shown, which it dismisses. It never decides an approval, cancels queued input or leaves the space. Leaving takes holding **B** for a second, a hold that starts in the space; a shorter hold, or a press, never leaves, and while it is held the status line says that holding it leaves. A cancellation still in its undo time is sent before leaving.
 - **Deny** is one of an approval's choices, beside *allow once* and each standing option, chosen with the right stick left and right and confirmed with **A**, like any other choice. Nothing is decided without **A**.
 - Cancelling a queued entry takes selecting it in the queue strip with the right stick up and down, then **A**; it is sent only after 3 seconds, during which **A** undoes it. An entry that started sending meanwhile is not cancelled, and the panel says so. Any participant may cancel any waiting entry, as `spaces.md` allows; a visitor is told they only watch.
-- A request takes **A** for itself: when an approval or question appears, the list closes, a selected entry is let go, and a cancellation still in its undo time is sent at once, so that an **A** meant for something else decides nothing.
+- A request takes **A** for itself: when an approval or question appears, the list closes, a selected entry is let go, and a cancellation still in its undo time is sent at once, and **A** does nothing for 0.6 seconds, saying to read the request first, so that an **A** meant for something else decides nothing.
 - **A** never resets the swarm in a space, where it confirms the choice shown, chooses from the list, or cancels or keeps the selected queue entry.
 
 **Controls in a space:**
@@ -48,7 +48,8 @@ The headset client's conversation model and controls inside a space, and the pla
 
 - Test that B in a space never sends a decision, a cancellation or a leave, that holding it for less than a second does not leave, and that holding it for a second leaves once.
 - Test that deny is the last approval choice, survives updates to the space and is sent only with A; that A cancels a selected queue entry only after the undo time, that A within it keeps the entry, that an entry sent meanwhile is not cancelled, that leaving sends a pending cancellation, and that an approval arriving sends it and closes the list.
-- Test that following and paging reach a message's last page with the queue strip and a problem shown, and that the list keeps its selection and description in view.
+- Test that following and paging reach a message's last page with the queue strip and a problem shown, including a problem that arrives without the space changing, and that the list keeps its selection and description in view.
+- Test that A does nothing just after a request appears.
 - Test that a problem is shown while recording and while sending, stays when something is sent, and is dismissed by B; and that every panel line fits.
 - Test that the queue strip shows waiting and sending entries, marks the participant's own, keeps the selected entry in view, and is not reached by paging.
 - Test that Y opens the list on the current mode with its description, that A sends the chosen mode directly and the speech setting toggled, and that Y or B closes it.

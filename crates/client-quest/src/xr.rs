@@ -346,12 +346,19 @@ pub fn run(
         if controls.back {
             conversation.back();
         }
-        // Only a hold that starts in a space can leave it, so B held while joining does not.
-        if controls.back_held && conversation.joined_space().is_some() {
-            let since = *back_since.get_or_insert(now);
-            conversation.hold_back(Some(now.duration_since(since)));
-        } else if back_since.take().is_some() {
-            conversation.hold_back(None);
+        // Only a hold whose press is in a space can leave it, so B held while joining does not.
+        if controls.back && conversation.joined_space().is_some() {
+            back_since = Some(now);
+        }
+        match back_since {
+            Some(since) if controls.back_held => {
+                conversation.hold_back(Some(now.duration_since(since)));
+            }
+            Some(_) => {
+                back_since = None;
+                conversation.hold_back(None);
+            }
+            None => {}
         }
         conversation.tick_space(now);
         if controls.refresh {

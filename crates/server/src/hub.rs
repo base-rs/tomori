@@ -2453,9 +2453,20 @@ impl Hub {
         let text = text.trim();
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
+        // A repeated finalization of an answer already applied is acknowledged in the same way.
+        let answered = record.answer.as_ref().and_then(|_| {
+            state.space(&record.space).and_then(|space| {
+                space
+                    .answered
+                    .iter()
+                    .find(|(answered, _)| *answered == key)
+                    .map(|(_, text)| text.as_str())
+            })
+        });
         if let Some(queued) = state
             .space(&record.space)
             .and_then(|space| space.model.queued_text(&key))
+            .or(answered)
         {
             let text = queued.to_owned();
             state.send(
@@ -2510,22 +2521,6 @@ impl Hub {
         }
         // A spoken answer goes to the presented question, never into the queue, where it would wait behind the question it answers. See `design/spaces.md`.
         if let Some(target) = &record.answer {
-            // A repeated finalization of an answer already applied is acknowledged with the text applied, as a repeated queued utterance is.
-            if let Some((_, applied)) = state
-                .space(&record.space)
-                .and_then(|space| space.answered.iter().find(|(answered, _)| *answered == key))
-            {
-                let text = applied.clone();
-                state.send(
-                    &record.participant,
-                    ServerMessage::Transcript {
-                        utterance: record.client,
-                        text,
-                        finished: true,
-                    },
-                );
-                return;
-            }
             let message = match state.answer(
                 &record.participant,
                 &record.space,
