@@ -361,6 +361,7 @@ mod tests {
             .apply(Event::State(ConnectionState::Connected {
                 source: 1,
                 server: "Test".into(),
+                role: protocol::ConnectionRole::Visitor,
                 backends: vec![],
                 roots: vec![],
                 environments: vec![],

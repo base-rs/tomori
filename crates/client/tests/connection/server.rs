@@ -136,6 +136,7 @@ impl<B: ReadableBody> Session<B> {
                             protocol,
                             server: "mini".into(),
                             source: self.connection,
+                            role: protocol::ConnectionRole::Owner,
                             backends: vec![],
                             roots: vec![],
                             environments: vec![],

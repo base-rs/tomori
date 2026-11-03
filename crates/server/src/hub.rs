@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -16,10 +16,11 @@ use base_scheduler::Cancellation;
 use discovery::Counts;
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
-    AudioFrame, ClientMessage, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
+    AudioFrame, ClientMessage, ConnectionRole, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
     PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
 };
 
+use crate::access::{self, Access};
 use crate::backends::Backends;
 use crate::environments;
 use crate::limits;
@@ -29,6 +30,9 @@ use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
 pub type ConnectionId = u64;
+
+/// A registered connection: its identifier, its outbox, the flag it sets when data arrives, and where it reports its writes. See [`Hub::connect`].
+pub type Connected = (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>);
 
 /// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
@@ -100,6 +104,8 @@ pub struct Hub {
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
     counts_changed: Notify,
+    /// The most visitors connected at once; see `design/security.md`.
+    max_visitors: AtomicUsize,
     this: Weak<Hub>,
 }
 
@@ -127,6 +133,10 @@ struct HubState {
 
 struct ConnectionRecord {
     outbox: Arc<Outbox>,
+    /// What the connection was admitted as at the door.
+    access: Access,
+    /// The role the client was last told, so that it is told again only when it changes.
+    role: Option<ConnectionRole>,
     participant: Option<String>,
     utterance: Option<OpenUtterance>,
     /// The client's id for the utterance the server last closed by failing it, so that an end or cancel already on its way is ignored rather than refused.
@@ -241,6 +251,16 @@ fn run_token() -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// The key under which the hub keeps a participant: the identity they said in Hello, together with the principal they authenticated as, if any. The same identity without that principal is a different participant, so it cannot take over an authenticated participant's connection, space or audio source. See `design/security.md`.
+///
+/// The principal's length comes first, so that no principal and identity join to another's key; an unauthenticated key starts with `/`, which a length cannot.
+fn participant_key(principal: Option<&str>, identity: &str) -> String {
+    match principal {
+        Some(principal) => format!("{}:{principal}/{identity}", principal.len()),
+        None => format!("/{identity}"),
+    }
+}
+
 /// An error reply, cut to [`limits::ERROR_BYTES`].
 fn error_message(error: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
@@ -250,18 +270,44 @@ fn error_message(error: impl Into<String>) -> ServerMessage {
 }
 
 impl HubState {
-    /// The spaces listed, which includes closed spaces until they are forgotten, and the greeted participants with a connection, whether in a space or in the lobby. A space still being created is not listed, so it is not counted.
+    /// The spaces listed, which includes closed spaces until they are forgotten, and the greeted owners and collaborators with a connection, whether in a space or in the lobby. Visitors are not counted. A space still being created is not listed, so it is not counted.
     fn counts(&self) -> Counts {
         let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
         Counts {
             spaces: count(self.spaces.len()),
             participants: count(
-                self.participants
+                self.connections
                     .values()
-                    .filter(|record| record.connection.is_some())
+                    .filter(|record| record.participant.is_some() && !record.access.is_visitor())
                     .count(),
             ),
         }
+    }
+
+    /// Tell a participant's connection its role if it changed, such as on joining or leaving a space.
+    fn update_role(&mut self, participant: &str) {
+        let Some(record) = self.participants.get(participant) else {
+            return;
+        };
+        let space = record.space.as_deref();
+        let Some(connection) = record
+            .connection
+            .and_then(|id| self.connections.get_mut(&id))
+        else {
+            return;
+        };
+        let role = connection.access.role(space);
+        if connection.role != Some(role) {
+            connection.role = Some(role);
+            connection.outbox.message(ServerMessage::Role { role });
+        }
+    }
+
+    /// The role of a participant's connection where they are now.
+    fn role(&self, connection: ConnectionId, space: Option<&str>) -> ConnectionRole {
+        self.connections
+            .get(&connection)
+            .map_or(ConnectionRole::Visitor, |record| record.access.role(space))
     }
 
     fn outbox(&self, participant: &str) -> Option<&Arc<Outbox>> {
@@ -292,8 +338,8 @@ impl HubState {
         if let Some(space) = self.space(id) {
             space.touched.set(Some(Instant::now()));
             space.deferred.set(false);
-            for participant in &space.model.participants {
-                if let Some(outbox) = self.outbox(participant) {
+            for member in space.model.members() {
+                if let Some(outbox) = self.outbox(member) {
                     outbox.space();
                 }
             }
@@ -343,7 +389,8 @@ impl HubState {
             .spaces
             .iter()
             .filter(|space| {
-                space.model.participants.is_empty() && !occupied.contains(space.model.id.as_str())
+                space.model.members().next().is_none()
+                    && !occupied.contains(space.model.id.as_str())
             })
             .filter_map(|space| Some((space.closed?, space.model.id.clone())))
             .collect();
@@ -412,6 +459,7 @@ impl HubState {
         };
         if let Some(record) = self.space_mut(&space) {
             record.model.participants.retain(|id| id != participant);
+            record.model.visitors.retain(|id| id != participant);
         }
         self.touch_space(&space);
     }
@@ -419,11 +467,21 @@ impl HubState {
     fn join(&mut self, participant: &str, space: &str) {
         // Not forgotten until the participant is in the space they join, which might be a closed one.
         self.depart(participant);
+        let participates = self
+            .participants
+            .get(participant)
+            .and_then(|record| record.connection)
+            .is_some_and(|connection| self.role(connection, Some(space)).participates());
         let Some(record) = self.space_mut(space) else {
             return;
         };
-        if !record.model.participants.iter().any(|id| id == participant) {
-            record.model.participants.push(participant.to_owned());
+        let members = if participates {
+            &mut record.model.participants
+        } else {
+            &mut record.model.visitors
+        };
+        if !members.iter().any(|id| id == participant) {
+            members.push(participant.to_owned());
         }
         if let Some(record) = self.participants.get_mut(participant) {
             record.space = Some(space.to_owned());
@@ -432,6 +490,7 @@ impl HubState {
         if let Some(outbox) = self.outbox(participant) {
             outbox.clear_audio();
         }
+        self.update_role(participant);
         self.forget_closed();
         self.touch_space(space);
     }
@@ -477,6 +536,7 @@ impl Hub {
             environments: environments::offered(),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
+            max_visitors: AtomicUsize::new(usize::MAX),
             this: this.clone(),
         })
     }
@@ -487,6 +547,11 @@ impl Hub {
             .roots
             .write()
             .expect("workspace roots are never left poisoned") = roots;
+    }
+
+    /// Change the most visitors connected at once; see [`Hub::connect`].
+    pub(crate) fn set_max_visitors(&self, limit: usize) {
+        self.max_visitors.store(limit, Ordering::Relaxed);
     }
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
@@ -529,12 +594,19 @@ impl Hub {
         }
     }
 
-    /// Register a connection. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`].
-    pub fn connect(
-        &self,
-        cancellation: Cancellation,
-    ) -> (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>) {
+    /// Register a connection admitted at the door as `access`. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`]. Returns `None` for a visitor while the most visitors are connected; see `design/security.md`.
+    pub fn connect(&self, cancellation: Cancellation, access: Access) -> Option<Connected> {
         let mut state = self.lock();
+        if access.is_visitor() {
+            let visitors = state
+                .connections
+                .values()
+                .filter(|record| record.access.is_visitor())
+                .count();
+            if visitors >= self.max_visitors.load(Ordering::Relaxed) {
+                return None;
+            }
+        }
         state.next_connection += 1;
         let id = state.next_connection;
         let outbox = Arc::new(Outbox::new());
@@ -544,6 +616,8 @@ impl Hub {
             id,
             ConnectionRecord {
                 outbox: outbox.clone(),
+                access,
+                role: None,
                 participant: None,
                 utterance: None,
                 failed: None,
@@ -562,7 +636,29 @@ impl Hub {
                 },
             },
         );
-        (id, outbox, received, output)
+        Some((id, outbox, received, output))
+    }
+
+    /// End the connections of principals that are no longer valid, such as when their token was revoked, as if they had disconnected.
+    pub fn revoke(&self, valid: impl Fn(&str) -> bool) {
+        let revoked: Vec<(ConnectionId, Cancellation)> = self
+            .lock()
+            .connections
+            .iter()
+            .filter(|(_, record)| {
+                record
+                    .access
+                    .principal
+                    .as_deref()
+                    .is_some_and(|principal| !valid(principal))
+            })
+            .map(|(&id, record)| (id, record.liveness.cancellation.clone()))
+            .collect();
+        for (id, cancellation) in revoked {
+            log::info!("Connection {id} presented a credential that was revoked.");
+            self.disconnect(id);
+            cancellation.cancel();
+        }
     }
 
     /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Release, in the same way, connections whose current write has made no progress for the keepalive timeout: a peer that does not read can receive neither audio nor state. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
@@ -719,14 +815,18 @@ impl Hub {
                     &mut deferred,
                 );
             } else if let Some((participant, space)) = state.member(connection) {
-                self.act(
-                    &mut state,
-                    connection,
-                    &participant,
-                    space.as_deref(),
-                    message,
-                    &mut deferred,
-                );
+                let role = state.role(connection, space.as_deref());
+                match access::refusal(role, &message) {
+                    Some(refusal) => state.error(&participant, refusal),
+                    None => self.act(
+                        &mut state,
+                        connection,
+                        &participant,
+                        space.as_deref(),
+                        message,
+                        &mut deferred,
+                    ),
+                }
             } else if let Some(record) = state.connections.get(&connection) {
                 record.outbox.message(error_message("Send hello first."));
             }
@@ -783,6 +883,8 @@ impl Hub {
             outbox.close();
             return;
         }
+        let access = state.connections[&connection].access.clone();
+        let participant = participant_key(access.principal.as_deref(), &participant);
         if !state.participants.contains_key(&participant) {
             state.next_source += 1;
             let source = state.next_source;
@@ -821,16 +923,24 @@ impl Hub {
             .expect("checked above");
         record.participant = Some(participant.clone());
         record.liveness.greeted = true;
-        let backends = self.backends.info();
-        let roots = self
-            .roots
-            .read()
-            .expect("workspace roots are never left poisoned")
-            .clone();
+        let role = access.role(None);
+        record.role = Some(role);
+        // Only owners create spaces, so only they are told what they could be created with.
+        let (backends, roots) = if role == ConnectionRole::Owner {
+            let roots = self
+                .roots
+                .read()
+                .expect("workspace roots are never left poisoned")
+                .clone();
+            (self.backends.info(), roots)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         outbox.message(ServerMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             server: crate::SERVER_NAME.to_owned(),
             source,
+            role,
             backends,
             roots,
             environments: self.environments.clone(),
@@ -988,6 +1098,7 @@ impl Hub {
                 if let Some(record) = state.participants.get_mut(participant) {
                     record.last_space = None;
                 }
+                state.update_role(participant);
                 outbox.spaces();
             }
             ClientMessage::Gate { .. } => {
@@ -1174,7 +1285,7 @@ impl Hub {
                     return;
                 };
                 let source = state.participants[participant].source;
-                for other in &space.model.participants {
+                for other in space.model.members() {
                     if other != participant {
                         state.send(
                             other,
@@ -1253,6 +1364,13 @@ impl Hub {
             let Some((participant, Some(space))) = state.member(connection) else {
                 return;
             };
+            // Visitors send no audio; anything they send is neither relayed nor transcribed. See `design/security.md`.
+            if !state.role(connection, Some(&space)).participates() {
+                log::debug!(
+                    "Dropped audio from {participant}, who does not participate in {space}."
+                );
+                return;
+            }
             let record = state
                 .connections
                 .get_mut(&connection)
@@ -1295,7 +1413,7 @@ impl Hub {
                 return;
             };
             if let Some(space) = state.space(&space) {
-                for other in &space.model.participants {
+                for other in space.model.members() {
                     if *other != participant
                         && let Some(outbox) = state.outbox(other)
                     {
@@ -1662,21 +1780,21 @@ impl Hub {
         self.recount(&mut state);
     }
 
-    /// Announce an agent speech segment to the space's current participants, in order with its frames.
+    /// Announce an agent speech segment to everyone in the space now, in order with its frames.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn agent_speech(&self, space: &str, message: ServerMessage) {
         let state = self.lock();
         let Some(record) = state.space(space) else {
             return;
         };
-        for participant in &record.model.participants {
-            if let Some(outbox) = state.outbox(participant) {
+        for member in record.model.members() {
+            if let Some(outbox) = state.outbox(member) {
                 outbox.agent_message(message.clone());
             }
         }
     }
 
-    /// Send one agent speech frame to the space's current participants. A participant who joined mid-segment receives from here on.
+    /// Send one agent speech frame to everyone in the space now. Someone who joined mid-segment receives from here on.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn agent_audio(&self, space: &str, frame: &AudioFrame) {
         let Ok(encoded) = Frame::audio(frame).try_encode() else {
@@ -1687,22 +1805,22 @@ impl Hub {
         let Some(record) = state.space(space) else {
             return;
         };
-        for participant in &record.model.participants {
-            if let Some(outbox) = state.outbox(participant) {
+        for member in record.model.members() {
+            if let Some(outbox) = state.outbox(member) {
                 outbox.agent_audio(encoded.clone());
             }
         }
     }
 
-    /// Tell the space's participants that agent speech could not be produced.
+    /// Tell everyone in the space that agent speech could not be produced.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn speech_failed(&self, space: &str, error: String) {
         let state = self.lock();
         let Some(record) = state.space(space) else {
             return;
         };
-        for participant in &record.model.participants {
-            state.error(participant, error.clone());
+        for member in record.model.members() {
+            state.error(member, error.clone());
         }
     }
 
@@ -1767,7 +1885,7 @@ mod tests {
 
     /// Connect and say hello as `participant`.
     fn greet(hub: &Hub, participant: &str) -> ConnectionId {
-        let (connection, ..) = hub.connect(Cancellation::new());
+        let (connection, ..) = hub.connect(Cancellation::new(), Access::open()).unwrap();
         hub.handle(
             connection,
             ClientMessage::Hello {
@@ -1815,12 +1933,42 @@ mod tests {
     }
 
     #[test]
+    fn visitors_are_not_counted_as_participants() {
+        let hub = hub();
+        let (visitor, ..) = hub.connect(Cancellation::new(), Access::visitor()).unwrap();
+        hub.handle(
+            visitor,
+            ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                participant: "vic".to_owned(),
+                name: "Vic".to_owned(),
+            },
+        );
+        assert_eq!(hub.counts(), counts(0, 0));
+        greet(&hub, "ada");
+        assert_eq!(hub.counts(), counts(0, 1));
+
+        // The limit applies to visitors only.
+        hub.set_max_visitors(1);
+        assert!(
+            hub.connect(Cancellation::new(), Access::visitor())
+                .is_none()
+        );
+        assert!(hub.connect(Cancellation::new(), Access::open()).is_some());
+        hub.disconnect(visitor);
+        assert!(
+            hub.connect(Cancellation::new(), Access::visitor())
+                .is_some()
+        );
+    }
+
+    #[test]
     fn counts_follow_connections_and_listed_spaces() {
         let hub = hub();
         assert_eq!(hub.counts(), counts(0, 0));
 
         // A connection counts once it has said hello.
-        let (silent, ..) = hub.connect(Cancellation::new());
+        let (silent, ..) = hub.connect(Cancellation::new(), Access::open()).unwrap();
         assert_eq!(hub.counts(), counts(0, 0));
         let mut ada = 0;
         assert!(notifies(&hub, || ada = greet(&hub, "ada")));
@@ -1887,9 +2035,11 @@ mod tests {
         };
         let hello = Duration::from_secs(3600);
         let blocked = Cancellation::new();
-        let (_, _, blocked_received, blocked_output) = hub.connect(blocked.clone());
+        let (_, _, blocked_received, blocked_output) =
+            hub.connect(blocked.clone(), Access::open()).unwrap();
         let flowing = Cancellation::new();
-        let (_, _, flowing_received, flowing_output) = hub.connect(flowing.clone());
+        let (_, _, flowing_received, flowing_output) =
+            hub.connect(flowing.clone(), Access::open()).unwrap();
 
         let start = Instant::now();
         // Both peers keep sending. One write is never accepted; the other connection's writes complete.

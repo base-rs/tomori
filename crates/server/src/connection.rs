@@ -11,6 +11,7 @@ use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use protocol::{Frame, FrameDecoder, ServerMessage};
 
+use crate::access::Access;
 use crate::hub::{ConnectionId, Hub, Output};
 use crate::outbox::{Outbox, Popped};
 
@@ -39,10 +40,15 @@ pub struct ConnectionBody<B: ReadableBody> {
 }
 
 impl<B: ReadableBody> ConnectionBody<B> {
-    /// `cancellation` must end only this connection's HTTP exchange; the hub cancels it when the connection goes silent. See [`Hub::sweep`].
-    pub fn new(hub: Arc<Hub>, request: B, cancellation: Cancellation) -> Self {
-        let (id, outbox, received, output) = hub.connect(cancellation);
-        Self {
+    /// `cancellation` must end only this connection's HTTP exchange; the hub cancels it when the connection goes silent. See [`Hub::sweep`]. Returns `None` if the hub refuses the connection, as a visitor beyond the limit.
+    pub fn new(
+        hub: Arc<Hub>,
+        request: B,
+        cancellation: Cancellation,
+        access: Access,
+    ) -> Option<Self> {
+        let (id, outbox, received, output) = hub.connect(cancellation, access)?;
+        Some(Self {
             hub,
             id,
             outbox,
@@ -52,7 +58,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             decoder: FrameDecoder::new(),
             input_ended: false,
             finished: false,
-        }
+        })
     }
 
     /// Append waiting outgoing frames to `output`, up to the chunk target. Returns false once the outbox is closed and drained.

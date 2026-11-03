@@ -66,6 +66,28 @@ pub enum Activity {
     Unknown,
 }
 
+/// What a connection may do where it is now: an owner anywhere, a collaborator in the space they were admitted to, and a visitor otherwise. `Unknown` stands for a role a newer server sends that this build does not know, and permits nothing beyond a visitor's actions. See `design/security.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionRole {
+    /// Everything a collaborator can do, and creating spaces and listing an agent's sessions.
+    Owner,
+    /// Acting in the space: talking to the agent, deciding approvals, answering questions and the like.
+    Collaborator,
+    /// Watching: listing spaces, joining one to watch and hear it, leaving and knocking.
+    Visitor,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl ConnectionRole {
+    /// Whether this role makes its holder a participant in the space they are in, able to act on it.
+    pub fn participates(self) -> bool {
+        matches!(self, Self::Owner | Self::Collaborator)
+    }
+}
+
 /// The complete shared state of a space, identical for every participant. See `design/spaces.md`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpaceState {
@@ -346,6 +368,22 @@ mod tests {
         let json = serde_json::to_value(&approval).unwrap();
         assert_eq!(json["options"][0]["id"], "suggestions");
         assert_eq!(serde_json::from_value::<Approval>(json).unwrap(), approval);
+    }
+
+    #[test]
+    fn roles_a_newer_server_adds_are_read_as_unknown() {
+        assert_eq!(
+            serde_json::from_str::<ConnectionRole>("\"moderator\"").unwrap(),
+            ConnectionRole::Unknown
+        );
+        assert_eq!(
+            serde_json::to_value(ConnectionRole::Collaborator).unwrap(),
+            "collaborator"
+        );
+        assert!(ConnectionRole::Owner.participates());
+        assert!(ConnectionRole::Collaborator.participates());
+        assert!(!ConnectionRole::Visitor.participates());
+        assert!(!ConnectionRole::Unknown.participates());
     }
 
     #[test]

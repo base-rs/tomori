@@ -13,8 +13,8 @@ use crate::{
 };
 use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
-    Activity, BackendInfo, ClientMessage, Decision, EnvironmentInfo, QueueState, Role,
-    ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, EnvironmentInfo, QueueState,
+    Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
 };
 use std::{
     sync::Arc,
@@ -107,6 +107,8 @@ impl LobbyStep {
 pub struct Conversation {
     /// This participant's number on the connected server, from its Welcome, which the server records on their queued input. Kept while the connection is down, since a reconnect keeps it; see `design/security.md`.
     source: Option<u32>,
+    /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
+    role: ConnectionRole,
     name: String,
     mode: Mode,
     servers: Vec<Choice>,
@@ -183,6 +185,7 @@ impl Conversation {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             source: None,
+            role: ConnectionRole::Unknown,
             name: name.into(),
             mode: Mode::Servers,
             servers: Vec::new(),
@@ -305,6 +308,7 @@ impl Conversation {
         self.connected = Some(choice);
         self.state = None;
         self.source = None;
+        self.role = ConnectionRole::Unknown;
         self.spaces.clear();
         self.listed = false;
         self.selected = 0;
@@ -376,13 +380,15 @@ impl Conversation {
         if let ConnectionState::Connected {
             server,
             source,
+            role,
             backends,
             roots,
             environments,
         } = &state
         {
-            log::info!("Connected to {server}");
+            log::info!("Connected to {server} as {role:?}");
             self.source = Some(*source);
+            self.role = *role;
             self.error = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
@@ -400,6 +406,10 @@ impl Conversation {
 
     fn receive(&mut self, message: ServerMessage) {
         match message {
+            ServerMessage::Role { role } => {
+                log::info!("Now {role:?}");
+                self.role = role;
+            }
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
                 self.selected = if self.listed && self.selected == self.spaces.len() {
@@ -1907,6 +1917,7 @@ mod tests {
         Event::State(ConnectionState::Connected {
             source: 1,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
             backends,
             roots,
             environments: sky(),
@@ -2425,6 +2436,7 @@ mod tests {
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 1,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
             backends: backends(),
             roots: roots(),
             environments: vec![
@@ -2473,6 +2485,7 @@ mod tests {
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 1,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
             backends: backends(),
             roots: roots(),
             environments: vec![],
@@ -3001,6 +3014,7 @@ mod tests {
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 2,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
             backends: vec![],
             roots: vec![],
             environments: sky(),

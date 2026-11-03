@@ -27,8 +27,10 @@ pub struct SpaceModel {
     pub environment: String,
     /// The bound session's identifier, namespaced by backend.
     pub session: String,
-    /// Participant identifiers, in join order.
+    /// Participants (owners and collaborators), by their hub key, in join order.
     pub participants: Vec<String>,
+    /// Visitors watching the space, by their hub key, in join order. They receive what participants receive, but are not participants; see `design/security.md`.
+    pub visitors: Vec<String>,
     busy: Option<bool>,
     closed: bool,
     messages: Vec<MessageModel>,
@@ -163,6 +165,7 @@ impl SpaceModel {
             environment,
             session,
             participants: Vec::new(),
+            visitors: Vec::new(),
             busy: snapshot.busy,
             closed: false,
             messages: Vec::new(),
@@ -594,6 +597,11 @@ impl SpaceModel {
             pending.answers.clear();
             self.questions.push_front(pending);
         }
+    }
+
+    /// Everyone in the space, participants and visitors, who receive its state, presence, audio and speech.
+    pub fn members(&self) -> impl Iterator<Item = &String> {
+        self.participants.iter().chain(&self.visitors)
     }
 
     pub fn state(&self, participants: Vec<Participant>) -> SpaceState {

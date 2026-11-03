@@ -303,6 +303,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
             protocol,
             server,
             source,
+            role,
             backends,
             roots,
             environments,
@@ -315,6 +316,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
             context.set_state(ConnectionState::Connected {
                 source,
                 server,
+                role,
                 backends,
                 roots,
                 environments,

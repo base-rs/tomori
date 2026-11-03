@@ -5,11 +5,13 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use base_http::body::{BodyError, BodyFrame, ReadableBody};
-use base_http::{InterimHandler, InterimResponses, Method, Request, Response, Status};
+use base_http::{Fields, InterimHandler, InterimResponses, Method, Request, Response, Status};
 use base_http_server::Handler;
 use base_scheduler::Cancellation;
+use security::Credentials;
 
 use crate::connection::ConnectionBody;
+use crate::door::Door;
 use crate::hub::Hub;
 
 /// The HTTP routes of the server: `POST /connect` for client connections and `GET /health`.
@@ -17,12 +19,36 @@ use crate::hub::Hub;
 /// The cancellation passed to each call must be specific to that HTTP connection, as [`crate::Server::run`] arranges: a connection that goes silent is ended by cancelling it.
 pub struct Application {
     hub: Arc<Hub>,
+    door: Door,
 }
 
 impl Application {
     pub(crate) fn new(hub: Arc<Hub>) -> Self {
-        Self { hub }
+        Self {
+            hub,
+            door: Door::Open,
+        }
     }
+
+    pub(crate) fn set_door(&mut self, door: Door) {
+        self.door = door;
+    }
+
+    pub(crate) fn door(&self) -> &Door {
+        &self.door
+    }
+}
+
+/// The credentials on a request. An `Authorization` field that is not text is presented as an empty token, so that it is refused.
+fn credentials(fields: &Fields) -> Credentials {
+    fn text(value: &[u8]) -> Option<&str> {
+        std::str::from_utf8(value).ok()
+    }
+    let authorization = fields
+        .values("authorization")
+        .next()
+        .map(|value| text(value).unwrap_or_default());
+    Credentials::from_fields(authorization, fields.values("cookie").filter_map(text))
 }
 
 /// A response body: either a client connection or a small fixed document.
@@ -117,13 +143,37 @@ impl Handler for Application {
         let post = request.method == Method::POST;
         Ok(match path {
             protocol::CONNECT_PATH if post => {
-                let body =
-                    ConnectionBody::new(self.hub.clone(), request.body, cancellation.clone());
-                response(
-                    Status::OK,
-                    protocol::CONTENT_TYPE,
-                    ResponseBody::Connection(body),
-                )
+                // Credentials are checked before the connection reaches the hub; every refusal gets the same reply. See `design/security.md`.
+                let Some(access) = self.door.admit(&credentials(&request.fields)) else {
+                    log::debug!("Refused a connection whose credentials were not accepted.");
+                    let mut refused = response(
+                        Status::new(401).expect("valid status"),
+                        "text/plain",
+                        ResponseBody::fixed("Unauthorized.\n"),
+                    );
+                    refused
+                        .fields
+                        .add("WWW-Authenticate", "Bearer")
+                        .expect("valid challenge");
+                    return Ok(refused);
+                };
+                match ConnectionBody::new(
+                    self.hub.clone(),
+                    request.body,
+                    cancellation.clone(),
+                    access,
+                ) {
+                    Some(body) => response(
+                        Status::OK,
+                        protocol::CONTENT_TYPE,
+                        ResponseBody::Connection(body),
+                    ),
+                    None => response(
+                        Status::new(503).expect("valid status"),
+                        "text/plain",
+                        ResponseBody::fixed("Too many visitors are connected.\n"),
+                    ),
+                }
             }
             "/health" if get => response(
                 Status::OK,

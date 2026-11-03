@@ -50,7 +50,9 @@ pub enum ConnectionState {
         /// This client's participant number, which other clients see as the audio frame source.
         source: u32,
         server: String,
-        /// The server's backends, so the client shows only actions each supports.
+        /// What this connection may do in the lobby. A [`protocol::ServerMessage::Role`] follows whenever it changes. See `design/security.md`.
+        role: protocol::ConnectionRole,
+        /// The server's backends, so the client shows only actions each supports. Empty unless this connection is an owner.
         backends: Vec<protocol::BackendInfo>,
         /// The directories a space may run in, so the client can choose one without typing a path.
         roots: Vec<protocol::WorkspaceRoot>,
@@ -106,6 +108,7 @@ mod tests {
             ConnectionState::Connected {
                 source: 1,
                 server: "s".into(),
+                role: protocol::ConnectionRole::Owner,
                 backends: vec![],
                 roots: vec![],
                 environments: vec![],

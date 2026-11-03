@@ -79,6 +79,10 @@ impl Transcriber for TextTranscriber {
 pub struct TestServer {
     pub address: SocketAddr,
     pub backend: FakeBackend,
+    /// The token store, for a server that admits by tokens; see [`TestServer::with_tokens`].
+    pub tokens: Option<Arc<security::TokenStore>>,
+    /// The token store's temporary directory, removed when the server is dropped.
+    state: Option<std::path::PathBuf>,
     cancellation: Cancellation,
     thread: Option<JoinHandle<()>>,
 }
@@ -87,6 +91,83 @@ impl TestServer {
     /// A server whose fake sessions answer every prompt immediately.
     pub fn start() -> Self {
         Self::with_backend(FakeBackend::new())
+    }
+
+    /// A server that admits holders of its tokens, issued with [`TestServer::issue`], and anyone else as a visitor if `visitors`. `configure` may change the server further, such as its visitor limit.
+    pub fn with_tokens(
+        visitors: bool,
+        configure: impl FnOnce(Server) -> Server + Send + 'static,
+    ) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let state = std::env::temp_dir().join(format!(
+            "tomori-test-tokens-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&state);
+        let store = Arc::new(security::TokenStore::open(&state).expect("the token store opens"));
+        let tokens = store.clone();
+        let mut server = Self::with_server(FakeBackend::new(), move |backends| {
+            configure(
+                Server::new(backends, Arc::new(TextTranscriber::default()))
+                    .with_tokens(tokens, visitors),
+            )
+        });
+        server.tokens = Some(store);
+        server.state = Some(state);
+        server
+    }
+
+    /// Issue a token granting `grant`, as `tomori-server auth mint` does.
+    pub fn issue(&self, name: &str, grant: security::Grant) -> (security::Entry, String) {
+        self.tokens
+            .as_ref()
+            .expect("the server admits by tokens")
+            .issue(name, grant)
+            .expect("the token is issued")
+    }
+
+    /// Revoke a token as `tomori-server auth revoke` does, from another process's view of the token store, which the server notices when it next reads the store.
+    pub fn revoke_elsewhere(&self, id: &str) -> bool {
+        let state = self.state.as_ref().expect("the server admits by tokens");
+        security::TokenStore::open(state)
+            .expect("the token store opens")
+            .revoke(id)
+            .expect("the token store is written")
+    }
+
+    /// Open a connection presenting `token`, say hello and wait for the welcome.
+    pub fn connect_with_token(&self, participant: &str, name: &str, token: &str) -> TestClient {
+        let mut client = TestClient::open_with(
+            self.address,
+            &[("Authorization", &format!("Bearer {token}"))],
+        );
+        client.hello(participant, name);
+        client
+    }
+
+    /// Open `POST /connect` with the `fields` given, and return the response's status and body, for a connection that is refused.
+    pub fn refused(&self, fields: &[(&str, &str)]) -> (u16, String) {
+        let mut stream = TcpStream::connect(self.address).unwrap();
+        let fields: String = fields
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        write!(
+            stream,
+            "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nContent-Length: 0\r\nConnection: close\r\n{fields}\r\n",
+            protocol::CONNECT_PATH,
+            protocol::CONTENT_TYPE
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response[9..12].parse().unwrap();
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_owned())
+            .unwrap_or_default();
+        (status, body)
     }
 
     pub fn with_backend(backend: FakeBackend) -> Self {
@@ -137,6 +218,8 @@ impl TestServer {
         Self {
             address,
             backend,
+            tokens: None,
+            state: None,
             cancellation,
             thread: Some(thread),
         }
@@ -177,6 +260,9 @@ impl Drop for TestServer {
                 result.expect("the server thread exits cleanly");
             }
         }
+        if let Some(state) = self.state.take() {
+            let _ = std::fs::remove_dir_all(state);
+        }
     }
 }
 
@@ -187,17 +273,28 @@ pub struct TestClient {
     audio: Receiver<AudioFrame>,
     /// The audio source number assigned in the welcome.
     pub source: u32,
+    /// The role named in the welcome.
+    pub role: protocol::ConnectionRole,
     sequence: u32,
 }
 
 impl TestClient {
     /// Open `POST /connect` without saying hello.
     pub fn open(address: SocketAddr) -> Self {
+        Self::open_with(address, &[])
+    }
+
+    /// Open `POST /connect` with the extra request `fields` given, such as credentials, without saying hello.
+    pub fn open_with(address: SocketAddr, fields: &[(&str, &str)]) -> Self {
         let mut stream = TcpStream::connect(address).unwrap();
         stream.set_nodelay(true).unwrap();
+        let fields: String = fields
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
         write!(
             stream,
-            "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n{fields}\r\n",
             protocol::CONNECT_PATH,
             protocol::CONTENT_TYPE
         )
@@ -240,6 +337,7 @@ impl TestClient {
             messages,
             audio,
             source: 0,
+            role: protocol::ConnectionRole::Unknown,
             sequence: 0,
         }
     }
@@ -250,8 +348,8 @@ impl TestClient {
             participant: participant.to_owned(),
             name: name.to_owned(),
         });
-        self.source = self.wait_for(|message| match message {
-            ServerMessage::Welcome { source, .. } => Some(*source),
+        (self.source, self.role) = self.wait_for(|message| match message {
+            ServerMessage::Welcome { source, role, .. } => Some((*source, *role)),
             _ => None,
         });
     }

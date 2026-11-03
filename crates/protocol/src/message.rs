@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BackendInfo, EnvironmentInfo, Gate, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    BackendInfo, ConnectionRole, EnvironmentInfo, Gate, SessionSummary, SpaceState, SpaceSummary,
+    WorkspaceRoot,
 };
 
 /// A tracked pose in the space's coordinate system.
@@ -129,9 +130,12 @@ pub enum ServerMessage {
         server: String,
         /// The participant number used as [`crate::AudioFrame::source`] for this client's forwarded audio.
         source: u32,
-        /// The server's backends, so a client shows only actions each supports.
+        /// What this connection may do in the lobby; [`ServerMessage::Role`] follows whenever it changes. Unknown if absent.
+        #[serde(default)]
+        role: ConnectionRole,
+        /// The server's backends, so a client shows only actions each supports. Empty unless the connection is an owner, since only owners create spaces.
         backends: Vec<BackendInfo>,
-        /// The directories a space may run in, so a client can choose one without typing a path.
+        /// The directories a space may run in, so a client can choose one without typing a path. Empty unless the connection is an owner.
         roots: Vec<WorkspaceRoot>,
         /// The environments a space may be bound to, the first being the one bound when a `CreateSpace` names none. Absent from older servers.
         #[serde(default)]
@@ -139,6 +143,10 @@ pub enum ServerMessage {
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
+    },
+    /// What this connection may now do, sent whenever its role changes, such as on joining or leaving a space. See `design/security.md`.
+    Role {
+        role: ConnectionRole,
     },
     /// The answer to [`ClientMessage::ListSessions`].
     Sessions {

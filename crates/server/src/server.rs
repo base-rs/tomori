@@ -25,6 +25,7 @@ use protocol::Keepalive;
 use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT, Watch};
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
+use crate::door::Door;
 use crate::hub::{CreateRequest, Hub, Job, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
@@ -57,6 +58,9 @@ pub struct Server {
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
 pub const DEFAULT_PARTICIPANT_RETENTION: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// The most visitors connected at once, so that visitors cannot take every connection slot from participants. See `design/security.md`.
+pub const DEFAULT_MAX_VISITORS: usize = 64;
 
 /// The most connections served at once; further peers wait in the listen backlog.
 const MAX_CONNECTIONS: usize = 256;
@@ -97,6 +101,7 @@ impl Server {
         let (sender, jobs) = async_channel::unbounded();
         let slots = SpaceSlots::new(DEFAULT_MAX_SPACES);
         let hub = Hub::new(backends, transcriber, sender, Vec::new(), slots.clone());
+        hub.set_max_visitors(DEFAULT_MAX_VISITORS);
         Self {
             application: Application::new(hub.clone()),
             hub,
@@ -146,6 +151,18 @@ impl Server {
             self.hub.set_roots(roots.to_protocol());
         }
         self.roots.get_or_insert(roots);
+        self
+    }
+
+    /// Admit holders of the tokens in `store` as what each grants, and anyone without credentials as a visitor if `visitors`, or not at all. Without this, everyone is an owner, as with `tomori-server --auth open`. See `design/security.md`.
+    pub fn with_tokens(mut self, store: Arc<security::TokenStore>, visitors: bool) -> Self {
+        self.application.set_door(Door::tokens(store, visitors));
+        self
+    }
+
+    /// Change the most visitors connected at once; see [`DEFAULT_MAX_VISITORS`].
+    pub fn with_max_visitors(self, limit: usize) -> Self {
+        self.hub.set_max_visitors(limit);
         self
     }
 
@@ -490,6 +507,7 @@ impl Server {
                     self.admission.sweep(now, self.request_timeout);
                     self.hub.sweep(now, &self.keepalive, self.request_timeout);
                     self.hub.forget_departed(now, self.retention);
+                    self.revoke_withdrawn();
                 }
                 Err(error) => {
                     if !cancellation.is_cancelled() {
@@ -498,6 +516,20 @@ impl Server {
                     return;
                 }
             }
+        }
+    }
+
+    /// End the connections whose tokens were revoked since the token store was last read, such as by `tomori-server auth revoke` in another process. See `design/security.md`.
+    fn revoke_withdrawn(&self) {
+        let Some(store) = self.application.door().store() else {
+            return;
+        };
+        match store.reload() {
+            Ok(true) => self
+                .hub
+                .revoke(|principal| store.entry(principal).is_some()),
+            Ok(false) => {}
+            Err(error) => log::warn!("Could not read the token store: {error}."),
         }
     }
 

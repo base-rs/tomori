@@ -3189,6 +3189,7 @@ dependencies = [
  "libc",
  "log",
  "protocol",
+ "security",
  "serde",
  "serde_json",
  "speech",

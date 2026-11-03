@@ -29,6 +29,10 @@ name = "spaces"
 required-features = ["fake"]
 
 [[test]]
+name = "security"
+required-features = ["fake"]
+
+[[test]]
 name = "workspaces"
 required-features = ["fake"]
 
@@ -66,6 +70,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc",
 gethostname = "1.1"
 log = "0.4"
 protocol = { path = "../protocol" }
+security = { path = "../security", features = ["issue"] }
 serde = "1"
 serde_json = "1"
 speech = { path = "../speech", optional = true }
@@ -74,4 +79,5 @@ speech = { path = "../speech", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+security = { path = "../security", features = ["issue"] }
 client = { path = "../client" }
