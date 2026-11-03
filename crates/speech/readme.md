@@ -11,10 +11,23 @@ Speech recognition and synthesis for the Tomori server, run in the server proces
 |---|---|---|
 | Streaming recognition (default) | NeMo FastConformer streaming transducer, English, 480 ms chunks, int8 | `stt::TransducerRecognizer` |
 | Transcript punctuation | English CNN-BiLSTM punctuation and casing, int8 | `stt::CnnBilstmPunctuator`, applied by `stt::Punctuated` |
-| Whole-clip recognition (comparison only) | Whisper `small.en`, int8 | `stt::WhisperRecognizer` |
+| Whole-clip recognition (`--speech-backend offline`) | Whisper `small.en`, int8 | `stt::WhisperRecognizer`, run by `stt::OfflineRecognition` |
+| Pauses in long whole-clip utterances | Silero voice activity detector | `stt::SileroVad` |
 | Synthesis | Kokoro multi-language v1.0, voice 3 (`af_heart`) | `tts::KokoroSynthesizer` |
 
-The streaming recognizer decodes each utterance once, as the audio arrives, so partial words appear while the participant is still speaking and the final transcript is ready shortly after they let go. Its vocabulary has no capitals or punctuation, so `stt::Punctuated` passes each final transcript through the punctuation model on the recognition thread, and ends it with a full stop, question mark or exclamation mark. Partial transcripts stay lowercase, because punctuating them would change words already shown. Punctuation never fails an utterance: if the model fails or changes the words, the transcript is delivered as recognized, and a panic disables punctuation only, logged once. Without the punctuation model, transcripts are lowercase and unpunctuated, and the server says so when it starts. Whisper cannot stream, so the server does not use it; it is kept for the benchmark below.
+The streaming recognizer decodes each utterance once, as the audio arrives, so partial words appear while the participant is still speaking and the final transcript is ready shortly after they let go. Its vocabulary has no capitals or punctuation, so `stt::Punctuated` passes each final transcript through the punctuation model on the recognition thread, and ends it with a full stop, question mark or exclamation mark. Partial transcripts stay lowercase, because punctuating them would change words already shown. Punctuation never fails an utterance: if the model fails or changes the words, the transcript is delivered as recognized, and a panic disables punctuation only, logged once. Without the punctuation model, transcripts are lowercase and unpunctuated, and the server says so when it starts. Whisper cannot stream, so the server uses it only with `--speech-backend offline`, which buffers each utterance and decodes it once it ends; it is also compared in the benchmark below.
+
+### Long utterances offline
+
+Whisper decodes at most 30 seconds at once. `stt::OfflineRecognition` decodes an utterance of up to 28 seconds (`stt::MAX_SEGMENT`) whole, and splits a longer one into consecutive segments with `stt::segment::cut`, decoding them in order and joining their transcripts with spaces:
+
+- Each segment but the last ends at a point, every 10 ms in the last 10 seconds before its limit: the quietest point whose surrounding 250 ms holds no speech heard by the Silero detector. If the detector is not installed, or hears speech throughout the search or nowhere in it, the point with the least energy in its 250 ms, if that is markedly quieter than most of the search. A signal with no pause at all is cut at the limit.
+- For a cut, the detector hears only the search and a second either side of it. If it fails or panics, the cut is placed by energy alone, and after a panic the detector is not used again.
+- Whisper writes words for audio without speech, such as "you" for silence. Every segment is decoded, but in an utterance longer than one segment, a transcript that is only a bracketed note such as "[BLANK_AUDIO]" or "(static)" is left out, as is one of at most two words for a segment the detector hears no speech in. An utterance that fits in one segment is reported as before.
+- Utterances that have ended take turns a segment at a time, the one that has waited longest first, so a short utterance waits for at most one segment of a long one, and two long ones alternate.
+- An utterance that passes 5 minutes (`stt::MAX_UTTERANCE`) fails at once with `Error::TooLong`, and nothing of it is decoded.
+
+On a 32-core Linux PC, the ignored test `transcribes_a_long_utterance_with_whisper` decodes 58.7 seconds of LibriSpeech, in three segments, in about 8.6 seconds, with or without the detector, and the transcripts match the reference apart from British spellings.
 
 Kokoro reports each sentence as soon as it is generated.
 
@@ -49,7 +62,7 @@ bash scripts/fetch-tts-model.sh   # .tools/tts/kokoro-multi-lang-v1_0 (380 MB)
 cargo run -p server --bin tomori-server -- --speech-root .
 ```
 
-`TransducerConfig::from_root`, `PunctuationConfig::from_root`, `KokoroConfig::from_root` and `WhisperConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) for the benchmark.
+`TransducerConfig::from_root`, `PunctuationConfig::from_root`, `KokoroConfig::from_root`, `WhisperConfig::from_root` and `SileroVadConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) and the Silero voice activity detector (`silero_vad.onnx`, 0.6 MB, checked against the digest the release publishes), for `--speech-backend offline` and the benchmark. Without the detector, the offline backend splits long utterances by loudness alone, and the server says so when it starts.
 
 ## Building and linking
 
