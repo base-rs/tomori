@@ -564,6 +564,7 @@ impl Connection {
             conversation.microphone_failed(error);
         }
         self.browse(focused && conversation.is_browsing(), conversation);
+        conversation.tick(Instant::now());
         conversation.expire_pairing(Instant::now());
         let mut reopen = None;
         while let Some(event) = self.client.as_ref().and_then(Client::try_event) {

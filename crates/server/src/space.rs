@@ -174,6 +174,13 @@ fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
     }
 }
 
+/// Whether `message` is a reply: an assistant message the agent completed with text, not tool calls alone.
+fn is_reply(message: &MessageModel) -> bool {
+    message.role == protocol::Role::Assistant
+        && message.completed
+        && !message.text.trim().is_empty()
+}
+
 /// The text delivered to the agent for a queue entry. With attribution, the speaker's display name prefixes the text as `Name: text`.
 pub fn attributed(speaker: &str, text: &str, attribution: bool) -> String {
     if attribution && !speaker.is_empty() {
@@ -271,7 +278,22 @@ impl SpaceModel {
             .iter()
             .map(|message| (message.id.clone(), message.text.clone()))
             .collect();
+        let replied: HashSet<String> = self
+            .messages
+            .iter()
+            .filter(|message| is_reply(message))
+            .map(|message| message.id.clone())
+            .collect();
         self.load_messages(messages);
+        // A reply the agent completed during the gap was not heard either.
+        if self.participants.is_empty()
+            && self
+                .messages
+                .iter()
+                .any(|message| is_reply(message) && !replied.contains(&message.id))
+        {
+            self.unheard = true;
+        }
         for message in self
             .messages
             .iter_mut()
@@ -285,6 +307,10 @@ impl SpaceModel {
         }
         if busy.is_some() {
             self.busy = busy;
+        }
+        // The turn may have ended during the gap, its idle event lost with the rest.
+        if busy == Some(false) {
+            self.turn_ended();
         }
         self.modes = modes;
         let listed: HashSet<&str> = permissions
@@ -515,7 +541,7 @@ impl SpaceModel {
                     let completed = self.message(&message);
                     completed.completed = true;
                     // A message of tool calls alone is a step of the turn, not a reply.
-                    let replied = !completed.text.trim().is_empty();
+                    let replied = is_reply(completed);
                     if replied && self.participants.is_empty() {
                         self.unheard = true;
                     }
@@ -617,6 +643,8 @@ impl SpaceModel {
                 {
                     let mut restored = message_model(message);
                     let shown = &self.messages[index];
+                    // Its end, and so a reply, may only now be known, after a gap that lost its events.
+                    let replied = !is_reply(shown) && is_reply(&restored);
                     // Its text may be recorded before the message is marked completed, and a record does not say
                     // which tools failed: what the space already knows is kept.
                     restored.completed |= shown.completed;
@@ -630,6 +658,12 @@ impl SpaceModel {
                         }
                     }
                     self.messages[index] = restored;
+                    if replied && self.participants.is_empty() {
+                        self.unheard = true;
+                        if self.busy == Some(false) {
+                            self.turn_ended();
+                        }
+                    }
                 }
             }
             Event::Resynchronized { snapshot } => {
@@ -1080,6 +1114,95 @@ mod tests {
         space.participants.push("ada".into());
         space.attend();
         space.apply(Event::Idle);
+        assert_eq!(space.attention(), None);
+    }
+
+    fn assistant(id: &str, text: &str, completed: bool) -> backend::SnapshotMessage {
+        backend::SnapshotMessage {
+            id: id.into(),
+            role: backend::Role::Assistant,
+            parts: vec![Part::Text { text: text.into() }],
+            completed,
+        }
+    }
+
+    #[test]
+    fn a_reply_that_ends_during_a_reconnection_still_needs_attention() {
+        let reconnecting = || Event::Reconnecting {
+            reason: "The agent's connection was lost.".into(),
+        };
+        let resynchronized = |busy, messages| Event::Resynchronized {
+            snapshot: Snapshot {
+                busy,
+                messages,
+                ..Snapshot::default()
+            },
+        };
+
+        // The reply completed before the gap, and its turn's end was lost in it.
+        let mut space = model();
+        space.apply(Event::Busy);
+        space.apply(Event::MessageStarted {
+            message: "m".into(),
+            role: backend::Role::Assistant,
+        });
+        space.apply(Event::TextDelta {
+            message: "m".into(),
+            text: "Done.".into(),
+        });
+        space.apply(Event::MessageCompleted {
+            message: "m".into(),
+        });
+        space.apply(reconnecting());
+        assert_eq!(space.attention(), None);
+        space.apply(resynchronized(
+            Some(false),
+            vec![assistant("m", "Done.", true)],
+        ));
+        assert_eq!(space.attention(), Some(Attention::Reply));
+
+        // The whole reply was written during the gap, and is read again with the session.
+        let mut space = model();
+        space.apply(Event::Busy);
+        space.apply(reconnecting());
+        space.apply(resynchronized(
+            Some(false),
+            vec![assistant("n", "All done.", true)],
+        ));
+        assert_eq!(space.attention(), Some(Attention::Reply));
+
+        // Read again while still being written, and restored once the agent has recorded it, after the turn ended.
+        let mut space = model();
+        space.apply(Event::Busy);
+        space.apply(reconnecting());
+        space.apply(resynchronized(Some(true), vec![assistant("o", "", false)]));
+        assert_eq!(space.attention(), None);
+        space.apply(Event::Idle);
+        assert_eq!(space.attention(), None);
+        space.apply(Event::MessageRestored {
+            message: assistant("o", "Finished.", true),
+        });
+        assert_eq!(space.attention(), Some(Attention::Reply));
+
+        // A reply already completed before the gap, read again, is nothing new, and someone in the space heard it.
+        let mut space = model();
+        space.participants.push("ada".into());
+        reply(&mut space, "p", "Heard.");
+        space.participants.clear();
+        space.apply(reconnecting());
+        space.apply(resynchronized(
+            Some(false),
+            vec![assistant("p", "Heard.", true)],
+        ));
+        assert_eq!(space.attention(), None);
+        let mut space = model();
+        space.participants.push("ada".into());
+        space.apply(Event::Busy);
+        space.apply(reconnecting());
+        space.apply(resynchronized(
+            Some(false),
+            vec![assistant("q", "Seen.", true)],
+        ));
         assert_eq!(space.attention(), None);
     }
 

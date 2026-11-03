@@ -28,6 +28,9 @@ const VISITING: &str = "Visitors can watch and listen, but not talk or act here.
 
 const LOST: &str = "Connection lost; your words were not sent.";
 
+/// How long after the remembered server is found the headset waits before connecting to it automatically, so that other servers browsing finds at about the same time are known, and one that needs attention can hold the connection back. See `design/arrival.md`.
+pub const AUTOMATIC_SETTLE: Duration = Duration::from_millis(1500);
+
 /// What the conversation needs done with the connection.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -151,6 +154,8 @@ pub struct Conversation {
     missing: Option<String>,
     /// Whether the remembered server may still be connected to when it appears: only once, before the participant moves the selection or connects.
     automatic: bool,
+    /// When the remembered server, found, is due to be connected automatically; see [`AUTOMATIC_SETTLE`].
+    automatic_at: Option<Instant>,
     /// The server chosen in the server list, while in the lobby or a space.
     connected: Option<Choice>,
     state: Option<ConnectionState>,
@@ -232,6 +237,7 @@ impl Conversation {
             chosen: false,
             missing: None,
             automatic: true,
+            automatic_at: None,
             connected: None,
             state: None,
             spaces: Vec::new(),
@@ -329,12 +335,27 @@ impl Conversation {
             None => self.server = 0,
         }
         self.servers = servers;
-        if self.automatic
-            && !self.chosen
-            && self.mode == Mode::Servers
-            && let Some(choice) = server_choice::automatic(&self.servers).cloned()
-        {
-            self.connect(choice);
+    }
+
+    /// Connect to the remembered server once it has been listed for [`AUTOMATIC_SETTLE`] at `now`, unless the participant chose first. If another server then needs attention and it doesn't, give up connecting automatically, so that the participant can see the other on the server row and nothing connects later while they reach for it. Call every frame.
+    pub fn tick(&mut self, now: Instant) {
+        let remembered = self.servers.iter().any(|choice| {
+            choice.source == server_choice::Source::Remembered && choice.is_available()
+        });
+        if !self.automatic || self.chosen || self.mode != Mode::Servers || !remembered {
+            self.automatic_at = None;
+            return;
+        }
+        if now < *self.automatic_at.get_or_insert(now + AUTOMATIC_SETTLE) {
+            return;
+        }
+        match server_choice::automatic(&self.servers).cloned() {
+            Some(choice) => self.connect(choice),
+            None => {
+                log::info!("Not connecting automatically while another server needs attention.");
+                self.automatic = false;
+                self.automatic_at = None;
+            }
         }
     }
 
@@ -578,6 +599,7 @@ impl Conversation {
                     let title = self
                         .space
                         .as_ref()
+                        .filter(|space| space.id == gone)
                         .map(|space| space.title.clone())
                         .or_else(|| {
                             self.spaces
@@ -660,7 +682,10 @@ impl Conversation {
             self.close_space();
             self.mode = Mode::Space;
         }
-        self.joining = None;
+        // A late update from a space being left does not end a join of another.
+        if entered || self.joining.as_deref() == Some(state.id.as_str()) {
+            self.joining = None;
+        }
         self.leaving = false;
         let request = state
             .approval
@@ -2686,6 +2711,31 @@ mod tests {
     }
 
     #[test]
+    fn a_late_update_from_a_rejoined_space_does_not_lose_the_jump() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
+        conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+        conversation.apply(connected());
+        conversation.apply(space(|_| {}));
+        listed(
+            &mut conversation,
+            vec![
+                summary(SPACE, "Tomori"),
+                needing("notes", "Notes", protocol::Attention::Reply, 5),
+            ],
+        );
+        conversation.take_actions();
+        // The space the server rejoined changes once more before the join is answered.
+        conversation.apply(space(|state| state.activity = Activity::Running));
+        conversation.apply(refused("notes"));
+        assert_eq!(conversation.mode(), Mode::Lobby);
+        assert_eq!(
+            conversation.arrival().unwrap().status.as_deref(),
+            Some("Notes has ended.")
+        );
+    }
+
+    #[test]
     fn a_jump_to_a_space_that_has_gone_says_it_ended() {
         let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
@@ -2796,20 +2846,39 @@ mod tests {
 
     #[test]
     fn the_remembered_server_is_not_connected_while_only_another_needs_attention() {
+        let start = Instant::now();
         let mut conversation = Conversation::new("Ada");
         let mut remembered = advertising("Desktop", "10.0.0.1:8765", 0, 0);
         remembered.source = Source::Remembered;
+        // Browsing finds the remembered server first, and the other a moment later.
+        conversation.set_servers(vec![remembered.clone()]);
+        conversation.tick(start);
+        conversation.tick(start + AUTOMATIC_SETTLE / 2);
+        assert!(conversation.take_actions().is_empty());
         conversation.set_servers(vec![
             remembered.clone(),
             advertising("Laptop", "10.0.0.2:8765", 1, 0),
         ]);
+        conversation.tick(start + AUTOMATIC_SETTLE);
         assert!(conversation.take_actions().is_empty());
         assert_eq!(conversation.mode(), Mode::Servers);
-        // Once nothing elsewhere needs attention, it is connected as before.
+        // Having held back, it gives up, so nothing connects later as the other's attention is dealt with.
         conversation.set_servers(vec![
             remembered.clone(),
             advertising("Laptop", "10.0.0.2:8765", 0, 0),
         ]);
+        conversation.tick(start + AUTOMATIC_SETTLE * 4);
+        assert!(conversation.take_actions().is_empty());
+
+        // When the remembered server needs attention too, it is connected.
+        let mut conversation = Conversation::new("Ada");
+        remembered.replies = Some(1);
+        conversation.set_servers(vec![
+            remembered.clone(),
+            advertising("Laptop", "10.0.0.2:8765", 1, 0),
+        ]);
+        conversation.tick(start);
+        conversation.tick(start + AUTOMATIC_SETTLE);
         assert_eq!(conversation.take_actions(), [Action::Connect(remembered)]);
     }
 
@@ -4761,7 +4830,14 @@ mod tests {
         let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
         assert!(conversation.take_actions().is_empty());
+        let start = Instant::now();
+        conversation.tick(start);
         conversation.set_servers(vec![remembered(), Choice::new("USB", USB, Source::Usb)]);
+        // Not at once: the headset waits a moment for other servers to be found.
+        conversation.tick(start);
+        conversation.tick(start + AUTOMATIC_SETTLE / 2);
+        assert!(conversation.take_actions().is_empty());
+        conversation.tick(start + AUTOMATIC_SETTLE);
         assert!(matches!(
             conversation.take_actions().as_slice(),
             [Action::Connect(choice)] if choice.address == "10.0.0.2:8765"
@@ -4771,6 +4847,8 @@ mod tests {
         conversation.back();
         conversation.take_actions();
         conversation.set_servers(vec![remembered(), Choice::new("USB", USB, Source::Usb)]);
+        conversation.tick(start + AUTOMATIC_SETTLE * 3);
+        conversation.tick(start + AUTOMATIC_SETTLE * 6);
         assert!(conversation.take_actions().is_empty());
         assert_eq!(conversation.mode(), Mode::Servers);
     }
@@ -4788,6 +4866,9 @@ mod tests {
             Choice::new("Other", "10.0.0.3:8765", Source::Discovered),
             Choice::new("USB", USB, Source::Usb),
         ]);
+        let start = Instant::now();
+        conversation.tick(start);
+        conversation.tick(start + AUTOMATIC_SETTLE);
         assert!(conversation.take_actions().is_empty());
         assert_eq!(conversation.mode(), Mode::Servers);
     }

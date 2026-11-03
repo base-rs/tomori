@@ -223,8 +223,13 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
         let space = spaces.remove(index);
         size -= json_len(&space) + 1;
     }
+    // Then the oldest, those that need attention last.
     while size > SNAPSHOT_BUDGET && !spaces.is_empty() {
-        let space = spaces.remove(0);
+        let index = spaces
+            .iter()
+            .position(|space| space.attention.is_none())
+            .unwrap_or(0);
+        let space = spaces.remove(index);
         size -= json_len(&space) + 1;
     }
 }

@@ -282,7 +282,7 @@ The user answered the questions below in November 2026:
 
 The remaining questions follow this document's recommendations:
 
-6. The remembered server is not connected automatically while another listed server advertises attention and it doesn't, so that the participant sees the other on the server row. It is still connected when it needs attention itself, or when nothing else does. The server that is found first may still be connected before another is found.
+6. The remembered server is connected automatically about one and a half seconds after browsing finds it, rather than at once, so that other servers found at about the same time are known. If another server then advertises attention and the remembered one doesn't, it is not connected automatically for the rest of that visit to the server row, so that the participant sees the other and nothing connects while they reach for it.
 7. Mentions are left out until there is a concrete need.
 8. A space that closed while nobody was in it counts as a problem.
 
@@ -291,6 +291,8 @@ Stage 1 differs from the sketch above in a few details:
 - The beacon above a server is the jump object itself, a pulsing diamond in the attention colour, and the server glows with a ring of points in that colour. Servers are still drawn as single cubes rather than constellations, so there are no orbiting points to colour.
 - A reply needs a completed assistant message with text; a turn of tool calls alone is not a reply.
 - An agent refusing a mode while nobody is in the space also counts as a problem, as it sets the space's error.
+- Only a participant's own `Join` clears a problem or a reply. The server putting a participant back in their last space on Hello does not, since they did not see what happened while away; a reconnecting client restores its membership with a `Join`, which does. So a jump that lands in an old space first does not clear that space's attention before moving on.
+- A reply whose turn ends during a backend reconnection counts, learned from the resynchronization or a restored message.
 - With only the TXT counts, the jump picks the most urgent space from the listing it receives on connecting. If nothing needs attention by then, it stays in the lobby and says so, rather than joining a space that was already handled.
 - A jump starts only from the server row, which a participant reaches from a space only by leaving it with `Leave`, so it never needs to leave a space itself yet.
 

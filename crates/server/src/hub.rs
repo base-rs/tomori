@@ -710,11 +710,6 @@ impl HubState {
         if !members.iter().any(|id| id == participant) {
             members.push(participant.to_owned());
         }
-        // A participant who joins sees what happened while nobody was there, for everyone; a visitor watching does not.
-        // See `design/spaces.md`.
-        if participates {
-            record.model.attend();
-        }
         if let Some(record) = self.participants.get_mut(participant) {
             record.space = Some(space.to_owned());
             record.last_space = Some(space.to_owned());
@@ -1771,6 +1766,14 @@ impl Hub {
                     );
                     return;
                 }
+                // A participant who chooses to join sees what happened while nobody was there, for everyone. A visitor
+                // watching does not, and being put back in a space on reconnecting does not count, since what happened
+                // meanwhile was not seen. See `design/spaces.md`.
+                if state.role(connection, Some(&target)).participates()
+                    && let Some(record) = state.space_mut(&target)
+                {
+                    record.model.attend();
+                }
                 state.join(participant, &target);
             }
             ClientMessage::Leave => {
@@ -2663,6 +2666,9 @@ impl Hub {
             return;
         };
         record.model.apply(event);
+        // Stamped now rather than when the snapshot is sent, so a level that ends and starts again within one
+        // snapshot interval starts its age again.
+        record.stamp_attention(Instant::now());
         state.stamp_closed();
         state.pump(space);
         if state.touch_space_paced(space, Instant::now()) {
@@ -3185,6 +3191,66 @@ mod tests {
         assert_eq!(hub.counts(), counts(1, 1));
         let bob = greet(&hub, "bob");
         assert_eq!(listing(&hub, bob)[0].attention, None);
+    }
+
+    #[test]
+    fn being_put_back_in_a_space_on_reconnecting_does_not_clear_its_attention() {
+        let hub = hub();
+        let ada = greet(&hub, "ada");
+        let space = create(&hub, &participant_key(None, "ada"));
+        hub.disconnect(ada);
+        // While Ada is away, the agent replies.
+        for event in [
+            Event::Busy,
+            Event::MessageStarted {
+                message: "m".into(),
+                role: backend::Role::Assistant,
+            },
+            Event::TextDelta {
+                message: "m".into(),
+                text: "Done.".into(),
+            },
+            Event::MessageCompleted {
+                message: "m".into(),
+            },
+            Event::Idle,
+        ] {
+            hub.space_event(&space, event);
+        }
+        assert_eq!(hub.counts(), needing(counts(1, 0), 0, 0, 1));
+        // Reconnecting puts her back in the space, which she has not seen yet; a jump would move on from it.
+        let ada = greet(&hub, "ada");
+        assert_eq!(
+            hub.lock().space(&space).unwrap().model.participants.len(),
+            1
+        );
+        assert_eq!(hub.counts(), needing(counts(1, 1), 0, 0, 1));
+        // A visitor watching it does not clear it.
+        let (visitor, ..) = hub.connect(Cancellation::new(), Access::visitor()).unwrap();
+        hub.handle(
+            visitor,
+            ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                participant: "vic".to_owned(),
+                name: "Vic".to_owned(),
+            },
+        );
+        hub.handle(
+            visitor,
+            ClientMessage::Join {
+                space: space.clone(),
+            },
+        );
+        assert_eq!(hub.lock().space(&space).unwrap().model.visitors.len(), 1);
+        assert_eq!(hub.counts(), needing(counts(1, 1), 0, 0, 1));
+        // Choosing to join it, as her client does to restore its membership, clears it.
+        hub.handle(
+            ada,
+            ClientMessage::Join {
+                space: space.clone(),
+            },
+        );
+        assert_eq!(hub.counts(), counts(1, 1));
     }
 
     #[test]
