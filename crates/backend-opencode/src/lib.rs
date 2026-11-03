@@ -114,6 +114,7 @@ impl Backend for OpenCode {
             interrupt: true,
             questions: true,
             workers: true,
+            instructions: true,
         }
     }
 
@@ -131,6 +132,20 @@ impl Backend for OpenCode {
             .reply_with(move |reply| connection::Command::Create { spec, reply })
             .await?;
         Ok(OpenCodeSession::new(id, events, commands))
+    }
+
+    async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {
+        if let Some(key) = keys.iter().find(|key| !backend::valid_instruction_key(key)) {
+            return Err(Error::new(
+                ErrorKind::Invalid,
+                format!("{key:?} cannot name an instruction entry"),
+            ));
+        }
+        let commands = self.connection()?;
+        let id = id.to_owned();
+        commands
+            .reply_with(move |reply| connection::Command::ForgetInstructions { id, keys, reply })
+            .await
     }
 
     fn shutdown(&self) {

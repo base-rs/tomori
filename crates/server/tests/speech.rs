@@ -355,6 +355,7 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
             directory: "/tmp".into(),
             session: None,
             environment: None,
+            instructions: None,
         })
         .unwrap();
     let space = receive(&ada, |message| match message {
@@ -414,6 +415,7 @@ fn live_audio_reaches_the_space_without_addressing_the_agent_and_resumes_after_x
             directory: "/tmp".into(),
             session: None,
             environment: None,
+            instructions: None,
         })
         .unwrap();
     let space = receive(&ada, |message| match message {
@@ -912,6 +914,7 @@ fn the_client_player_plays_the_spoken_reply() {
             directory: "/tmp".into(),
             session: None,
             environment: None,
+            instructions: None,
         })
         .unwrap();
     let space = receive(&ada, |message| match message {

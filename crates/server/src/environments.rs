@@ -16,6 +16,14 @@ pub fn offered() -> Vec<EnvironmentInfo> {
     }]
 }
 
+/// What the environment `id` tells the agent about what it presents and how to use it, its layer of a space's instructions; see `design/spaces.md`. Empty for Sky, and for an environment this server does not offer, until environments contribute one.
+pub fn instructions(id: &str) -> &'static str {
+    match id {
+        SKY => "",
+        _ => "",
+    }
+}
+
 /// The environment to bind a new space to: `requested`, when the server offers it, or the first offered when the request names none, as from a client that predates environments. Refusals name what is offered and never repeat the request.
 pub fn choose(offered: &[EnvironmentInfo], requested: Option<&str>) -> Result<String, String> {
     let found = match requested {

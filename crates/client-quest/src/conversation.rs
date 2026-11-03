@@ -198,6 +198,8 @@ pub struct Conversation {
     /// The approval a decision was sent for, so another press cannot send a second one.
     decided: Option<String>,
     notice: Option<String>,
+    /// The space's own instructions to the agent that this owner gave for the next space they create, if any. See `design/spaces.md`.
+    next_instructions: Option<String>,
     /// Shown in the lobby after a space you were in or joining has gone, until dismissed with B or another choice.
     ended: Option<String>,
     /// Which list the lobby shows: the spaces, or one of the creation rings.
@@ -296,6 +298,7 @@ impl Conversation {
             option: 0,
             decided: None,
             notice: None,
+            next_instructions: None,
             ended: None,
             step: LobbyStep::Spaces,
             menu: 0,
@@ -993,6 +996,7 @@ impl Conversation {
             knock: self.knock_state(),
             pairing: self.pairable().then(|| self.pairing_item().label),
             notice: self.notice.clone(),
+            instructions: space.and_then(|space| space.instructions.clone()),
         }
     }
 
@@ -1003,6 +1007,41 @@ impl Conversation {
             crate::hand_menu::Choice::Admit(id) => self.decide_knock(&id, true),
             crate::hand_menu::Choice::Decline(id) => self.decide_knock(&id, false),
             crate::hand_menu::Choice::Pair => self.pair(),
+            crate::hand_menu::Choice::ClearInstructions => self.instruct(""),
+        }
+    }
+
+    /// Give the joined space's agent `text` as the space's own instructions, or, outside a space, the agent of the next space this owner creates; empty text removes them. Only owners can, and only where the server shows a space's instructions. Says what happened in the notice. See `design/spaces.md`.
+    pub fn instruct(&mut self, text: &str) {
+        let text = text.trim();
+        if self.role != ConnectionRole::Owner {
+            self.notice = Some("Only owners can give a space instructions.".into());
+            return;
+        }
+        let in_space = self.mode == Mode::Space;
+        match self.space.as_ref().filter(|_| in_space) {
+            Some(space) if space.instructions.is_none() => {
+                self.notice = Some("This agent takes no instructions from Tomori.".into());
+            }
+            Some(_) => {
+                if self.send(ClientMessage::SetInstructions {
+                    text: text.to_owned(),
+                }) {
+                    self.notice = Some(if text.is_empty() {
+                        "Removing this space's instructions.".into()
+                    } else {
+                        "Giving the agent this space's instructions.".into()
+                    });
+                }
+            }
+            None => {
+                self.next_instructions = (!text.is_empty()).then(|| text.to_owned());
+                self.notice = Some(if text.is_empty() {
+                    "The next space you create has no instructions of its own.".into()
+                } else {
+                    "The next space you create is given these instructions.".into()
+                });
+            }
         }
     }
 
@@ -1115,6 +1154,7 @@ impl Conversation {
                 | ClientMessage::SetMode { .. }
                 | ClientMessage::DecideKnock { .. }
                 | ClientMessage::SetSpeech { .. }
+                | ClientMessage::SetInstructions { .. }
                 | ClientMessage::Replay { .. }
                 | ClientMessage::StopReplay
         );
@@ -1271,6 +1311,7 @@ impl Conversation {
             directory,
             session: session.map(|session| session.id),
             environment: None,
+            instructions: self.next_instructions.take(),
         };
         self.submit(create);
     }
@@ -2929,7 +2970,9 @@ fn paginate(text: &str, rows: usize) -> Vec<Vec<String>> {
 mod tests {
     use super::*;
     use crate::server_choice::{Source, USB};
-    use protocol::{Approval, ApprovalOption, Message, Participant, Question, QueueEntry};
+    use protocol::{
+        AgentInstructions, Approval, ApprovalOption, Message, Participant, Question, QueueEntry,
+    };
     use std::time::Duration;
 
     const SPACE: &str = "space-1";
@@ -3942,6 +3985,7 @@ mod tests {
                 directory: "/work/tomori".into(),
                 session: None,
                 environment: Some("sky".into()),
+                instructions: None,
             }]
         );
         // Back at the spaces, with the rings closed.
@@ -3984,6 +4028,7 @@ mod tests {
                 directory: "/work/tomori".into(),
                 session: Some("ses_1".into()),
                 environment: Some("sky".into()),
+                instructions: None,
             }]
         );
         assert_eq!(conversation.arrival().unwrap().ring, None);
@@ -4043,6 +4088,7 @@ mod tests {
                 directory: "/work/tomori".into(),
                 session: None,
                 environment: Some("sky".into()),
+                instructions: None,
             }]
         );
     }
@@ -4224,9 +4270,57 @@ mod tests {
                 directory: "/work/tomori".into(),
                 session: None,
                 environment: Some("observe".into()),
+                instructions: None,
             }]
         );
         assert!(conversation.text().contains("SPACES"));
+    }
+
+    #[test]
+    fn an_owner_gives_the_next_space_or_the_joined_one_instructions() {
+        // Outside a space, they go with the next space created, once.
+        let mut conversation = in_lobby(backends(), roots());
+        conversation.instruct("  Mind the docs. ");
+        create_in(&mut conversation);
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { instructions: Some(text), .. }] if text == "Mind the docs."
+        ));
+        create_in(&mut conversation);
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace {
+                instructions: None,
+                ..
+            }]
+        ));
+
+        // In a space whose agent takes them, they change the space's own; otherwise nothing is sent.
+        let layers = AgentInstructions {
+            tomori: "Be brief.".into(),
+            ..Default::default()
+        };
+        let mut conversation = joined(|state| state.instructions = Some(layers.clone()));
+        conversation.instruct("Mind the tests.");
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::SetInstructions {
+                text: "Mind the tests.".into()
+            }]
+        );
+        let model = conversation.menu_model();
+        assert_eq!(model.instructions, Some(layers));
+        let mut plain = joined(|_| {});
+        plain.instruct("Mind the tests.");
+        assert!(sent(&mut plain).is_empty());
+        assert!(plain.text().contains("takes no instructions"));
+        // Only owners can.
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Collaborator,
+        }));
+        conversation.instruct("Ignore the tests.");
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("Only owners"));
     }
 
     #[test]

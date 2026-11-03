@@ -37,6 +37,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     let error = ada.error();
     assert!(error.contains("title") && error.len() < 100, "{error}");
@@ -47,6 +48,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     let error = ada.error();
     assert!(!error.contains("BBB"), "{error}");
@@ -145,6 +147,7 @@ fn the_lobby_listing_stays_within_the_budget() {
             directory: directory.clone(),
             session: None,
             environment: None,
+            instructions: None,
         });
         let title = format!("Space {index}");
         creator.space(|state| state.title == title);

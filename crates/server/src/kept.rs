@@ -25,6 +25,9 @@ pub struct KeptSpace {
     pub session: String,
     pub environment: String,
     pub attribution: bool,
+    /// The space's own instructions to the agent, if an owner gave any. See `design/spaces.md`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
     /// Why the space closed, if it has; a closed space is listed again closed, and not bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<String>,
@@ -165,6 +168,7 @@ mod tests {
             session: "session-1".into(),
             environment: "sky".into(),
             attribution: false,
+            instructions: String::new(),
             closed: None,
             closed_order: None,
         }

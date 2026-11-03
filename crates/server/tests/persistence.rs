@@ -161,6 +161,58 @@ fn spaces_survive_a_restart() {
 }
 
 #[test]
+fn a_space_s_instructions_are_kept_and_given_again_after_a_restart() {
+    let state = State::new("instructions");
+    let backend = FakeBackend::new();
+    let id = {
+        let server = start(&backend, &state.0, None);
+        let mut ada = server.connect("ada", "Ada");
+        ada.send(&ClientMessage::CreateSpace {
+            title: "Docs".into(),
+            backend: "fake".into(),
+            directory: std::env::temp_dir().to_string_lossy().into_owned(),
+            session: None,
+            environment: None,
+            instructions: Some("Mind the docs.".into()),
+        });
+        let id = ada.space(|space| space.title == "Docs").id;
+        let deadline = std::time::Instant::now() + server::test_support::TIMEOUT;
+        while backend.started()[0].log().instructions.len() < 3 {
+            assert!(std::time::Instant::now() < deadline, "never given");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        id
+    };
+    let kept = state.kept();
+    assert_eq!(kept[0].instructions, "Mind the docs.");
+    let session = backend.started()[0].clone();
+    let given = session.log().instructions.len();
+    assert_eq!(given, 3);
+
+    let server = start(&backend, &state.0, None);
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::Join { space: id.clone() });
+    let restored = ada.space(|space| space.id == id && space.error.is_none());
+    assert_eq!(
+        restored.instructions.map(|layers| layers.space),
+        Some("Mind the docs.".to_owned())
+    );
+    // Bound again, the session is given every layer again.
+    let deadline = std::time::Instant::now() + server::test_support::TIMEOUT;
+    while session.log().instructions.len() < given * 2 {
+        assert!(std::time::Instant::now() < deadline, "not given again");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        session
+            .instructions()
+            .get("tomori-space")
+            .map(String::as_str),
+        Some("Mind the docs.")
+    );
+}
+
+#[test]
 fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
     let state = State::new("unbound");
     std::fs::create_dir_all(&state.0).unwrap();
@@ -172,6 +224,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         session: session.into(),
         environment: "sky".into(),
         attribution: true,
+        instructions: String::new(),
         closed: None,
         closed_order: None,
     };

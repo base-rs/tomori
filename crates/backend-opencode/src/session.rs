@@ -176,6 +176,35 @@ impl Session for OpenCodeSession {
         }
     }
 
+    fn set_instruction(
+        &self,
+        key: &str,
+        value: Option<&str>,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let id = self.inner.id.clone();
+        let identity = self.inner.events.identity.clone();
+        let commands = self.inner.commands.clone();
+        let key = key.to_owned();
+        let value = value.map(str::to_owned);
+        async move {
+            if !backend::valid_instruction_key(&key) {
+                return Err(backend::Error::new(
+                    ErrorKind::Invalid,
+                    format!("{key:?} cannot name an instruction entry"),
+                ));
+            }
+            commands
+                .reply_with(move |reply| Command::Instruction {
+                    id,
+                    identity,
+                    key,
+                    value,
+                    reply,
+                })
+                .await
+        }
+    }
+
     fn interrupt(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         let id = self.inner.id.clone();
         let identity = self.inner.events.identity.clone();

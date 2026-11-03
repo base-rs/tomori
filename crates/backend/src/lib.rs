@@ -23,6 +23,31 @@ pub struct Capabilities {
     pub questions: bool,
     /// Delegated worker sessions are reported.
     pub workers: bool,
+    /// Named instruction entries can be set on a session through [`Session::set_instruction`], and removed from one no
+    /// space is bound to through [`Backend::forget_instructions`]. See `design/agent-backends.md`.
+    #[serde(default)]
+    pub instructions: bool,
+}
+
+/// Whether `key` can name an instruction entry: lowercase letters, digits, `.`, `_` and `-`, starting with a letter or
+/// digit, as OpenCode requires.
+pub fn valid_instruction_key(key: &str) -> bool {
+    let mut characters = key.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '.' | '_' | '-')
+        })
+}
+
+fn unsupported_instructions() -> Error {
+    Error::new(
+        ErrorKind::Unsupported,
+        "the backend does not take instructions",
+    )
 }
 
 /// How to start a new session.
@@ -408,6 +433,18 @@ pub trait Backend: Send + Sync {
         directory: &str,
     ) -> impl Future<Output = Result<Self::Session>> + Send;
 
+    /// Remove the instruction entries `keys` from the session `id`, which no space is bound to any more, as when the
+    /// server forgets a closed space. A key the session does not have is not an error. Fails with
+    /// [`ErrorKind::Unsupported`] unless the backend has [`Capabilities::instructions`].
+    fn forget_instructions(
+        &self,
+        id: &str,
+        keys: Vec<String>,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let _ = (id, keys);
+        std::future::ready(Err(unsupported_instructions()))
+    }
+
     /// The server is shutting down: stop waiting for the agent. Requests still waiting for it, such as for a
     /// connection to return, fail at once, and so do later ones, so that shutdown never waits on the agent. Sessions
     /// are closed separately. Must not block.
@@ -448,6 +485,52 @@ pub trait Session: Send + Sync + 'static {
     /// confirms it, or [`Event::ModeRefused`] when it does not.
     fn set_mode(&self, mode: &str) -> impl Future<Output = Result<()>> + Send;
 
+    /// Set the session's instruction entry `key`, which [`valid_instruction_key`] accepts, to `value`, or remove it when
+    /// `value` is `None`. The agent keeps its entries with the session and gives them to the model alongside its own
+    /// instructions from its next step; they never change its configuration or files. The server sets its entries
+    /// again whenever it binds a session and after [`Event::Resynchronized`], so a backend need not remember them.
+    /// Fails with [`ErrorKind::Unsupported`] unless the backend has [`Capabilities::instructions`].
+    fn set_instruction(
+        &self,
+        key: &str,
+        value: Option<&str>,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let _ = (key, value);
+        std::future::ready(Err(unsupported_instructions()))
+    }
+
     /// Stop the session's process or connection. The agent's own history is kept.
     fn close(&self) -> impl Future<Output = Result<()>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instruction_keys_follow_opencode() {
+        for key in ["tomori", "tomori-space", "tomori.environment", "a_1", "9"] {
+            assert!(valid_instruction_key(key), "{key}");
+        }
+        for key in [
+            "",
+            "-tomori",
+            ".tomori",
+            "Tomori",
+            "tomori/space",
+            "tomori space",
+            "é",
+        ] {
+            assert!(!valid_instruction_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn capabilities_from_an_older_record_take_no_instructions() {
+        let capabilities: Capabilities = serde_json::from_value(serde_json::json!({
+            "attach": true, "interrupt": true, "questions": true, "workers": true
+        }))
+        .unwrap();
+        assert!(!capabilities.instructions);
+    }
 }

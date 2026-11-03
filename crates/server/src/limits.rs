@@ -49,6 +49,9 @@ pub const QUEUED_TEXT_BYTES: usize = 4096;
 /// The most entries waiting in a space's queue, not counting finished ones.
 pub const QUEUED_ENTRIES: usize = 16;
 
+/// Longest instructions an owner gives a space, in bytes. See `design/spaces.md`.
+pub const INSTRUCTIONS_BYTES: usize = 4096;
+
 /// Longest error text sent to a client, in bytes. Longer errors are cut.
 pub const ERROR_BYTES: usize = 512;
 

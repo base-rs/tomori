@@ -45,6 +45,10 @@ name = "persistence"
 required-features = ["fake"]
 
 [[test]]
+name = "instructions"
+required-features = ["fake"]
+
+[[test]]
 name = "workspaces"
 required-features = ["fake"]
 

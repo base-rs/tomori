@@ -87,6 +87,7 @@ fn without_credentials_a_connection_is_a_visitor_who_is_told_nothing_about_creat
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     assert_eq!(
         visitor.error(),
@@ -239,6 +240,7 @@ fn a_collaborator_takes_part_only_in_their_space() {
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     assert_eq!(bob.error(), "Only owners can do that.");
 

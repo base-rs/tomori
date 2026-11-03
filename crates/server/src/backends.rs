@@ -107,6 +107,10 @@ impl Backend for AnyBackend {
         dispatch!(self, backend => backend.attach(id, directory).await.map(AnySession::from))
     }
 
+    async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {
+        dispatch!(self, backend => backend.forget_instructions(id, keys).await)
+    }
+
     fn shutdown(&self) {
         dispatch!(self, backend => backend.shutdown())
     }
@@ -139,6 +143,10 @@ impl Session for AnySession {
 
     async fn set_mode(&self, mode: &str) -> Result<()> {
         dispatch!(self, session => session.set_mode(mode).await)
+    }
+
+    async fn set_instruction(&self, key: &str, value: Option<&str>) -> Result<()> {
+        dispatch!(self, session => session.set_instruction(key, value).await)
     }
 
     async fn interrupt(&self) -> Result<()> {

@@ -65,6 +65,7 @@ fn command(sender: &Sender, line: &str) -> bool {
                     directory: directory.into(),
                     session: None,
                     environment: None,
+                    instructions: None,
                 }
             }
             None => {

@@ -73,6 +73,11 @@ pub struct SpaceModel {
     /// The agent completed a reply in the current turn while nobody was in the space, so its turn ending is a reply
     /// nobody heard.
     unheard: bool,
+    /// The space's own instructions to the agent, or `None` when its backend takes no instructions. See
+    /// `design/spaces.md`.
+    instructions: Option<String>,
+    /// Why the agent may not have the instructions shown, until they are next given successfully.
+    instructions_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -246,6 +251,8 @@ impl SpaceModel {
             settled: HashSet::new(),
             unattended: None,
             unheard: false,
+            instructions: None,
+            instructions_error: None,
         };
         model.load_messages(snapshot.messages);
         model
@@ -461,6 +468,63 @@ impl SpaceModel {
         let (unattended, unheard) = (self.unattended, self.unheard);
         self.resynchronize(snapshot);
         (self.unattended, self.unheard) = (unattended, unheard);
+    }
+
+    /// The space's backend takes instructions, and the space's own are `space`.
+    pub fn take_instructions(&mut self, space: String) {
+        self.instructions = Some(space);
+    }
+
+    /// The space's own instructions, empty when it has none or its backend takes none.
+    pub fn space_instructions(&self) -> &str {
+        self.instructions.as_deref().unwrap_or_default()
+    }
+
+    /// The instruction layers in effect, or `None` when the backend takes none.
+    pub fn instructions(&self) -> Option<protocol::AgentInstructions> {
+        let space = self.instructions.as_deref()?;
+        Some(crate::instructions::layers(
+            &self.environment,
+            space,
+            self.instructions_error.clone(),
+        ))
+    }
+
+    /// The entries giving the agent every layer, or none when its backend takes none or the session has closed.
+    pub fn instruction_entries(&self) -> Vec<(String, Option<String>)> {
+        match self.instructions() {
+            Some(layers) if !self.closed => crate::instructions::entries(&layers),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Replace the space's own instructions with `text`, which is trimmed, and return the entry to set, or why not.
+    pub fn set_space_instructions(
+        &mut self,
+        text: &str,
+    ) -> Result<(String, Option<String>), &'static str> {
+        if self.closed {
+            return Err("The agent session has stopped.");
+        }
+        let Some(instructions) = self.instructions.as_mut() else {
+            return Err("This agent takes no instructions from Tomori.");
+        };
+        *instructions = text.trim().to_owned();
+        Ok((
+            crate::instructions::SPACE_KEY.to_owned(),
+            crate::instructions::entry(instructions),
+        ))
+    }
+
+    /// The agent was given instructions, or refused them with `error`, which is shown until it next takes them. The
+    /// space works without them, so a refusal is not a problem that needs attention.
+    pub fn instructed(&mut self, result: Result<(), String>) {
+        self.instructions_error = result.err().map(|error| {
+            limits::truncate(
+                &format!("The agent did not take Tomori's instructions: {error}"),
+                limits::ERROR_BYTES,
+            )
+        });
     }
 
     /// How much of each reply is spoken. Brief unless a participant chose otherwise.
@@ -972,6 +1036,7 @@ impl SpaceModel {
                 .filter(|mode| mode.len() <= limits::IDENTIFIER_BYTES)
                 .cloned(),
             modes: self.shown_modes(),
+            instructions: self.instructions(),
         }
     }
 

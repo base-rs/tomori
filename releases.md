@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tomori now gives the agent instructions of its own in each space, so that it answers briefly in plain speech and hands non-trivial work to sub-agents instead of doing it inline. They come in three layers: Tomori's own, the environment's (none for Sky yet) and the space's, which an owner can give when creating a space and change later. With OpenCode they are set as the session's instruction entries, never in your configuration or `AGENTS.md`, and are removed when the server forgets the space. Everyone in a space can read them in the hand menu's new **Agent** section, where an owner can also clear the space's own. In `--console`, `i` shows them, and `instruct TEXT` gives the space you are in, or the next one you create, its own instructions. If OpenCode refuses them, the space still works and says why.
+
 - In a space, **B** never denies an approval, cancels your words or leaves by accident: it closes what is open or dismisses a problem, and you hold it for a second to leave. *Deny* is one of the approval's choices on the right stick, confirmed with **A**. Select any waiting entry in the queue strip with the right stick up and down, and press **A** to cancel it; **A** again within 3 seconds undoes it.
 - Errors get their own line on the panel, marked **!** with how long ago they happened, and stay until dismissed or replaced instead of hiding behind "Sending…" or vanishing on the next action. The queue is always shown in its own strip.
 - **Y** opens a list of the agent's modes with their descriptions, and the space's brief or full speech, and **A** chooses one directly instead of cycling through them.

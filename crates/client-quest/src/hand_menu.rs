@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec3};
-use protocol::{ConnectionRole, KnockRequest, KnockState};
+use protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockState};
 
 use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
@@ -31,6 +31,10 @@ pub const ROW: f32 = 0.024;
 pub const ROW_LENGTH: f32 = 0.2;
 const MARKER: f32 = 0.009;
 const PIXEL: f32 = 0.0011;
+/// The most rows a layer of the agent's instructions takes when opened; a longer one ends with "...".
+pub const LAYER_ROWS: usize = 14;
+/// How much of a layer its button in the Agent section shows.
+const PREVIEW: usize = 24;
 
 /// Where the left palm is and which way it faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +112,36 @@ impl Visibility {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
     PeopleAndSecurity,
+    /// What Tomori tells the space's agent, in layers; shown inside a space.
+    Agent,
+    /// One layer of the agent's instructions, opened from [`Section::Agent`].
+    Layer(Layer),
+}
+
+/// A layer of the instructions Tomori gives a space's agent. See `design/spaces.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Layer {
+    Tomori,
+    Environment,
+    Space,
+}
+
+impl Layer {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tomori => "Tomori's",
+            Self::Environment => "The environment's",
+            Self::Space => "This space's",
+        }
+    }
+
+    fn text(self, instructions: &AgentInstructions) -> &str {
+        match self {
+            Self::Tomori => &instructions.tomori,
+            Self::Environment => &instructions.environment,
+            Self::Space => &instructions.space,
+        }
+    }
 }
 
 /// What an item of the hand menu stands for.
@@ -119,6 +153,10 @@ pub enum MenuKey {
     Admit(String),
     Decline(String),
     Pair,
+    /// Open a layer of the agent's instructions.
+    Layer(Layer),
+    /// Remove the space's own instructions, as an owner.
+    ClearInstructions,
     /// A row that is only read, by its place.
     Text(usize),
     /// The cue on the wrist.
@@ -149,6 +187,8 @@ pub struct Model {
     /// The pairing object's label while pairing is offered: "Pair", or the code while pairing.
     pub pairing: Option<String>,
     pub notice: Option<String>,
+    /// The instructions the joined space's agent is given, or `None` when it takes none or the server does not say.
+    pub instructions: Option<AgentInstructions>,
 }
 
 impl Model {
@@ -165,6 +205,8 @@ pub enum Choice {
     Admit(String),
     Decline(String),
     Pair,
+    /// Remove the space's own instructions to the agent.
+    ClearInstructions,
 }
 
 /// One row of the menu.
@@ -187,6 +229,9 @@ fn role_label(role: ConnectionRole) -> &'static str {
 
 /// The rows of `section`, or of the top level, for `model`.
 pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
+    // The Agent section applies only inside a space, so leaving one returns to the top level.
+    let section =
+        section.filter(|section| model.in_space || *section == Section::PeopleAndSecurity);
     let mut items = Vec::new();
     let text = |items: &mut Vec<Item>, kind: MenuKind, text: String| {
         let key = MenuKey::Text(items.len());
@@ -200,13 +245,86 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
         });
     };
     match section {
-        None => items.push(Item {
-            key: MenuKey::Section(Section::PeopleAndSecurity),
-            kind: MenuKind::Section {
-                flashing: model.waiting(),
-            },
-            text: "People & security".into(),
-        }),
+        None => {
+            items.push(Item {
+                key: MenuKey::Section(Section::PeopleAndSecurity),
+                kind: MenuKind::Section {
+                    flashing: model.waiting(),
+                },
+                text: "People & security".into(),
+            });
+            if model.in_space {
+                items.push(Item {
+                    key: MenuKey::Section(Section::Agent),
+                    kind: MenuKind::Section { flashing: false },
+                    text: "Agent".into(),
+                });
+            }
+        }
+        Some(Section::Agent) => {
+            button(&mut items, MenuKey::Back, "< Back".into());
+            text(&mut items, MenuKind::Heading, "Instructions".into());
+            match &model.instructions {
+                None => text(
+                    &mut items,
+                    MenuKind::Text,
+                    "This agent takes none from Tomori".into(),
+                ),
+                Some(instructions) => {
+                    for layer in [Layer::Tomori, Layer::Environment, Layer::Space] {
+                        let said = layer.text(instructions).trim();
+                        if said.is_empty() {
+                            text(
+                                &mut items,
+                                MenuKind::Text,
+                                format!("{}: none", layer.label()),
+                            );
+                        } else {
+                            button(
+                                &mut items,
+                                MenuKey::Layer(layer),
+                                format!("{}: {}", layer.label(), preview(said)),
+                            );
+                        }
+                    }
+                    if model.role == ConnectionRole::Owner && !instructions.space.trim().is_empty()
+                    {
+                        button(
+                            &mut items,
+                            MenuKey::ClearInstructions,
+                            "Clear this space's".into(),
+                        );
+                    }
+                    if let Some(error) = &instructions.error {
+                        for line in crate::caption::wrapped_lines(error)
+                            .into_iter()
+                            .take(LAYER_ROWS)
+                        {
+                            text(&mut items, MenuKind::Text, line);
+                        }
+                    }
+                }
+            }
+        }
+        Some(Section::Layer(layer)) => {
+            button(&mut items, MenuKey::Back, "< Back".into());
+            text(&mut items, MenuKind::Heading, layer.label().into());
+            let said = model
+                .instructions
+                .as_ref()
+                .map(|instructions| layer.text(instructions))
+                .unwrap_or_default();
+            let mut lines = crate::caption::wrapped_lines(said);
+            if lines.len() > LAYER_ROWS {
+                lines.truncate(LAYER_ROWS);
+                let last = lines.last_mut().expect("truncated to at least one");
+                last.truncate(crate::caption::COLUMNS - 3);
+                last.push_str("...");
+            }
+            for line in lines {
+                text(&mut items, MenuKind::Text, line);
+            }
+        }
         Some(Section::PeopleAndSecurity) => {
             button(&mut items, MenuKey::Back, "< Back".into());
             text(&mut items, MenuKind::Heading, "Requests".into());
@@ -274,6 +392,19 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
     items
 }
 
+/// The start of `text`, on one line, cut at a word with "..." when longer than [`PREVIEW`].
+fn preview(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= PREVIEW {
+        return line;
+    }
+    let cut: String = line.chars().take(PREVIEW).collect();
+    let cut = cut
+        .rsplit_once(' ')
+        .map_or(cut.as_str(), |(start, _)| start);
+    format!("{cut}...")
+}
+
 /// The hand menu's state: whether it shows, and which section is open.
 #[derive(Clone, Debug, Default)]
 pub struct HandMenu {
@@ -296,9 +427,18 @@ impl HandMenu {
                 None
             }
             MenuKey::Back => {
-                self.section = None;
+                // A layer steps back to the Agent section, and a section to the top level.
+                self.section = match self.section {
+                    Some(Section::Layer(_)) => Some(Section::Agent),
+                    _ => None,
+                };
                 None
             }
+            MenuKey::Layer(layer) => {
+                self.section = Some(Section::Layer(*layer));
+                None
+            }
+            MenuKey::ClearInstructions => Some(Choice::ClearInstructions),
             MenuKey::Knock => Some(Choice::Knock),
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
@@ -541,6 +681,85 @@ mod tests {
         assert!(
             texts(&items(Some(Section::PeopleAndSecurity), &idle)).contains(&"Nothing waiting")
         );
+    }
+
+    #[test]
+    fn the_agent_section_shows_each_layer_in_a_space_and_opens_it() {
+        let mut model = Model {
+            role: ConnectionRole::Owner,
+            ..Default::default()
+        };
+        // Only inside a space, where it applies.
+        assert_eq!(texts(&items(None, &model)), ["People & security"]);
+        assert_eq!(
+            texts(&items(Some(Section::Agent), &model)),
+            ["People & security"]
+        );
+        model.in_space = true;
+        assert_eq!(texts(&items(None, &model)), ["People & security", "Agent"]);
+        assert_eq!(
+            texts(&items(Some(Section::Agent), &model)),
+            [
+                "< Back",
+                "Instructions",
+                "This agent takes none from Tomori"
+            ]
+        );
+        let tomori = "You are Tomori, the coordinator of a shared spatial workspace. ".repeat(12);
+        model.instructions = Some(AgentInstructions {
+            tomori: tomori.clone(),
+            environment: String::new(),
+            space: "Mind the docs.".into(),
+            error: Some("The agent did not take Tomori's instructions: gone".into()),
+        });
+        let rows = items(Some(Section::Agent), &model);
+        assert_eq!(
+            texts(&rows),
+            [
+                "< Back",
+                "Instructions",
+                "Tomori's: You are Tomori, the...",
+                "The environment's: none",
+                "This space's: Mind the docs.",
+                "Clear this space's",
+                "The agent did not take Tomori's",
+                "instructions: gone",
+            ]
+        );
+        assert_eq!(rows[2].key, MenuKey::Layer(Layer::Tomori));
+        assert_eq!(rows[3].kind, MenuKind::Text);
+        assert_eq!(rows[5].key, MenuKey::ClearInstructions);
+        // Only an owner can clear the space's own.
+        let collaborator = Model {
+            role: ConnectionRole::Collaborator,
+            ..model.clone()
+        };
+        assert!(
+            !texts(&items(Some(Section::Agent), &collaborator)).contains(&"Clear this space's")
+        );
+
+        // A layer opens in place, wrapped and cut to fit, and steps back to the section.
+        let mut menu = HandMenu {
+            section: Some(Section::Agent),
+            ..Default::default()
+        };
+        assert_eq!(menu.choose(&MenuKey::Layer(Layer::Tomori)), None);
+        let rows = items(menu.section, &model);
+        assert_eq!(rows[1].text, "Tomori's");
+        assert_eq!(rows.len(), 2 + LAYER_ROWS);
+        assert!(rows.last().unwrap().text.ends_with("..."));
+        assert!(
+            rows.iter()
+                .all(|row| row.text.chars().count() <= crate::caption::COLUMNS)
+        );
+        assert_eq!(menu.choose(&MenuKey::Back), None);
+        assert_eq!(menu.section, Some(Section::Agent));
+        assert_eq!(
+            menu.choose(&MenuKey::ClearInstructions),
+            Some(Choice::ClearInstructions)
+        );
+        assert_eq!(menu.choose(&MenuKey::Back), None);
+        assert_eq!(menu.section, None);
     }
 
     #[test]
