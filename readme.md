@@ -246,7 +246,7 @@ That window doesn't connect to a server. To take part in a server's spaces from 
 cargo run -p client-quest -- --desktop [--server HOST:PORT] [--name NAME] [--token TOKEN]
 ```
 
-The mouse points as the right controller does: its left button chooses what it points at, and dragging with the right button looks around. **Enter** is A, **Backspace** is B (hold it for a second to leave a space), hold **Space** to talk to the agent (X), **Tab** is Y, the arrow keys are the left stick, **[** and **]** the right stick left and right, and **Page Up**/**Page Down** the right stick up and down. **M** opens the hand menu, **K** knocks on the space you watch, **+** and **-** admit or decline the first knock waiting, **P** pairs, **V** mutes spoken replies and **R** replays the latest. `tomori --help` lists them too. Desktop windows draw with 4× multisample anti-aliasing where the GPU supports it.
+The mouse points as the right controller does: its left button chooses what it points at, and dragging with the right button looks around. **Enter** is A, **Backspace** is B (hold it for a second to leave a space), hold **Space** to talk to the agent (X), **Tab** is Y, the arrow keys are the left stick, **\[** and **]** the right stick left and right, and **Page Up**/**Page Down** the right stick up and down. **M** opens the hand menu, **K** knocks on the space you watch, **+** and **-** admit or decline the first knock waiting, **P** pairs, **V** mutes spoken replies and **R** replays the latest. `tomori --help` lists them too. Desktop windows draw with 4× multisample anti-aliasing where the GPU supports it.
 
 To use a server without a headset or a GPU, show the headset's panel in the terminal:
 
