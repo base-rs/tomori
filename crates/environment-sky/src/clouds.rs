@@ -271,5 +271,4 @@ impl Clouds {
 }
 
 #[cfg(test)]
-#[path = "cloud_tests.rs"]
 mod tests;
