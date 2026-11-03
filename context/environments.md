@@ -1,6 +1,6 @@
-# Proposal: an environment framework, with a computer environment first
+# Environments
 
-A design proposal for discussion, from November 2026. Nothing here is a requirement until it is agreed. Once agreed, its parts become binding `design/*.md` changes, listed under [Changes to existing documents](#changes-to-existing-documents). Each part is tracked by an issue.
+How Tomori environments are built: a proposed framework, with a computer environment first. This is a design proposal for discussion, from November 2026. Nothing here is a requirement until it is agreed. Once agreed, its parts become binding `design/*.md` changes, listed under [Changes to existing documents](#changes-to-existing-documents). Each part is tracked by an issue.
 
 ## Summary
 
@@ -11,7 +11,7 @@ A design proposal for discussion, from November 2026. Nothing here is a requirem
   - A project that needs its own environments builds its own server and headset through builders (#73), without changing Tomori's source.
 - Alongside its environment, each space has a **generic scene**: entities built from Tomori's own vocabulary of shapes, materials, standard components and declarative animation (#77). Every client presents it without environment code. The agent's projections (#82) and environments without a client half use it.
 - No per-frame geometry crosses the network. Video and audio travel as **media streams** that never delay the conversation or speech (#84).
-- Tomori keeps its **own wgpu renderer**, grown into a shared crate, and adopts no engine or physics engine for now (#77, #78).
+- Tomori keeps its **own wgpu renderer**, grown into a shared crate, and adopts no game engine (#77). It provides a **default physics engine** for interaction, Rapier, run with the server as authority (#97).
 - What participants point at reaches the agent with their words (#81). The agent can **project charts, diagrams and highlights** into the space through Tomori's MCP tools (#82), with live data from data sources (#83).
 - The agent receives layered **instructions**: Tomori's own, the environment's and the space's (#72).
 - The first concrete environment is **`environment-computer`**: the computer's windows as panels in the space, operated with a virtual keyboard and mouse, playing their audio (#85).
@@ -126,6 +126,7 @@ Entities have an identifier, parent, owner (the agent stage or an environment's 
 - Instances, Series and Curve.
 - Text, Panel and Surface: flat, cylindrical or spherical, with exact ray intersection.
 - Interactable, Detail (shown by distance) and Resource.
+- Body: a physics body and collider (#97).
 
 Animation is declarative: tweens, drivers, time inside shaders, and keyframe tracks. Unknown components show as labelled placeholders. Client halves use the same vocabulary locally as a toolkit.
 
@@ -154,13 +155,20 @@ A shared crate, `tomori-render`, provides:
 
 Sceneries and client halves use the same contract. Still to measure and decide: 4× MSAA for the pass, and a frame-time budget.
 
-### 5. Interaction, movement and physics (#78)
+### 5. Interaction, movement and physics (#78, #97)
 
 **Tomori owns devices; environments receive meaning.** Picks go to the client half or to the generic scene. A client half turns choices into intents; a generic entity sends input to its owner only. Pinch has hysteresis. While grabbing, the dragging client owns the entity's transform until release.
 
 **Locomotion profiles:** `none` (default), `teleport` (onto declared walkable surfaces, with 30° snap turn), and `fly`. Travel is a per-participant rig carried in presence.
 
-**No physics engine for now.** `parry3d` serves picking and placement queries. Any later shared simulation runs on the server.
+**A default physics engine: Rapier (#97).** Rapier is pure Rust and built on `parry3d`, so physics, picking and teleport queries share one set of collider shapes. Environments and the generic scene get it by default, and an environment may opt out.
+
+- **Server authoritative.** Each space with physical content has a physics world on the server, stepped at a fixed rate on its own task, with bounded bodies and step time.
+- **Bodies.** A `Body` component in the generic scene: static, kinematic or dynamic, with a collider, mass, friction, restitution and damping. Sceneries declare static colliders.
+- **Hands and controllers.** Participants' hand joints and controller poses from presence become kinematic colliders, so anyone can push, poke and press, and everyone sees the same result.
+- **Grabbing and throwing.** The grabbing client takes authority over the body and moves it locally with no latency. On release it sends the release velocity, and the server continues the throw.
+- **Replication.** Transforms and velocities of awake bodies travel on the synchronization lane at a bounded rate, and sleeping bodies send nothing. Clients interpolate, and may later predict bodies near their hands.
+- **Client-only physics** is limited to cosmetic effects.
 
 ### 6. Placing the agent (#79)
 
@@ -230,6 +238,7 @@ Decided by the user in November 2026:
   - The environment has its own state synchronization.
   - Its server half is not limited to rendering: it can query anything.
 - Sessions in one directory may share the `tomori` tools across spaces.
+- Tomori provides a default physics engine for interaction (#97).
 - Tomori sets per-session instructions.
 
 Still open, discussed in the issues:
@@ -239,6 +248,7 @@ Still open, discussed in the issues:
 - changing a space's environment (#74);
 - the media transport (#84);
 - locomotion profiles (#78);
+- physics rates, limits and client prediction (#97);
 - prompt context limits (#81);
 - agent content persistence (#82);
 - instruction lifetime and wording (#72);
@@ -249,7 +259,7 @@ Still open, discussed in the issues:
 1. Instructions (#72) and the framework release work (#73), which are independent.
 2. Environment crates, synchronization and the generic scene (#75, #76, #77): Sky as the first environment crate, plus a test environment.
 3. Agent projection and shared attention (#82, #81), then data sources (#83).
-4. Interaction, anchors and the UI kit (#78, #79, #80) as environments need them.
+4. Interaction and physics, anchors and the UI kit (#78, #97, #79, #80) as environments need them.
 5. Media streams (#84), then `environment-computer` (#85–#88).
 
 ## Changes to existing documents
@@ -257,7 +267,7 @@ Still open, discussed in the issues:
 On acceptance:
 
 - `design/environments.md`: version agreement, and answers to its open questions.
-- `design/scene-modules.md`: "clients need no feature-specific code" narrows to the generic scene and agent content; the agent separation is relaxed at the space layer; the physics question is answered.
+- `design/scene-modules.md`: "clients need no feature-specific code" narrows to the generic scene and agent content; the agent separation is relaxed at the space layer; the physics question is answered: a default engine, with the server as authority (#97).
 - `design/agent-backends.md`: instruction entries and tool hosting become backend capabilities.
 - `design/spaces.md`: highlights and the agent stage join shared state, and the rig joins presence.
 - `design/clients.md`: the shared renderer and client builders.
