@@ -164,6 +164,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         environment: "sky".into(),
         attribution: true,
         closed: None,
+        closed_order: None,
     };
     std::fs::write(
         state.0.join(SPACES_FILE),
@@ -196,9 +197,11 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         );
         ada.send(&ClientMessage::Leave);
     }
-    // Kept as closed, so that it is not tried again.
+    // A session that no longer exists is kept as closed, so that it is not tried again; a backend that is not enabled may be next time.
     drop(server);
-    assert!(state.kept().iter().all(|space| space.closed.is_some()));
+    let kept = state.kept();
+    assert!(kept[0].closed.is_some());
+    assert_eq!(kept[1].closed, None);
 }
 
 #[test]
@@ -245,9 +248,11 @@ fn a_collaborator_admitted_to_a_kept_space_stays_admitted() {
         );
         (studio, token)
     };
+    // While the space is still being bound again, past the first sweeps, which revoke collaborator tokens whose space is gone.
+    backend.hold_creation();
     let server = start(&backend, &state.0, Some(tokens.clone()));
-    // Past the first sweeps, which revoke collaborator tokens whose space is gone.
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(2700));
+    backend.release_creation();
     assert!(tokens.entries().iter().any(|entry| entry.grant
         == Grant::Collaborator {
             space: studio.clone()
@@ -288,4 +293,83 @@ fn a_forgotten_closed_space_is_not_kept() {
     assert_eq!(kept.len(), server::CLOSED_SPACES);
     assert!(!kept.contains(&ids[0]));
     assert!(kept.contains(&ids[server::CLOSED_SPACES]));
+}
+
+#[test]
+fn a_space_not_bound_again_for_a_passing_reason_is_tried_at_the_next_start() {
+    let state = State::new("retried");
+    let backend = FakeBackend::new();
+    let studio = {
+        let server = start(&backend, &state.0, None);
+        server.connect("ada", "Ada").create_space("Studio").id
+    };
+    backend.fail_snapshots(true);
+    {
+        let server = start(&backend, &state.0, None);
+        let mut ada = server.connect("ada", "Ada");
+        ada.send(&ClientMessage::Join {
+            space: studio.clone(),
+        });
+        let space = ada.space(|space| space.activity == protocol::Activity::Closed);
+        assert!(
+            space
+                .error
+                .unwrap()
+                .starts_with("Could not read the fake session again")
+        );
+    }
+    assert_eq!(state.kept()[0].closed, None);
+    backend.fail_snapshots(false);
+    let server = start(&backend, &state.0, None);
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::Join {
+        space: studio.clone(),
+    });
+    ada.space(|space| space.id == studio && space.error.is_none());
+}
+
+#[test]
+fn the_least_recently_closed_space_is_still_forgotten_first_after_a_restart() {
+    let state = State::new("order");
+    let backend = FakeBackend::new();
+    let (first, second) = {
+        let server = start(&backend, &state.0, None);
+        let mut ada = server.connect("ada", "Ada");
+        let first = ada.create_space("First").id;
+        let second = ada.create_space("Second").id;
+        // The second space, which Ada is in, closes first.
+        backend.started()[1].emit(Event::Closed { reason: None });
+        ada.space(|space| space.id == second && space.activity == protocol::Activity::Closed);
+        ada.send(&ClientMessage::Leave);
+        listed(&ada, &second);
+        backend.started()[0].emit(Event::Closed { reason: None });
+        ada.wait_for(|message| match message {
+            ServerMessage::Spaces { spaces } => spaces
+                .iter()
+                .any(|space| space.id == first && space.activity == protocol::Activity::Closed)
+                .then_some(()),
+            _ => None,
+        });
+        (first, second)
+    };
+    let server = start(&backend, &state.0, None);
+    let mut ada = server.connect("ada", "Ada");
+    for index in 1..server::CLOSED_SPACES {
+        let id = ada.create_space(&format!("Space {index}")).id;
+        backend
+            .started()
+            .last()
+            .unwrap()
+            .emit(Event::Closed { reason: None });
+        ada.space(|space| space.id == id && space.activity == protocol::Activity::Closed);
+    }
+    ada.send(&ClientMessage::Leave);
+    let spaces = ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } if spaces.len() == server::CLOSED_SPACES => {
+            Some(spaces.clone())
+        }
+        _ => None,
+    });
+    assert!(spaces.iter().any(|space| space.id == first));
+    assert!(!spaces.iter().any(|space| space.id == second));
 }

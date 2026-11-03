@@ -1029,25 +1029,32 @@ async fn run_restored<S: Timers>(
         hub.restore_failed(
             &id,
             format!("The {backend} backend is not enabled on this server."),
+            false,
         );
         return;
     };
     let Some(directory) = resolve(scheduler, &places, &directory, cancellation).await else {
         if !cancellation.is_cancelled() {
-            hub.restore_failed(&id, DIRECTORY_UNAVAILABLE.to_owned());
+            hub.restore_failed(&id, DIRECTORY_UNAVAILABLE.to_owned(), false);
         }
         return;
     };
     let Some(slot) = places.slots.acquire() else {
-        hub.restore_failed(&id, places.slots.full_error());
+        hub.restore_failed(&id, places.slots.full_error(), false);
         return;
     };
     let session = match found.attach(&session, &directory).await {
         Ok(session) => session,
         Err(error) => {
+            // Only the agent saying that the session is gone closes the space for good; it may be unreachable for now.
+            let lasting = matches!(
+                error.kind,
+                backend::ErrorKind::NotFound | backend::ErrorKind::Invalid
+            );
             hub.restore_failed(
                 &id,
                 format!("Could not resume the {backend} session: {}", error.message),
+                lasting,
             );
             return;
         }
@@ -1065,6 +1072,7 @@ async fn run_restored<S: Timers>(
                     "Could not read the {backend} session again: {}",
                     error.message
                 ),
+                false,
             );
             return;
         }
@@ -1099,7 +1107,11 @@ async fn run_session(
     .await
     {
         Either::Left((error, _)) => error,
-        Either::Right(_) => None,
+        // The server is stopping, perhaps before the supervisor has said so: say so first, so that the space is kept open.
+        Either::Right(_) => {
+            hub.stopping();
+            None
+        }
     };
     hub.space_ended(space, error);
     if let Err(error) = session.close().await {
@@ -1171,9 +1183,16 @@ async fn drive(
     mut voice: Option<Voice>,
 ) -> Option<String> {
     let events = async {
+        let mut bound = session.id();
         loop {
             match session.next_event().await {
                 Ok(event) => {
+                    // An agent may name its session anew once it starts, as Claude Code does.
+                    let id = session.id();
+                    if id != bound {
+                        hub.session_changed(space, id.clone());
+                        bound = id;
+                    }
                     let closed = matches!(event, Event::Closed { .. });
                     // Speech segmentation and queueing never wait for synthesis, and happen outside the hub lock.
                     if let Some(voice) = voice.as_mut() {

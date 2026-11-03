@@ -366,6 +366,8 @@ struct SpaceRecord {
     deferred: Cell<bool>,
     /// Once the space has closed, when relative to other spaces, so that the least recently closed are forgotten first.
     closed: Option<u64>,
+    /// Closed, but kept as open, and not forgotten, so that it is bound again when the server next starts: closed by shutdown, or not bound again after a restart for a reason that may pass. See `design/spaces.md`.
+    kept_open: bool,
 }
 
 /// An utterance whose transcript has not been reported yet.
@@ -526,6 +528,8 @@ impl HubState {
             if space.closed.is_none() && space.model.is_closed() {
                 space.closed = Some(self.next_closed);
                 self.next_closed += 1;
+                // Closing the sessions as the server stops does not close their spaces.
+                space.kept_open |= self.shutting_down;
             }
         }
     }
@@ -544,7 +548,11 @@ impl HubState {
                     session: model.session.clone(),
                     environment: model.environment.clone(),
                     attribution: model.attribution(),
-                    closed: model.closed_reason().map(str::to_owned),
+                    closed: model
+                        .closed_reason()
+                        .filter(|_| !space.kept_open)
+                        .map(str::to_owned),
+                    closed_order: space.closed.filter(|_| !space.kept_open),
                 }
             })
             .collect()
@@ -562,7 +570,8 @@ impl HubState {
             .spaces
             .iter()
             .filter(|space| {
-                space.model.members().next().is_none()
+                !space.kept_open
+                    && space.model.members().next().is_none()
                     && !occupied.contains(space.model.id.as_str())
             })
             .filter_map(|space| Some((space.closed?, space.model.id.clone())))
@@ -2407,7 +2416,12 @@ impl Hub {
             touched: Cell::new(None),
             deferred: Cell::new(false),
             closed: None,
+            kept_open: false,
         });
+        // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
+        drop(state);
+        self.keep();
+        let mut state = self.lock();
         let creator_waiting = state
             .participants
             .get(&request.creator)
@@ -2427,12 +2441,35 @@ impl Hub {
         Some(id)
     }
 
+    /// The session of `space` now goes by `session`, as Claude Code may say once it starts, so that the space is bound to it after a restart.
+    pub(crate) fn session_changed(&self, space: &str, session: String) {
+        {
+            let mut state = self.lock();
+            let Some(record) = state.space_mut(space) else {
+                return;
+            };
+            log::info!("Space {space} is now bound to session {session}.");
+            record.model.session = session;
+        }
+        self.keep();
+    }
+
+    /// Begin shutting down, as the server stops, so that the spaces closing are kept open; see [`Self::shutdown`].
+    pub(crate) fn stopping(&self) {
+        self.lock().shutting_down = true;
+    }
+
     /// List again the spaces `store` keeps, and keep spaces there from now on. Each space that was open waits as reconnecting until the supervisor binds it to its session, so that clients restoring it, and collaborators admitted to it, find it meanwhile; each that was closed is listed closed. Returns the spaces to bind. See `design/spaces.md`.
     pub(crate) fn restore(&self, store: Arc<crate::kept::SpaceStore>) -> Vec<Restore> {
         let mut restores = Vec::new();
+        let mut kept = store.spaces();
+        let order: Vec<String> = kept.iter().map(|space| space.id.clone()).collect();
+        // Closed spaces are stamped in the order they closed.
+        kept.sort_by_key(|space| space.closed_order);
+        let mut closed = Vec::new();
         {
             let mut state = self.lock();
-            for kept in store.spaces() {
+            for kept in kept {
                 if state.space(&kept.id).is_some() {
                     continue;
                 }
@@ -2448,9 +2485,12 @@ impl Hub {
                 model.set_attribution(kept.attribution);
                 let (commands, receiver) = async_channel::unbounded();
                 match kept.closed {
-                    Some(reason) => model.apply(Event::Closed {
-                        reason: Some(reason),
-                    }),
+                    Some(reason) => {
+                        model.apply(Event::Closed {
+                            reason: Some(reason),
+                        });
+                        closed.push(kept.id.clone());
+                    }
                     None => {
                         model.apply(Event::Reconnecting {
                             reason: RESTORING.to_owned(),
@@ -2470,9 +2510,23 @@ impl Hub {
                     touched: Cell::new(None),
                     deferred: Cell::new(false),
                     closed: None,
+                    kept_open: false,
                 });
             }
-            state.stamp_closed();
+            for id in closed {
+                let order = state.next_closed;
+                state.next_closed += 1;
+                if let Some(record) = state.space_mut(&id) {
+                    record.closed = Some(order);
+                }
+            }
+            // Listed in the order they were created, as before the restart.
+            state.spaces.sort_by_key(|space| {
+                order
+                    .iter()
+                    .position(|id| *id == space.model.id)
+                    .unwrap_or(usize::MAX)
+            });
             state.touch_lobby();
             self.recount(&mut state);
         }
@@ -2503,21 +2557,21 @@ impl Hub {
         true
     }
 
-    /// The space `id`, listed again after a restart, could not be bound to its session: list it as closed, with `reason`.
-    pub(crate) fn restore_failed(&self, id: &str, reason: String) {
+    /// The space `id`, listed again after a restart, could not be bound to its session: list it as closed, with `reason`. Unless the failure is `lasting`, such as the session no longer existing, it is kept as open, to be bound again when the server next starts.
+    pub(crate) fn restore_failed(&self, id: &str, reason: String, lasting: bool) {
         log::warn!("Space {id} could not be bound again: {reason}");
+        if !lasting && let Some(record) = self.lock().space_mut(id) {
+            record.kept_open = true;
+        }
         self.space_ended(id, Some(reason));
     }
 
-    /// Write the kept spaces, if there is somewhere to keep them and they changed. Nothing is written once shutdown has begun, since closing the sessions then does not close their spaces.
+    /// Write the kept spaces, if there is somewhere to keep them and they changed. Spaces closed once shutdown has begun are kept as open; see `stamp_closed`.
     pub(crate) fn keep(&self) {
         let Some(store) = self.kept.read().expect("never left poisoned").clone() else {
             return;
         };
-        let written = store.keep(|| {
-            let state = self.lock();
-            (!state.shutting_down).then(|| state.kept())
-        });
+        let written = store.keep(|| Some(self.lock().kept()));
         if let Err(error) = written {
             log::error!(
                 "Could not keep the spaces in {}: {error}.",

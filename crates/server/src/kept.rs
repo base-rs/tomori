@@ -28,6 +28,9 @@ pub struct KeptSpace {
     /// Why the space closed, if it has; a closed space is listed again closed, and not bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<String>,
+    /// When the space closed relative to the others, so that the least recently closed are still forgotten first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_order: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,6 +166,7 @@ mod tests {
             environment: "sky".into(),
             attribution: false,
             closed: None,
+            closed_order: None,
         }
     }
 
@@ -177,6 +181,7 @@ mod tests {
         assert!(!store.keep(|| None).unwrap());
         let closed = KeptSpace {
             closed: Some("The agent session ended.".into()),
+            closed_order: Some(4),
             ..space("space-a-2")
         };
         assert!(

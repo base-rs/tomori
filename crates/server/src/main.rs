@@ -78,8 +78,9 @@ Options:
   --no-visitors        Refuse connections without a token, instead of admitting them as visitors.
   --max-visitors COUNT The most visitors connected at once (default 64).
   --state-directory PATH
-                                              Where the token store, the certificate and the spaces kept across restarts
-                       are (default $XDG_STATE_HOME/tomori, or ~/.local/state/tomori).
+                                                                     Where the token store, the certificate and the spaces kept across restarts
+                       are (default $XDG_STATE_HOME/tomori, or ~/.local/state/tomori). One server
+                       at a time uses a state directory, so give each server its own.
   --help               Show this help.";
 
 /// The modes `claude --permission-mode` accepts.
