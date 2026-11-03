@@ -7,7 +7,7 @@
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
-    not(any(feature = "fake", feature = "claude-code", feature = "opencode")),
+    not(any(feature = "fake", feature = "opencode")),
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
@@ -27,21 +27,17 @@ const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [
                      [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
                      [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
-                     [--claude-permission-mode MODE] [--auth MODE] [--no-visitors]
+                                          [--auth MODE] [--no-visitors]
                      [--max-visitors COUNT] [--state-directory PATH]
        tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
-  --backend NAME       Offer a backend; repeat for several. Available: fake, claude-code,
-                       opencode.
+    --backend NAME       Offer a backend; repeat for several. Available: fake, opencode.
   --opencode-url URL   Where the opencode backend reaches its `opencode serve` process. Defaults
                        to the OPENCODE_URL environment variable, then the `opencode serve
                        --service` registration file, then http://127.0.0.1:4096.
-  --claude-permission-mode MODE
-                       The permission mode claude-code sessions start in: auto (default), default,
-                       acceptEdits, plan, dontAsk or bypassPermissions. A mode the agent refuses is
-                       reported to the space, which starts in the agent's default mode instead.
+  
   --speech-root PATH   The directory holding .tools/ with the speech models; see
                        crates/speech/readme.md. Without it, there is no speech recognition or
                        synthesis.
@@ -83,22 +79,11 @@ Options:
                        at a time uses a state directory, so give each server its own.
   --help               Show this help.";
 
-/// The modes `claude --permission-mode` accepts.
-const CLAUDE_PERMISSION_MODES: &[&str] = &[
-    "auto",
-    "default",
-    "acceptEdits",
-    "plan",
-    "dontAsk",
-    "bypassPermissions",
-];
-
 struct Arguments {
     bind: SocketAddr,
     backends: Vec<String>,
     opencode_url: Option<String>,
-    /// The permission mode Claude Code sessions start in, when the operator chose one.
-    claude_permission_mode: Option<String>,
+
     speech_root: Option<PathBuf>,
     speech_provider: String,
     /// How utterances are transcribed: the streaming transducer, or the offline (whole-clip) model.
@@ -143,7 +128,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         bind: SocketAddr::from(([0, 0, 0, 0], protocol::DEFAULT_PORT)),
         backends: Vec::new(),
         opencode_url: None,
-        claude_permission_mode: None,
+
         speech_root: None,
         speech_provider: "cpu".to_owned(),
         speech_backend: "streaming".to_owned(),
@@ -173,18 +158,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             "--opencode-url" => {
                 parsed.opencode_url = Some(arguments.next().ok_or("--opencode-url needs a URL")?)
             }
-            "--claude-permission-mode" => {
-                let mode = arguments
-                    .next()
-                    .ok_or("--claude-permission-mode needs a mode")?;
-                if !CLAUDE_PERMISSION_MODES.contains(&mode.as_str()) {
-                    return Err(format!(
-                        "--claude-permission-mode must be one of {}, not {mode:?}",
-                        CLAUDE_PERMISSION_MODES.join(", ")
-                    ));
-                }
-                parsed.claude_permission_mode = Some(mode);
-            }
+
             "--speech-root" => {
                 parsed.speech_root = Some(
                     arguments
@@ -493,22 +467,12 @@ fn advertise(
     }
 }
 
-#[cfg_attr(
-    not(all(feature = "opencode", feature = "claude-code")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(feature = "opencode"), allow(unused_variables))]
 fn backend(name: &str, arguments: &Arguments) -> Result<server::AnyBackend, String> {
     match name {
         #[cfg(feature = "fake")]
         "fake" => Ok(server::fake::FakeBackend::new().into()),
-        #[cfg(feature = "claude-code")]
-        "claude-code" => {
-            let mut config = backend_claude_code::Config::default();
-            if let Some(mode) = &arguments.claude_permission_mode {
-                config.permission_mode = mode.clone();
-            }
-            Ok(backend_claude_code::ClaudeCode::new(config).into())
-        }
+
         #[cfg(feature = "opencode")]
         "opencode" => Ok(backend_opencode::OpenCode::new(backend_opencode::Config {
             url: arguments.opencode_url.clone(),
@@ -1088,20 +1052,6 @@ mod tests {
         ] {
             assert!(arguments(list).is_err(), "{list:?} was accepted");
         }
-    }
-
-    #[test]
-    fn the_claude_starting_mode_is_configurable() {
-        assert_eq!(arguments(&[]).unwrap().claude_permission_mode, None);
-        assert_eq!(
-            arguments(&["--claude-permission-mode", "plan"])
-                .unwrap()
-                .claude_permission_mode
-                .as_deref(),
-            Some("plan")
-        );
-        assert!(arguments(&["--claude-permission-mode"]).is_err());
-        assert!(arguments(&["--claude-permission-mode", "manual"]).is_err());
     }
 
     #[test]

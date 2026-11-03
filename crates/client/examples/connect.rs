@@ -17,7 +17,7 @@
 //! `gate off|live|agent`, `allow <request>`, `deny <request>`, `grant <request> <option>`, `quit`. A pending approval is
 //! printed with its request id and the ids of the options it offers.
 //!
-//! `create` starts a new agent session, such as `create claude-code /home/sam/project`, which the server accepts only
+//! `create` starts a new agent session, such as `create opencode /home/sam/project`, which the server accepts only
 //! beneath one of its workspace roots; the directory cannot contain spaces. The title defaults to the directory's last
 //! component. The space is bound to the first environment the server offers, which the connected state lists.
 

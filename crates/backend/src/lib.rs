@@ -47,7 +47,7 @@ pub struct Prompt {
     /// Unique per queue entry. A backend that is asked to send the same key twice delivers it at most once.
     pub key: String,
     /// The text to deliver, already including speaker attribution if enabled. It is delivered as the content of a user
-    /// message and never interpreted as an agent command, such as a Claude Code slash command, whatever it begins with.
+    /// message and never interpreted as an agent command, such as a slash command, whatever it begins with.
     pub text: String,
 }
 
@@ -77,11 +77,11 @@ pub enum Decision {
 pub enum GrantScope {
     /// Until the agent session ends.
     Session,
-    /// This project, for this user only, such as Claude Code's `.claude/settings.local.json`.
+    /// This project, for this user only.
     Local,
-    /// This project, for everyone who uses it, such as Claude Code's `.claude/settings.json`.
+    /// This project, for everyone who uses it.
     Project,
-    /// Every project of this user, such as Claude Code's `~/.claude/settings.json`.
+    /// Every project of this user.
     User,
 }
 
@@ -98,7 +98,7 @@ pub enum Grant {
     },
     /// The agent may work in `path`.
     Directory { path: String, scope: GrantScope },
-    /// The agent's permission mode changes, such as to Claude Code's `acceptEdits`.
+    /// The agent's permission mode changes, such as to one that accepts edits without asking.
     Mode { mode: String, scope: GrantScope },
 }
 
@@ -186,7 +186,7 @@ pub enum WorkerState {
     Unknown,
 }
 
-/// A delegated worker, such as a Claude Code subagent or an OpenCode child session.
+/// A delegated worker, such as an OpenCode child session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worker {
     pub id: String,
@@ -196,9 +196,8 @@ pub struct Worker {
     pub state: WorkerState,
 }
 
-/// A mode a session can be switched to while it runs, as the agent's own interface offers it: for Claude Code, a
-/// permission mode its terminal cycles through with Shift-Tab; for OpenCode, a primary agent its terminal cycles through
-/// with Tab. See `design/agent-backends.md`.
+/// A mode a session can be switched to while it runs, as the agent's own interface offers it: for OpenCode, a primary
+/// agent its terminal cycles through with Tab. See `design/agent-backends.md`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mode {
     /// The agent's own identifier, such as `acceptEdits` or `plan`; passed back to [`Session::set_mode`].
@@ -386,11 +385,11 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A kind of agent, such as Claude Code or OpenCode.
+/// A kind of agent, such as OpenCode.
 pub trait Backend: Send + Sync {
     type Session: Session;
 
-    /// The stable identifier used in [`SessionSpec`]-creating requests, such as `claude-code`.
+    /// The stable identifier used in [`SessionSpec`]-creating requests, such as `opencode`.
     fn name(&self) -> &str;
 
     fn capabilities(&self) -> Capabilities;

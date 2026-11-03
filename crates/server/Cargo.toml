@@ -53,11 +53,9 @@ name = "speech"
 required-features = ["fake", "speech"]
 
 [features]
-default = ["fake", "claude-code", "opencode", "speech"]
+default = ["fake", "opencode", "speech"]
 # A scripted in-memory backend for tests and for manual testing without an agent.
 fake = []
-# Claude Code, driven as a persistent `claude` process per space.
-claude-code = ["dep:backend-claude-code"]
 # OpenCode, driven over the HTTP and SSE APIs of a running `opencode serve` process.
 opencode = ["dep:backend-opencode"]
 # Speech recognition and synthesis with the speech crate's in-process sherpa-onnx engines.
@@ -68,7 +66,6 @@ speech-shared = ["speech", "speech/shared"]
 [dependencies]
 async-channel = "2"
 backend = { path = "../backend" }
-backend-claude-code = { path = "../backend-claude-code", optional = true }
 backend-opencode = { path = "../backend-opencode", optional = true }
 base-http = "0.2.0"
 base-endpoint = { version = "0.1.0", features = ["rustls"] }

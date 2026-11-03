@@ -2441,7 +2441,7 @@ impl Hub {
         Some(id)
     }
 
-    /// The session of `space` now goes by `session`, as Claude Code may say once it starts, so that the space is bound to it after a restart.
+    /// The session of `space` now goes by `session`, as an agent may say once it starts, so that the space is bound to it after a restart.
     pub(crate) fn session_changed(&self, space: &str, session: String) {
         {
             let mut state = self.lock();

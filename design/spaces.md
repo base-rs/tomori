@@ -18,7 +18,7 @@ Shared space state is held by the server and is the same for everyone in the spa
 
 If the initial session snapshot cannot be read, the server refuses to open the space, reports a retryable error to its creator, and closes the backend handle. It does not delete an attached agent session. This avoids presenting incomplete conversation, permission or worker state as current. The initial snapshot carries every pending approval and question, so a session with several parallel requests opens with all of them queued.
 
-An OpenCode session is bound to at most one space at a time. A request to bind one that is already bound is refused with an error directing the requester to the existing space, and the refusal does not affect that space. A stale handle to a session that has since been bound again cannot close or command the new binding. The server does not yet enforce this for Claude Code, whose attach starts a separate agent process.
+An OpenCode session is bound to at most one space at a time. A request to bind one that is already bound is refused with an error directing the requester to the existing space, and the refusal does not affect that space. A stale handle to a session that has since been bound again cannot close or command the new binding.
 
 Worker-list authority is reported independently from unrelated space errors: when the server says omissions are authoritative, a client may retire a previously observed worker even if another error remains visible. An incomplete list, including one trimmed to fit the snapshot budget, never authorizes a departure. Older servers without this indication retain the earlier conservative error-based behavior.
 

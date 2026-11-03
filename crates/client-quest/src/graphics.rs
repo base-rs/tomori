@@ -1596,7 +1596,7 @@ mod tests {
                 kind: Kind::Choice,
                 label: name.into(),
                 detail: None,
-                selected: name == "claude-code",
+                selected: name == "opencode",
             };
             let creating = View {
                 heading: "Choose a backend".into(),
@@ -1604,9 +1604,7 @@ mod tests {
                 items: spaces.into_iter().chain([create(true)]).collect(),
                 ring: Some(Ring {
                     step: Step::Backend,
-                    items: ["claude-code", "opencode", "codex", "echo"]
-                        .map(backend)
-                        .into(),
+                    items: ["opencode", "codex", "echo"].map(backend).into(),
                 }),
                 ..Default::default()
             };

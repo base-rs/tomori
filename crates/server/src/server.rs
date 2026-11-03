@@ -1187,7 +1187,7 @@ async fn drive(
         loop {
             match session.next_event().await {
                 Ok(event) => {
-                    // An agent may name its session anew once it starts, as Claude Code does.
+                    // An agent may name its session anew once it starts.
                     let id = session.id();
                     if id != bound {
                         hub.session_changed(space, id.clone());
