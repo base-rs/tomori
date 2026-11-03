@@ -340,6 +340,8 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
+        // The counts when serving starts, taken before any connection is accepted: the publisher is polled after serving begins, and a client served before then would otherwise be counted as the starting point, so its arrival would never be published.
+        let counts = self.counts();
         // Ends the spaces, the sweep and the pacing once serving has ended for any reason.
         let services = cancellation.child();
         let serving = async {
@@ -355,7 +357,7 @@ impl Server {
                     self.sweep(scheduler, &services),
                     zip(
                         self.pace(scheduler, &services),
-                        self.publish(scheduler, &services),
+                        self.publish(scheduler, counts, &services),
                     ),
                 ),
             ),
@@ -364,13 +366,17 @@ impl Server {
         served
     }
 
-    /// Report changed counts to the [`with_counts`](Self::with_counts) callback, at most once per interval. A change waits until the interval since the last report, or since starting, has passed, and then the latest counts are reported, unless they have changed back.
-    async fn publish<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+    /// Report changes from `published`, the counts when serving started, to the [`with_counts`](Self::with_counts) callback, at most once per interval. A change waits until the interval since the last report, or since starting, has passed, and then the latest counts are reported, unless they have changed back.
+    async fn publish<S: Timers>(
+        &self,
+        scheduler: &S,
+        mut published: Counts,
+        cancellation: &Cancellation,
+    ) {
         let Some(publish) = &self.counts else {
             return;
         };
         let mut timer = scheduler.timer();
-        let mut published = self.counts();
         let mut due = scheduler.now() + self.counts_interval;
         loop {
             let listener = self.hub.listen_counts();
@@ -1677,8 +1683,10 @@ mod tests {
         assert!(health(running.address).starts_with("HTTP/1.1 200"));
         let cancelled = Instant::now();
         running.cancellation.cancel();
-        // New peers are refused while the connection drains, rather than queued.
+        // New peers are refused while the connection drains, rather than queued. A peer that connects as the server is cancelled may still be accepted, since an accept that completes wins over a concurrent cancellation, but the accept after it is already cancelled, so at most one is.
+        let mut probes = 0;
         while TcpStream::connect(running.address).is_ok() {
+            probes += 1;
             assert!(cancelled.elapsed() < drain / 2, "the listener stayed open");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -1693,6 +1701,10 @@ mod tests {
         let elapsed = cancelled.elapsed();
         assert!(elapsed >= drain, "the drain ended after {elapsed:?}");
         assert!(elapsed < drain * 4, "the drain took {elapsed:?}");
-        assert_eq!(result.unwrap().connections, 1);
+        let connections = result.unwrap().connections;
+        assert!(
+            connections == 1 || (connections == 2 && probes > 0),
+            "{connections} connections served after {probes} peers connected while cancelling"
+        );
     }
 }

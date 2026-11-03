@@ -202,7 +202,7 @@ The original audio remains 16 kHz mono even if PipeWire exposes the remapped inp
 
 Enable Quest developer mode, connect a USB data cable, and accept **Allow USB debugging** inside the headset. `adb devices -l` must show `device`, not `unauthorized`. Keep your boundary enabled and stay seated or stationary. Wake the Touch controllers before launching: Quest may otherwise show a **controllers required** dialog and block the application from starting.
 
-Install a **user-local rustup** toolchain (Rust 1.93+) and Android tools:
+Install a **user-local rustup** toolchain (Rust 1.90+) and Android tools:
 
 ```sh
 rustup target add aarch64-linux-android
@@ -266,6 +266,8 @@ cargo run -p client-quest -- --xr        # use an active desktop OpenXR Vulkan r
 npm test --prefix bridge          # session routing, questions and permissions
 ```
 
+`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. The main branch requires these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
+
 For the PC streaming-recognition test (model + public sample required):
 
 ```sh
@@ -303,6 +305,12 @@ Original project code is released under the MIT License; see [license.md](licens
 - The optional OBS plugin compatibility patch follows the upstream plugin's GPL-2.0-or-later licensing; its packaging metadata is under `packaging/`.
 - Speech models and native dependencies are downloaded separately, not bundled in this repository. Their licensing requirements are noted in the relevant setup sections above.
 
+## Releasing
+
+Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
+
+No Tomori crate is published yet: which crates are published, and their names, are planned in [#73](https://github.com/ioquatix/tomori/issues/73).
+
 ## Releases
 
 <!-- bake-readme:releases:start -->
@@ -314,3 +322,7 @@ See [releases.md](releases.md) for the full release history.
 ## See Also
 
 - [tomori](https://github.com/ioquatix/tomori) — A conversational spatial workspace for people and agents, built with OpenXR and wgpu<!-- bake-readme:package -->
+
+## Contributing
+
+Please open an issue or pull request on [GitHub](https://github.com/ioquatix/tomori).

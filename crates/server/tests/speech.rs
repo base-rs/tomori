@@ -11,7 +11,7 @@ use protocol::{
     ServerMessage, SpeechSetting,
 };
 use server::fake::FakeBackend;
-use server::test_support::{TestClient, TestServer, TextTranscriber};
+use server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
 use server::{RecognitionTranscriber, Server};
 use speech::stt::{RATE, Transcript};
 use speech::{AudioChunk, Error, RecognitionStream, StreamingRecognizer, Synthesizer};
@@ -680,7 +680,9 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
     });
     assert_eq!(text, ("u2".to_owned(), "run the tests".to_owned()));
     ada.space(|state| !state.queue.is_empty());
-    let prompts = server.backend.started()[0].log().prompts;
+    // The input is queued before the space's driver hands it to the session.
+    let session = server.backend.started()[0].clone();
+    let prompts = eventually(|| Some(session.log().prompts).filter(|prompts| !prompts.is_empty()));
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0].text, "Ada: run the tests");
 }
@@ -715,7 +717,9 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     });
     assert_eq!(transcript(&mut ada, "u2"), "run the tests");
     ada.space(|state| !state.queue.is_empty());
-    let prompts = server.backend.started()[0].log().prompts;
+    // The input is queued before the space's driver hands it to the session.
+    let session = server.backend.started()[0].clone();
+    let prompts = eventually(|| Some(session.log().prompts).filter(|prompts| !prompts.is_empty()));
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0].text, "Ada: run the tests");
 }

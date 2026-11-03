@@ -2,7 +2,7 @@
 name = "security"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version.workspace = true
 description = "Tomori's authentication, tokens, certificates and pinning, shared by the server and clients"
 repository = "https://github.com/ioquatix/tomori"
 license = "MIT"

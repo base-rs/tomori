@@ -2,6 +2,13 @@
 members = ["crates/environment-sky", "crates/protocol", "crates/security", "crates/backend", "crates/backend-opencode", "crates/client", "crates/client-quest", "crates/discovery", "crates/server", "crates/speech", "bake"]
 resolver = "3"
 
+[workspace.package]
+# The oldest Rust that builds the workspace with its locked dependencies: wgpu-hal depends on ordered-float 5.5, which needs 1.90. The source itself needs 1.88, for let chains and `slice::as_chunks`. CI builds and tests with this version.
+rust-version = "1.90"
+
+[workspace.metadata.bake.release]
+reviewers = ["ioquatix"]
+
 [profile.release]
 lto = "thin"
 strip = "debuginfo"

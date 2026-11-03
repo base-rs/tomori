@@ -14,7 +14,7 @@ use protocol::{
 };
 use server::Server;
 use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, speech};
+use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually, speech};
 
 /// Errors received within `window`, skipping other messages.
 fn errors_within(client: &TestClient, window: Duration) -> Vec<String> {
@@ -680,7 +680,8 @@ fn queued_input_is_visible_to_everyone_and_anyone_can_cancel_it() {
     // Entries carry the speaker's participant number, so Bob's client can recognize its own.
     assert_eq!(entry.source, bob.source);
 
-    // Ada cancels Bob's queued entry; both see it go.
+    // Ada cancels Bob's queued entry; both see it go. Bob first sees it queued, so that an older snapshot without it is not taken for the cancellation.
+    bob.space(|state| state.queue.iter().any(|queued| queued.id == entry.id));
     ada.send(&ClientMessage::CancelQueued {
         entry: entry.id.clone(),
     });
@@ -1350,8 +1351,9 @@ fn a_question_is_answered_by_any_participant() {
         text: "2".to_owned(),
     });
     ada.space(|state| state.question.is_none());
+    // The question is cleared as soon as it is complete, before the space's driver hands the answers to the session.
     assert_eq!(
-        session.log().answers,
+        eventually(|| Some(session.log().answers).filter(|answers| !answers.is_empty())),
         [(
             "q1".to_owned(),
             vec![(
@@ -1451,8 +1453,9 @@ fn a_spoken_answer_answers_the_presented_question_and_is_never_queued() {
         say_answer(&mut ada, "u2", &question, "Blue").unwrap(),
         "Blue"
     );
+    // The question is cleared as soon as it is complete, before the space's driver hands the answers to the session.
     assert_eq!(
-        session.log().answers,
+        eventually(|| Some(session.log().answers).filter(|answers| !answers.is_empty())),
         [(
             "q1".to_owned(),
             vec![(

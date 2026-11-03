@@ -1,0 +1,42 @@
+name: Coverage
+
+# The Base 100% source-region coverage gate. Coverage is still far below 100% (see #55), so this workflow reports the uncovered regions but is not required: the main branch ruleset requires test-result from test.yml and check from publish.yml, and neither depends on it. Once the workspace reaches 100%, move this job into test.yml and add it to test-result's needs. See the Tests section of readme.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: llvm-tools-preview
+          # Invalidate caches containing the retired socketry-cargo-bake launcher.
+          cache-shared-key: coverage-bake-launcher-v2
+      - name: Install the ALSA development files for the desktop client
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      - uses: actions/cache@v6
+        with:
+          path: .tools/sherpa-onnx
+          key: sherpa-onnx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
+      - name: Install Bake launcher
+        run: cargo install bake --locked
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --locked
+      # The project's test:before task fetches the sherpa-onnx libraries, restored from the cache above when unchanged.
+      - name: Run tests and require complete source-region coverage
+        shell: bash
+        run: cargo bake --locked test:coverage --all-targets true 2>&1 | tee coverage.log
+      - name: Summarize coverage
+        if: always()
+        run: grep -o 'region coverage is [^;]*; [0-9]* source regions remain uncovered' coverage.log >> "$GITHUB_STEP_SUMMARY" || true

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use server::Server;
 use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber};
+use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually};
 
 /// The snapshot budget documented in `design/server.md`.
 const BUDGET: usize = MAX_FRAME_BYTES / 4;
@@ -229,8 +229,9 @@ fn an_enormous_question_is_trimmed_to_the_budget_and_can_still_be_answered() {
         text: "1".to_owned(),
     });
     ada.space(|state| state.question.is_none());
+    // The question is cleared as soon as it is complete, before the space's driver hands the answers to the session.
     assert_eq!(
-        session.log().answers,
+        eventually(|| Some(session.log().answers).filter(|answers| !answers.is_empty())),
         [(
             "q1".to_owned(),
             vec![(asked, AnswerValue::Choices(vec!["Yes".to_owned()]))]

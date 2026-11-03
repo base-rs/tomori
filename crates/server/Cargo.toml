@@ -2,7 +2,7 @@
 name = "server"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version.workspace = true
 description = "The Tomori server: spaces, agent sessions and live audio over one duplex connection per client"
 repository = "https://github.com/ioquatix/tomori"
 license = "MIT"
