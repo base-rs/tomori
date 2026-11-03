@@ -80,7 +80,7 @@ pub fn listen(samples: &[i16], start: usize) -> Option<Range<usize>> {
 /// `speech` lists the ranges of `samples` known to hold speech, in clip indices, or is empty when no detector heard them. If the rest of the clip is at most [`MAX_SEGMENT`] long, it is one segment. Otherwise the segment ends at a candidate point, every 10 ms in the last [`SEARCH`] before its limit:
 ///
 /// - If the detector heard speech in the search, and none in the 250 ms around some candidates, the quietest of those.
-/// - Otherwise, the candidate with the least energy in the 250 ms around it, if that is markedly quieter than most of the search. A detector that heard speech throughout, as when it merged a short pause into the words around it, does not decide.
+/// - Otherwise, the candidate with the least energy in the 250 ms around it, if that is markedly quieter than most of the search. A detector that heard speech throughout, as when it merged a short pause into the words around it, or nowhere in the search, does not decide.
 /// - Otherwise the audio has no pause, and the segment ends at its limit.
 ///
 /// The latest of equally quiet candidates wins, so segments stay as long as they can.

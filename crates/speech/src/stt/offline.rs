@@ -146,7 +146,7 @@ struct OfflineEntry {
     ready: Option<Instant>,
     /// Where the next segment to decode starts; the audio before it has been decoded.
     decoded: usize,
-    /// The transcript of each segment decoded so far, in order, without the empty ones.
+    /// The transcript of each segment decoded so far, in order, without the empty ones and those left out as having no speech.
     texts: Vec<String>,
     /// How many segments have been decoded, how many of them ended at their limit because there was no pause, and how many were left out of the transcript as having no speech in them.
     segments: usize,
@@ -311,7 +311,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         }
         if entry.segments > 1 {
             log::info!(
-                "Utterance {}: {:.1} seconds transcribed in {} segments, {} cut without a pause and {} without speech.",
+                "Utterance {}: {:.1} seconds transcribed in {} segments, {} cut without a pause and {} left out as having no speech.",
                 entry.key,
                 entry.samples.len() as f64 / f64::from(RATE),
                 entry.segments,
