@@ -184,6 +184,8 @@ pub fn run(
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
     let mut hand_menu = HandMenu::default();
+    // Whether the hand menu showed last frame, when A is read, so that A then chooses only in it.
+    let mut menu_was_shown = false;
     let mut arrival_time = 0.0_f32;
     let mut motion = arrival_motion::Motion::default();
     let mut delegation_scene = crate::delegation::Scene::new();
@@ -324,6 +326,8 @@ pub fn run(
                 }
                 false
             }
+            // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval.
+            _ if menu_was_shown => false,
             _ => controls.reset && conversation.press_a(highlighted.as_ref()),
         };
         // Hold X to talk to the agent; releasing it while focused sends the utterance.
@@ -430,6 +434,7 @@ pub fn run(
             .to_scene_transform(head_pose(&views))
             .map(|pose| Vec3::from_array(pose.position));
         let menu_shown = focused && hand_menu.update(palm, head, Instant::now());
+        menu_was_shown = menu_shown;
         let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
             let model = conversation.menu_model();
             match palm {
@@ -462,7 +467,9 @@ pub fn run(
         let in_arrival = conversation.arrival().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
         renderer.set_scenery(motion.scenery(arrival_time));
-        swarm.step(dt, controller.filter(|_| pointing.attracting));
+        // A trigger pull that misses the hand menu's rows does nothing while it shows.
+        let attracting = pointing.attracting && !menu_shown;
+        swarm.step(dt, controller.filter(|_| attracting));
         renderer.update(
             &gpu.queue,
             &swarm,
@@ -473,7 +480,7 @@ pub fn run(
             } else {
                 controller
             },
-            pointing.attracting,
+            attracting,
         );
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {

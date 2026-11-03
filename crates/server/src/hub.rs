@@ -694,6 +694,15 @@ impl HubState {
         let Some(mut record) = self.participants.remove(&knock.participant) else {
             return false;
         };
+        // A knock made again since the decision belongs to the old key, which is gone.
+        let stale: Vec<String> = self
+            .knocks
+            .iter()
+            .filter(|waiting| waiting.participant == knock.participant)
+            .map(|waiting| waiting.space.clone())
+            .collect();
+        self.knocks
+            .retain(|waiting| waiting.participant != knock.participant);
         record.visitor = false;
         let space = record.space.clone();
         self.participants.insert(key.clone(), record);
@@ -720,6 +729,9 @@ impl HubState {
             }
         }
         self.update_role(&key);
+        for space in stale {
+            self.announce_knocks(&space);
+        }
         if let Some(space) = space {
             self.touch_space(&space);
             self.announce_knocks(&space);
@@ -872,7 +884,15 @@ impl Hub {
         };
         let admitted = {
             let mut state = self.lock();
-            state.admit(&knock, entry.principal().id, token)
+            let admitted = state.admit(&knock, entry.principal().id, token);
+            if !admitted && let Some(record) = state.connections.get(&knock.connection) {
+                // Still connected, but no longer the visitor who knocked, such as after reconnecting.
+                record.outbox.message(ServerMessage::KnockState {
+                    state: protocol::KnockState::Withdrawn,
+                });
+            }
+            self.recount(&mut state);
+            admitted
         };
         if admitted {
             log::info!(
@@ -1967,6 +1987,14 @@ impl Hub {
                 };
                 if state.role(connection, Some(&space)).participates() {
                     state.error(participant, "You already take part in this space.");
+                    return;
+                }
+                // One token admits a device as one thing; a collaborator elsewhere asks an owner instead.
+                if state.connections[&connection].access.principal.is_some() {
+                    state.error(
+                        participant,
+                        "You are admitted elsewhere on this server; ask an owner to let you in here.",
+                    );
                     return;
                 }
                 if self.tokens.read().expect("never left poisoned").is_none() {

@@ -176,7 +176,7 @@ fn knocks_are_bounded() {
 }
 
 #[test]
-fn a_knock_expires_or_is_withdrawn_when_its_visitor_leaves() {
+fn a_knock_expires() {
     let (server, ada, space) =
         knocking_server(|server| server.with_knock_timeout(Duration::from_millis(500)));
     let mut vic = visitor(&server, "vic", "Vic", &space);
@@ -188,7 +188,11 @@ fn a_knock_expires_or_is_withdrawn_when_its_visitor_leaves() {
     // An expired knock waits like a declined one.
     vic.send(&ClientMessage::Knock);
     assert_eq!(vic.error(), "You knocked recently; try again in a minute.");
+}
 
+#[test]
+fn a_knock_is_withdrawn_when_its_visitor_leaves() {
+    let (server, ada, space) = knocking_server(|server| server);
     let mut wes = visitor(&server, "wes", "Wes", &space);
     wes.send(&ClientMessage::Knock);
     knock_state(&wes);
@@ -213,6 +217,38 @@ fn only_a_visitor_knocks_and_only_a_participant_decides() {
     let mut lobby = server.connect("lobby", "Lobby");
     lobby.send(&ClientMessage::Knock);
     assert_eq!(lobby.error(), "Join a space first.");
+}
+
+#[test]
+fn a_collaborator_elsewhere_asks_an_owner_instead_of_knocking() {
+    let (server, mut ada, studio) = knocking_server(|server| server);
+    let other = ada.create_space("Other").id;
+    let (_, token) = server.issue("Bob", Grant::Collaborator { space: studio });
+    let mut bob = server.connect_with_token("bob", "Bob", &token);
+    bob.send(&ClientMessage::Join {
+        space: other.clone(),
+    });
+    bob.space(|state| state.id == other);
+    bob.send(&ClientMessage::Knock);
+    assert_eq!(
+        bob.error(),
+        "You are admitted elsewhere on this server; ask an owner to let you in here."
+    );
+}
+
+#[test]
+fn visitors_are_not_told_about_knocks() {
+    let (server, _ada, space) = knocking_server(|server| server);
+    let mut vic = visitor(&server, "vic", "Vic", &space);
+    let wes = visitor(&server, "wes", "Wes", &space);
+    vic.send(&ClientMessage::Knock);
+    knock_state(&vic);
+    while let Some(message) = wes.next_message(Duration::from_millis(300)) {
+        assert!(
+            !matches!(message, ServerMessage::Knocks { .. }),
+            "{message:?}"
+        );
+    }
 }
 
 #[test]

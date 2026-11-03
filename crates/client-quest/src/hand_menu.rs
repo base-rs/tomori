@@ -21,13 +21,14 @@ pub const HIDE_ANGLE: f32 = 55.0 * std::f32::consts::PI / 180.0;
 /// How long the palm faces the head before the menu appears, so that a hand passing through the pose does not show it.
 pub const HOLD: Duration = Duration::from_millis(200);
 
-/// The OpenXR hand joints the palm is found from.
+/// The OpenXR hand joints the palm is found from: the wrist and the knuckles of the index and little fingers, which are far enough apart to give a steady direction.
 const WRIST: usize = 1;
-const INDEX_METACARPAL: usize = 6;
-const LITTLE_METACARPAL: usize = 21;
+const INDEX_KNUCKLE: usize = 7;
+const LITTLE_KNUCKLE: usize = 22;
 
-/// How far apart the menu's rows are, and how large their markers.
-const ROW: f32 = 0.032;
+/// How far apart the menu's rows are, how far each reaches to the right to be pointed at, and how large their markers.
+pub const ROW: f32 = 0.032;
+pub const ROW_LENGTH: f32 = 0.2;
 const MARKER: f32 = 0.009;
 const PIXEL: f32 = 0.0011;
 
@@ -45,8 +46,8 @@ impl Palm {
         let position =
             |index: usize| hand.joints[index].map(|joint| Vec3::from_array(joint.position));
         let wrist = position(WRIST)?;
-        let index = position(INDEX_METACARPAL)? - wrist;
-        let little = position(LITTLE_METACARPAL)? - wrist;
+        let index = position(INDEX_KNUCKLE)? - wrist;
+        let little = position(LITTLE_KNUCKLE)? - wrist;
         // For a left hand, the little finger crossed with the index finger points out of the palm.
         let normal = little.cross(index).try_normalize()?;
         Some(Self { wrist, normal })
@@ -370,8 +371,8 @@ mod tests {
         let mut joints = [None; crate::hands::JOINT_COUNT];
         for (place, position) in [
             (WRIST, wrist),
-            (INDEX_METACARPAL, index),
-            (LITTLE_METACARPAL, little),
+            (INDEX_KNUCKLE, index),
+            (LITTLE_KNUCKLE, little),
         ] {
             joints[place] = Some(Joint {
                 position: position.to_array(),

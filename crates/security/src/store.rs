@@ -145,13 +145,16 @@ impl TokenStore {
 
     /// Read the file again, for changes another process made. Returns whether the tokens changed. The file is read whole rather than trusting its modification time, which may not change between two quick writes.
     pub fn reload(&self) -> Result<bool, StoreError> {
+        // Under the lock, so that a change being made, here or in another process, is either read whole or not begun.
+        let lock = File::create(self.path.with_extension("lock"))?;
+        lock.lock_shared()?;
         let entries = read(&self.path)?;
         let mut state = self.write_state();
-        if entries == state.entries {
-            return Ok(false);
-        }
+        let changed = entries != state.entries;
         state.entries = entries;
-        Ok(true)
+        drop(state);
+        lock.unlock()?;
+        Ok(changed)
     }
 
     /// Apply `change` to the entries as they are in the file now, under the lock, and write them back.

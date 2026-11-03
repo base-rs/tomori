@@ -490,12 +490,18 @@ impl Conversation {
                 );
                 self.knock = Some(state);
             }
-            ServerMessage::Admitted { token } => {
+            // Only an answer to this device's own knock, so that a server cannot hand it a token unasked.
+            ServerMessage::Admitted { token }
+                if self.knock == Some(protocol::KnockState::Pending) =>
+            {
                 self.knock = None;
                 if let Some(certificate) = self.certificate {
                     self.actions.push(Action::Admitted { token, certificate });
                 }
                 self.notice = Some("You were let in: you can now take part in this space.".into());
+            }
+            ServerMessage::Admitted { .. } => {
+                log::warn!("Ignored an admission this device did not ask for.")
             }
             ServerMessage::Paired { token } => {
                 self.pairing = None;
@@ -2658,6 +2664,18 @@ mod tests {
         );
         assert_eq!(conversation.knock_state(), None);
         assert!(!conversation.can_knock());
+    }
+
+    #[test]
+    fn an_admission_this_device_did_not_ask_for_is_ignored() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.apply(space(|_| {}));
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::Admitted {
+            token: "tomori_unasked".into(),
+        }));
+        assert!(conversation.take_actions().is_empty());
     }
 
     #[test]

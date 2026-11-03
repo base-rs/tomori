@@ -847,6 +847,17 @@ impl Connection {
         let Some(link) = self.link.as_mut() else {
             return;
         };
+        // Never from a server whose identity changed, over a certificate other than the one kept, or in place of a token already kept: an admission may not replace what this device trusts.
+        let kept = self.store.credential(&link.key).certificate;
+        if link.distrusted
+            || link.token.is_some()
+            || kept.is_some_and(|kept| kept != certificate.to_string())
+        {
+            log::warn!(
+                "Ignored an admission that would replace what this device keeps for the server."
+            );
+            return;
+        }
         self.store
             .remember_certificate(&link.key, &certificate.to_string());
         self.store.remember_token(&link.key, &token);

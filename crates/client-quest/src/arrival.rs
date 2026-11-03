@@ -313,12 +313,21 @@ impl Scene {
                             center: object.position,
                             half_extents: Vec3::new(reach, reach, object.size * 0.6),
                         },
-                        // A row of the hand menu is chosen by its marker or its label, which runs to the right of it.
-                        Kind::Menu(_) => Shape::Sphere {
-                            center: object.position
-                                + (object.label.anchor - object.position).with_y(0.0) * 4.0,
-                            radius: 0.06,
-                        },
+                        // A row of the hand menu is chosen by its marker or its label, which runs to the right of it, and is no taller than a row, so that rows never overlap.
+                        Kind::Menu(_) => {
+                            let right = (object.label.anchor - object.position)
+                                .with_y(0.0)
+                                .normalize_or_zero();
+                            let length = crate::hand_menu::ROW_LENGTH;
+                            Shape::Box {
+                                center: object.position + right * (length / 2.0 - object.size),
+                                half_extents: Vec3::new(
+                                    right.x.abs() * length / 2.0 + 0.01,
+                                    crate::hand_menu::ROW * 0.45,
+                                    right.z.abs() * length / 2.0 + 0.01,
+                                ),
+                            }
+                        }
                         _ => Shape::Sphere {
                             center: object.position,
                             radius: reach,
