@@ -5,6 +5,7 @@
 //!
 //! See `design/server.md` and `design/live-audio.md`.
 
+pub mod engagement;
 pub mod playback;
 
 /// Finding servers on the local network with Bonjour: [`discovery::browse`] yields servers to list, and [`discovery::Server::address`] gives the address for [`Options::new`]. On Android, hold a Wi-Fi multicast lock while browsing; see the [`discovery`] crate documentation.

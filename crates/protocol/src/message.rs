@@ -128,6 +128,25 @@ pub enum ClientMessage {
         knock: String,
         admit: bool,
     },
+    /// Play a retained reply again to this participant only, from its start, from [`crate::REPLAY_SOURCE`]: `None`
+    /// for the latest reply. Live agent speech of a later reply stops it. Sent only to a server whose
+    /// [`crate::SpaceState::speech`] is known. See `design/speech.md`.
+    Replay {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// Stop this participant's replay or catch-up, and follow live speech from here on.
+    StopReplay,
+    /// Whether this participant is wearing their device and attending, sent when it changes and once on entering a
+    /// space. Sent only to a server whose [`crate::SpaceState::speech`] is known. See `design/spaces.md`.
+    Engagement {
+        state: crate::Engagement,
+    },
+    /// Change how much of each reply the current space speaks, for everyone in it. Sent only to a server whose
+    /// [`crate::SpaceState::speech`] is known.
+    SetSpeech {
+        speech: crate::SpeechSetting,
+    },
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,
@@ -186,12 +205,17 @@ pub enum ServerMessage {
         utterance: String,
         error: String,
     },
-    /// Announces the agent speech audio frames that follow, which use [`crate::AGENT_SOURCE`].
+    /// Announces the agent speech audio frames that follow, which use [`crate::AGENT_SOURCE`], or
+    /// [`crate::REPLAY_SOURCE`] when `replay` is set.
     Speech {
         segment: u32,
         message: String,
         text: String,
         sample_rate: u32,
+        /// Set when the segment is played again for this participant only, as a replay or catch-up, rather than
+        /// live. Absent from older servers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replay: bool,
     },
     Presence {
         source: u32,
@@ -280,6 +304,65 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["final"], true);
+    }
+
+    #[test]
+    fn replay_engagement_and_speech_settings_have_a_stable_wire_format() {
+        assert_eq!(
+            serde_json::to_value(ClientMessage::Replay { message: None }).unwrap(),
+            serde_json::json!({"type": "replay"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMessage::StopReplay).unwrap(),
+            serde_json::json!({"type": "stop_replay"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMessage::Engagement {
+                state: crate::Engagement::Away
+            })
+            .unwrap(),
+            serde_json::json!({"type": "engagement", "state": "away"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMessage::SetSpeech {
+                speech: crate::SpeechSetting::Brief
+            })
+            .unwrap(),
+            serde_json::json!({"type": "set_speech", "speech": "brief"})
+        );
+        // A state a newer client sends is read as unknown, which still counts as listening.
+        let newer: ClientMessage =
+            serde_json::from_value(serde_json::json!({"type": "engagement", "state": "dozing"}))
+                .unwrap();
+        assert_eq!(
+            newer,
+            ClientMessage::Engagement {
+                state: crate::Engagement::Unknown
+            }
+        );
+        assert!(crate::Engagement::Unknown.is_listening());
+        assert!(crate::Engagement::Distracted.is_listening());
+        assert!(!crate::Engagement::Away.is_listening());
+
+        // Live speech omits the replay flag, as older servers did; a replayed segment sets it.
+        let live = ServerMessage::Speech {
+            segment: 1,
+            message: "m".into(),
+            text: "Hello.".into(),
+            sample_rate: 24_000,
+            replay: false,
+        };
+        let json = serde_json::to_value(&live).unwrap();
+        assert!(json.get("replay").is_none());
+        assert_eq!(serde_json::from_value::<ServerMessage>(json).unwrap(), live);
+        let replayed = ServerMessage::Speech {
+            segment: 1,
+            message: "m".into(),
+            text: "Hello.".into(),
+            sample_rate: 24_000,
+            replay: true,
+        };
+        assert_eq!(serde_json::to_value(&replayed).unwrap()["replay"], true);
     }
 
     #[test]

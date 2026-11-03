@@ -359,6 +359,8 @@ struct Speaker {
     retry_at: Option<Instant>,
     /// Whether a failure has been shown since the speaker last opened, so that retries do not repeat it.
     reported: bool,
+    /// Whether agent speech is muted locally, kept across connections.
+    muted: bool,
 }
 
 impl Speaker {
@@ -370,6 +372,7 @@ impl Speaker {
             failure: Arc::default(),
             retry_at: None,
             reported: false,
+            muted: false,
         }
     }
 
@@ -378,8 +381,22 @@ impl Speaker {
         self.detach();
         if let Some(audio) = client.take_audio() {
             let (player, control) = Player::new(audio, MixerOptions::default());
+            control.set_agent_muted(self.muted);
             self.player = Some((Arc::new(Mutex::new(player)), control));
         }
+    }
+
+    /// Mute or unmute agent speech locally, on this player and those of later connections.
+    fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        if let Some(control) = self.control() {
+            control.set_agent_muted(muted);
+        }
+    }
+
+    /// Whether agent speech played again for this participant is playing.
+    fn is_replaying(&self) -> bool {
+        self.control().is_some_and(PlayerControl::is_replaying)
     }
 
     /// The client is going away: stop playing and forget its audio.
@@ -636,6 +653,7 @@ impl Connection {
         if let Some(control) = self.speaker.control() {
             control.set_silenced(self.voice.talking());
         }
+        conversation.set_replaying(self.speaker.is_replaying());
     }
 
     fn perform(&mut self, conversation: &mut Conversation) {
@@ -746,6 +764,7 @@ impl Connection {
                         conversation.microphone_failed(error);
                     }
                 }
+                Action::SetAgentMuted(muted) => self.speaker.set_muted(muted),
             }
         }
     }

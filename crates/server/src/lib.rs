@@ -25,6 +25,7 @@ mod projection;
 mod queue;
 #[cfg(feature = "speech")]
 mod recognition;
+mod retention;
 mod server;
 mod space;
 mod transcriber;

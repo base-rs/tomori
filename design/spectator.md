@@ -8,6 +8,8 @@ For the virtual camera, the PipeWire spectator renders at 1920×1080 at up to 30
 
 The spectator animates its swarm from the joined space's observed activity rather than displaying a static neutral arrangement. Worker transitions use the animated swarm's positions. This does not replace the shared-scene requirement in [clients.md](clients.md).
 
+The spectator reports no engagement, so the server keeps it at the live edge of agent speech: its audience hears replies as they are spoken, never a catch-up of what was said before it joined. See `speech.md`.
+
 ## Rationale
 
 The spectator view is intended for an audience and recording, where a headset HUD obstructs the scene and a static swarm misrepresents the session. The user identified both problems in November 2026 and requested a matching 1080p render and virtual camera for huddles.
@@ -24,3 +26,4 @@ Spectator rendering and its shared view, not headset rendering or in-world scene
 - View a connected spectator in a window or OBS and confirm that the scene is unobstructed while the headset HUD remains visible.
 - Test that observed activity drives a moving spectator swarm using the same simulation as the headset, and inspect that worker transitions use its current positions.
 - Check the PipeWire and virtual camera formats and verify that the camera receives frames at 1920×1080.
+- Test that the spectator's conversation never reports engagement.

@@ -229,6 +229,35 @@ fn muted_agent_speech_plays_silently_but_keeps_its_level() {
 }
 
 #[test]
+fn muting_also_silences_agent_speech_played_again() {
+    let mut mixer = mixer();
+    mixer.set_agent_muted(true);
+    mixer.push(frame(REPLAY_SOURCE, 0, 1_000));
+    mixer.push(frame(REPLAY_SOURCE, 1, 1_000));
+    mixer.push(frame(1, 0, 500));
+    mixer.push(frame(1, 1, 500));
+    let output = mix(&mut mixer, 4);
+    // Other participants still play.
+    assert!(output.iter().all(|&sample| sample == 500));
+    assert!(mixer.is_source_playing(REPLAY_SOURCE));
+}
+
+#[test]
+fn a_source_stays_recent_through_a_short_silence() {
+    let mut mixer = mixer();
+    assert!(!mixer.is_source_recent(REPLAY_SOURCE, Duration::from_millis(100)));
+    mixer.push(frame(REPLAY_SOURCE, 0, 1_000));
+    assert!(mixer.is_source_recent(REPLAY_SOURCE, Duration::from_millis(100)));
+    mix(&mut mixer, 4);
+    // 50 ms after its last audio, it is no longer playing, but still recent.
+    mix(&mut mixer, 50);
+    assert!(!mixer.is_source_playing(REPLAY_SOURCE));
+    assert!(mixer.is_source_recent(REPLAY_SOURCE, Duration::from_millis(100)));
+    mix(&mut mixer, 100);
+    assert!(!mixer.is_source_recent(REPLAY_SOURCE, Duration::from_millis(100)));
+}
+
+#[test]
 fn clearing_forgets_levels() {
     let mut mixer = mixer();
     mixer.push(frame(1, 0, 1_000));

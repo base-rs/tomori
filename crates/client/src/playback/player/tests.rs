@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::SyncSender;
 
-use protocol::{AGENT_SOURCE, Gate};
+use protocol::{AGENT_SOURCE, Gate, REPLAY_SOURCE};
 
 use super::*;
 use crate::playback::JitterOptions;
@@ -52,6 +52,31 @@ fn plays_received_participants_and_agent_speech_together() {
     sender.send(frame(AGENT_SOURCE, 0, 20)).unwrap();
     assert_eq!(render(&mut player, FRAME), [120; FRAME]);
     assert_eq!(control.statistics(), PlaybackStatistics::default());
+}
+
+#[test]
+fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
+    let (sender, mut player, control) = player();
+    control.set_agent_muted(true);
+    sender.send(frame(1, 0, 100)).unwrap();
+    sender.send(frame(AGENT_SOURCE, 0, 20)).unwrap();
+    sender.send(frame(REPLAY_SOURCE, 0, 7)).unwrap();
+    assert!(!control.is_replaying());
+    assert_eq!(render(&mut player, FRAME), [100; FRAME]);
+    assert!(control.is_replaying());
+    // Unmuting resumes agent speech, live or played again, at once.
+    control.set_agent_muted(false);
+    sender.send(frame(1, 1, 100)).unwrap();
+    sender.send(frame(AGENT_SOURCE, 1, 20)).unwrap();
+    sender.send(frame(REPLAY_SOURCE, 1, 7)).unwrap();
+    assert_eq!(render(&mut player, FRAME), [127; FRAME]);
+    // The mute survives the mixer being made again for a new device rate.
+    control.set_agent_muted(true);
+    render(&mut player, FRAME);
+    let mut output = vec![1; FRAME * 2];
+    sender.send(frame(AGENT_SOURCE, 2, 20)).unwrap();
+    player.render(RATE * 2, &mut output);
+    assert!(output.iter().all(|&sample| sample == 0));
 }
 
 #[test]

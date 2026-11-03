@@ -66,7 +66,9 @@ Before you join a space, servers, spaces and the **New space** object stand in t
 - **Servers:** point and pull, or flick the left stick up/down and press **A**, to connect; **Y** searches again. A server with an incompatible protocol is shown, grey, with its version, but can't be chosen.
 - **Spaces:** the spaces and the **New space** object are shown together; with no spaces, only **New space** is. Choose a space to join it. Choose the connected server, on the left, or press **B**, to return to the servers; **B** first dismisses an error or a note that a space has ended. **Y** lists again.
 - **New space:** choosing it opens rings of choices around it, one at a time: the backend, then the folder, then, for a backend that can attach, a new session or one of its existing sessions in that folder. **B**, or choosing the centre object again, steps back to the previous ring. **Y** lists the sessions again.
-- **In a space:** flick the left stick up/down to page through text and left/right to move between messages; the queue follows the last message. **Y** fetches the space again.
+- **In a space:** flick the left stick up/down to page through text and left/right to move between messages; the queue follows the last message. **Y** steps to the agent's next mode, or fetches the space again when it offers none.
+- **Right stick click:** play the latest spoken reply again from its start, to you only; click again to stop it and follow live speech. A reply that starts meanwhile stops it, and plays live.
+- **Left stick click:** mute or unmute spoken replies for you only; the status line shows **Muted**. Other participants still play.
 - **Pending approval:** flick the right stick left/right to choose *allow once* or a standing option, then press **A**; **B** denies. Nothing is decided without a press.
 - **Pending question:** answer it on the PC for now.
 - **B:** deny a pending approval, otherwise cancel your newest queued entry, otherwise leave the space.
@@ -103,13 +105,17 @@ The ready halo persists; you don't need to catch an end-of-turn flash. An active
 
 ### Voice
 
-In a space, squeeze the **left grip** to toggle live audio to the other participants and spectator without addressing the agent. The panel shows **MIC LIVE** while the microphone is open. Squeeze again to mute. Live audio is off by default and stops on focus loss, disconnection, departure or microphone failure; toggle it again to resume. Live capture requests the Android voice-communication preset, but echo cancellation is not guaranteed: use headphones or lower the headset volume if there is feedback. The live-microphone toggle is currently available on Quest, not desktop XR.
+In a space, squeeze the **left grip** to toggle live audio to the other participants and spectator without addressing the agent. The panel shows **MIC LIVE** while the microphone is open. Squeeze again to mute. Live audio is off by default and stops on focus loss, taking the headset off, disconnection, departure or microphone failure; toggle it again to resume. Live capture requests the Android voice-communication preset, but echo cancellation is not guaranteed: use headphones or lower the headset volume if there is feedback. The live-microphone toggle is currently available on Quest, not desktop XR.
 
 Hold **X** to talk to the agent: the panel shows **MIC AGENT** with the words recognized so far, and a **REC** timer above it counts up. Release **X** to send; the server finishes the transcript and queues it like typed input, where **B** can still cancel it. Releasing X returns to live audio if it was enabled; otherwise the microphone is off, and the panel says **Mic off**. Tomori asks for microphone access when it starts, so that the request does not interrupt your first recording; if you dismiss it, the first use of the microphone asks again. If it was denied, allow the microphone for Tomori in the headset's Settings.
 
 If anything stops the words reaching the agent intact, such as lost audio, a dropped connection, nothing being heard or a full queue, the panel shows the error and nothing is sent. Losing focus, as when the system menu opens, cancels a recording that is still held; release **X** before holding it again.
 
 The agent's replies are spoken as they stream in, and everyone in the space hears them and each other's push-to-talk audio through the headset or desktop speakers. You never hear your own recording back. While **X** is held, nothing plays, so that the speakers cannot be transcribed as your words; the reply carries on meanwhile and resumes where it has got to when you release (see [design/speech.md](design/speech.md) and [design/live-audio.md](design/live-audio.md)).
+
+Replies are brief by default: each message speaks its first paragraphs, up to about 20 seconds, then says "More on the panel." Any participant can switch a space to full speech with `set_speech` (the headset has no control for it yet).
+
+The server keeps the latest two spoken replies, up to 5 minutes of audio. If you join a space, or put your headset back on, having missed any of the latest reply, you hear it from its start, then whatever followed, until you have caught up with live speech; others in the space are unaffected. Taking the headset off counts as away, and turns the live microphone off. The headset tells the server when it is put on or taken off, from its proximity sensor and the OpenXR session state, and the status line counts who is away.
 
 Recognition and synthesis run inside the server through sherpa-onnx, whose libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build links. Recognition uses a streaming transducer that shows words while you speak, and a punctuation model adds capitals and punctuation to the finished transcript; synthesis uses Kokoro. The models need about 560 MB in `.tools/`. From the repository root:
 

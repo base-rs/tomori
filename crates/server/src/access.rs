@@ -81,6 +81,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::PairBegin { .. }
         | ClientMessage::PairReveal { .. }
         | ClientMessage::PairCancel => true,
+        // Ignored from a visitor, whose client may report it before it knows its role. See `design/spaces.md`.
+        ClientMessage::Engagement { .. } => watcher,
         ClientMessage::ListSpaces
         | ClientMessage::Join { .. }
         | ClientMessage::Leave
@@ -96,6 +98,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::Presence { .. }
         | ClientMessage::SetAttribution { .. }
         | ClientMessage::SetMode { .. }
+        | ClientMessage::SetSpeech { .. }
+        | ClientMessage::Replay { .. }
+        | ClientMessage::StopReplay
         | ClientMessage::DecideKnock { .. } => participant,
     };
     if permitted {
@@ -168,6 +173,14 @@ mod tests {
             ClientMessage::SetMode {
                 mode: "plan".into(),
             },
+            ClientMessage::Replay { message: None },
+            ClientMessage::StopReplay,
+            ClientMessage::Engagement {
+                state: protocol::Engagement::Away,
+            },
+            ClientMessage::SetSpeech {
+                speech: protocol::SpeechSetting::Full,
+            },
             ClientMessage::PairBegin {
                 commitment: "c".into(),
             },
@@ -201,6 +214,7 @@ mod tests {
             "list_spaces",
             "join",
             "leave",
+            "engagement",
             "pair_begin",
             "pair_reveal",
             "pair_cancel",

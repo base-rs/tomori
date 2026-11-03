@@ -16,8 +16,9 @@ use base_scheduler::Cancellation;
 use discovery::{AttentionCounts, Counts};
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
-    Attention, AudioFrame, ClientMessage, ConnectionRole, EnvironmentInfo, Frame, FrameKind, Gate,
-    Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
+    Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, EnvironmentInfo, Frame,
+    FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting,
+    WorkspaceRoot,
 };
 
 use crate::access::{self, Access, Grant};
@@ -25,6 +26,7 @@ use crate::backends::Backends;
 use crate::environments;
 use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
+use crate::retention::{Delivery, Item, Retention};
 use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
@@ -355,6 +357,8 @@ struct ParticipantRecord {
     last_space: Option<String>,
     /// When the participant's last connection ended, while it has none.
     departed: Option<Instant>,
+    /// What the participant's current connection last reported, if anything. See `design/spaces.md`.
+    engagement: Option<Engagement>,
 }
 
 struct SpaceRecord {
@@ -371,6 +375,10 @@ struct SpaceRecord {
     /// The attention the space was last listed as needing, and since when, so the listing can say how long it has
     /// waited. Stamped after each agent event and whenever participants are told the space changed.
     attention: Cell<Option<(Attention, Instant)>>,
+    /// The space's agent speech, kept for those who missed it. See `design/speech.md`.
+    speech: Retention,
+    /// Wakes the space's speech pacer, so that it paces a replay or catch-up that just started.
+    waker: Option<Box<dyn Fn() + Send>>,
 }
 
 impl SpaceRecord {
@@ -393,6 +401,13 @@ impl SpaceRecord {
             _ => 0,
         });
         summary
+    }
+
+    /// Wake the space's speech pacer, if it has one, to pace a replay or catch-up that just started.
+    fn wake(&self) {
+        if let Some(waker) = &self.waker {
+            waker();
+        }
     }
 }
 
@@ -665,6 +680,7 @@ impl HubState {
                 Some(Participant {
                     name: record.name.clone(),
                     source: record.source,
+                    engagement: record.engagement,
                 })
             })
             .collect()
@@ -686,6 +702,7 @@ impl HubState {
         if let Some(record) = self.space_mut(&space) {
             record.model.participants.retain(|id| id != participant);
             record.model.visitors.retain(|id| id != participant);
+            record.speech.left(participant);
         }
         self.withdraw_knock(participant, &space);
         self.touch_space(&space);
@@ -699,6 +716,10 @@ impl HubState {
             .get(participant)
             .and_then(|record| record.connection)
             .is_some_and(|connection| self.role(connection, Some(space)).participates());
+        let engagement = self
+            .participants
+            .get(participant)
+            .and_then(|record| record.engagement);
         let Some(record) = self.space_mut(space) else {
             return;
         };
@@ -709,6 +730,10 @@ impl HubState {
         };
         if !members.iter().any(|id| id == participant) {
             members.push(participant.to_owned());
+        }
+        // A participant who missed part of the latest reply hears it from its start. Visitors follow live speech; see `design/speech.md`.
+        if participates && record.speech.joined(participant, engagement) {
+            record.wake();
         }
         if let Some(record) = self.participants.get_mut(participant) {
             record.space = Some(space.to_owned());
@@ -1575,6 +1600,7 @@ impl Hub {
                     space: None,
                     last_space: None,
                     departed: None,
+                    engagement: None,
                 },
             );
         }
@@ -1584,6 +1610,8 @@ impl Hub {
             .expect("inserted above");
         record.name = name;
         record.departed = None;
+        // A new connection may be from a client that reports nothing, which stays at the live edge.
+        record.engagement = None;
         let source = record.source;
         let previous = record.connection.replace(connection);
         let rejoin = record.space.clone().or_else(|| record.last_space.clone());
@@ -2225,6 +2253,60 @@ impl Hub {
                     state.error(participant, "The agent session has stopped.");
                 }
             }
+            ClientMessage::Replay { message } => {
+                if let Some(message) = &message
+                    && let Err(error) = limits::check(message, limits::IDENTIFIER_BYTES, "message")
+                {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.speech.replay(participant, message.as_deref()) {
+                    Ok(()) => record.wake(),
+                    Err(error) => state.error(participant, error),
+                }
+            }
+            ClientMessage::StopReplay => {
+                // Stopping is harmless when nothing plays, so a stop that crosses the end of a replay is not refused.
+                if let Some(record) = space.and_then(|space| state.space_mut(space)) {
+                    record.speech.stop(participant);
+                }
+            }
+            ClientMessage::Engagement { state: engagement } => {
+                // A visitor's engagement is ignored: visitors follow live speech and show no presence. See `design/security.md`.
+                if !state.role(connection, space).participates() {
+                    return;
+                }
+                let Some(record) = state.participants.get_mut(participant) else {
+                    return;
+                };
+                if record.engagement == Some(engagement) {
+                    return;
+                }
+                log::debug!("Participant {} is now {engagement:?}.", record.source);
+                record.engagement = Some(engagement);
+                if let Some(space) = space
+                    && let Some(record) = state.space_mut(space)
+                {
+                    if record.speech.engagement(participant, engagement) {
+                        record.wake();
+                    }
+                    state.touch_space(space);
+                }
+            }
+            ClientMessage::SetSpeech { speech } => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.model.set_speech(speech) {
+                    Ok(()) => state.touch_space(&space),
+                    Err(error) => state.error(participant, error),
+                }
+            }
         }
     }
 
@@ -2467,6 +2549,8 @@ impl Hub {
             closed: None,
             kept_open: false,
             attention: Cell::new(None),
+            speech: Retention::default(),
+            waker: None,
         });
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
@@ -2564,6 +2648,8 @@ impl Hub {
                     closed: None,
                     kept_open: false,
                     attention: Cell::new(None),
+                    speech: Retention::default(),
+                    waker: None,
                 });
             }
             for id in closed {
@@ -2832,6 +2918,9 @@ impl Hub {
         if !record.model.is_closed() {
             record.model.apply(Event::Closed { reason: error });
         }
+        // A closed space keeps no speech, so that up to [`CLOSED_SPACES`] closed spaces hold no audio, and its pacer stops once what is still queued has been spoken.
+        record.speech.close();
+        record.waker = None;
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
         state.touch_space(space);
@@ -2842,34 +2931,95 @@ impl Hub {
 
     /// Announce an agent speech segment to everyone in the space now, in order with its frames.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
-    pub(crate) fn agent_speech(&self, space: &str, message: ServerMessage) {
-        let state = self.lock();
-        let Some(record) = state.space(space) else {
+    fn live_speech(&self, space: &str, reply: u64, item: Item, mut send: impl FnMut(&Outbox)) {
+        let mut state = self.lock();
+        let Some(record) = state.space_mut(space) else {
             return;
         };
-        for member in record.model.members() {
+        record.speech.record(reply, item);
+        let state = &*state;
+        let record = state.space(space).expect("found above");
+        // Visitors have no place in the kept speech, so they always hear it live.
+        let participants = record
+            .model
+            .participants
+            .iter()
+            .filter(|participant| record.speech.hears_live(participant));
+        for member in participants.chain(&record.model.visitors) {
             if let Some(outbox) = state.outbox(member) {
-                outbox.agent_message(message.clone());
+                send(outbox);
             }
         }
     }
 
-    /// Send one agent speech frame to everyone in the space now. Someone who joined mid-segment receives from here on.
+    /// Announce an agent speech segment of reply number `reply` to the space's participants who hear live speech, in order with its frames.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
-    pub(crate) fn agent_audio(&self, space: &str, frame: &AudioFrame) {
+    pub(crate) fn agent_speech(&self, space: &str, reply: u64, message: ServerMessage) {
+        self.live_speech(space, reply, Item::Announce(message.clone()), |outbox| {
+            outbox.agent_message(message.clone())
+        });
+    }
+
+    /// Send one agent speech frame of reply number `reply` to the space's participants who hear live speech. A participant who joined mid-segment and reports nothing receives from here on.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn agent_audio(&self, space: &str, reply: u64, frame: &AudioFrame) {
         let Ok(encoded) = Frame::audio(frame).try_encode() else {
             log::warn!("An agent speech frame for {space} exceeds the frame limit.");
             return;
         };
-        let state = self.lock();
-        let Some(record) = state.space(space) else {
-            return;
+        let item = Item::Frame {
+            sample_rate: frame.sample_rate,
+            samples: frame.samples.as_slice().into(),
         };
-        for member in record.model.members() {
-            if let Some(outbox) = state.outbox(member) {
-                outbox.agent_audio(encoded.clone());
+        self.live_speech(space, reply, item, |outbox| {
+            outbox.agent_audio(encoded.clone())
+        });
+    }
+
+    /// A breath between two spoken segments of reply number `reply`, kept so that a catch-up pauses there too.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn agent_gap(&self, space: &str, reply: u64) {
+        self.live_speech(space, reply, Item::Gap, |_| {});
+    }
+
+    /// Send each catching-up or replaying participant of `space` what is due by `now`. Returns `None` once the space is gone, and otherwise when the next is due, if anyone is still catching up or replaying.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn pace_speech(&self, space: &str, now: Instant) -> Option<Option<Instant>> {
+        let mut state = self.lock();
+        let record = state.space_mut(space)?;
+        let mut deliveries = Vec::new();
+        let next = record.speech.pace(now, &mut deliveries);
+        for (participant, delivery) in deliveries {
+            let Some(outbox) = state.outbox(&participant) else {
+                continue;
+            };
+            match delivery {
+                Delivery::Message(message) => outbox.agent_message(message),
+                Delivery::Frame(frame) => match Frame::audio(&frame).try_encode() {
+                    Ok(encoded) => outbox.agent_audio(encoded),
+                    Err(_) => {
+                        log::warn!("A replayed speech frame for {space} exceeds the frame limit.")
+                    }
+                },
             }
         }
+        Some(next)
+    }
+
+    /// Let the space's speech pacer be woken when a replay or catch-up starts.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn set_speech_waker(&self, space: &str, waker: Box<dyn Fn() + Send>) {
+        if let Some(record) = self.lock().space_mut(space) {
+            record.waker = Some(waker);
+        }
+    }
+
+    /// How much of each reply the space speaks; brief for a space that is gone.
+    #[cfg_attr(not(feature = "speech"), allow(dead_code))]
+    pub(crate) fn speech_setting(&self, space: &str) -> SpeechSetting {
+        self.lock()
+            .space(space)
+            .map_or(SpeechSetting::Brief, |record| record.model.speech())
     }
 
     /// Tell everyone in the space that agent speech could not be produced.

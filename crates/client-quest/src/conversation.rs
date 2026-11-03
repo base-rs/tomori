@@ -13,8 +13,9 @@ use crate::{
 };
 use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
-    Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, EnvironmentInfo, QueueState,
-    Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, Engagement, EnvironmentInfo,
+    QueueState, Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, SpeechSetting,
+    WorkspaceRoot,
 };
 use std::{
     sync::Arc,
@@ -62,6 +63,8 @@ pub enum Action {
         token: String,
         certificate: client::Fingerprint,
     },
+    /// Mute or unmute agent speech locally, live or played again.
+    SetAgentMuted(bool),
 }
 
 /// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
@@ -206,6 +209,16 @@ pub struct Conversation {
     paged: Option<Paged>,
     talk: Option<Talk>,
     live: bool,
+    /// Whether the participant is wearing the device and attending. See `design/spaces.md`.
+    engagement: Engagement,
+    /// The engagement last reported on this connection, so that each change is reported once.
+    reported: Option<Engagement>,
+    /// Whether this client reports engagement at all; the spectator does not, so it follows live speech.
+    reports_engagement: bool,
+    /// Whether agent speech is muted locally.
+    muted: bool,
+    /// Whether a replay or catch-up was playing at the last frame.
+    replaying: bool,
     capture_generation: u64,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
     launch: String,
@@ -269,6 +282,11 @@ impl Conversation {
             paged: None,
             talk: None,
             live: false,
+            engagement: Engagement::Engaged,
+            reported: None,
+            reports_engagement: true,
+            muted: false,
+            replaying: false,
             capture_generation: 0,
             launch: format!(
                 "{:x}",
@@ -478,6 +496,8 @@ impl Conversation {
             self.role = *role;
             self.certificate = *certificate;
             self.error = None;
+            // A new connection starts with nothing reported.
+            self.reported = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
             self.environments = environments.clone();
@@ -547,7 +567,11 @@ impl Conversation {
                 if !role.participates() {
                     self.stop_live();
                     self.stop_talking();
+                    // The server ignores a visitor's engagement, so it is reported again on taking part.
+                    self.reported = None;
                 }
+                // Admitted to act here, the participant's engagement now counts.
+                self.report();
             }
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
@@ -730,6 +754,79 @@ impl Conversation {
             self.message = self.message.min(items(&state).saturating_sub(1));
         }
         self.space = Some(state);
+        self.report();
+    }
+
+    /// Report the engagement to a server that accepts it, once per change on each connection. Sent without clearing a shown error, as it is not something the participant did.
+    fn report(&mut self) {
+        // A visitor sends no presence, so no engagement either; see `design/security.md`.
+        let supported = self.reports_engagement
+            && self.role.participates()
+            && self.mode == Mode::Space
+            && matches!(self.state, Some(ConnectionState::Connected { .. }))
+            && self
+                .space
+                .as_ref()
+                .is_some_and(|space| space.speech != SpeechSetting::Unknown);
+        if supported && self.reported != Some(self.engagement) {
+            self.reported = Some(self.engagement);
+            self.actions.push(Action::Send(ClientMessage::Engagement {
+                state: self.engagement,
+            }));
+        }
+    }
+
+    /// Never report engagement, so that the server keeps this client at the live edge of speech rather than playing it what it missed, as for the spectator. See `design/spectator.md`.
+    #[cfg(not(target_os = "android"))]
+    pub fn follow_live_speech_only(&mut self) {
+        self.reports_engagement = false;
+    }
+
+    /// The participant put the device on or took it off, or something else took or returned its input. Taking it off stops the live microphone and any recording, as losing focus does; see `design/live-audio.md`.
+    pub fn set_engagement(&mut self, engagement: Engagement) {
+        self.engagement = engagement;
+        if !engagement.is_listening() {
+            self.stop_live();
+            self.stop_talking();
+        }
+        self.report();
+    }
+
+    /// Left stick click: mute or unmute spoken replies, for this participant only. Other participants still play.
+    pub fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        log::info!(
+            "Spoken replies {}",
+            if self.muted { "muted" } else { "unmuted" }
+        );
+        self.actions.push(Action::SetAgentMuted(self.muted));
+    }
+
+    /// Right stick click: play the latest reply again from its start, for this participant only, or stop what is playing again and follow live speech. Asking to hear it again unmutes spoken replies.
+    pub fn replay(&mut self) {
+        let Some(space) = self.space.as_ref().filter(|_| self.mode == Mode::Space) else {
+            self.notice = Some("Join a space to hear a reply again.".into());
+            return;
+        };
+        if space.speech == SpeechSetting::Unknown {
+            self.notice = Some("This server cannot play replies again.".into());
+            return;
+        }
+        if self.replaying {
+            self.notice = None;
+            self.send(ClientMessage::StopReplay);
+            return;
+        }
+        if self.muted {
+            self.toggle_mute();
+        }
+        self.notice = None;
+        self.send(ClientMessage::Replay { message: None });
+    }
+
+    /// Whether a replay or catch-up is playing, from the player, once per frame.
+    pub fn set_replaying(&mut self, replaying: bool) {
+        self.replaying = replaying;
     }
 
     /// Finish a jump with the first listing: join the space that most needs attention, even one the server already put this participant in, since joining is what says it has been seen. If someone dealt with it meanwhile, stay in the lobby and say so.
@@ -954,6 +1051,9 @@ impl Conversation {
                 | ClientMessage::SetAttribution { .. }
                 | ClientMessage::SetMode { .. }
                 | ClientMessage::DecideKnock { .. }
+                | ClientMessage::SetSpeech { .. }
+                | ClientMessage::Replay { .. }
+                | ClientMessage::StopReplay
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());
@@ -2172,6 +2272,8 @@ impl Conversation {
                     "" => "The server named no environment.".into(),
                     missing => format!("Unknown environment: {missing}"),
                 }
+            } else if self.replaying {
+                "Replaying... R-stick click stops".into()
             } else if let Some(entry) = self.own_queued() {
                 format!("Queued: {}", entry.text)
             } else {
@@ -2180,15 +2282,18 @@ impl Conversation {
                     .iter()
                     .filter(|entry| entry.state == QueueState::Queued)
                     .count();
-                match (self.live, waiting) {
-                    (true, 0) => format!("{} here", space.participants.len()),
-                    (true, count) => format!("{count} queued | {} here", space.participants.len()),
-                    (false, 0) => format!("Mic off | {} here", space.participants.len()),
-                    (false, count) => format!(
-                        "Mic off | {count} queued | {} here",
-                        space.participants.len()
-                    ),
+                let mut parts = Vec::new();
+                if !self.live {
+                    parts.push("Mic off".to_owned());
                 }
+                if self.muted {
+                    parts.push("Muted".to_owned());
+                }
+                if waiting > 0 {
+                    parts.push(format!("{waiting} queued"));
+                }
+                parts.push(here(space));
+                parts.join(" | ")
             }
         });
         // The current mode is shown by the name the agent's interface gives it, even when it is not one Tomori can step to.
@@ -2254,6 +2359,19 @@ fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> Client
 /// Messages, then the queue when it has entries.
 fn items(space: &SpaceState) -> usize {
     space.messages.len() + usize::from(!space.queue.is_empty())
+}
+
+/// How many participants are in the space, and how many of them are away.
+fn here(space: &SpaceState) -> String {
+    let away = space
+        .participants
+        .iter()
+        .filter(|participant| participant.engagement == Some(Engagement::Away))
+        .count();
+    match away {
+        0 => format!("{} here", space.participants.len()),
+        away => format!("{} here, {away} away", space.participants.len() - away),
+    }
 }
 
 fn activity_label(activity: Activity) -> &'static str {
@@ -2396,6 +2514,7 @@ mod tests {
             participants: vec![Participant {
                 name: "Ada".into(),
                 source: 1,
+                engagement: None,
             }],
             ..Default::default()
         };
@@ -4460,6 +4579,168 @@ mod tests {
         conversation.apply(Event::State(ConnectionState::Closed));
         assert!(conversation.take_actions().contains(&Action::StopLive));
         assert!(!conversation.live);
+    }
+
+    #[test]
+    fn engagement_is_reported_once_per_change_and_connection_to_a_server_that_retains_speech() {
+        // An older server, which reports no speech setting, is never sent it.
+        let mut older = joined(|_| {});
+        older.set_engagement(Engagement::Away);
+        assert!(sent(&mut older).is_empty());
+
+        // Only engagement reports matter here; the server putting the client in a space also has it join.
+        let reports = |conversation: &mut Conversation| {
+            sent(conversation)
+                .into_iter()
+                .filter(|message| matches!(message, ClientMessage::Engagement { .. }))
+                .collect::<Vec<_>>()
+        };
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        conversation.take_actions();
+        // Nothing is reported in the lobby, then the engagement is reported on entering the space.
+        conversation.set_engagement(Engagement::Engaged);
+        assert!(reports(&mut conversation).is_empty());
+        conversation.apply(space(|state| state.speech = SpeechSetting::Brief));
+        let engaged = ClientMessage::Engagement {
+            state: Engagement::Engaged,
+        };
+        assert_eq!(reports(&mut conversation), std::slice::from_ref(&engaged));
+        conversation.apply(space(|state| state.speech = SpeechSetting::Brief));
+        assert!(reports(&mut conversation).is_empty());
+        conversation.set_engagement(Engagement::Distracted);
+        conversation.set_engagement(Engagement::Engaged);
+        assert_eq!(
+            reports(&mut conversation),
+            [
+                ClientMessage::Engagement {
+                    state: Engagement::Distracted
+                },
+                engaged.clone()
+            ]
+        );
+        // A new connection reports again, since the server forgets it with the old one.
+        conversation.apply(connected());
+        conversation.apply(space(|state| state.speech = SpeechSetting::Brief));
+        assert_eq!(reports(&mut conversation), [engaged]);
+
+        // A visitor sends no engagement, until admitted to act in the space.
+        let mut visitor = Conversation::new("Ada");
+        visitor.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        visitor.apply(connected());
+        visitor.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        visitor.apply(space(|state| state.speech = SpeechSetting::Brief));
+        visitor.replay();
+        let engagement = |messages: Vec<ClientMessage>| {
+            messages
+                .into_iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        ClientMessage::Engagement { .. } | ClientMessage::Replay { .. }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(engagement(sent(&mut visitor)).is_empty());
+        visitor.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Collaborator,
+        }));
+        assert_eq!(
+            engagement(sent(&mut visitor)),
+            [ClientMessage::Engagement {
+                state: Engagement::Engaged
+            }]
+        );
+
+        // The spectator never reports, so it follows live speech.
+        let mut spectator = Conversation::new("Spectator");
+        spectator.follow_live_speech_only();
+        spectator.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        spectator.apply(connected());
+        spectator.apply(space(|state| state.speech = SpeechSetting::Brief));
+        assert!(
+            !sent(&mut spectator)
+                .iter()
+                .any(|message| matches!(message, ClientMessage::Engagement { .. }))
+        );
+    }
+
+    #[test]
+    fn taking_the_headset_off_turns_the_live_microphone_off_and_abandons_a_recording() {
+        let mut conversation = joined(|state| state.speech = SpeechSetting::Brief);
+        conversation.toggle_live();
+        conversation.talk(true);
+        conversation.take_actions();
+        conversation.set_engagement(Engagement::Away);
+        let actions = conversation.take_actions();
+        assert!(actions.contains(&Action::StopLive), "{actions:?}");
+        assert!(actions.contains(&Action::CancelUtterance), "{actions:?}");
+        assert!(actions.contains(&Action::Send(ClientMessage::Engagement {
+            state: Engagement::Away
+        })));
+        assert!(!conversation.live);
+        assert_eq!(conversation.recording(), None);
+        // Putting it back on does not reopen the microphone.
+        conversation.set_engagement(Engagement::Engaged);
+        assert!(
+            !conversation
+                .take_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartLive(_)))
+        );
+        assert!(!conversation.live);
+    }
+
+    #[test]
+    fn the_stick_clicks_mute_spoken_replies_and_play_the_latest_again() {
+        let mut conversation = joined(|state| state.speech = SpeechSetting::Brief);
+        conversation.toggle_mute();
+        assert_eq!(conversation.take_actions(), [Action::SetAgentMuted(true)]);
+        assert!(conversation.text().contains("Muted"));
+        // Asking to hear the reply again unmutes, then asks the server to play it to this participant.
+        conversation.replay();
+        assert_eq!(
+            conversation.take_actions(),
+            [
+                Action::SetAgentMuted(false),
+                Action::Send(ClientMessage::Replay { message: None })
+            ]
+        );
+        // While it plays, the same click stops it.
+        conversation.set_replaying(true);
+        assert!(conversation.text().contains("Replaying"));
+        conversation.replay();
+        assert_eq!(sent(&mut conversation), [ClientMessage::StopReplay]);
+        conversation.set_replaying(false);
+
+        // An older server cannot play replies again, so nothing is sent.
+        let mut older = joined(|_| {});
+        older.replay();
+        assert!(sent(&mut older).is_empty());
+        assert!(older.text().contains("cannot play replies again"));
+        // Muting works with any server, as it is local.
+        older.toggle_mute();
+        assert_eq!(older.take_actions(), [Action::SetAgentMuted(true)]);
+    }
+
+    #[test]
+    fn participants_who_are_away_are_counted_apart() {
+        let mut conversation = joined(|state| {
+            state.participants.push(Participant {
+                name: "Bob".into(),
+                source: 2,
+                engagement: Some(Engagement::Away),
+            });
+        });
+        assert!(
+            conversation.text().contains("1 here, 1 away"),
+            "{}",
+            conversation.text()
+        );
     }
 
     #[test]
