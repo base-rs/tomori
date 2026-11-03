@@ -94,6 +94,11 @@ impl Palm {
         let towards = (head - self.wrist).try_normalize()?;
         Some(self.normal.dot(towards).clamp(-1.0, 1.0).acos())
     }
+
+    /// The angle, in radians, between the way the palm faces and straight up in the scene, whose +Y is the world's up.
+    pub fn angle_to_up(&self) -> f32 {
+        self.normal.dot(Vec3::Y).clamp(-1.0, 1.0).acos()
+    }
 }
 
 /// From the eyes to the neck, about which the head turns, in the head's space: the eyes are about 7.5 cm above it and 8 cm in front.
@@ -124,18 +129,29 @@ pub struct Visibility {
 impl Visibility {
     /// Update with the palm's angle to the head at `now`, or `None` when the hand is not tracked. Returns whether the menu is shown.
     pub fn update(&mut self, angle: Option<f32>, now: Instant) -> bool {
+        self.update_within(angle, SHOW_ANGLE, HIDE_ANGLE, now)
+    }
+
+    /// Update with the palm's `angle` to whatever it turns towards at `now`, or `None` when the hand is not tracked: it shows once the angle has been within `show` for [`HOLD`], and hides once it is beyond `hide`. Returns whether it is shown.
+    pub fn update_within(
+        &mut self,
+        angle: Option<f32>,
+        show: f32,
+        hide: f32,
+        now: Instant,
+    ) -> bool {
         match angle {
             None => {
                 self.shown = false;
                 self.facing_since = None;
             }
             Some(angle) if self.shown => {
-                if angle > HIDE_ANGLE {
+                if angle > hide {
                     self.shown = false;
                     self.facing_since = None;
                 }
             }
-            Some(angle) if angle <= SHOW_ANGLE => {
+            Some(angle) if angle <= show => {
                 let since = *self.facing_since.get_or_insert(now);
                 self.shown = now.saturating_duration_since(since) >= HOLD;
             }
