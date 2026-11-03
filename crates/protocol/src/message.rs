@@ -27,6 +27,13 @@ pub enum Decision {
     Deny,
 }
 
+/// The question and field a spoken answer is for, as presented in [`crate::Question`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerTarget {
+    pub question: String,
+    pub field: String,
+}
+
 /// Control messages sent by a client.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -68,6 +75,9 @@ pub enum ClientMessage {
     /// Mark the start of push-to-talk audio for the agent. Audio frames with [`Gate::Agent`] belong to the open utterance.
     UtteranceBegin {
         utterance: String,
+        /// The presented question and field this utterance answers, so that its transcript is sent as the answer rather than queued as input. Absent from older clients, and sent only to a server whose [`crate::SpaceState::speech`] is known. See `design/spaces.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<AnswerTarget>,
     },
     /// Finalize the utterance; the server finishes recognition and queues the transcript.
     UtteranceEnd {

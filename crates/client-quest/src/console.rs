@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), q (quit).";
 
 pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
     let (sender, input) = mpsc::channel();
@@ -29,6 +29,7 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
     let mut knocks = Vec::new();
     loop {
         connection.poll(true, &mut conversation);
+        conversation.tick_space(std::time::Instant::now());
         match input.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
                 for command in line.split_whitespace() {
@@ -41,12 +42,15 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                         ">" => conversation.choose(1),
                         "a" => {
                             if conversation.accept() {
-                                println!(
-                                    "(A has nothing to choose; on the headset it resets the swarm.)"
-                                );
+                                println!("(A has nothing to choose here.)");
                             }
                         }
                         "b" => conversation.back(),
+                        // A terminal reports no key releases, so B is held to leave with its own command.
+                        "leave" => {
+                            conversation.hold_back(Some(crate::conversation::LEAVE_HOLD));
+                            conversation.hold_back(None);
+                        }
                         "y" => conversation.refresh(),
                         // A terminal reports no key releases, so x starts recording and x again sends it.
                         "x" => {

@@ -179,6 +179,9 @@ pub fn run(
     let mut stick_latched = false;
     let mut audience_toggle = LiveGrip::default();
     let mut choice_latched = false;
+    let mut queue_latched = false;
+    // When B was pressed, while it is held: holding it leaves a space.
+    let mut back_since: Option<Instant> = None;
     let mut was_talking = false;
     // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
     let mut talk_blocked = false;
@@ -198,11 +201,13 @@ pub fn run(
     let mut workers = crate::delegation::Workers::default();
     let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
+    // In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
+    let mut panel = crate::panel_anchor::PanelAnchor::default();
     // Whether the headset is worn and Tomori has input, reported to the server; see `design/spaces.md`.
     let mut engagement = client::engagement::Tracker::new();
     conversation.set_engagement(engagement.engagement());
     log::info!(
-        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose or reset.",
+        "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose.",
         images.len()
     );
     'main: loop {
@@ -220,6 +225,9 @@ pub fn run(
                         stick_latched = false;
                         audience_toggle.blur();
                         choice_latched = false;
+                        queue_latched = false;
+                        back_since = None;
+                        conversation.hold_back(None);
                         was_talking = false;
                         talk_blocked = true;
                         conversation.stop_live();
@@ -289,6 +297,9 @@ pub fn run(
             stick_latched = false;
             audience_toggle.blur();
             choice_latched = false;
+            queue_latched = false;
+            back_since = None;
+            conversation.hold_back(None);
             was_talking = false;
             talk_blocked = true;
             conversation.stop_live();
@@ -333,6 +344,13 @@ pub fn run(
         if controls.back {
             conversation.back();
         }
+        if controls.back_held {
+            let since = *back_since.get_or_insert(now);
+            conversation.hold_back(Some(now.duration_since(since)));
+        } else if back_since.take().is_some() {
+            conversation.hold_back(None);
+        }
+        conversation.tick_space(now);
         if controls.refresh {
             conversation.refresh();
         }
@@ -345,19 +363,28 @@ pub fn run(
             conversation.choose(if right.x > 0.0 { 1 } else { -1 });
         }
         choice_latched = choice_moving;
+        // Otherwise the right stick up or down selects a waiting entry in the queue strip, which A cancels.
+        let queue_moving = !choosing && right.y.abs() > 0.6 && right.y.abs() > right.x.abs();
+        if queue_moving && !queue_latched {
+            conversation.select_queued(if right.y > 0.0 { -1 } else { 1 });
+        }
+        queue_latched = queue_moving;
         // A chooses the object the ray highlighted last frame, as the
-        // trigger does; with nothing highlighted it accepts or resets.
-        let reset = match &highlighted {
+        // trigger does; with nothing highlighted it accepts. Inside a space it
+        // never resets the swarm; see `design/interaction.md`.
+        match &highlighted {
             Some(arrival::Key::Menu(key)) if controls.reset => {
                 if let Some(choice) = hand_menu.choose(key) {
                     conversation.choose_menu(choice);
                 }
-                false
             }
             // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval.
-            _ if menu_was_shown => false,
-            _ => controls.reset && conversation.press_a(highlighted.as_ref()),
-        };
+            _ if menu_was_shown => {}
+            _ if controls.reset => {
+                conversation.press_a(highlighted.as_ref());
+            }
+            _ => {}
+        }
         // Hold X to talk to the agent; releasing it while focused sends the utterance.
         if focused && !controls.talk {
             talk_blocked = false;
@@ -382,9 +409,6 @@ pub fn run(
         );
         caption.set_text(&gpu.queue, &conversation.text());
         caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
-        if reset {
-            swarm = Swarm::new();
-        }
         if !frame.should_render {
             stream.end(frame.predicted_display_time, BLEND, &[])?;
             continue;
@@ -567,6 +591,11 @@ pub fn run(
                 tracked_hands,
             );
         }
+        // Arrival hides the panel; entering a space places it in front of the participant again.
+        if in_arrival {
+            panel.reset();
+        }
+        let panel_pose = panel.update(head_pose(&views), dt);
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
         let submission = renderer.render(
@@ -577,7 +606,7 @@ pub fn run(
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
             // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
-            (!in_arrival && !menu_shown).then(|| (&caption, head_pose(&views))),
+            (!in_arrival && !menu_shown).then_some((&caption, panel_pose)),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
@@ -960,6 +989,7 @@ struct Controls {
     talk: bool,
     talk_active: bool,
     back: bool,
+    back_held: bool,
     refresh: bool,
     navigation: xr::Vector2f,
     presentation_navigation: xr::Vector2f,
@@ -992,6 +1022,7 @@ impl Controls {
             talk: held(actions.talk),
             talk_active: actions.talk.is_active,
             back: pressed(actions.back),
+            back_held: held(actions.back),
             refresh: pressed(actions.refresh),
             navigation: axis(actions.navigation),
             presentation_navigation: axis(actions.presentation_navigation),

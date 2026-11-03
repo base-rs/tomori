@@ -338,7 +338,7 @@ impl Outbox {
         message: ClientMessage,
     ) -> Option<FailedUtterance> {
         match &message {
-            ClientMessage::UtteranceBegin { utterance } => {
+            ClientMessage::UtteranceBegin { utterance, .. } => {
                 // A begin that cannot be sent now cannot be delivered with its audio later.
                 let failed = !state.connected;
                 state.generation += 1;

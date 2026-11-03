@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- In a space, **B** never denies an approval, cancels your words or leaves by accident: it closes what is open or dismisses a problem, and you hold it for a second to leave. *Deny* is one of the approval's choices on the right stick, confirmed with **A**. Select any waiting entry in the queue strip with the right stick up and down, and press **A** to cancel it; **A** again within 3 seconds undoes it.
+- Errors get their own line on the panel, marked **!** with how long ago they happened, and stay until dismissed or replaced instead of hiding behind "Sending…" or vanishing on the next action. The queue is always shown in its own strip.
+- **Y** opens a list of the agent's modes with their descriptions, and the space's brief or full speech, and **A** chooses one directly instead of cycling through them.
+- Hold **X** while a question is shown to answer it by voice, with an option's label or number; the words go to the question, not the queue.
+- The panel stands in the world in front of you instead of following your head, and glides back in front of you only when you turn or walk away for more than a second.
 - A space keeps its spoken replies while nobody is listening, and plays the latest one from its start when you join or put your headset back on, instead of joining mid-sentence; then whatever followed, until you have caught up with live speech. It keeps the latest two replies and at most 5 minutes of audio. Others in the space are unaffected, and nobody hears a reply twice at once. Older clients and the spectator stay with live speech as before.
 - Click the right stick in a space to hear the latest reply again from its start, to you only, and again to stop it; a new reply stops it and plays live. Click the left stick to mute spoken replies for you only. In `--console`, `replay` and `mute` do the same.
 - The headset tells the server when it is taken off or put back on, from its proximity sensor where the runtime reports it and from the OpenXR session state, and turns the live microphone off when it is taken off. Everyone in the space sees who is away, as "2 here, 1 away".

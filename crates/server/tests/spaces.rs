@@ -1290,6 +1290,100 @@ fn a_question_is_answered_by_any_participant() {
     assert_eq!(ada.error(), "That question is no longer pending.");
 }
 
+/// Say `text` as the answer to the presented `question`, and return the transcript or the failure.
+fn say_answer(
+    client: &mut TestClient,
+    utterance: &str,
+    question: &protocol::Question,
+    text: &str,
+) -> Result<String, String> {
+    client.send(&ClientMessage::UtteranceBegin {
+        utterance: utterance.to_owned(),
+        answer: Some(protocol::AnswerTarget {
+            question: question.id.clone(),
+            field: question.field.clone(),
+        }),
+    });
+    client.send_audio(protocol::Gate::Agent, server::test_support::speech(text));
+    client.send(&ClientMessage::UtteranceEnd {
+        utterance: utterance.to_owned(),
+    });
+    client.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance: id,
+            text,
+            finished: true,
+        } if id == utterance => Some(Ok(text.clone())),
+        ServerMessage::TranscriptFailed {
+            utterance: id,
+            error,
+        } if id == utterance => Some(Err(error.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_spoken_answer_answers_the_presented_question_and_is_never_queued() {
+    let server = TestServer::start();
+    let (mut ada, _bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::QuestionAsked(Question {
+        id: "q1".to_owned(),
+        title: "Preferences".to_owned(),
+        fields: vec![Field {
+            key: "colour".to_owned(),
+            title: "Colour".to_owned(),
+            description: None,
+            kind: FieldKind::Choice,
+            options: vec![
+                FieldOption {
+                    label: "Red".to_owned(),
+                    description: None,
+                },
+                FieldOption {
+                    label: "Blue".to_owned(),
+                    description: None,
+                },
+            ],
+            custom: false,
+        }],
+    }));
+    let question = ada
+        .space(|state| state.question.is_some())
+        .question
+        .unwrap();
+
+    // Something that is not one of the options fails as the utterance, and nothing is queued.
+    assert_eq!(
+        say_answer(&mut ada, "u1", &question, "Green").unwrap_err(),
+        "Say an option's label or number. No answer was submitted."
+    );
+
+    assert_eq!(
+        say_answer(&mut ada, "u2", &question, "Blue").unwrap(),
+        "Blue"
+    );
+    let state = ada.space(|state| state.question.is_none());
+    assert!(state.queue.is_empty());
+    assert_eq!(
+        session.log().answers,
+        [(
+            "q1".to_owned(),
+            vec![(
+                "colour".to_owned(),
+                AnswerValue::Choices(vec!["Blue".to_owned()])
+            )]
+        )]
+    );
+    assert!(session.log().prompts.is_empty());
+
+    // Once it is answered, a late spoken answer says so rather than queueing the words.
+    assert_eq!(
+        say_answer(&mut ada, "u3", &question, "Red").unwrap_err(),
+        "That question is no longer pending."
+    );
+}
+
 #[test]
 fn any_participant_switches_the_mode_once_the_agent_confirms_it() {
     let server = TestServer::start();
@@ -1445,6 +1539,7 @@ fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
     let (mut ada, _bob, _) = pair(&server);
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".to_owned(),
+        answer: None,
     });
     ada.send_audio(Gate::Agent, speech("he"));
     // The gate switches to live and back; some live frames were not sent.
@@ -1475,6 +1570,7 @@ fn a_lost_frame_fails_the_utterance() {
     let (mut ada, _bob, _) = pair(&server);
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".to_owned(),
+        answer: None,
     });
     ada.send_audio(Gate::Agent, speech("ab"));
     ada.skip_sequence(2);
