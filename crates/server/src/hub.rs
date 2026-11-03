@@ -2539,6 +2539,8 @@ impl Hub {
                         model.apply(Event::Closed {
                             reason: Some(reason),
                         });
+                        // It closed before the restart; whether anyone saw it is not known.
+                        model.attend();
                         closed.push(kept.id.clone());
                     }
                     None => {
@@ -2615,6 +2617,14 @@ impl Hub {
             record.kept_open = true;
         }
         self.space_ended(id, Some(reason));
+        // Not being bound again is the server's restart, not something that happened in the space's work, so it needs no
+        // attention; see `design/spaces.md`.
+        let mut state = self.lock();
+        if let Some(record) = state.space_mut(id) {
+            record.model.attend();
+        }
+        state.touch_space(id);
+        self.recount(&mut state);
     }
 
     /// Write the kept spaces, if there is somewhere to keep them and they changed. Spaces closed once shutdown has begun are kept as open; see `stamp_closed`.

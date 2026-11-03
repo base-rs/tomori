@@ -451,7 +451,11 @@ impl SpaceModel {
             .collect();
         self.workers_authoritative = true;
         self.session = session;
+        // The session's history, read again after a restart, is not news: what happened while the server was stopped
+        // is not known, so it raises no problem or reply. A pending request still waits for input.
+        let (unattended, unheard) = (self.unattended, self.unheard);
         self.resynchronize(snapshot);
+        (self.unattended, self.unheard) = (unattended, unheard);
     }
 
     /// Whether `mode` is one the space shows as offered, so a participant may choose it.
@@ -1224,6 +1228,50 @@ mod tests {
             vec![assistant("q", "Seen.", true)],
         ));
         assert_eq!(space.attention(), None);
+    }
+
+    #[test]
+    fn a_space_bound_again_after_a_restart_starts_with_no_problem_or_reply() {
+        let mut space = SpaceModel::new(
+            "s1".into(),
+            "Title".into(),
+            "fake".into(),
+            "/tmp".into(),
+            "sky".into(),
+            "fake-1".into(),
+            Snapshot::default(),
+        );
+        space.apply(Event::Reconnecting {
+            reason: "Reconnecting after the restart.".into(),
+        });
+        space.bind(
+            "fake-1".into(),
+            Snapshot {
+                busy: Some(false),
+                messages: vec![assistant("old", "A reply from before.", true)],
+                ..Snapshot::default()
+            },
+        );
+        assert_eq!(space.attention(), None);
+        // A request still pending is input, as shared state.
+        let mut space = SpaceModel::new(
+            "s2".into(),
+            "Title".into(),
+            "fake".into(),
+            "/tmp".into(),
+            "sky".into(),
+            "fake-2".into(),
+            Snapshot::default(),
+        );
+        space.bind(
+            "fake-2".into(),
+            Snapshot {
+                busy: Some(false),
+                permissions: vec![permission("p")],
+                ..Snapshot::default()
+            },
+        );
+        assert_eq!(space.attention(), Some(Attention::Input));
     }
 
     #[test]

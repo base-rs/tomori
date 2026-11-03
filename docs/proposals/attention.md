@@ -293,6 +293,7 @@ Stage 1 differs from the sketch above in a few details:
 - An agent refusing a mode while nobody is in the space also counts as a problem, as it sets the space's error.
 - Only a participant's own `Join` clears a problem or a reply. The server putting a participant back in their last space on Hello does not, since they did not see what happened while away; a reconnecting client restores its membership with a `Join`, which does, and the headset sends a `Join` for a space it was put in unasked once it shows it. A jump that lands in an old space first moves on without clearing that space's attention, or joins it if it is the most urgent.
 - A reply whose turn ends during a backend reconnection counts, learned from the resynchronization or a restored message.
+- Spaces now survive a server restart, but attention does not: a space listed again starts with no problem or reply, even one already closed or one that cannot be bound again, and only a request still pending in the session shows as input.
 - With only the TXT counts, the jump picks the most urgent space from the listing it receives on connecting. If nothing needs attention by then, it stays in the lobby and says so, rather than joining a space that was already handled.
 - A jump starts only from the server row, which a participant reaches from a space only by leaving it with `Leave`, so it never needs to leave a space itself yet.
 
