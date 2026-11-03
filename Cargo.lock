@@ -840,6 +840,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "ash",
+ "base-markdown",
  "basisu",
  "bytemuck",
  "client",

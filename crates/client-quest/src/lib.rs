@@ -33,6 +33,7 @@ mod headless_spectator;
 mod identity;
 mod interaction;
 mod log_cadence;
+mod markdown_lite;
 mod panel_anchor;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
@@ -40,6 +41,7 @@ mod playback;
 mod pointing;
 mod recording;
 mod server_choice;
+mod speakers;
 #[cfg(not(target_os = "android"))]
 mod spectator;
 #[cfg(not(target_os = "android"))]
@@ -47,6 +49,7 @@ mod spectator_feed;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
 mod swarm;
+mod transcript;
 mod ui_panel;
 mod ui_text;
 mod vulkan;

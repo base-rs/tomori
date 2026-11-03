@@ -255,6 +255,9 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
                 MenuKind::Cue => {
                     out.push(cube(p, Vec3::splat(s * pulse), [1.0, 0.6, 0.2], face));
                 }
+                MenuKind::ProblemCue => {
+                    out.push(cube(p, Vec3::splat(s * pulse), [1.0, 0.2, 0.15], face));
+                }
             }
         }
         Kind::Pair { pending } => {
