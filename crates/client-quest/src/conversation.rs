@@ -81,6 +81,8 @@ pub enum Action {
     },
     /// Mute or unmute agent speech locally, live or played again.
     SetAgentMuted(bool),
+    /// Change and keep this device's Feedback setting. See `design/feedback.md`.
+    SetFeedback(crate::feedback::Settings),
 }
 
 /// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
@@ -275,6 +277,10 @@ pub struct Conversation {
     muted: bool,
     /// Whether a replay or catch-up was playing at the last frame.
     replaying: bool,
+    /// This device's Feedback setting, which the hand menu and console change.
+    feedback: crate::feedback::Settings,
+    /// Whether the last [`Self::accept`] refused, saying why, rather than acting or having nothing to do.
+    refused: bool,
     /// The problem shown and when it first appeared, so that its age can be shown.
     problem_seen: Option<(String, Instant)>,
     /// The space's ongoing problem, as dismissed on this headset; it shows again if it changes.
@@ -377,6 +383,8 @@ impl Conversation {
             reports_engagement: true,
             muted: false,
             replaying: false,
+            feedback: crate::feedback::Settings::default(),
+            refused: false,
             problem_seen: None,
             dismissed: None,
             space_menu: None,
@@ -428,6 +436,12 @@ impl Conversation {
     #[cfg(test)]
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
+    }
+
+    /// Queue `action` as though the conversation had asked for it.
+    #[cfg(test)]
+    pub fn push_action(&mut self, action: Action) {
+        self.actions.push(action);
     }
 
     /// Take one action so a failure can cancel later queued microphone starts.
@@ -964,6 +978,30 @@ impl Conversation {
         self.send(ClientMessage::Replay { message: None });
     }
 
+    /// This device's Feedback setting, as kept on it.
+    pub fn set_feedback(&mut self, settings: crate::feedback::Settings) {
+        self.feedback = settings;
+    }
+
+    /// Change one half of the Feedback setting, sounds or vibration, and keep it.
+    pub fn change_feedback(
+        &mut self,
+        sounds: Option<crate::feedback::Level>,
+        vibration: Option<crate::feedback::Level>,
+    ) {
+        let settings = crate::feedback::Settings {
+            sounds: sounds.unwrap_or(self.feedback.sounds),
+            vibration: vibration.unwrap_or(self.feedback.vibration),
+        };
+        log::info!(
+            "Feedback: sounds {}, vibration {}",
+            settings.sounds.label(),
+            settings.vibration.label()
+        );
+        self.feedback = settings;
+        self.actions.push(Action::SetFeedback(settings));
+    }
+
     /// Whether a replay or catch-up is playing, from the player, once per frame.
     pub fn set_replaying(&mut self, replaying: bool) {
         self.replaying = replaying;
@@ -1133,6 +1171,7 @@ impl Conversation {
             muted: self.muted,
             pill: self.pill,
             pointed: None,
+            feedback: self.feedback,
         }
     }
 
@@ -1160,6 +1199,12 @@ impl Conversation {
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
             crate::hand_menu::Choice::Leave => {}
+            crate::hand_menu::Choice::Sounds => {
+                self.change_feedback(Some(self.feedback.sounds.next()), None)
+            }
+            crate::hand_menu::Choice::Vibration => {
+                self.change_feedback(None, Some(self.feedback.vibration.next()))
+            }
         }
     }
 
@@ -1618,18 +1663,20 @@ impl Conversation {
         }
     }
 
-    /// B held in a space for `held`, or released (`None`). Holding it for [`LEAVE_HOLD`] leaves the space, once per hold.
-    pub fn hold_back(&mut self, held: Option<Duration>) {
+    /// B held in a space for `held`, or released (`None`). Holding it for [`LEAVE_HOLD`] leaves the space, once per hold. Returns whether this call left.
+    pub fn hold_back(&mut self, held: Option<Duration>) -> bool {
         let Some(held) = held.filter(|_| self.mode == Mode::Space) else {
             self.leave_hold = None;
-            return;
+            return false;
         };
         let left = self.leave_hold.is_some_and(|(_, left)| left);
         self.leave_hold = Some((held, left));
         if held >= LEAVE_HOLD && !left {
             self.leave_hold = Some((held, true));
             self.leave();
+            return true;
         }
+        false
     }
 
     /// Whether the right stick up and down selects queued entries now, rather than doing anything else.
@@ -1675,6 +1722,7 @@ impl Conversation {
     /// pointed at. Otherwise A accepts as [`Self::accept`] does. Returns true
     /// when A has nothing to do here.
     pub fn press_a(&mut self, highlighted: Option<&arrival::Key>) -> bool {
+        self.refused = false;
         match highlighted {
             Some(key) if self.arrival().is_some() => {
                 self.choose_object(key);
@@ -1684,15 +1732,22 @@ impl Conversation {
         }
     }
 
+    /// Whether the last press of A was refused, saying why, as just after a request appears, so that it is not felt as a choice. See `design/feedback.md`.
+    pub fn a_refused(&self) -> bool {
+        self.refused
+    }
+
     /// A: connect, join, confirm the chosen approval choice, choose from the space's list, or cancel the selected queued entry or undo that. Returns true when A has nothing to do here. A never resets the swarm in a space, where it would hide what A does; see `design/interaction.md`.
     pub fn accept(&mut self) -> bool {
         // Choosing anything takes over from a jump still waiting for the listing.
         self.jumping = false;
+        self.refused = false;
         match self.mode {
             Mode::Servers => {
                 match self.servers.get(self.server).cloned() {
                     Some(choice) if choice.is_available() => self.connect(choice),
                     Some(choice) => {
+                        self.refused = true;
                         self.error = Some(format!(
                             "Cannot join {}: {}.",
                             choice.label,
@@ -1786,6 +1841,7 @@ impl Conversation {
                         .request_at
                         .is_some_and(|at| at.elapsed() < REQUEST_GRACE)
                 {
+                    self.refused = true;
                     self.notice = Some("Read the request before choosing.".into());
                     return false;
                 }
@@ -1795,6 +1851,7 @@ impl Conversation {
                         .as_ref()
                         .is_some_and(|space| space.approval.is_some() || space.question.is_some())
                 {
+                    self.refused = true;
                     self.notice = Some("Turn your right wrist to decide.".into());
                     return false;
                 }
@@ -1818,6 +1875,7 @@ impl Conversation {
                 if (self.cancelling.is_some() || self.queue_selected.is_some())
                     && !self.role.participates()
                 {
+                    self.refused = true;
                     self.notice = Some(VISITING.into());
                     return false;
                 }
@@ -1977,38 +2035,50 @@ impl Conversation {
         self.wrist.jump(&items, direction, newest.as_deref());
     }
 
-    /// A on the transcript: expand or collapse a turn, confirm a choice, or remove a queued entry or undo that.
-    pub fn wrist_accept(&mut self) {
+    /// The right wrist's focus: a turn, a request's button or a queued entry.
+    pub fn wrist_focus(&self) -> Option<&crate::transcript::Focus> {
+        self.wrist.focus.as_ref()
+    }
+
+    /// A on the transcript: expand or collapse a turn, confirm a choice, or remove a queued entry or undo that. Returns whether it did any of them, rather than nothing or refusing.
+    pub fn wrist_accept(&mut self) -> bool {
         use crate::transcript::Focus;
         let items = self.wrist_items();
         self.wrist.settle(&items);
         match self.wrist.focus.clone() {
-            None | Some(Focus::Card(0)) => {}
+            None | Some(Focus::Card(0)) => false,
             Some(Focus::Group(..)) => {
                 self.wrist.toggle(&items);
+                true
             }
             Some(Focus::Card(choice)) => {
                 if !self.role.participates() {
                     self.notice = Some(VISITING.into());
+                    false
                 } else if self
                     .request_at
                     .is_some_and(|at| at.elapsed() < REQUEST_GRACE)
                 {
                     self.notice = Some("Read the request before choosing.".into());
+                    false
                 } else if self.approval().is_some() {
                     self.option = choice - 1;
                     self.decide();
+                    true
+                } else {
+                    false
                 }
             }
             Some(Focus::Queue(entry)) => {
                 if !self.role.participates() {
                     self.notice = Some(VISITING.into());
-                    return;
+                    return false;
                 }
                 match self.cancelling.take() {
                     // A again within the undo time keeps it.
                     Some((cancelling, _)) if cancelling == entry => {
                         self.notice = Some("Not removed.".into());
+                        true
                     }
                     other => {
                         if let Some((other, _)) = other {
@@ -2017,6 +2087,9 @@ impl Conversation {
                         if self.waiting().iter().any(|waiting| waiting.id == entry) {
                             self.cancelling = Some((entry, Instant::now() + CANCEL_UNDO));
                             self.notice = None;
+                            true
+                        } else {
+                            false
                         }
                     }
                 }
@@ -2519,7 +2592,6 @@ impl Conversation {
     }
 
     /// How long X has been held, while recording.
-    #[cfg(any(not(target_os = "android"), test))]
     pub fn recording(&self) -> Option<Duration> {
         match &self.talk {
             Some(Talk::Recording { started, .. }) => Some(started.elapsed()),
@@ -6209,6 +6281,59 @@ mod tests {
     }
 
     #[test]
+    fn holding_b_says_when_it_left_once_per_hold() {
+        let mut conversation = joined(|_| {});
+        assert!(!conversation.hold_back(Some(Duration::ZERO)));
+        assert!(!conversation.hold_back(Some(LEAVE_HOLD / 2)));
+        assert!(conversation.hold_back(Some(LEAVE_HOLD)));
+        assert!(!conversation.hold_back(Some(LEAVE_HOLD * 2)));
+        assert!(!conversation.hold_back(None));
+    }
+
+    #[test]
+    fn a_press_with_nothing_to_do_or_that_acts_is_not_a_refusal() {
+        let mut conversation = Conversation::new("Ada");
+        conversation.press_a(None);
+        assert!(!conversation.a_refused());
+        let mut joined = joined(|space| space.approval = Some(approval(&[])));
+        joined.request_at = Some(Instant::now());
+        assert!(!joined.press_a(None));
+        assert!(joined.a_refused());
+        // The next press after the grace acts, and the refusal is forgotten.
+        settle(&mut joined);
+        assert!(!joined.press_a(None));
+        assert!(!joined.a_refused());
+    }
+
+    #[test]
+    fn the_sound_section_steps_and_keeps_the_feedback_setting() {
+        use crate::feedback::{Level, Settings};
+        let mut conversation = Conversation::new("Ada");
+        let kept = Settings {
+            sounds: Level::Off,
+            vibration: Level::Reduced,
+        };
+        conversation.set_feedback(kept);
+        assert_eq!(conversation.menu_model().feedback, kept);
+        assert!(conversation.take_actions().is_empty());
+        conversation.choose_menu(crate::hand_menu::Choice::Sounds);
+        conversation.choose_menu(crate::hand_menu::Choice::Vibration);
+        let full = Settings {
+            sounds: Level::Full,
+            vibration: Level::Reduced,
+        };
+        let stepped = Settings {
+            sounds: Level::Full,
+            vibration: Level::Off,
+        };
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::SetFeedback(full), Action::SetFeedback(stepped)]
+        );
+        assert_eq!(conversation.menu_model().feedback, stepped);
+    }
+
+    #[test]
     fn engagement_is_reported_once_per_change_and_connection_to_a_server_that_retains_speech() {
         // An older server, which reports no speech setting, is never sent it.
         let mut older = joined(|_| {});
@@ -6546,8 +6671,9 @@ mod tests {
         conversation.apply(space(|space| {
             space.approval = Some(approval(&[("always", "Yes, and don't ask again")]));
         }));
-        // A away from the wrist decides nothing, and says where to decide.
-        assert!(!conversation.accept());
+        // A away from the wrist decides nothing, and says where to decide, which is a refusal rather than a choice.
+        assert!(!conversation.press_a(None));
+        assert!(conversation.a_refused());
         assert!(sent(&mut conversation).is_empty());
         assert!(
             conversation
@@ -6556,10 +6682,11 @@ mod tests {
         );
         // Opening the wrist focuses the card's title and gives A its grace again.
         conversation.wrist_opened();
-        conversation.wrist_accept();
+        assert!(!conversation.wrist_accept());
         assert!(sent(&mut conversation).is_empty());
         conversation.wrist_step(1);
-        conversation.wrist_accept();
+        // Refused within the grace, which is not a choice to feel.
+        assert!(!conversation.wrist_accept());
         assert!(sent(&mut conversation).is_empty(), "within the grace");
         assert_eq!(
             conversation.notice.as_deref(),
@@ -6574,7 +6701,11 @@ mod tests {
         conversation.wrist_step(1);
         conversation.wrist_step(1);
         conversation.wrist_step(1);
-        conversation.wrist_accept();
+        assert!(matches!(
+            conversation.wrist_focus(),
+            Some(crate::transcript::Focus::Card(_))
+        ));
+        assert!(conversation.wrist_accept());
         assert_eq!(
             sent(&mut conversation),
             [ClientMessage::Decide {
@@ -6644,7 +6775,7 @@ mod tests {
         });
         // Down from following reaches the queue.
         conversation.wrist_step(1);
-        conversation.wrist_accept();
+        assert!(conversation.wrist_accept());
         assert!(
             sent(&mut conversation).is_empty(),
             "not until the undo time"
@@ -6655,7 +6786,7 @@ mod tests {
                 .any(|row| row.plain().contains("Removing… A undoes"))
         );
         // A again undoes it.
-        conversation.wrist_accept();
+        assert!(conversation.wrist_accept());
         conversation.tick_space(Instant::now() + CANCEL_UNDO);
         assert!(sent(&mut conversation).is_empty());
         // Removed, it is sent once the undo time is over.

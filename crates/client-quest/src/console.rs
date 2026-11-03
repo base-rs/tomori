@@ -10,7 +10,32 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), q (quit).";
+
+/// `feedback` shows the Feedback setting, and `feedback sounds LEVEL` or `feedback vibration LEVEL` changes one half of it, as the hand menu's Sound section does. See `design/feedback.md`.
+fn feedback(conversation: &mut Conversation, argument: &str) {
+    let words: Vec<&str> = argument.split_whitespace().collect();
+    let level = |word: &str| crate::feedback::Level::parse(word);
+    match words[..] {
+        [] => {}
+        ["sounds", word] if level(word).is_some() => {
+            conversation.change_feedback(level(word), None)
+        }
+        ["vibration", word] if level(word).is_some() => {
+            conversation.change_feedback(None, level(word))
+        }
+        _ => {
+            println!("(feedback sounds|vibration full|reduced|off)");
+            return;
+        }
+    }
+    let settings = conversation.menu_model().feedback;
+    println!(
+        "  Sounds: {}; vibration: {}",
+        settings.sounds.label(),
+        settings.vibration.label()
+    );
+}
 
 /// `point` lists the space's workers by number, `point N` points at the `N`th until another `point`, and `point off`
 /// points at nothing. While recording, the worker pointed at is sent with the words, as on the headset; see
@@ -87,6 +112,13 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                     if let Some(notice) = conversation.menu_model().notice {
                         println!("({notice})");
                     }
+                    continue;
+                }
+                // The Feedback setting; the rest of the line says which half, and to what.
+                if let Some(rest) = line.trim_start().strip_prefix("feedback")
+                    && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                {
+                    feedback(&mut conversation, rest);
                     continue;
                 }
                 // Pointing at a worker, as the headset's ray does; the rest of the line is its number.
@@ -186,7 +218,9 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                                 "td" => conversation.wrist_step(1),
                                 "tl" => conversation.wrist_jump(-1),
                                 "tr" => conversation.wrist_jump(1),
-                                "ta" => conversation.wrist_accept(),
+                                "ta" => {
+                                    conversation.wrist_accept();
+                                }
                                 "tb" => {
                                     conversation.wrist_back();
                                 }

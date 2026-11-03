@@ -343,6 +343,19 @@ impl WristState {
     }
 }
 
+/// What the right stick, A and B did on the transcript.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WristInput {
+    /// B was taken by the transcript.
+    pub back: bool,
+    /// The focus moved to another row: a turn or a row within one, a request's title or button, or a queued entry.
+    pub moved: bool,
+    /// The focus is on a request's title or button, which counts as looking at the request.
+    pub on_request: bool,
+    /// A chose something: a turn expanded or collapsed, a choice confirmed, or an entry removed or kept.
+    pub chose: bool,
+}
+
 /// The right wrist's transcript, with its controls and where it is.
 pub struct Wrist {
     panel: Panel,
@@ -368,7 +381,7 @@ impl Wrist {
         &self.state
     }
 
-    /// Give the right stick, A and B to the transcript while it is active, at `now`. Returns whether B was taken, so that the space does not also act on it; holding B to leave is unaffected.
+    /// Give the right stick, A and B to the transcript while it is active, at `now`. Says whether B was taken, so that the space does not also act on it, with holding B to leave unaffected; and whether the focus moved and A chose something, which are felt (see `design/feedback.md`).
     pub fn input(
         &mut self,
         conversation: &mut Conversation,
@@ -376,32 +389,42 @@ impl Wrist {
         a: bool,
         b: bool,
         now: Instant,
-    ) -> bool {
+    ) -> WristInput {
         if !self.state.active() {
             // A stick held as the transcript opens, such as from paging result cards, does not move its focus.
             self.stick = Repeat::blocked();
-            return false;
+            return WristInput::default();
         }
+        let focused = conversation.wrist_focus().cloned();
         match self.stick.update(stick, now) {
             Some((0, down)) => conversation.wrist_step(down),
             Some((right, _)) => conversation.wrist_jump(right),
             None => {}
         }
-        if a {
-            conversation.wrist_accept();
+        let moved = conversation.wrist_focus() != focused.as_ref();
+        let on_request = matches!(
+            conversation.wrist_focus(),
+            Some(crate::transcript::Focus::Card(_))
+        );
+        let chose = a && conversation.wrist_accept();
+        WristInput {
+            back: b && (conversation.wrist_back() || self.state.reattach()),
+            moved,
+            on_request,
+            chose,
         }
-        b && (conversation.wrist_back() || self.state.reattach())
     }
 
-    /// Show, place and draw it for `frame` at `moment`.
+    /// Show, place and draw it for `frame` at `moment`. Returns whether it just opened on the wrist.
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
         conversation: &mut Conversation,
         frame: WristFrame,
         moment: Moment,
-    ) {
-        if self.state.show(&frame, moment.now) {
+    ) -> bool {
+        let opened = self.state.show(&frame, moment.now);
+        if opened {
             conversation.wrist_opened();
         }
         // Squeezes count only while it shows.
@@ -411,7 +434,7 @@ impl Wrist {
         }
         if !self.state.active() {
             self.model = None;
-            return;
+            return opened;
         }
         let detached = self.state.detached();
         let (columns, pixel) = if detached {
@@ -436,6 +459,7 @@ impl Wrist {
                 .map(|(palm, viewer)| on_wrist(&palm, viewer, height)),
             _ => self.model,
         };
+        opened
     }
 
     /// The panel to draw, with `scene_to_space` taking the scene to the eyes' space.

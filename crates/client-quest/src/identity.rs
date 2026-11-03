@@ -18,6 +18,8 @@ const PARTICIPANT_FILE: &str = "participant-2";
 const SERVER_FILE: &str = "server";
 /// The certificate and token kept for each server; see [`Credential`].
 const CREDENTIALS_FILE: &str = "credentials.json";
+/// The Feedback setting: which sounds and vibrations play. See `design/feedback.md`.
+const FEEDBACK_FILE: &str = "feedback.json";
 
 /// Settings given when the app starts, which take precedence over the defaults.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -215,6 +217,20 @@ impl Store {
         let participant = random_participant();
         self.write(PARTICIPANT_FILE, &participant);
         participant
+    }
+
+    /// The Feedback setting kept on this device, or the default when none is kept or it cannot be read.
+    pub fn feedback(&self) -> crate::feedback::Settings {
+        self.read(FEEDBACK_FILE)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn remember_feedback(&self, settings: crate::feedback::Settings) {
+        self.write(
+            FEEDBACK_FILE,
+            &serde_json::to_string(&settings).expect("settings serialize"),
+        );
     }
 
     /// The instance name of the server last connected to.
@@ -478,6 +494,24 @@ mod tests {
             Store::new(Some(directory.clone())).server().as_deref(),
             Some("attic")
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn keeps_the_feedback_setting_on_the_device() {
+        use crate::feedback::{Level, Settings};
+        let directory = directory("feedback");
+        let store = Store::new(Some(directory.clone()));
+        assert_eq!(store.feedback(), Settings::default());
+        let settings = Settings {
+            sounds: Level::Reduced,
+            vibration: Level::Off,
+        };
+        store.remember_feedback(settings);
+        assert_eq!(Store::new(Some(directory.clone())).feedback(), settings);
+        // A setting that cannot be read is the default.
+        fs::write(directory.join(FEEDBACK_FILE), "loud").unwrap();
+        assert_eq!(store.feedback(), Settings::default());
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -8,10 +8,7 @@ use std::time::Duration;
 
 use protocol::{AudioFrame, REPLAY_SOURCE};
 
-use super::{Mixer, MixerOptions, PlaybackStatistics};
-
-/// How long playback takes to fade out when silenced, and back in afterwards, so that it does not click.
-const FADE: Duration = Duration::from_millis(10);
+use super::{Earcon, Mixer, MixerOptions, PlaybackStatistics};
 
 /// How long after its last audio agent speech played again still counts as playing: longer than the breath between spoken segments, so that a replay counts as playing throughout.
 const REPLAY_PAUSE: Duration = Duration::from_millis(700);
@@ -20,6 +17,7 @@ enum Command {
     LocalSource(Option<u32>),
     Clear,
     AgentMuted(bool),
+    Play(Earcon),
 }
 
 #[derive(Default)]
@@ -34,7 +32,7 @@ struct Shared {
 ///
 /// The player belongs to the audio device's callback, and [`PlayerControl`] to the application. Control changes travel through a channel that [`Self::render`] drains without blocking, so the application never holds anything the callback waits for. Rendering never blocks: missing audio is silence.
 ///
-/// The mixer is created at the device rate the first time [`Self::render`] is called, and created again if the device rate changes, keeping the local source.
+/// The mixer is created at the device rate by [`Self::prepare`], which an output calls before it starts, since creating one synthesizes the sound cues; [`Self::render`] creates it again if the device rate changes, keeping the local source.
 ///
 /// Unlike a [`Mixer`] shared with the application, the player also calls [`Mixer::push`] from the callback, so the callback allocates and frees: a buffer for each new source, and each frame's samples once played. Received frames are 20 ms each, so this is a few small allocations per callback; nothing waits on a lock.
 pub struct Player {
@@ -45,8 +43,6 @@ pub struct Player {
     mixer: Option<Mixer>,
     local_source: Option<u32>,
     agent_muted: bool,
-    /// How far playback has faded out, in samples: 0 is full volume, and the fade length is silent.
-    faded: u32,
 }
 
 /// The application's handle on a [`Player`]. Cloneable, and never blocks the player.
@@ -69,9 +65,26 @@ impl Player {
             mixer: None,
             local_source: None,
             agent_muted: false,
-            faded: 0,
         };
         (player, PlayerControl { commands, shared })
+    }
+
+    /// Make the mixer for `sample_rate` now, outside the audio callback, since making one synthesizes every sound cue. An output calls this with the device's rate before it starts; [`Self::render`] makes one only if the rate changes after that.
+    pub fn prepare(&mut self, sample_rate: u32) {
+        if sample_rate == 0 || self.mixer.as_ref().map(Mixer::sample_rate) == Some(sample_rate) {
+            return;
+        }
+        let mut mixer = Mixer::new(MixerOptions {
+            sample_rate,
+            ..self.options
+        });
+        mixer.set_local_source(self.local_source);
+        mixer.set_agent_muted(self.agent_muted);
+        // A mixer made while push-to-talk records starts silent, rather than fading out what the microphone would hear.
+        if self.shared.silenced.load(Ordering::Relaxed) {
+            mixer.silence_now();
+        }
+        self.mixer = Some(mixer);
     }
 
     /// Fill `output` with the next mono samples at `sample_rate`, after taking every frame received since the last call.
@@ -80,16 +93,8 @@ impl Player {
             output.fill(0);
             return;
         }
-        if self.mixer.as_ref().map(Mixer::sample_rate) != Some(sample_rate) {
-            let mut mixer = Mixer::new(MixerOptions {
-                sample_rate,
-                ..self.options
-            });
-            mixer.set_local_source(self.local_source);
-            mixer.set_agent_muted(self.agent_muted);
-            self.mixer = Some(mixer);
-        }
-        let mixer = self.mixer.as_mut().expect("created above");
+        self.prepare(sample_rate);
+        let mixer = self.mixer.as_mut().expect("prepared above");
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 Command::LocalSource(source) => {
@@ -100,6 +105,7 @@ impl Player {
                     self.agent_muted = muted;
                     mixer.set_agent_muted(muted);
                 }
+                Command::Play(earcon) => mixer.play(earcon),
                 Command::Clear => {
                     mixer.clear();
                     // Including what arrived before the clear but was not yet rendered, such as a backlog from while no output played.
@@ -111,27 +117,12 @@ impl Player {
             mixer.push(frame);
         }
         // Silenced audio is still mixed, so that it is consumed in real time and resumes live rather than replaying what was missed.
+        mixer.set_silenced(self.shared.silenced.load(Ordering::Relaxed));
         mixer.mix(output);
         self.shared.replaying.store(
             mixer.is_source_recent(REPLAY_SOURCE, REPLAY_PAUSE),
             Ordering::Relaxed,
         );
-        let length = (FADE.as_secs_f64() * f64::from(sample_rate))
-            .ceil()
-            .max(1.0) as u32;
-        let silenced = self.shared.silenced.load(Ordering::Relaxed);
-        self.faded = self.faded.min(length);
-        if silenced || self.faded > 0 {
-            for sample in output.iter_mut() {
-                self.faded = if silenced {
-                    (self.faded + 1).min(length)
-                } else {
-                    self.faded.saturating_sub(1)
-                };
-                let gain = 1.0 - self.faded as f32 / length as f32;
-                *sample = (f32::from(*sample) * gain).round() as i16;
-            }
-        }
         // Only the application reads the statistics, rarely, so the callback skips publishing them rather than wait.
         if let Ok(mut statistics) = self.shared.statistics.try_lock() {
             *statistics = mixer.statistics();
@@ -161,7 +152,12 @@ impl PlayerControl {
         self.shared.replaying.load(Ordering::Relaxed)
     }
 
-    /// Silence playback, fading out over a few milliseconds, while still consuming what arrives in real time. Used while the microphone records push-to-talk, so that playback cannot be picked up and transcribed; see `design/live-audio.md`.
+    /// Play a sound cue, once. It is local: never sent and never a source, and [`Self::clear`] does not stop it.
+    pub fn play(&self, earcon: Earcon) {
+        let _ = self.commands.send(Command::Play(earcon));
+    }
+
+    /// Silence playback, fading out over a few milliseconds, while still consuming what arrives in real time; the cues that [`Earcon::bypasses_silence`] still play. Used while the microphone records push-to-talk, so that playback cannot be picked up and transcribed; see `design/live-audio.md`.
     pub fn set_silenced(&self, silenced: bool) {
         self.shared.silenced.store(silenced, Ordering::Relaxed);
     }

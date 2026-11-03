@@ -24,9 +24,11 @@ mod desktop_participant;
 #[cfg(not(target_os = "android"))]
 mod discover;
 mod environment;
+mod feedback;
 mod graphics;
 mod hand_menu;
 mod hands;
+mod haptics;
 
 #[cfg(not(target_os = "android"))]
 mod headless_spectator;
