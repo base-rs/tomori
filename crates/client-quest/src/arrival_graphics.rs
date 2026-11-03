@@ -514,10 +514,12 @@ pub struct ArrivalLabels {
 }
 
 impl ArrivalLabels {
+    /// `samples` is the scene pass's sample count, which this draws within.
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        samples: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -560,7 +562,10 @@ impl ArrivalLabels {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });

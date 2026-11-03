@@ -73,6 +73,12 @@ pub struct Renderer {
     cameras: [wgpu::Buffer; 2],
     camera_bindings: [wgpu::BindGroup; 2],
     depth: [wgpu::TextureView; 2],
+    /// Samples per pixel in each eye's scene pass; above 1, the pass draws into `multisampled` and resolves into the eye's target. With the format, for resizing, which only desktop windows do.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    samples: u32,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    format: wgpu::TextureFormat,
+    multisampled: Option<[wgpu::TextureView; 2]>,
     scene: Vec<Instance>,
     vertex_count: u32,
     controllers: Controllers,
@@ -89,6 +95,18 @@ impl Renderer {
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+    ) -> Self {
+        Self::with_samples(device, queue, format, width, height, 1)
+    }
+
+    /// As [`Renderer::new`], with `samples` samples per pixel for multisample anti-aliasing, such as 4; 1 draws straight into the targets.
+    pub fn with_samples(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("oriented swarm instances"),
@@ -171,7 +189,10 @@ impl Renderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -187,22 +208,31 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let depth = Self::depth_views(device, width, height);
-        let controllers = Controllers::new(device, queue, format, &camera_layout);
-        let workspace =
-            crate::workspace_graphics::WorkspaceGraphics::new(device, format, &camera_layout);
-        let arrival = crate::arrival_graphics::ArrivalLabels::new(device, format, &camera_layout);
+        let depth = Self::depth_views(device, width, height, samples);
+        let multisampled = Self::multisampled_views(device, format, width, height, samples);
+        let controllers = Controllers::new(device, queue, format, &camera_layout, samples);
+        let workspace = crate::workspace_graphics::WorkspaceGraphics::new(
+            device,
+            format,
+            &camera_layout,
+            samples,
+        );
+        let arrival =
+            crate::arrival_graphics::ArrivalLabels::new(device, format, &camera_layout, samples);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::Minimal,
             reveal: None,
-            sky: environment_sky::Sky::new(device, queue, format, width, height),
+            sky: environment_sky::Sky::with_samples(device, queue, format, width, height, samples),
             pipeline,
             vertices,
             instances,
             cameras,
             camera_bindings,
             depth,
+            samples,
+            format,
+            multisampled,
             scene: Vec::with_capacity(MAX_INSTANCES),
             vertex_count: mesh.len() as u32,
             controllers,
@@ -213,7 +243,42 @@ impl Renderer {
         }
     }
 
-    fn depth_views(device: &wgpu::Device, width: u32, height: u32) -> [wgpu::TextureView; 2] {
+    /// Each eye's multisampled color target, which its scene pass resolves into the eye's own target; none for a single sample.
+    fn multisampled_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
+    ) -> Option<[wgpu::TextureView; 2]> {
+        (samples > 1).then(|| {
+            std::array::from_fn(|_| {
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("eye multisampled color"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: samples,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+            })
+        })
+    }
+
+    fn depth_views(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        samples: u32,
+    ) -> [wgpu::TextureView; 2] {
         std::array::from_fn(|_| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -224,7 +289,7 @@ impl Renderer {
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
-                    sample_count: 1,
+                    sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -236,7 +301,9 @@ impl Renderer {
 
     #[cfg(any(not(target_os = "android"), test))]
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.depth = Self::depth_views(device, width, height);
+        self.depth = Self::depth_views(device, width, height, self.samples);
+        self.multisampled =
+            Self::multisampled_views(device, self.format, width, height, self.samples);
         self.sky.resize(device, width, height);
     }
 
@@ -412,6 +479,7 @@ impl Renderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("swarm frame"),
         });
+        let multisampled = self.multisampled.as_ref();
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
             if self.environment == Environment::Sky {
@@ -428,8 +496,8 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eye"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &targets[eye],
-                    resolve_target: None,
+                    view: multisampled.map_or(&targets[eye], |views| &views[eye]),
+                    resolve_target: multisampled.map(|_| &targets[eye]),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -438,7 +506,12 @@ impl Renderer {
                             b: 0.025,
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        // Only the resolved image is needed once the samples are resolved.
+                        store: if multisampled.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1647,6 +1720,152 @@ mod tests {
                 sheet.save(path).unwrap();
             }
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(scope.pop().await.is_none());
+        });
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    fn multisampling_smooths_edges_in_both_environments() {
+        use crate::arrival::{Item, Key, Kind, Scene, View};
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 200;
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::VULKAN,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("multisample test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let eye = glam::Vec3::new(0.0, 1.6, 0.0);
+            let matrix = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
+            let scene = Scene::layout(&View {
+                heading: "Spaces on studio.local".into(),
+                items: vec![Item {
+                    key: Key::Create,
+                    kind: Kind::Create { open: false },
+                    label: "New space".into(),
+                    detail: None,
+                    selected: false,
+                }],
+                ..Default::default()
+            });
+            let mut caption = crate::caption::Caption::new(&device, format);
+            caption.set_text(&queue, "Hello from the desktop window.");
+            let mut swarm = Swarm::new();
+            for _ in 0..120 {
+                swarm.step(1.0 / 72.0, None);
+            }
+            // Draw everything the scene pass draws, so that each pipeline's sample count must match the pass's.
+            let render = |samples: u32, environment: Environment| {
+                let mut renderer =
+                    Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, samples);
+                renderer.set_environment(environment);
+                renderer.update(&queue, &swarm, None, false);
+                renderer.update_controllers(
+                    &queue,
+                    [
+                        Some(crate::controller::Pose {
+                            position: [-0.2, 1.3, -0.6],
+                            orientation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                        None,
+                    ],
+                    [None, None],
+                );
+                renderer.update_arrival(
+                    &device,
+                    &queue,
+                    &crate::arrival_graphics::Frame {
+                        scene: &scene,
+                        hovered: Some(&Key::Create),
+                        ray: Some((glam::Vec3::new(0.2, 1.1, -0.3), crate::arrival::CREATE)),
+                        time: 1.0,
+                    },
+                );
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    Some((&caption, Mat4::from_translation(eye))),
+                );
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("multisample test readback"),
+                    size: u64::from(WIDTH * HEIGHT * 4),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(WIDTH * 4),
+                            rows_per_image: Some(HEIGHT),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
+            };
+            // Edges drawn with several samples blend into their background, which a single sample never does.
+            let colours = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .map(|pixel| pixel.0)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            };
+            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
+            for (row, environment) in [Environment::Minimal, Environment::Sky]
+                .into_iter()
+                .enumerate()
+            {
+                let single = render(1, environment);
+                let multi = render(4, environment);
+                assert!(
+                    colours(&multi) > colours(&single),
+                    "{environment:?}: {} colours multisampled, {} without",
+                    colours(&multi),
+                    colours(&single)
+                );
+                let y = (row as u32 * HEIGHT).into();
+                image::imageops::replace(&mut sheet, &single, 0, y);
+                image::imageops::replace(&mut sheet, &multi, WIDTH.into(), y);
+            }
+            if let Ok(path) = std::env::var("TOMORI_MULTISAMPLE_PREVIEW") {
+                sheet.save(path).unwrap();
+            }
             assert!(scope.pop().await.is_none());
         });
     }
