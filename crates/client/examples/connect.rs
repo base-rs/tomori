@@ -11,6 +11,8 @@
 //!
 //! Without an address, or with `-`, it browses for servers advertised with Bonjour, lists them and asks which one to join.
 //!
+//! It connects over TLS, accepting the certificate the server presents, or plain HTTP to a server in `--auth open` mode. Without a token it is a visitor, who can only watch; set `TOMORI_TOKEN` to a token from `tomori-server auth mint --owner --name NAME` to create spaces and act in them. See `design/security.md`.
+//!
 //! Type commands on standard input: `list`, `create <backend> <directory> [title]`, `join <space>`, `leave`,
 //! `gate off|live|agent`, `allow <request>`, `deny <request>`, `grant <request> <option>`, `quit`. A pending approval is
 //! printed with its request id and the ids of the options it offers.
@@ -201,8 +203,17 @@ fn main() -> std::io::Result<()> {
     };
     eprintln!("Connecting to {address}.");
     let name = arguments.next().unwrap_or_else(|| "Console".into());
-    let participant = format!("console-{}", std::process::id());
-    let client = Client::connect(Options::new(address, participant, name))?;
+    // A random identity, since the server takes a known one for the participant who used it.
+    let participant = {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        format!("console-{:016x}", hasher.finish())
+    };
+    let mut options = Options::new(address, participant, name);
+    options.transport = client::Transport::Automatic { pin: None };
+    options.token = std::env::var("TOMORI_TOKEN").ok().filter(|token| !token.is_empty());
+    let client = Client::connect(options)?;
 
     let sender = client.sender();
     let (quit, quitting) = std::sync::mpsc::channel();

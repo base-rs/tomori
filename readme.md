@@ -75,13 +75,31 @@ bash scripts/fetch-sherpa-onnx.sh
 cargo run -p server --bin tomori-server -- --backend claude-code
 ```
 
-The headset creates spaces with its **New space** object (see
-[Controls](#controls)). To create one from the PC instead, use the example
-client: give it the server's address, then type `create` with the backend and a
-directory beneath a workspace root.
+Anyone who can reach the server can watch its spaces as a visitor. Creating
+spaces, talking to the agent and approving its tools need a token (see
+[design/security.md](design/security.md)). Make the first owner token on the
+PC, and give it to the headset or the desktop client once; each keeps it for
+that server:
 
 ```sh
-cargo run -p client --example connect -- 127.0.0.1:8765
+cargo run -p server --bin tomori-server -- auth mint --owner --name "Sam's Quest"
+TOMORI_TOKEN=tomori_… bash scripts/android.sh run     # or: tomori --xr --token tomori_…
+```
+
+`tomori-server auth list` lists the tokens and `auth revoke ID` revokes one.
+The server keeps its tokens and TLS certificate in `~/.local/state/tomori`
+(`--state-directory` changes it), serves only TLS, and shows owners its status
+page at `https://<server>:8765/`, where they sign in with a token. Pass
+`--no-visitors` to refuse anyone without a token, or `--auth open` to let
+anyone in as an owner, as before.
+
+The headset creates spaces with its **New space** object (see
+[Controls](#controls)), shown to owners. To create one from the PC instead, use
+the example client with an owner token: give it the server's address, then type
+`create` with the backend and a directory beneath a workspace root.
+
+```sh
+TOMORI_TOKEN=tomori_… cargo run -p client --example connect -- 127.0.0.1:8765
 create claude-code /home/sam/project
 ```
 
