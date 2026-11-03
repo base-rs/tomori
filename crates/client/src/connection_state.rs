@@ -21,6 +21,8 @@ pub enum Disconnect {
     Protocol(String),
     /// Connecting or the server's Welcome took too long, or an established connection received nothing for [`protocol::Keepalive::timeout`].
     Timeout,
+    /// The server presented a different certificate from the one pinned, with this fingerprint. Nothing was sent to it.
+    Certificate(String),
     /// The server ended the connection.
     Closed,
 }
@@ -33,6 +35,10 @@ impl fmt::Display for Disconnect {
             Self::Status(status) => write!(formatter, "server responded with status {status}"),
             Self::Protocol(error) => write!(formatter, "protocol error: {error}"),
             Self::Timeout => write!(formatter, "timed out waiting for the server"),
+            Self::Certificate(fingerprint) => write!(
+                formatter,
+                "the server's certificate has changed (it presented {fingerprint})"
+            ),
             Self::Closed => write!(formatter, "server closed the connection"),
         }
     }
@@ -50,7 +56,11 @@ pub enum ConnectionState {
         /// This client's participant number, which other clients see as the audio frame source.
         source: u32,
         server: String,
-        /// The server's backends, so the client shows only actions each supports.
+        /// What this connection may do in the lobby. A [`protocol::ServerMessage::Role`] follows whenever it changes. See `design/security.md`.
+        role: protocol::ConnectionRole,
+        /// The fingerprint of the server's TLS certificate, to pin from then on, or `None` over plain HTTP.
+        certificate: Option<security::Fingerprint>,
+        /// The server's backends, so the client shows only actions each supports. Empty unless this connection is an owner.
         backends: Vec<protocol::BackendInfo>,
         /// The directories a space may run in, so the client can choose one without typing a path.
         roots: Vec<protocol::WorkspaceRoot>,
@@ -97,6 +107,10 @@ mod tests {
             (Disconnect::Status(404), "server responded with status 404"),
             (Disconnect::Protocol("z".into()), "protocol error: z"),
             (Disconnect::Timeout, "timed out waiting for the server"),
+            (
+                Disconnect::Certificate("ab".into()),
+                "the server's certificate has changed (it presented ab)",
+            ),
             (Disconnect::Closed, "server closed the connection"),
         ];
         for (reason, text) in cases {
@@ -106,6 +120,8 @@ mod tests {
             ConnectionState::Connected {
                 source: 1,
                 server: "s".into(),
+                role: protocol::ConnectionRole::Owner,
+                certificate: None,
                 backends: vec![],
                 roots: vec![],
                 environments: vec![],

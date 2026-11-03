@@ -12,7 +12,8 @@ use crate::{
     server_choice::{self, Choice, Source},
 };
 use client::{
-    Client, ConnectionState, Event, Microphone, Options, discovery,
+    Client, ConnectionState, Disconnect, Event, Fingerprint, Microphone, Options, Transport,
+    discovery,
     playback::{MixerOptions, Player, PlayerControl},
 };
 use protocol::{ClientMessage, Gate, Pose, ServerMessage};
@@ -47,6 +48,46 @@ pub struct Connection {
     speaker: Speaker,
     /// Receives other participants' presence reports, which the conversation ignores. Set by a spectator that renders them.
     presence: Option<PresenceHook>,
+    /// The server connected to, and how, for keeping its certificate and token.
+    link: Option<Link>,
+}
+
+/// How this device is connected to a server, so that what it learns can be kept for that server. See `design/security.md`.
+struct Link {
+    address: String,
+    /// The server's discovered instance name, or its address, under which its certificate and token are kept.
+    key: String,
+    transport: Transport,
+    token: Option<String>,
+    /// Whether the token is the one given at startup, kept for this server once a connection over TLS succeeds.
+    pending_token: bool,
+    /// Whether the server's certificate is already kept for it.
+    pinned: bool,
+    /// The server presented a different certificate from the one kept: it is not trusted, so nothing it presents is kept.
+    distrusted: bool,
+    /// Asked to be admitted only to pair, since the server refuses visitors.
+    pairing: bool,
+}
+
+/// What to do once the client reported why it disconnected.
+enum Reopen {
+    /// The server refused the token: connect again without it.
+    WithoutToken,
+    /// The server's certificate changed: connect again as a visitor, sending no token, and keep nothing.
+    Distrusted,
+    /// The server refuses visitors: connect again asking to pair.
+    ToPair,
+}
+
+/// How to connect to `choice`, given what is kept for it: pin the certificate kept, or else the one it advertises; with neither, try TLS and fall back to plain HTTP.
+fn transport(kept: Option<&str>, advertised: Option<&str>) -> (Transport, bool) {
+    let parse =
+        |fingerprint: Option<&str>| fingerprint.and_then(|text| text.parse::<Fingerprint>().ok());
+    match (parse(kept), parse(advertised)) {
+        (Some(pin), _) => (Transport::Tls { pin: Some(pin) }, true),
+        (None, Some(pin)) => (Transport::Tls { pin: Some(pin) }, false),
+        (None, None) => (Transport::Automatic { pin: None }, false),
+    }
 }
 
 /// A hook that renders the other participants' presence reports, which the conversation ignores.
@@ -429,13 +470,14 @@ impl Connection {
         playback: Box<dyn Playback>,
         conversation: &mut Conversation,
     ) -> Self {
-        log::info!(
-            "Participant {} as {:?}",
-            identity.participant,
-            identity.name
-        );
+        // The participant identity is a secret of this device, so it is not logged.
+        log::info!("Participant {:?}", identity.name);
         if let Some(address) = &identity.server {
             conversation.connect(Choice::new(address, address, Source::Override));
+        } else if identity.token.is_some() {
+            log::info!(
+                "The token given is presented only to a server given at startup, or over USB."
+            );
         }
         let remembered = store.server();
         Self {
@@ -457,6 +499,7 @@ impl Connection {
             },
             speaker: Speaker::new(playback),
             presence: None,
+            link: None,
         }
     }
 
@@ -521,7 +564,18 @@ impl Connection {
             conversation.microphone_failed(error);
         }
         self.browse(focused && conversation.is_browsing(), conversation);
+        conversation.expire_pairing(Instant::now());
+        let mut reopen = None;
         while let Some(event) = self.client.as_ref().and_then(Client::try_event) {
+            match &event {
+                Event::State(ConnectionState::Connected { certificate, .. }) => {
+                    self.keep(*certificate)
+                }
+                Event::State(ConnectionState::Disconnected { reason, .. }) => {
+                    reopen = self.refused(reason, conversation).or(reopen);
+                }
+                _ => {}
+            }
             let connected = matches!(event, Event::State(ConnectionState::Connected { .. }));
             if connected && let Some(client) = self.client.as_ref() {
                 conversation.set_capture_generation(client.sender().connection_generation());
@@ -561,6 +615,9 @@ impl Connection {
         if let Some(error) = self.voice.failure() {
             conversation.microphone_failed(error);
         }
+        if let Some(reopen) = reopen {
+            self.reopen(reopen, conversation);
+        }
         self.perform(conversation);
         if self
             .client
@@ -580,22 +637,47 @@ impl Connection {
         while let Some(action) = conversation.next_action() {
             match action {
                 Action::Connect(choice) => {
-                    self.disconnect();
-                    let mut options = Options::new(
-                        choice.address,
-                        &self.identity.participant,
-                        &self.identity.name,
-                    );
-                    options.microphone_rearm_on_disconnect = true;
-                    match Client::connect(options) {
-                        Ok(mut client) => {
-                            self.speaker.attach(&mut client);
-                            self.client = Some(client);
-                        }
-                        Err(error) => {
-                            conversation.fail(format!("Cannot start a connection: {error}"))
-                        }
+                    let mut key = choice
+                        .instance
+                        .clone()
+                        .unwrap_or_else(|| choice.address.clone());
+                    let mut kept = self.store.credential(&key);
+                    // A server reached another way, such as over USB and then over Wi-Fi, is recognized by its certificate: the one kept for this name, or else the one it advertises. That certificate is then pinned, so only the server holding its key receives the token kept for it.
+                    if kept.token.is_none()
+                        && let Some((server, credential)) = kept
+                            .certificate
+                            .as_deref()
+                            .or(choice.fingerprint.as_deref())
+                            .and_then(|fingerprint| {
+                                self.store.credential_for_certificate(fingerprint)
+                            })
+                    {
+                        key = server;
+                        kept = credential;
                     }
+                    let (transport, pinned) =
+                        transport(kept.certificate.as_deref(), choice.fingerprint.as_deref());
+                    // A token given at startup goes only to the server given at startup, or over USB to this computer: never to a discovered server, whose advertisement anyone on the network could make.
+                    let startup = self
+                        .identity
+                        .token
+                        .clone()
+                        .filter(|_| matches!(choice.source, Source::Override | Source::Usb));
+                    let pending_token = kept.token.is_none() && startup.is_some();
+                    let link = Link {
+                        address: choice.address,
+                        key,
+                        transport,
+                        token: kept.token.or(startup),
+                        pending_token,
+                        pinned,
+                        distrusted: false,
+                        pairing: false,
+                    };
+                    self.open(link, conversation);
+                }
+                Action::Paired { token, certificate } => {
+                    self.paired(token, certificate, conversation)
                 }
                 Action::Disconnect => self.disconnect(),
                 Action::Rescan => {
@@ -663,7 +745,123 @@ impl Connection {
     }
 
     /// Close the connection without stalling the frame: closing waits briefly for the server.
+    /// Connect as `link` says.
+    fn open(&mut self, link: Link, conversation: &mut Conversation) {
+        self.disconnect();
+        let mut options = Options::new(
+            link.address.clone(),
+            &self.identity.participant,
+            &self.identity.name,
+        );
+        options.microphone_rearm_on_disconnect = true;
+        options.transport = link.transport;
+        options.token = link.token.clone();
+        options.pairing = link.pairing;
+        match Client::connect(options) {
+            Ok(mut client) => {
+                self.speaker.attach(&mut client);
+                self.client = Some(client);
+                self.link = Some(link);
+            }
+            Err(error) => conversation.fail(format!("Cannot start a connection: {error}")),
+        }
+    }
+
+    /// Keep what a connection over TLS established: the server's certificate, pinned from then on, and a token given at startup.
+    fn keep(&mut self, certificate: Option<Fingerprint>) {
+        let Some(link) = self.link.as_mut() else {
+            return;
+        };
+        let Some(certificate) = certificate.filter(|_| !link.distrusted) else {
+            return;
+        };
+        if !link.pinned {
+            self.store
+                .remember_certificate(&link.key, &certificate.to_string());
+            link.pinned = true;
+            // Pinned from now on, including when the client reconnects.
+            link.transport = Transport::Tls {
+                pin: Some(certificate),
+            };
+        }
+        if link.pending_token
+            && let Some(token) = &link.token
+        {
+            self.store.remember_token(&link.key, token);
+            link.pending_token = false;
+            self.identity.token = None;
+        }
+    }
+
+    /// Respond to a refused connection: forget a refused token, or distrust a server whose certificate changed.
+    fn refused(&mut self, reason: &Disconnect, conversation: &mut Conversation) -> Option<Reopen> {
+        let link = self.link.as_mut()?;
+        match reason {
+            Disconnect::Status(401) if link.token.is_some() => {
+                if link.pending_token {
+                    self.identity.token = None;
+                } else {
+                    self.store.forget_token(&link.key);
+                }
+                conversation.security_notice(
+                    "This server no longer admits this device, so it watches as a visitor.",
+                );
+                Some(Reopen::WithoutToken)
+            }
+            // The server refuses visitors: ask to pair instead, which it admits.
+            Disconnect::Status(401) if !link.pairing => Some(Reopen::ToPair),
+            Disconnect::Status(401) => {
+                conversation.security_notice("This server admits only devices with a token.");
+                None
+            }
+            Disconnect::Certificate(_) if !link.distrusted => {
+                conversation.security_notice(
+                    "This server's identity has changed, so this device watches as a visitor and sends it no token.",
+                );
+                Some(Reopen::Distrusted)
+            }
+            _ => None,
+        }
+    }
+
+    fn reopen(&mut self, reopen: Reopen, conversation: &mut Conversation) {
+        let Some(mut link) = self.link.take() else {
+            return;
+        };
+        link.token = None;
+        link.pending_token = false;
+        match reopen {
+            Reopen::Distrusted => {
+                link.distrusted = true;
+                link.transport = Transport::Tls { pin: None };
+            }
+            Reopen::ToPair => link.pairing = true,
+            Reopen::WithoutToken => {}
+        }
+        self.open(link, conversation);
+    }
+
+    /// Pairing gave this device an owner token: keep it with the certificate the pairing connection presented, which replaces one it distrusted, and connect with both. See `design/security.md`.
+    fn paired(&mut self, token: String, certificate: Fingerprint, conversation: &mut Conversation) {
+        let Some(mut link) = self.link.take() else {
+            return;
+        };
+        self.store
+            .remember_certificate(&link.key, &certificate.to_string());
+        self.store.remember_token(&link.key, &token);
+        link.transport = Transport::Tls {
+            pin: Some(certificate),
+        };
+        link.token = Some(token);
+        link.pending_token = false;
+        link.pinned = true;
+        link.distrusted = false;
+        link.pairing = false;
+        self.open(link, conversation);
+    }
+
     fn disconnect(&mut self) {
+        self.link = None;
         self.voice.reset();
         self.speaker.detach();
         if let Some(client) = self.client.take() {
@@ -733,6 +931,39 @@ impl Drop for Connection {
 mod tests {
     use super::*;
     use crate::capture::{Active, Failed, Samples};
+
+    #[test]
+    fn the_kept_certificate_is_pinned_before_the_advertised_one() {
+        let kept = Fingerprint::of(b"kept").to_string();
+        let advertised = Fingerprint::of(b"advertised").to_string();
+        assert_eq!(
+            transport(Some(&kept), Some(&advertised)),
+            (
+                Transport::Tls {
+                    pin: kept.parse().ok()
+                },
+                true
+            )
+        );
+        assert_eq!(
+            transport(None, Some(&advertised)),
+            (
+                Transport::Tls {
+                    pin: advertised.parse().ok()
+                },
+                false
+            )
+        );
+        // Nothing known, or nothing valid: try TLS, then plain HTTP.
+        assert_eq!(
+            transport(None, None),
+            (Transport::Automatic { pin: None }, false)
+        );
+        assert_eq!(
+            transport(Some("not a fingerprint"), None),
+            (Transport::Automatic { pin: None }, false)
+        );
+    }
     use std::{
         sync::atomic::{AtomicBool, AtomicU32, Ordering},
         thread::JoinHandle,

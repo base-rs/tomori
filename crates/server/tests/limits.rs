@@ -107,7 +107,6 @@ fn an_oversized_hello_is_refused() {
             protocol: protocol::PROTOCOL_VERSION,
             participant,
             name,
-            credentials: None,
         });
         let error = client.error();
         assert!(

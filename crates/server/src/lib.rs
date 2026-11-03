@@ -5,16 +5,20 @@
 //!
 //! Each client opens `POST /connect` and keeps it open. The request body carries client frames and the response body carries server frames for the life of the connection; see `design/server.md`. The server hosts several spaces, each bound to exactly one backend session, and keeps one shared state per space; see `design/spaces.md`. Participant audio is relayed within a space and push-to-talk audio is handed to a [`Transcriber`]; see `design/live-audio.md`. With the `speech` feature, [`RecognitionTranscriber`] transcribes with the speech crate, and a synthesizer given to [`Server::with_synthesizer`] speaks each space's assistant replies as one real-time agent speech stream; see `design/speech.md`.
 
+mod access;
 mod admission;
 mod application;
+pub mod auth_command;
 mod backends;
 mod connection;
+mod door;
 mod environments;
 mod hub;
 mod limits;
 #[cfg(feature = "speech")]
 pub mod offline;
 mod outbox;
+mod pages;
 mod projection;
 mod queue;
 #[cfg(feature = "speech")]
@@ -32,14 +36,20 @@ pub mod fake;
 #[cfg(feature = "fake")]
 pub mod test_support;
 
+pub use access::{Access, Grant};
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use hub::CLOSED_SPACES;
+pub use hub::{
+    PAIRING_ATTEMPTS, PAIRING_TIMEOUT, PAIRING_WINDOW, PairingEvent, PairingView, REVEAL_TIMEOUT,
+};
 #[cfg(feature = "speech")]
 pub use offline::OfflineTranscriber;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
-pub use server::{COUNTS_INTERVAL, DEFAULT_PARTICIPANT_RETENTION, Server, bind};
+pub use server::{
+    COUNTS_INTERVAL, DEFAULT_MAX_VISITORS, DEFAULT_PARTICIPANT_RETENTION, Pairing, Server, bind,
+};
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
 pub use voice::SpeechMode;
 pub use workspace::{

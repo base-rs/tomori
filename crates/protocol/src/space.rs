@@ -66,6 +66,30 @@ pub enum Activity {
     Unknown,
 }
 
+/// What a connection may do where it is now: an owner anywhere, a collaborator in the space they were admitted to, and a visitor otherwise. `Unknown` stands for a role a newer server sends that this build does not know, and permits nothing beyond a visitor's actions. See `design/security.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionRole {
+    /// Everything a collaborator can do, and creating spaces and listing an agent's sessions.
+    Owner,
+    /// Acting in the space: talking to the agent, deciding approvals, answering questions and the like.
+    Collaborator,
+    /// Watching: listing spaces, joining one to watch and hear it, leaving, pairing and knocking.
+    Visitor,
+    /// Only pairing, on a server that refuses visitors.
+    Pairing,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl ConnectionRole {
+    /// Whether this role makes its holder a participant in the space they are in, able to act on it.
+    pub fn participates(self) -> bool {
+        matches!(self, Self::Owner | Self::Collaborator)
+    }
+}
+
 /// The complete shared state of a space, identical for every participant. See `design/spaces.md`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpaceState {
@@ -163,9 +187,8 @@ pub enum QueueState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub id: String,
-    /// The speaker's participant identity, so a client can recognize its own entries. Absent from older servers.
-    #[serde(default)]
-    pub participant: String,
+    /// The speaker's participant number, their public handle, so a client can recognize its own entries by the `source` in its `Welcome`. A participant's identity is never sent to other clients; see `design/security.md`.
+    pub source: u32,
     /// The speaker's display name.
     pub speaker: String,
     pub text: String,
@@ -254,9 +277,8 @@ pub struct Presentation {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Participant {
-    pub id: String,
     pub name: String,
-    /// The number used as the audio frame source for this participant.
+    /// The participant's number: their public handle, and the source of their audio frames. A participant's identity is never sent to other clients; see `design/security.md`.
     pub source: u32,
 }
 
@@ -351,16 +373,20 @@ mod tests {
     }
 
     #[test]
-    fn queue_entries_from_older_servers_have_no_participant() {
-        let entry: QueueEntry = serde_json::from_value(serde_json::json!({
-            "id": "e1",
-            "speaker": "Ada",
-            "text": "run the tests",
-            "state": "queued",
-        }))
-        .unwrap();
-        assert_eq!(entry.participant, "");
-        assert_eq!(entry.speaker, "Ada");
+    fn roles_a_newer_server_adds_are_read_as_unknown() {
+        assert_eq!(
+            serde_json::from_str::<ConnectionRole>("\"moderator\"").unwrap(),
+            ConnectionRole::Unknown
+        );
+        assert_eq!(
+            serde_json::to_value(ConnectionRole::Collaborator).unwrap(),
+            "collaborator"
+        );
+        assert!(ConnectionRole::Owner.participates());
+        assert!(ConnectionRole::Collaborator.participates());
+        assert!(!ConnectionRole::Visitor.participates());
+        assert!(!ConnectionRole::Pairing.participates());
+        assert!(!ConnectionRole::Unknown.participates());
     }
 
     #[test]

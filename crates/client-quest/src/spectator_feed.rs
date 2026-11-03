@@ -77,6 +77,8 @@ pub struct SpectatorOptions {
     pub space: Option<String>,
     /// A participant name to follow, or the first available.
     pub follow: Option<String>,
+    /// A token for the server, for a server that refuses visitors. See `design/security.md`.
+    pub token: Option<String>,
 }
 
 /// The spectator's connection to a space. Tracks participant presence and
@@ -110,10 +112,11 @@ impl Feed {
         let overrides = Overrides {
             server: options.server.clone(),
             name: None,
+            token: options.token.clone(),
         };
         let store = Store::new(None);
         let identity = Identity::new(&store, crate::identity::host_name().as_deref(), overrides);
-        let mut conversation = Conversation::new(&identity.participant, &identity.name);
+        let mut conversation = Conversation::new(&identity.name);
 
         // The connection enqueues a `Connect` action when a server is given,
         // so it must be created before `join_space` queues a `Send(Join)`:
@@ -361,6 +364,8 @@ mod tests {
             .apply(Event::State(ConnectionState::Connected {
                 source: 1,
                 server: "Test".into(),
+                role: protocol::ConnectionRole::Visitor,
+                certificate: None,
                 backends: vec![],
                 roots: vec![],
                 environments: vec![],

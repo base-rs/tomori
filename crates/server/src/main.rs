@@ -3,7 +3,7 @@
 
 //! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS] [--workspace-root PATH]... [--max-spaces COUNT]`
 //!
-//! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. There is no authentication yet: anyone who can reach the port can join a space. See `design/server.md`.
+//! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. Holders of the server's tokens are owners or collaborators; anyone else may watch as a visitor, unless `--no-visitors`. `tomori-server auth` manages the tokens. See `design/server.md` and `design/security.md`.
 
 // Built without any backend, the backend enums are empty and every match on them is vacuous.
 #![cfg_attr(
@@ -27,7 +27,9 @@ const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [
                      [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
                      [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
-                     [--claude-permission-mode MODE]
+                     [--claude-permission-mode MODE] [--auth MODE] [--no-visitors]
+                     [--max-visitors COUNT] [--state-directory PATH]
+       tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
@@ -69,6 +71,15 @@ Options:
                        Let spaces run in this directory or beneath it; repeat for several. Without
                        it, the only root is the directory the server starts in. Each root must exist.
   --max-spaces COUNT   The most spaces whose agent sessions run at once (default 8).
+  --auth MODE          tokens (default): holders of this server's tokens are owners or
+                       collaborators, and anyone else is a visitor who can only watch. open: anyone
+                       who can reach the server is an owner, who can create spaces and approve tool
+                       use.
+  --no-visitors        Refuse connections without a token, instead of admitting them as visitors.
+  --max-visitors COUNT The most visitors connected at once (default 64).
+  --state-directory PATH
+                       Where the token store is kept (default $XDG_STATE_HOME/tomori, or
+                       ~/.local/state/tomori).
   --help               Show this help.";
 
 /// The modes `claude --permission-mode` accepts.
@@ -100,6 +111,19 @@ struct Arguments {
     /// Empty for the default, the current directory.
     workspace_roots: Vec<PathBuf>,
     max_spaces: usize,
+    /// `--auth open`: everyone is an owner.
+    open: bool,
+    visitors: bool,
+    max_visitors: usize,
+    state_directory: Option<PathBuf>,
+}
+
+/// The state directory from the environment; see [`server::auth_command::default_state_directory`].
+fn default_state_directory() -> Option<PathBuf> {
+    server::auth_command::default_state_directory(
+        std::env::var("XDG_STATE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 /// A positive number of seconds, such as `5` or `0.5`.
@@ -129,6 +153,10 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         request_timeout: None,
         workspace_roots: Vec::new(),
         max_spaces: server::DEFAULT_MAX_SPACES,
+        open: false,
+        visitors: true,
+        max_visitors: server::DEFAULT_MAX_VISITORS,
+        state_directory: None,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -232,9 +260,36 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                     .filter(|count| *count > 0)
                     .ok_or_else(|| format!("--max-spaces needs a positive count, not {value:?}"))?;
             }
+            "--auth" => {
+                parsed.open = match arguments.next().as_deref() {
+                    Some("open") => true,
+                    Some("tokens") => false,
+                    other => return Err(format!("--auth needs tokens or open, not {other:?}")),
+                }
+            }
+            "--no-visitors" => parsed.visitors = false,
+            "--max-visitors" => {
+                let value = arguments.next().ok_or("--max-visitors needs a count")?;
+                parsed.max_visitors = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("--max-visitors needs a count, not {value:?}"))?;
+            }
+            "--state-directory" => {
+                parsed.state_directory = Some(
+                    arguments
+                        .next()
+                        .ok_or("--state-directory needs a directory")?
+                        .into(),
+                )
+            }
             "--help" | "-h" => return Err(USAGE.to_owned()),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
+    }
+    if parsed.open && !parsed.visitors {
+        return Err(
+            "--auth open admits everyone, so it cannot be combined with --no-visitors".to_owned(),
+        );
     }
     if parsed.keepalive.timeout <= parsed.keepalive.interval {
         return Err(format!(
@@ -265,6 +320,111 @@ fn workspace_roots(roots: &[PathBuf]) -> Result<WorkspaceRoots, String> {
     Ok(roots)
 }
 
+/// Configure who the server admits, and say so. A server that accepts tokens serves only TLS, with the certificate in its state directory, whose fingerprint is returned for advertising. See `design/security.md`.
+fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<String>), String> {
+    if arguments.open {
+        let warning = "Anyone who can reach this server can create spaces and approve tool use (--auth open).";
+        eprintln!("Warning: {warning}");
+        log::warn!("{warning}");
+        return Ok((server, None));
+    }
+    let state = arguments
+        .state_directory
+        .clone()
+        .or_else(default_state_directory)
+        .ok_or("No state directory for the token store: give --state-directory, or set XDG_STATE_HOME or HOME.")?;
+    let store = security::TokenStore::open(&state).map_err(|error| {
+        format!(
+            "Could not open the token store in {}: {error}.",
+            state.display()
+        )
+    })?;
+    let owners = store
+        .entries()
+        .iter()
+        .filter(|entry| entry.grant == security::Grant::Owner)
+        .count();
+    eprintln!(
+        "Admitting holders of this server's tokens ({owners} owner tokens, in {}){}.",
+        state.display(),
+        if arguments.visitors {
+            format!(
+                ", and up to {} visitors without one",
+                arguments.max_visitors
+            )
+        } else {
+            String::new()
+        }
+    );
+    if owners == 0 {
+        eprintln!(
+            "No owner token is issued yet: run `tomori-server auth mint --owner --name NAME`."
+        );
+    }
+    let certificate = security::ServerCertificate::load_or_create(&state).map_err(|error| {
+        format!(
+            "Could not load or create the server's certificate in {}: {error}.",
+            state.display()
+        )
+    })?;
+    let config = certificate
+        .server_config()
+        .map_err(|error| format!("The server's certificate cannot be used: {error}."))?;
+    let fingerprint = certificate.fingerprint().to_string();
+    eprintln!("Serving TLS only; the certificate's fingerprint is {fingerprint}.");
+    let server = server
+        .with_tokens(std::sync::Arc::new(store), arguments.visitors)
+        .with_max_visitors(arguments.max_visitors)
+        .with_tls(config)
+        .with_pairing(certificate.fingerprint())
+        .with_pairing_prompt(|event| match event {
+            server::PairingEvent::Began { name } => eprintln!("{name:?} began pairing."),
+            server::PairingEvent::Waiting { name, code } => eprintln!(
+                "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
+            ),
+            server::PairingEvent::Paused => eprintln!(
+                "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again."
+            ),
+        });
+    confirm_pairings_on_console(server.pairing());
+    Ok((server, Some(fingerprint)))
+}
+
+/// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches. See `design/security.md`.
+fn confirm_pairings_on_console(pairing: server::Pairing) {
+    use std::io::BufRead;
+    let reading = std::thread::Builder::new()
+        .name("tomori-console".into())
+        .spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line.eq_ignore_ascii_case("allow") {
+                    pairing.allow();
+                    eprintln!("Pairing is allowed again.");
+                } else if pairing.pending().is_none() {
+                    eprintln!("No pairing is waiting.");
+                } else if line.eq_ignore_ascii_case("decline") {
+                    pairing.decline();
+                    eprintln!("Declined the pairing.");
+                } else if let Some(code) = security::pairing::typed(line) {
+                    match pairing.confirm(&code) {
+                        Ok(name) => eprintln!("Paired {name:?} as an owner."),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                } else {
+                    eprintln!("Type the 6-digit code the device shows, or \"decline\".");
+                }
+            }
+        });
+    if let Err(error) = reading {
+        eprintln!("Could not read the console for pairing ({error}); confirm on the status page.");
+    }
+}
+
 /// The default display name: the host name without its domain, such as `studio` for `studio.local`.
 fn host_name() -> String {
     let host = gethostname::gethostname();
@@ -278,18 +438,19 @@ fn host_name() -> String {
 /// The running advertisement, if any, which the server updates as its counts change.
 type Advertised = Arc<Mutex<Option<discovery::Advertisement>>>;
 
-/// Advertise the bound `address`, with the server's current `counts`, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
+/// Advertise the bound `address`, with the server's current `counts` and its certificate's `fingerprint` if it serves TLS, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
 fn advertise(
     arguments: &Arguments,
     address: SocketAddr,
     counts: discovery::Counts,
+    fingerprint: Option<String>,
 ) -> Option<discovery::Advertisement> {
     if !arguments.advertise {
         eprintln!("Bonjour: not advertising (--no-advertise).");
         return None;
     }
     let name = arguments.name.clone().unwrap_or_else(host_name);
-    match discovery::advertise(&name, address.port(), address.ip(), counts) {
+    match discovery::advertise(&name, address.port(), address.ip(), counts, fingerprint) {
         Ok(advertisement) => {
             eprintln!(
                 "Bonjour: advertising {:?} as _tomori._tcp on port {}.",
@@ -562,7 +723,21 @@ fn synthesis(
 fn main() -> ExitCode {
     // Log to standard error, at info and above unless `RUST_LOG` says otherwise.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let arguments = match parse(std::env::args().skip(1)) {
+    let mut command = std::env::args().skip(1).peekable();
+    if command.peek().map(String::as_str) == Some("auth") {
+        command.next();
+        return match server::auth_command::run(command, default_state_directory()) {
+            Ok(output) => {
+                print!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let arguments = match parse(command) {
         Ok(arguments) => arguments,
         Err(message) => {
             eprintln!("{message}");
@@ -613,6 +788,14 @@ fn main() -> ExitCode {
         .with_keepalive(arguments.keepalive)
         .with_workspace_roots(roots)
         .with_max_spaces(arguments.max_spaces);
+    let fingerprint;
+    (server, fingerprint) = match admission(server, &arguments) {
+        Ok(admitted) => admitted,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
@@ -651,14 +834,19 @@ fn main() -> ExitCode {
         let address = scheduler
             .socket_local_address(&listener)
             .map_err(|error| error.to_string())?;
+        let scheme = if fingerprint.is_some() {
+            "https"
+        } else {
+            "http"
+        };
         eprintln!(
-            "Tomori server listening on http://{address} (backends: {}). There is no authentication: anyone on this network can join.",
+            "Tomori server listening on {scheme}://{address} (backends: {}).",
             arguments.backends.join(", ")
         );
         *advertised
             .lock()
             .expect("the advertisement is never left poisoned") =
-            advertise(&arguments, address, server.counts());
+            advertise(&arguments, address, server.counts(), fingerprint.clone());
         let served = server.run(&scheduler, listener, &cancellation).await;
         // Withdraw the advertisement as soon as serving ends.
         drop(
@@ -816,6 +1004,43 @@ mod tests {
             [PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
         );
         assert_eq!(parsed.max_spaces, 3);
+    }
+
+    #[test]
+    fn admission_is_configurable() {
+        let parsed = arguments(&[]).unwrap();
+        assert!(!parsed.open);
+        assert!(parsed.visitors);
+        assert_eq!(parsed.max_visitors, server::DEFAULT_MAX_VISITORS);
+        assert_eq!(parsed.state_directory, None);
+        let parsed = arguments(&[
+            "--auth",
+            "tokens",
+            "--no-visitors",
+            "--max-visitors",
+            "3",
+            "--state-directory",
+            "/var/lib/tomori",
+        ])
+        .unwrap();
+        assert!(!parsed.open);
+        assert!(!parsed.visitors);
+        assert_eq!(parsed.max_visitors, 3);
+        assert_eq!(
+            parsed.state_directory,
+            Some(PathBuf::from("/var/lib/tomori"))
+        );
+        assert!(arguments(&["--auth", "open"]).unwrap().open);
+        for list in [
+            &["--auth"][..],
+            &["--auth", "none"],
+            &["--auth", "open", "--no-visitors"],
+            &["--max-visitors"],
+            &["--max-visitors", "-1"],
+            &["--state-directory"],
+        ] {
+            assert!(arguments(list).is_err(), "{list:?}");
+        }
     }
 
     #[test]

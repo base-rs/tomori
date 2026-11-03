@@ -184,6 +184,34 @@ fn form(object: &Object, time: f32, out: &mut Vec<Cube>) {
             let turn = face * Quat::from_rotation_z(FRAC_PI_4);
             out.push(cube(p, Vec3::splat(s * 1.2), [0.7, 0.85, 1.0], turn));
         }
+        Kind::Pair { pending } => {
+            // A key: a diamond bow and a shaft with a bit, which pulses while its code waits to be confirmed.
+            let glow = if pending {
+                0.75 + 0.25 * (time * 4.0).sin()
+            } else {
+                1.0
+            };
+            let color = [0.95 * glow, 0.78 * glow, 0.3 * glow];
+            let bow = face * Quat::from_rotation_z(FRAC_PI_4);
+            out.push(cube(
+                p + face * Vec3::new(-s * 0.9, 0.0, 0.0),
+                Vec3::splat(s * 0.8),
+                color,
+                bow,
+            ));
+            out.push(cube(
+                p + face * Vec3::new(s * 0.5, 0.0, 0.0),
+                Vec3::new(s * 1.6, s * 0.3, s * 0.3),
+                color,
+                face,
+            ));
+            out.push(cube(
+                p + face * Vec3::new(s * 1.1, -s * 0.35, 0.0),
+                Vec3::new(s * 0.3, s * 0.5, s * 0.3),
+                color,
+                face,
+            ));
+        }
     }
 }
 

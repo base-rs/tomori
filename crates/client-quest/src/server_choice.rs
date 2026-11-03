@@ -34,6 +34,8 @@ pub struct Choice {
     pub spaces: Option<u32>,
     /// How many participants a discovered server advertises as connected, if it does.
     pub participants: Option<u32>,
+    /// The fingerprint of the TLS certificate a discovered server advertises, if it serves TLS. See `design/security.md`.
+    pub fingerprint: Option<String>,
 }
 
 impl Choice {
@@ -46,6 +48,7 @@ impl Choice {
             unavailable: None,
             spaces: None,
             participants: None,
+            fingerprint: None,
         }
     }
 
@@ -55,6 +58,7 @@ impl Choice {
             instance: Some(server.instance.clone()),
             spaces: server.spaces,
             participants: server.participants,
+            fingerprint: server.fingerprint.clone(),
             ..Self::new(&server.name, address, source)
         }
     }
@@ -163,6 +167,7 @@ mod tests {
             protocol,
             spaces: None,
             participants: None,
+            fingerprint: None,
         }
     }
 

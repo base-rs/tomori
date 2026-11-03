@@ -13,8 +13,8 @@ use crate::{
 };
 use client::{ConnectionState, Event, UtteranceFailure};
 use protocol::{
-    Activity, BackendInfo, ClientMessage, Decision, EnvironmentInfo, QueueState, Role,
-    ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, EnvironmentInfo, QueueState,
+    Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
 };
 use std::{
     sync::Arc,
@@ -22,6 +22,9 @@ use std::{
 };
 
 const BODY_ROWS: usize = ROWS - 4;
+
+/// Said when a visitor tries to talk or act in the space they are watching. See `design/security.md`.
+const VISITING: &str = "Visitors can watch and listen, but not talk or act here.";
 
 const LOST: &str = "Connection lost; your words were not sent.";
 
@@ -46,7 +49,24 @@ pub enum Action {
     /// Open or close the microphone for other participants without addressing the agent.
     StartLive(u64),
     StopLive,
+    /// Pairing gave this device an owner token for the server, to keep with the certificate the pairing connection presented, and connect with. See `design/security.md`.
+    Paired {
+        token: String,
+        certificate: client::Fingerprint,
+    },
 }
+
+/// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq)]
+enum Pairing {
+    /// Committed to this value, waiting for the server's.
+    Committed(security::pairing::Nonce, Instant),
+    /// Both sides have the code, written for reading, which waits to be confirmed on the server.
+    Waiting(String, Instant),
+}
+
+/// How long the device waits for a pairing to be confirmed before it gives up itself: the server's timeout and a margin. A pairing the device gives up on is cancelled, so one choice of the pairing object allows the server one try. See `design/security.md`.
+const PAIRING_PATIENCE: Duration = Duration::from_secs(135);
 
 /// Push-to-talk, from pressing X until the server's transcript or failure. See `design/speech.md`.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,8 +125,13 @@ impl LobbyStep {
 }
 
 pub struct Conversation {
-    /// This participant's identity, which the server records on their queued input.
-    participant: String,
+    /// This participant's number on the connected server, from its Welcome, which the server records on their queued input. Kept while the connection is down, since a reconnect keeps it; see `design/security.md`.
+    source: Option<u32>,
+    /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
+    role: ConnectionRole,
+    /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
+    certificate: Option<client::Fingerprint>,
+    pairing: Option<Pairing>,
     name: String,
     mode: Mode,
     servers: Vec<Choice>,
@@ -166,7 +191,7 @@ pub struct Conversation {
     talk: Option<Talk>,
     live: bool,
     capture_generation: u64,
-    /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant identity persists.
+    /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
     launch: String,
     utterances: u64,
 }
@@ -179,10 +204,13 @@ struct Paged {
 }
 
 impl Conversation {
-    /// `participant` is this participant's identity and `name` their display name.
-    pub fn new(participant: impl Into<String>, name: impl Into<String>) -> Self {
+    /// `name` is this participant's display name.
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            participant: participant.into(),
+            source: None,
+            role: ConnectionRole::Unknown,
+            certificate: None,
+            pairing: None,
             name: name.into(),
             mode: Mode::Servers,
             servers: Vec::new(),
@@ -304,6 +332,10 @@ impl Conversation {
         self.actions.push(Action::Connect(choice.clone()));
         self.connected = Some(choice);
         self.state = None;
+        self.source = None;
+        self.role = ConnectionRole::Unknown;
+        self.certificate = None;
+        self.pairing = None;
         self.spaces.clear();
         self.listed = false;
         self.selected = 0;
@@ -333,6 +365,23 @@ impl Conversation {
     }
 
     /// Report a problem the connection found, such as a client that could not start.
+    /// Tell the participant something about the connection's security, such as that the server's identity changed. See `design/security.md`.
+    pub fn security_notice(&mut self, notice: impl Into<String>) {
+        let notice = notice.into();
+        log::warn!("{notice}");
+        self.notice = Some(notice);
+    }
+
+    /// What this connection may do where it is now.
+    pub fn role(&self) -> ConnectionRole {
+        self.role
+    }
+
+    /// Whether this connection may create spaces, so that the create object is offered. Only owners create spaces; see `design/security.md`.
+    fn creates(&self) -> bool {
+        self.role == ConnectionRole::Owner
+    }
+
     pub fn fail(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
     }
@@ -358,6 +407,8 @@ impl Conversation {
 
     fn connection_changed(&mut self, state: ConnectionState) {
         if !matches!(state, ConnectionState::Connected { .. }) {
+            // A pairing belongs to its connection; the server withdraws it.
+            self.pairing = None;
             self.stop_live();
             match &self.talk {
                 Some(Talk::Recording { .. }) => {
@@ -374,13 +425,18 @@ impl Conversation {
         }
         if let ConnectionState::Connected {
             server,
+            source,
+            role,
+            certificate,
             backends,
             roots,
             environments,
-            ..
         } = &state
         {
-            log::info!("Connected to {server}");
+            log::info!("Connected to {server} as {role:?}");
+            self.source = Some(*source);
+            self.role = *role;
+            self.certificate = *certificate;
             self.error = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
@@ -398,6 +454,31 @@ impl Conversation {
 
     fn receive(&mut self, message: ServerMessage) {
         match message {
+            // A connection admitted only to pair is not shown spaces, even if a server sends them.
+            ServerMessage::Spaces { .. } if self.role == ConnectionRole::Pairing => {}
+            ServerMessage::PairNonce { nonce } => self.pair_with(&nonce),
+            ServerMessage::PairWaiting => {}
+            ServerMessage::Paired { token } => {
+                self.pairing = None;
+                if let Some(certificate) = self.certificate {
+                    self.actions.push(Action::Paired { token, certificate });
+                    self.notice =
+                        Some("Paired: this device is now an owner of this server.".into());
+                }
+            }
+            ServerMessage::PairFailed { error } => {
+                self.pairing = None;
+                self.notice = Some(error);
+            }
+            ServerMessage::Role { role } => {
+                log::info!("Now {role:?}");
+                self.role = role;
+                // A visitor sends no audio, so the microphone closes as the role changes.
+                if !role.participates() {
+                    self.stop_live();
+                    self.stop_talking();
+                }
+            }
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
                 self.selected = if self.listed && self.selected == self.spaces.len() {
@@ -578,19 +659,111 @@ impl Conversation {
     }
 
     fn list(&mut self) {
+        // A connection admitted only to pair sees no spaces.
+        if self.role == ConnectionRole::Pairing {
+            return;
+        }
         self.actions.push(Action::Send(ClientMessage::ListSpaces));
     }
 
-    fn send(&mut self, message: ClientMessage) {
+    /// The pairing object: its code while pairing, which is compared with the server's. See `design/arrival.md`.
+    fn pairing_item(&self) -> arrival::Item {
+        let (label, detail, pending) = match &self.pairing {
+            Some(Pairing::Waiting(code, _)) => (code.clone(), "Confirm on the server", true),
+            Some(Pairing::Committed(..)) => ("Pairing...".to_owned(), "Choose to cancel", true),
+            None => ("Pair".to_owned(), "Become an owner", false),
+        };
+        arrival::Item {
+            key: arrival::Key::Pair,
+            kind: arrival::Kind::Pair { pending },
+            label,
+            detail: Some(detail.into()),
+            selected: false,
+        }
+    }
+
+    /// Whether this device can pair with the server: connected over TLS, and not already an owner. See `design/security.md`.
+    pub fn pairable(&self) -> bool {
+        self.certificate.is_some()
+            && self.role != ConnectionRole::Owner
+            && matches!(self.state, Some(ConnectionState::Connected { .. }))
+    }
+
+    /// Start pairing, committing to a random value, or cancel the pairing in progress.
+    pub fn pair(&mut self) {
+        if self.pairing.take().is_some() {
+            self.actions.push(Action::Send(ClientMessage::PairCancel));
+            self.notice = None;
+            return;
+        }
+        if !self.pairable() {
+            return;
+        }
+        let device = security::pairing::Nonce::generate();
+        self.actions.push(Action::Send(ClientMessage::PairBegin {
+            commitment: device.commitment(),
+        }));
+        self.pairing = Some(Pairing::Committed(device, Instant::now()));
+        self.error = None;
+        self.notice = Some("Pairing...".into());
+    }
+
+    /// The server sent its value: reveal ours, and derive the code from both and the certificate this connection presented.
+    fn pair_with(&mut self, nonce: &str) {
+        let (Some(Pairing::Committed(device, began)), Some(certificate), Some(server)) = (
+            self.pairing.clone(),
+            self.certificate,
+            security::pairing::Nonce::parse(nonce),
+        ) else {
+            return;
+        };
+        self.actions.push(Action::Send(ClientMessage::PairReveal {
+            nonce: device.to_hex(),
+        }));
+        let code =
+            security::pairing::display(&security::pairing::code(certificate, device, server));
+        self.notice = Some(format!("Pairing code {code}: confirm it on the server."));
+        self.pairing = Some(Pairing::Waiting(code, began));
+    }
+
+    /// Give up on a pairing that has waited longer than [`PAIRING_PATIENCE`] at `now`, cancelling it on the server. Called every frame.
+    pub fn expire_pairing(&mut self, now: Instant) {
+        let began = match &self.pairing {
+            Some(Pairing::Committed(_, began) | Pairing::Waiting(_, began)) => *began,
+            None => return,
+        };
+        if now.saturating_duration_since(began) >= PAIRING_PATIENCE {
+            self.pairing = None;
+            self.actions.push(Action::Send(ClientMessage::PairCancel));
+            self.notice = Some("The pairing was not confirmed in time.".into());
+        }
+    }
+
+    /// Send `message`, unless it acts in the space and this connection only watches. Returns whether it was sent.
+    fn send(&mut self, message: ClientMessage) -> bool {
+        // A visitor only watches: acting in the space, such as deciding an approval, is not sent. See `design/security.md`.
+        let acts = matches!(
+            message,
+            ClientMessage::CancelQueued { .. }
+                | ClientMessage::Decide { .. }
+                | ClientMessage::Answer { .. }
+                | ClientMessage::SetAttribution { .. }
+                | ClientMessage::SetMode { .. }
+        );
+        if acts && !self.role.participates() {
+            self.notice = Some(VISITING.into());
+            return false;
+        }
         self.error = None;
         self.actions.push(Action::Send(message));
+        true
     }
 
     /// The number of entries in the list shown at `step`, so the stick stays on one of them.
     fn step_list(&self, step: LobbyStep) -> usize {
         match step {
             // The spaces, then the create object.
-            LobbyStep::Spaces => self.spaces.len() + 1,
+            LobbyStep::Spaces => self.spaces.len() + usize::from(self.creates()),
             LobbyStep::Backend => self.backends.len(),
             LobbyStep::Directory => self.roots.len(),
             // "New session", then the existing sessions.
@@ -851,10 +1024,11 @@ impl Conversation {
                             self.send(ClientMessage::Join { space });
                         }
                         // The create object opens its first ring.
-                        None => {
+                        None if self.creates() => {
                             self.ended = None;
                             self.open_menu();
                         }
+                        None => {}
                     },
                     LobbyStep::Backend => {
                         if let Some(backend) = self.backends.get(self.menu) {
@@ -911,12 +1085,13 @@ impl Conversation {
                     None => (Decision::AllowOnce, None),
                     Some(index) => (Decision::Grant, Some(approval.options[index].id.clone())),
                 };
-                self.decided = Some(request.clone());
-                self.send(ClientMessage::Decide {
-                    request,
+                if self.send(ClientMessage::Decide {
+                    request: request.clone(),
                     decision,
                     option,
-                });
+                }) {
+                    self.decided = Some(request);
+                }
                 false
             }
         }
@@ -940,12 +1115,13 @@ impl Conversation {
                     .is_some_and(|space| space.approval.is_some());
                 if let Some(approval) = self.approval() {
                     let request = approval.id.clone();
-                    self.decided = Some(request.clone());
-                    self.send(ClientMessage::Decide {
-                        request,
+                    if self.send(ClientMessage::Decide {
+                        request: request.clone(),
                         decision: Decision::Deny,
                         option: None,
-                    });
+                    }) {
+                        self.decided = Some(request);
+                    }
                 } else if pending {
                     // Wait for the decision already sent.
                 } else if let Some(entry) = self.own_queued().map(|entry| entry.id.clone()) {
@@ -1017,6 +1193,10 @@ impl Conversation {
             self.notice = Some("Join a space to talk to the agent.".into());
             return;
         }
+        if !self.role.participates() {
+            self.notice = Some(VISITING.into());
+            return;
+        }
         if !matches!(self.state, Some(ConnectionState::Connected { .. })) {
             self.error = Some("Offline; cannot record.".into());
             return;
@@ -1048,6 +1228,10 @@ impl Conversation {
         }
         if self.mode != Mode::Space || self.space.is_none() {
             self.notice = Some("Join a space to use live audio.".into());
+            return;
+        }
+        if !self.role.participates() {
+            self.notice = Some(VISITING.into());
             return;
         }
         if !matches!(self.state, Some(ConnectionState::Connected { .. })) {
@@ -1155,11 +1339,15 @@ impl Conversation {
         }
     }
 
-    /// Your newest entry still waiting in the queue. Entries are matched by participant identity, since display names need not be unique.
+    /// Your newest entry still waiting in the queue. Entries are matched by participant number, since display names need not be unique.
     fn own_queued(&self) -> Option<&protocol::QueueEntry> {
-        self.space.as_ref()?.queue.iter().rev().find(|entry| {
-            entry.state == QueueState::Queued && entry.participant == self.participant
-        })
+        let source = self.source?;
+        self.space
+            .as_ref()?
+            .queue
+            .iter()
+            .rev()
+            .find(|entry| entry.state == QueueState::Queued && entry.source == source)
     }
 
     /// The joined space, and whether its state is current: not while the connection is down, when the server may have moved on without us.
@@ -1297,10 +1485,14 @@ impl Conversation {
                 .unwrap_or_else(|| {
                     if self.joining.is_some() {
                         "Joining...".into()
+                    } else if self.role == ConnectionRole::Pairing {
+                        "This server admits only paired devices: pair to join.".into()
                     } else if !self.listed {
                         "Listing spaces...".into()
-                    } else if self.spaces.is_empty() {
+                    } else if self.spaces.is_empty() && self.creates() {
                         "No spaces yet; create one.".into()
+                    } else if self.spaces.is_empty() {
+                        "No spaces yet.".into()
                     } else {
                         format!("You are {}.", self.name)
                     }
@@ -1322,7 +1514,7 @@ impl Conversation {
                     }
                 )
             })
-            .chain(["+ New space".to_owned()]);
+            .chain(self.creates().then(|| "+ New space".to_owned()));
         let start = window(self.selected, self.step_list(LobbyStep::Spaces), rows);
         for (index, entry) in entries.enumerate().skip(start).take(rows) {
             let marker = if index == self.selected { '>' } else { ' ' };
@@ -1505,12 +1697,16 @@ impl Conversation {
                 let status = self.status().or_else(|| self.ended.clone()).or_else(|| {
                     if self.joining.is_some() {
                         Some("Joining...".into())
+                    } else if self.role == ConnectionRole::Pairing {
+                        Some("This server admits only paired devices: pair to join.".into())
                     } else if !self.listed {
                         Some("Listing spaces...".into())
                     } else if !spaces {
                         Some(self.ring_hint(self.step).into())
-                    } else if self.spaces.is_empty() {
+                    } else if self.spaces.is_empty() && self.creates() {
                         Some("No spaces yet; create one.".into())
+                    } else if self.spaces.is_empty() {
+                        Some("No spaces yet.".into())
                     } else {
                         None
                     }
@@ -1530,13 +1726,14 @@ impl Conversation {
                         detail: Some(activity_label(space.activity).into()),
                         selected: spaces && index == self.selected,
                     })
-                    .chain([arrival::Item {
+                    .chain(self.creates().then(|| arrival::Item {
                         key: arrival::Key::Create,
                         kind: arrival::Kind::Create { open: !spaces },
                         label: if spaces { "New space" } else { "Back" }.into(),
                         detail: None,
                         selected: spaces && self.selected >= self.spaces.len(),
-                    }])
+                    }))
+                    .chain(self.pairable().then(|| self.pairing_item()))
                     .collect();
                 Some(arrival::View {
                     heading: match ring {
@@ -1596,6 +1793,8 @@ impl Conversation {
                     self.accept();
                 }
             }
+            (Mode::Lobby, arrival::Key::Pair) => self.pair(),
+            (Mode::Lobby, arrival::Key::Create) if !self.creates() => {}
             (Mode::Lobby, arrival::Key::Create) => {
                 self.error = None;
                 if self.step == LobbyStep::Spaces {
@@ -1901,6 +2100,8 @@ mod tests {
         Event::State(ConnectionState::Connected {
             source: 1,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
             backends,
             roots,
             environments: sky(),
@@ -1939,7 +2140,7 @@ mod tests {
 
     /// Connected to a server that offers `backends` and `roots`, in the lobby.
     fn in_lobby(backends: Vec<BackendInfo>, roots: Vec<WorkspaceRoot>) -> Conversation {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.apply(connected_with(backends, roots));
@@ -1956,7 +2157,6 @@ mod tests {
             environment: "sky".into(),
             activity: Activity::Idle,
             participants: vec![Participant {
-                id: "p".into(),
                 name: "Ada".into(),
                 source: 1,
             }],
@@ -1992,11 +2192,11 @@ mod tests {
         }
     }
 
-    /// An entry spoken by `speaker`, whose participant identity is their name in lower case.
+    /// An entry spoken by `speaker`. Ada is this client, participant 1 as connected in these tests; anyone else is participant 2.
     fn entry(id: &str, speaker: &str, state: QueueState) -> QueueEntry {
         QueueEntry {
             id: id.into(),
-            participant: speaker.to_lowercase(),
+            source: if speaker == "Ada" { 1 } else { 2 },
             speaker: speaker.into(),
             text: format!("text of {id}"),
             state,
@@ -2024,7 +2224,7 @@ mod tests {
 
     /// A conversation connected to a server and joined to [`SPACE`].
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(space(change));
@@ -2040,7 +2240,7 @@ mod tests {
 
     #[test]
     fn connects_lists_and_joins() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         assert!(conversation.is_browsing());
         conversation.set_servers(vec![
             Choice::new("Studio", "10.0.0.1:8765", Source::Discovered),
@@ -2140,6 +2340,215 @@ mod tests {
         );
         // The create object stays selected as the spaces change.
         assert!(view.items[1].selected);
+    }
+
+    /// Told the role `role`, as the server does whenever it changes.
+    fn role(role: ConnectionRole) -> Event {
+        Event::Message(ServerMessage::Role { role })
+    }
+
+    /// Connected over TLS with `certificate`, as `role`, in the lobby.
+    fn connected_securely(role: ConnectionRole, certificate: client::Fingerprint) -> Conversation {
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.take_actions();
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role,
+            certificate: Some(certificate),
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+        }));
+        conversation.take_actions();
+        conversation
+    }
+
+    fn pairing_label(conversation: &Conversation) -> Option<String> {
+        conversation
+            .arrival()?
+            .items
+            .into_iter()
+            .find(|item| item.key == arrival::Key::Pair)
+            .map(|item| item.label)
+    }
+
+    #[test]
+    fn a_visitor_pairs_with_a_code_derived_from_the_certificate() {
+        use security::pairing::{Nonce, code, display};
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+
+        conversation.choose_object(&arrival::Key::Pair);
+        let [ClientMessage::PairBegin { commitment }] = &sent(&mut conversation)[..] else {
+            panic!("expected a commitment");
+        };
+        let commitment = commitment.clone();
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pairing..."));
+
+        let server = Nonce::generate();
+        conversation.apply(Event::Message(ServerMessage::PairNonce {
+            nonce: server.to_hex(),
+        }));
+        let [ClientMessage::PairReveal { nonce }] = &sent(&mut conversation)[..] else {
+            panic!("expected the value revealed");
+        };
+        let device = Nonce::parse(nonce).unwrap();
+        // The revealed value is the one committed to, and the code is derived from it, the server's and the certificate.
+        assert_eq!(device.commitment(), commitment);
+        let expected = display(&code(certificate, device, server));
+        assert_eq!(pairing_label(&conversation), Some(expected.clone()));
+        assert!(conversation.status().unwrap().contains(&expected));
+
+        conversation.apply(Event::Message(ServerMessage::Paired {
+            token: "tomori_paired".into(),
+        }));
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Paired {
+                token: "tomori_paired".into(),
+                certificate
+            }]
+        );
+        assert!(conversation.status().unwrap().contains("now an owner"));
+    }
+
+    #[test]
+    fn the_device_gives_up_on_a_pairing_left_unconfirmed() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.expire_pairing(Instant::now());
+        assert!(conversation.take_actions().is_empty());
+        conversation.expire_pairing(Instant::now() + PAIRING_PATIENCE);
+        assert_eq!(sent(&mut conversation), [ClientMessage::PairCancel]);
+        assert_eq!(
+            conversation.status().as_deref(),
+            Some("The pairing was not confirmed in time.")
+        );
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+        conversation.expire_pairing(Instant::now() + PAIRING_PATIENCE);
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_pairing_starts_over() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::PairFailed {
+            error: "The pairing was declined.".into(),
+        }));
+        assert_eq!(
+            conversation.status().as_deref(),
+            Some("The pairing was declined.")
+        );
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+
+        // Choosing it again while pairing cancels.
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.choose_object(&arrival::Key::Pair);
+        assert_eq!(sent(&mut conversation), [ClientMessage::PairCancel]);
+        // A value from a server that was not asked is ignored.
+        conversation.apply(Event::Message(ServerMessage::PairNonce {
+            nonce: security::pairing::Nonce::generate().to_hex(),
+        }));
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn pairing_is_offered_over_tls_to_anyone_but_an_owner() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        assert!(pairing_label(&connected_securely(ConnectionRole::Owner, certificate)).is_none());
+        assert!(
+            pairing_label(&connected_securely(
+                ConnectionRole::Collaborator,
+                certificate
+            ))
+            .is_some()
+        );
+        // Over plain HTTP there is no certificate to derive a code from.
+        let mut plain = in_lobby(vec![], vec![]);
+        plain.apply(role(ConnectionRole::Visitor));
+        assert!(pairing_label(&plain).is_none());
+        plain.pair();
+        assert!(plain.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_connection_admitted_only_to_pair_lists_no_spaces() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.take_actions();
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Pairing,
+            certificate: Some(certificate),
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+        }));
+        assert!(sent(&mut conversation).is_empty());
+        let view = conversation.arrival().unwrap();
+        assert_eq!(keys(&view.items), [arrival::Key::Pair]);
+        assert_eq!(
+            view.status.as_deref(),
+            Some("This server admits only paired devices: pair to join.")
+        );
+    }
+
+    #[test]
+    fn only_owners_are_offered_the_create_object() {
+        let mut conversation = in_lobby(vec![], vec![]);
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert_eq!(conversation.role(), ConnectionRole::Visitor);
+        listed(&mut conversation, vec![]);
+        let view = conversation.arrival().unwrap();
+        assert!(view.items.is_empty());
+        assert_eq!(view.status.as_deref(), Some("No spaces yet."));
+        assert!(!conversation.text().contains("New space"));
+        // Choosing it anyway, as a stale pointer might, opens nothing.
+        conversation.choose_object(&arrival::Key::Create);
+        assert!(!conversation.text().contains("NEW SPACE"));
+
+        listed(&mut conversation, vec![summary("one", "One")]);
+        let view = conversation.arrival().unwrap();
+        assert_eq!(keys(&view.items), [arrival::Key::Space("one".into())]);
+        assert!(!conversation.text().contains("New space"));
+    }
+
+    #[test]
+    fn a_visitor_watches_but_does_not_talk_or_act() {
+        let mut conversation = joined(|state| state.approval = Some(approval(&[])));
+        conversation.apply(role(ConnectionRole::Visitor));
+        conversation.talk(true);
+        assert_eq!(conversation.status().as_deref(), Some(VISITING));
+        assert!(conversation.take_actions().is_empty());
+        conversation.toggle_live();
+        assert!(conversation.take_actions().is_empty());
+        conversation.accept();
+        assert!(sent(&mut conversation).is_empty());
+
+        // Admitted as a collaborator, they can, until they become a visitor again, which closes the microphone.
+        conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.toggle_live();
+        assert!(conversation.live);
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert!(!conversation.live);
+        conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.take_actions();
+        conversation.accept();
+        assert!(matches!(
+            sent(&mut conversation)[..],
+            [ClientMessage::Decide { .. }]
+        ));
     }
 
     #[test]
@@ -2334,9 +2743,9 @@ mod tests {
 
     #[test]
     fn pointing_chooses_servers_spaces_and_the_connected_server() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         let mut old = Choice::new("Old", "10.0.0.3:8765", Source::Discovered);
-        old.unavailable = Some("protocol 2, needs 1".into());
+        old.unavailable = Some("protocol 1, needs 2".into());
         let studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
         conversation.set_servers(vec![
             old,
@@ -2420,6 +2829,8 @@ mod tests {
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 1,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
             backends: backends(),
             roots: roots(),
             environments: vec![
@@ -2468,6 +2879,8 @@ mod tests {
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 1,
             server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
             backends: backends(),
             roots: roots(),
             environments: vec![],
@@ -2485,7 +2898,7 @@ mod tests {
 
     #[test]
     fn arrival_and_the_lobby_use_the_grid_and_a_space_its_environment() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         assert_eq!(conversation.environment(), Environment::Minimal);
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
@@ -2530,7 +2943,7 @@ mod tests {
 
     #[test]
     fn the_server_list_shows_advertised_counts() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         let mut studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
         studio.spaces = Some(2);
         studio.participants = Some(1);
@@ -2543,11 +2956,11 @@ mod tests {
 
     #[test]
     fn an_incompatible_server_cannot_be_chosen() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         let mut old = Choice::new("Old", "10.0.0.3:8765", Source::Discovered);
-        old.unavailable = Some("protocol 2, needs 1".into());
+        old.unavailable = Some("protocol 1, needs 2".into());
         conversation.set_servers(vec![old]);
-        assert!(conversation.text().contains("(Old - protocol 2, needs 1)"));
+        assert!(conversation.text().contains("(Old - protocol 1, needs 2)"));
         conversation.accept();
         assert!(conversation.take_actions().is_empty());
         assert_eq!(conversation.mode(), Mode::Servers);
@@ -2681,7 +3094,7 @@ mod tests {
 
     #[test]
     fn activity_is_never_ready_unless_the_server_says_idle() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         assert_eq!(conversation.activity(), SessionActivity::Unselected);
 
         let cases = [
@@ -2715,7 +3128,7 @@ mod tests {
 
     #[test]
     fn the_joined_space_is_current_only_while_connected_and_gone_after_leaving() {
-        assert!(Conversation::new("ada", "Ada").joined_space().is_none());
+        assert!(Conversation::new("Ada").joined_space().is_none());
         let mut conversation = joined(|state| {
             state.workers = vec![protocol::Worker {
                 id: "w".into(),
@@ -2874,7 +3287,7 @@ mod tests {
 
     #[test]
     fn a_refused_join_from_the_lobby_leaves() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(Event::Message(ServerMessage::Spaces {
@@ -2913,7 +3326,7 @@ mod tests {
 
     #[test]
     fn the_server_rejoining_after_a_reconnect_in_the_lobby_enters_the_space() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Override));
         conversation.apply(connected());
         conversation.apply(space(|_| {}));
@@ -2975,12 +3388,37 @@ mod tests {
     fn another_participant_with_your_name_does_not_own_your_entries() {
         let mut conversation = joined(|state| {
             let mut namesake = entry("1", "Ada", QueueState::Queued);
-            namesake.participant = "another-ada".into();
+            namesake.source = 2;
             state.queue = vec![namesake];
         });
         assert!(!conversation.text().contains("B cancel queued"));
         conversation.back();
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+    }
+
+    #[test]
+    fn your_entries_follow_the_number_the_server_gives_you() {
+        let mut conversation = joined(|state| {
+            state.queue = vec![entry("1", "Ada", QueueState::Queued)];
+        });
+        assert!(conversation.text().contains("B cancel queued"));
+        // Still yours while the connection is down, since a reconnect keeps the number.
+        conversation.apply(Event::State(ConnectionState::Connecting { attempt: 1 }));
+        assert!(conversation.text().contains("B cancel queued"));
+        // A server that numbers you differently, such as after it restarts, does not see the entry as yours.
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 2,
+            server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+        }));
+        assert!(!conversation.text().contains("B cancel queued"));
+        // Choosing another server forgets the number until it welcomes you.
+        conversation.connect(Choice::new("Other", "10.0.0.2:8765", Source::Discovered));
+        assert_eq!(conversation.source, None);
     }
 
     #[test]
@@ -3085,7 +3523,7 @@ mod tests {
         );
         assert_fits(&mut conversation);
 
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.set_servers(
             (0..20)
                 .map(|i| Choice::new(long.clone(), format!("10.0.0.{i}:8765"), Source::Discovered))
@@ -3195,7 +3633,7 @@ mod tests {
 
     #[test]
     fn b_in_the_lobby_returns_to_the_server_list() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.back();
@@ -3538,7 +3976,7 @@ mod tests {
 
     #[test]
     fn x_outside_a_space_explains_itself() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.take_actions();
@@ -3615,7 +4053,7 @@ mod tests {
 
     #[test]
     fn keeps_the_selection_when_lists_change() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![
             Choice::new("A", "a", Source::Discovered),
             Choice::new("B", "b", Source::Discovered),
@@ -3635,7 +4073,7 @@ mod tests {
 
     #[test]
     fn selects_the_used_server_again_when_browsing_finds_it_after_returning() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         let usb = Choice::new("USB", USB, Source::Usb);
         let servers = vec![
             Choice::new("A", "a", Source::Discovered),
@@ -3665,7 +4103,7 @@ mod tests {
 
     #[test]
     fn connecting_to_another_server_while_the_chosen_one_is_missing_forgets_it() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         let usb = Choice::new("USB", USB, Source::Usb);
         let b = Choice::new("B", "b", Source::Discovered);
         conversation.set_servers(vec![usb.clone(), b.clone()]);
@@ -3691,7 +4129,7 @@ mod tests {
 
     #[test]
     fn connects_to_the_remembered_server_when_it_appears_but_only_once() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
         assert!(conversation.take_actions().is_empty());
         conversation.set_servers(vec![remembered(), Choice::new("USB", USB, Source::Usb)]);
@@ -3710,7 +4148,7 @@ mod tests {
 
     #[test]
     fn moving_the_selection_stops_the_remembered_server_connecting() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![
             Choice::new("Other", "10.0.0.3:8765", Source::Discovered),
             Choice::new("USB", USB, Source::Usb),
@@ -3727,7 +4165,7 @@ mod tests {
 
     #[test]
     fn selects_the_best_server_until_one_is_chosen() {
-        let mut conversation = Conversation::new("ada", "Ada");
+        let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
         conversation.set_servers(vec![
             Choice::new("Studio", "10.0.0.2:8765", Source::Discovered),

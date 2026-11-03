@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -16,10 +16,11 @@ use base_scheduler::Cancellation;
 use discovery::Counts;
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
-    AudioFrame, ClientMessage, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
+    AudioFrame, ClientMessage, ConnectionRole, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
     PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
 };
 
+use crate::access::{self, Access, Grant};
 use crate::backends::Backends;
 use crate::environments;
 use crate::limits;
@@ -30,11 +31,98 @@ use crate::workspace::SpaceSlots;
 
 pub type ConnectionId = u64;
 
+/// A registered connection: its identifier, its outbox, the flag it sets when data arrives, and where it reports its writes. See [`Hub::connect`].
+pub type Connected = (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>);
+
 /// The shortest time between snapshots of one space caused by agent events, so that a streaming reply sends about ten full snapshots a second however fast its text arrives. See `design/server.md`.
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The most closed spaces kept that nobody is in. Beyond this, the oldest are forgotten, so that sessions ending repeatedly cannot grow the server's memory without bound. See `design/spaces.md`.
 pub const CLOSED_SPACES: usize = 32;
+
+/// Who is where, for the status page. See `design/security.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub spaces: Vec<SpaceStatus>,
+    /// The display names and roles of the connected participants in the lobby.
+    pub lobby: Vec<(String, ConnectionRole)>,
+    /// Visitors connected, wherever they are.
+    pub visitors: usize,
+}
+
+/// One space on the status page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceStatus {
+    pub title: String,
+    pub activity: protocol::Activity,
+    /// The display names and roles of its participants.
+    pub participants: Vec<(String, ConnectionRole)>,
+    /// How many visitors are watching it.
+    pub visitors: usize,
+}
+
+/// How long a pairing waits to be confirmed before it is withdrawn. See `design/security.md`.
+pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a device has to reveal its value once the server has sent its own.
+pub const REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most pairings that begin within [`PAIRING_WINDOW`], so that a relay cannot keep trying values until the two codes happen to match.
+pub const PAIRING_ATTEMPTS: usize = 3;
+pub const PAIRING_WINDOW: Duration = Duration::from_secs(600);
+
+/// A pairing as the console and status page show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairingView {
+    /// Names this pairing, so that the status page confirms the one it showed.
+    pub serial: u64,
+    pub name: String,
+    /// The code, written as the device shows it, once the device has revealed its value.
+    pub code: Option<String>,
+}
+
+/// How a pairing is confirmed: by typing the code the device shows, on the console, or by the pairing the status page showed, whose code an owner compared.
+#[derive(Clone, Copy, Debug)]
+pub enum Confirmation<'a> {
+    Typed(&'a str),
+    Shown(u64),
+}
+
+/// A device pairing: its commitment, the server's value, and the code once the device has revealed its own value.
+struct PendingPairing {
+    serial: u64,
+    connection: ConnectionId,
+    /// The device's display name, which names the token it receives.
+    name: String,
+    commitment: String,
+    server: security::pairing::Nonce,
+    code: Option<String>,
+    started: Instant,
+}
+
+/// What pairing needs from the server: its certificate's fingerprint, which the code is derived from, and the token store, which issues the token. Without them, as in `--auth open` mode, the server does not pair.
+#[derive(Clone)]
+pub struct PairingSetup {
+    pub fingerprint: security::Fingerprint,
+    pub tokens: Arc<security::TokenStore>,
+}
+
+/// Something about pairing to show on the server's console. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PairingEvent {
+    /// A device began pairing.
+    Began { name: String },
+    /// A pairing waits to be confirmed, with the code written as the device shows it.
+    Waiting { name: String, code: String },
+    /// Pairings are paused, since too many began recently.
+    Paused,
+}
+
+/// Shows [`PairingEvent`]s on the server's console.
+pub type PairingPrompt = Box<dyn Fn(&PairingEvent) + Send + Sync>;
+
+/// The most disconnected visitors remembered. Anyone can connect as a visitor with a new identity, so beyond this the longest gone are forgotten, rather than kept for the whole retention. See `design/spaces.md`.
+pub const RETAINED_VISITORS: usize = 256;
 
 /// Work for a space's driver, which owns the backend session.
 #[derive(Debug)]
@@ -100,6 +188,13 @@ pub struct Hub {
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
     counts_changed: Notify,
+    /// The most visitors connected at once; see `design/security.md`.
+    max_visitors: AtomicUsize,
+    /// Whether the server serves only TLS, which pairing needs: the token it issues must not cross the network in the clear.
+    encrypted: AtomicBool,
+    pairing: RwLock<Option<PairingSetup>>,
+    pairing_prompt: RwLock<Option<PairingPrompt>>,
+    pairing_timeout: RwLock<Duration>,
     this: Weak<Hub>,
 }
 
@@ -114,6 +209,8 @@ struct HubState {
     next_ping: u64,
     /// Orders closed spaces by when they closed; see [`SpaceRecord::closed`].
     next_closed: u64,
+    /// Orders disconnections; see [`ParticipantRecord::departure`].
+    next_departure: u64,
     connections: HashMap<ConnectionId, ConnectionRecord>,
     participants: HashMap<String, ParticipantRecord>,
     /// In creation order.
@@ -121,12 +218,21 @@ struct HubState {
     utterances: HashMap<UtteranceId, UtteranceRecord>,
     /// Set once shutdown has begun: no further spaces are registered.
     shutting_down: bool,
+    /// The one pairing pending, if any; see `design/security.md`.
+    pairing: Option<PendingPairing>,
+    next_pairing: u64,
+    /// When recent pairings began, for [`PAIRING_ATTEMPTS`].
+    pairing_attempts: std::collections::VecDeque<Instant>,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
 }
 
 struct ConnectionRecord {
     outbox: Arc<Outbox>,
+    /// What the connection was admitted as at the door.
+    access: Access,
+    /// The role the client was last told, so that it is told again only when it changes.
+    role: Option<ConnectionRole>,
     participant: Option<String>,
     utterance: Option<OpenUtterance>,
     /// The client's id for the utterance the server last closed by failing it, so that an end or cancel already on its way is ignored rather than refused.
@@ -190,6 +296,10 @@ struct OpenUtterance {
 }
 
 struct ParticipantRecord {
+    /// Admitted as a visitor, so forgotten sooner when many have come and gone; see [`RETAINED_VISITORS`].
+    visitor: bool,
+    /// The order in which participants last disconnected, so that the longest gone are forgotten first.
+    departure: u64,
     name: String,
     source: u32,
     connection: Option<ConnectionId>,
@@ -214,6 +324,8 @@ struct SpaceRecord {
 /// An utterance whose transcript has not been reported yet.
 struct UtteranceRecord {
     participant: String,
+    /// The participant's number, their public handle, which keys their queued input.
+    source: u32,
     client: String,
     space: String,
 }
@@ -224,6 +336,8 @@ enum Deferred {
     Push(UtteranceId, AudioFrame),
     End(UtteranceId),
     Cancel(UtteranceId),
+    /// Show something about pairing on the console.
+    PairingPrompt(PairingEvent),
 }
 
 /// A token for this server run, so space identifiers are not reused after a restart: 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
@@ -239,6 +353,16 @@ fn run_token() -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// The key under which the hub keeps a participant: the identity they said in Hello, together with the principal they authenticated as, if any. The same identity without that principal is a different participant, so it cannot take over an authenticated participant's connection, space or audio source. See `design/security.md`.
+///
+/// The principal's length comes first, so that no principal and identity join to another's key; an unauthenticated key starts with `/`, which a length cannot.
+fn participant_key(principal: Option<&str>, identity: &str) -> String {
+    match principal {
+        Some(principal) => format!("{}:{principal}/{identity}", principal.len()),
+        None => format!("/{identity}"),
+    }
+}
+
 /// An error reply, cut to [`limits::ERROR_BYTES`].
 fn error_message(error: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
@@ -248,18 +372,44 @@ fn error_message(error: impl Into<String>) -> ServerMessage {
 }
 
 impl HubState {
-    /// The spaces listed, which includes closed spaces until they are forgotten, and the greeted participants with a connection, whether in a space or in the lobby. A space still being created is not listed, so it is not counted.
+    /// The spaces listed, which includes closed spaces until they are forgotten, and the greeted owners and collaborators with a connection, whether in a space or in the lobby. Visitors are not counted. A space still being created is not listed, so it is not counted.
     fn counts(&self) -> Counts {
         let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
         Counts {
             spaces: count(self.spaces.len()),
             participants: count(
-                self.participants
+                self.connections
                     .values()
-                    .filter(|record| record.connection.is_some())
+                    .filter(|record| record.participant.is_some() && !record.access.is_visitor())
                     .count(),
             ),
         }
+    }
+
+    /// Tell a participant's connection its role if it changed, such as on joining or leaving a space.
+    fn update_role(&mut self, participant: &str) {
+        let Some(record) = self.participants.get(participant) else {
+            return;
+        };
+        let space = record.space.as_deref();
+        let Some(connection) = record
+            .connection
+            .and_then(|id| self.connections.get_mut(&id))
+        else {
+            return;
+        };
+        let role = connection.access.role(space);
+        if connection.role != Some(role) {
+            connection.role = Some(role);
+            connection.outbox.message(ServerMessage::Role { role });
+        }
+    }
+
+    /// The role of a participant's connection where they are now.
+    fn role(&self, connection: ConnectionId, space: Option<&str>) -> ConnectionRole {
+        self.connections
+            .get(&connection)
+            .map_or(ConnectionRole::Visitor, |record| record.access.role(space))
     }
 
     fn outbox(&self, participant: &str) -> Option<&Arc<Outbox>> {
@@ -290,8 +440,8 @@ impl HubState {
         if let Some(space) = self.space(id) {
             space.touched.set(Some(Instant::now()));
             space.deferred.set(false);
-            for participant in &space.model.participants {
-                if let Some(outbox) = self.outbox(participant) {
+            for member in space.model.members() {
+                if let Some(outbox) = self.outbox(member) {
                     outbox.space();
                 }
             }
@@ -341,7 +491,8 @@ impl HubState {
             .spaces
             .iter()
             .filter(|space| {
-                space.model.participants.is_empty() && !occupied.contains(space.model.id.as_str())
+                space.model.members().next().is_none()
+                    && !occupied.contains(space.model.id.as_str())
             })
             .filter_map(|space| Some((space.closed?, space.model.id.clone())))
             .collect();
@@ -360,6 +511,8 @@ impl HubState {
         for record in self.participants.values() {
             if record.space.is_none()
                 && let Some(connection) = record.connection.and_then(|id| self.connections.get(&id))
+                // A connection admitted only to pair learns nothing about the spaces.
+                && connection.access.grant != Grant::Pairing
             {
                 connection.outbox.spaces();
             }
@@ -388,7 +541,6 @@ impl HubState {
             .filter_map(|id| {
                 let record = self.participants.get(id)?;
                 Some(Participant {
-                    id: id.clone(),
                     name: record.name.clone(),
                     source: record.source,
                 })
@@ -411,6 +563,7 @@ impl HubState {
         };
         if let Some(record) = self.space_mut(&space) {
             record.model.participants.retain(|id| id != participant);
+            record.model.visitors.retain(|id| id != participant);
         }
         self.touch_space(&space);
     }
@@ -418,11 +571,21 @@ impl HubState {
     fn join(&mut self, participant: &str, space: &str) {
         // Not forgotten until the participant is in the space they join, which might be a closed one.
         self.depart(participant);
+        let participates = self
+            .participants
+            .get(participant)
+            .and_then(|record| record.connection)
+            .is_some_and(|connection| self.role(connection, Some(space)).participates());
         let Some(record) = self.space_mut(space) else {
             return;
         };
-        if !record.model.participants.iter().any(|id| id == participant) {
-            record.model.participants.push(participant.to_owned());
+        let members = if participates {
+            &mut record.model.participants
+        } else {
+            &mut record.model.visitors
+        };
+        if !members.iter().any(|id| id == participant) {
+            members.push(participant.to_owned());
         }
         if let Some(record) = self.participants.get_mut(participant) {
             record.space = Some(space.to_owned());
@@ -431,8 +594,41 @@ impl HubState {
         if let Some(outbox) = self.outbox(participant) {
             outbox.clear_audio();
         }
+        self.update_role(participant);
         self.forget_closed();
         self.touch_space(space);
+    }
+
+    /// End the pending pairing, of `connection` if given, telling its device why. Returns whether one ended.
+    fn end_pairing(&mut self, connection: Option<ConnectionId>, error: &str) -> bool {
+        let Some(pairing) = self.pairing.take_if(|pairing| {
+            connection.is_none_or(|connection| pairing.connection == connection)
+        }) else {
+            return false;
+        };
+        if let Some(record) = self.connections.get(&pairing.connection) {
+            record.outbox.message(ServerMessage::PairFailed {
+                error: error.to_owned(),
+            });
+        }
+        true
+    }
+
+    /// Forget the longest gone disconnected visitors beyond [`RETAINED_VISITORS`].
+    fn forget_excess_visitors(&mut self) {
+        let mut departed: Vec<(u64, String)> = self
+            .participants
+            .iter()
+            .filter(|(_, record)| record.visitor && record.connection.is_none())
+            .map(|(key, record)| (record.departure, key.clone()))
+            .collect();
+        let Some(excess) = departed.len().checked_sub(RETAINED_VISITORS) else {
+            return;
+        };
+        departed.sort_unstable();
+        for (_, key) in departed.into_iter().take(excess) {
+            self.participants.remove(&key);
+        }
     }
 
     /// The greeted participant of a connection and their current space.
@@ -476,6 +672,11 @@ impl Hub {
             environments: environments::offered(),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
+            max_visitors: AtomicUsize::new(usize::MAX),
+            encrypted: AtomicBool::new(false),
+            pairing: RwLock::new(None),
+            pairing_prompt: RwLock::new(None),
+            pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             this: this.clone(),
         })
     }
@@ -488,6 +689,134 @@ impl Hub {
             .expect("workspace roots are never left poisoned") = roots;
     }
 
+    /// Pair devices with this setup; see `design/security.md`.
+    pub(crate) fn set_pairing(&self, setup: PairingSetup) {
+        *self.pairing.write().expect("never left poisoned") = Some(setup);
+    }
+
+    pub(crate) fn set_pairing_prompt(&self, prompt: PairingPrompt) {
+        *self.pairing_prompt.write().expect("never left poisoned") = Some(prompt);
+    }
+
+    pub(crate) fn set_pairing_timeout(&self, timeout: Duration) {
+        *self.pairing_timeout.write().expect("never left poisoned") = timeout;
+    }
+
+    /// Mark the server as serving only TLS, so that it pairs devices.
+    pub(crate) fn set_encrypted(&self, encrypted: bool) {
+        self.encrypted.store(encrypted, Ordering::Relaxed);
+    }
+
+    /// The pairing pending, revealed or not, if any.
+    pub fn pending_pairing(&self) -> Option<PairingView> {
+        let state = self.lock();
+        let pairing = state.pairing.as_ref()?;
+        Some(PairingView {
+            serial: pairing.serial,
+            name: pairing.name.clone(),
+            code: pairing.code.as_deref().map(security::pairing::display),
+        })
+    }
+
+    /// Confirm the pairing waiting, issuing its device an owner token. Returns the device's name.
+    pub fn confirm_pairing(&self, confirmation: Confirmation<'_>) -> Result<String, &'static str> {
+        let pairing = {
+            let mut state = self.lock();
+            let pairing = state.pairing.as_ref().ok_or("No pairing is waiting.")?;
+            let code = pairing
+                .code
+                .as_deref()
+                .ok_or("The device has not shown its code yet.")?;
+            let confirmed = match confirmation {
+                Confirmation::Typed(typed) => typed == code,
+                Confirmation::Shown(serial) => serial == pairing.serial,
+            };
+            if !confirmed {
+                return Err(match confirmation {
+                    Confirmation::Typed(_) => "That code does not match, so nothing was confirmed.",
+                    Confirmation::Shown(_) => {
+                        "A different pairing is waiting now, so nothing was confirmed."
+                    }
+                });
+            }
+            state.pairing.take().expect("checked above")
+        };
+        // The token is issued outside the hub's lock, since issuing writes the token store.
+        let issued = self
+            .pairing
+            .read()
+            .expect("never left poisoned")
+            .clone()
+            .ok_or("This server does not pair devices.")
+            .and_then(|setup| {
+                setup
+                    .tokens
+                    .issue(&pairing.name, security::Grant::Owner)
+                    .map_err(|error| {
+                        log::error!("Could not issue a token for a pairing: {error}.");
+                        "The token could not be issued."
+                    })
+            });
+        let state = self.lock();
+        let outbox = state
+            .connections
+            .get(&pairing.connection)
+            .map(|record| record.outbox.clone());
+        match issued {
+            Ok((entry, token)) => {
+                log::info!("Paired {:?} as owner token {}.", pairing.name, entry.id);
+                if let Some(outbox) = outbox {
+                    outbox.message(ServerMessage::Paired { token });
+                }
+                Ok(pairing.name)
+            }
+            Err(error) => {
+                if let Some(outbox) = outbox {
+                    outbox.message(ServerMessage::PairFailed {
+                        error: format!("{error} Try again."),
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether pairings are paused, since [`PAIRING_ATTEMPTS`] began within [`PAIRING_WINDOW`].
+    pub fn pairing_paused(&self) -> bool {
+        let state = self.lock();
+        let now = Instant::now();
+        state
+            .pairing_attempts
+            .iter()
+            .filter(|began| now.saturating_duration_since(**began) < PAIRING_WINDOW)
+            .count()
+            >= PAIRING_ATTEMPTS
+    }
+
+    /// Allow pairings again, forgetting those that began recently, as the operator or an owner may when pairing is paused, such as by someone using up the attempts.
+    pub fn allow_pairing(&self) {
+        self.lock().pairing_attempts.clear();
+    }
+
+    /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
+    pub fn decline_pairing(&self, serial: Option<u64>) -> bool {
+        let mut state = self.lock();
+        if serial.is_some_and(|serial| {
+            state
+                .pairing
+                .as_ref()
+                .is_none_or(|pairing| pairing.serial != serial)
+        }) {
+            return false;
+        }
+        state.end_pairing(None, "The pairing was declined.")
+    }
+
+    /// Change the most visitors connected at once; see [`Hub::connect`].
+    pub(crate) fn set_max_visitors(&self, limit: usize) {
+        self.max_visitors.store(limit, Ordering::Relaxed);
+    }
+
     fn lock(&self) -> MutexGuard<'_, HubState> {
         self.state.lock().expect("hub state is never left poisoned")
     }
@@ -495,6 +824,56 @@ impl Hub {
     /// How many spaces are listed and participants connected, as advertised; see `design/server.md`.
     pub fn counts(&self) -> Counts {
         self.lock().counts()
+    }
+
+    /// Who is where now, for the status page.
+    pub fn status(&self) -> Status {
+        let state = self.lock();
+        let role = |key: &str, space: Option<&str>| {
+            let record = state.participants.get(key)?;
+            let connection = state.connections.get(&record.connection?)?;
+            Some((record.name.clone(), connection.access.role(space)))
+        };
+        let spaces = state
+            .spaces
+            .iter()
+            .map(|space| SpaceStatus {
+                title: space.model.title.clone(),
+                activity: space.model.activity(),
+                participants: space
+                    .model
+                    .participants
+                    .iter()
+                    .filter_map(|key| role(key, Some(&space.model.id)))
+                    .collect(),
+                visitors: space.model.visitors.len(),
+            })
+            .collect();
+        // In the lobby, people are listed by what they were admitted as; visitors are only counted.
+        let lobby = state
+            .participants
+            .values()
+            .filter(|record| record.space.is_none())
+            .filter_map(|record| {
+                let connection = state.connections.get(&record.connection?)?;
+                let role = match connection.access.grant {
+                    Grant::Owner => ConnectionRole::Owner,
+                    Grant::Collaborator { .. } => ConnectionRole::Collaborator,
+                    Grant::Visitor | Grant::Pairing => return None,
+                };
+                Some((record.name.clone(), role))
+            })
+            .collect();
+        let visitors = state
+            .connections
+            .values()
+            .filter(|record| record.participant.is_some() && record.access.is_visitor())
+            .count();
+        Status {
+            spaces,
+            lobby,
+            visitors,
+        }
     }
 
     /// Wait for [`counts`](Self::counts) to change. Check them after creating the listener to avoid a lost wakeup.
@@ -524,16 +903,29 @@ impl Hub {
                 Deferred::Push(id, frame) => self.transcriber.push(id, &frame),
                 Deferred::End(id) => self.transcriber.end(id),
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
+                Deferred::PairingPrompt(event) => {
+                    if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
+                    {
+                        prompt(&event);
+                    }
+                }
             }
         }
     }
 
-    /// Register a connection. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`].
-    pub fn connect(
-        &self,
-        cancellation: Cancellation,
-    ) -> (ConnectionId, Arc<Outbox>, Arc<AtomicBool>, Arc<Output>) {
+    /// Register a connection admitted at the door as `access`. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`]. Returns `None` for a visitor while the most visitors are connected; see `design/security.md`.
+    pub fn connect(&self, cancellation: Cancellation, access: Access) -> Option<Connected> {
         let mut state = self.lock();
+        if access.is_visitor() {
+            let visitors = state
+                .connections
+                .values()
+                .filter(|record| record.access.is_visitor())
+                .count();
+            if visitors >= self.max_visitors.load(Ordering::Relaxed) {
+                return None;
+            }
+        }
         state.next_connection += 1;
         let id = state.next_connection;
         let outbox = Arc::new(Outbox::new());
@@ -543,6 +935,8 @@ impl Hub {
             id,
             ConnectionRecord {
                 outbox: outbox.clone(),
+                access,
+                role: None,
                 participant: None,
                 utterance: None,
                 failed: None,
@@ -561,7 +955,29 @@ impl Hub {
                 },
             },
         );
-        (id, outbox, received, output)
+        Some((id, outbox, received, output))
+    }
+
+    /// End the connections of principals that are no longer valid, such as when their token was revoked, as if they had disconnected.
+    pub fn revoke(&self, valid: impl Fn(&str) -> bool) {
+        let revoked: Vec<(ConnectionId, Cancellation)> = self
+            .lock()
+            .connections
+            .iter()
+            .filter(|(_, record)| {
+                record
+                    .access
+                    .principal
+                    .as_deref()
+                    .is_some_and(|principal| !valid(principal))
+            })
+            .map(|(&id, record)| (id, record.liveness.cancellation.clone()))
+            .collect();
+        for (id, cancellation) in revoked {
+            log::info!("Connection {id} presented a credential that was revoked.");
+            self.disconnect(id);
+            cancellation.cancel();
+        }
     }
 
     /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Release, in the same way, connections whose current write has made no progress for the keepalive timeout: a peer that does not read can receive neither audio nor state. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
@@ -613,6 +1029,24 @@ impl Hub {
                 }
             }
         }
+        {
+            let timeout = *self.pairing_timeout.read().expect("never left poisoned");
+            let mut state = self.lock();
+            let expired = state.pairing.as_ref().and_then(|pairing| {
+                let waited = now.saturating_duration_since(pairing.started);
+                if pairing.code.is_none() && waited >= REVEAL_TIMEOUT {
+                    Some("The pairing was not completed in time.")
+                } else if waited >= timeout {
+                    Some("The pairing was not confirmed in time.")
+                } else {
+                    None
+                }
+            });
+            if let Some(error) = expired {
+                log::info!("A pairing was withdrawn: {error}");
+                state.end_pairing(None, error);
+            }
+        }
         for (id, cancellation) in expired {
             // Release the participant now; cancelling also ends the exchange, even one blocked writing to a peer that is gone.
             self.disconnect(id);
@@ -641,6 +1075,14 @@ impl Hub {
         {
             let mut state = self.lock();
             state.abandon_utterance(connection, &mut deferred);
+            if state
+                .pairing
+                .as_ref()
+                .is_some_and(|pairing| pairing.connection == connection)
+            {
+                log::info!("A pairing was withdrawn because its device disconnected.");
+                state.pairing = None;
+            }
             if let Some(record) = state.connections.remove(&connection)
                 && let Some(participant) = record.participant
             {
@@ -656,10 +1098,14 @@ impl Hub {
                     .is_some_and(|record| record.connection == Some(connection));
                 if current {
                     state.leave(&participant);
+                    state.next_departure += 1;
+                    let departure = state.next_departure;
                     if let Some(record) = state.participants.get_mut(&participant) {
                         record.connection = None;
                         record.departed = Some(Instant::now());
+                        record.departure = departure;
                     }
+                    state.forget_excess_visitors();
                 }
             }
             self.recount(&mut state);
@@ -718,14 +1164,18 @@ impl Hub {
                     &mut deferred,
                 );
             } else if let Some((participant, space)) = state.member(connection) {
-                self.act(
-                    &mut state,
-                    connection,
-                    &participant,
-                    space.as_deref(),
-                    message,
-                    &mut deferred,
-                );
+                let role = state.role(connection, space.as_deref());
+                match access::refusal(role, &message) {
+                    Some(refusal) => state.error(&participant, refusal),
+                    None => self.act(
+                        &mut state,
+                        connection,
+                        &participant,
+                        space.as_deref(),
+                        message,
+                        &mut deferred,
+                    ),
+                }
             } else if let Some(record) = state.connections.get(&connection) {
                 record.outbox.message(error_message("Send hello first."));
             }
@@ -782,12 +1232,16 @@ impl Hub {
             outbox.close();
             return;
         }
+        let access = state.connections[&connection].access.clone();
+        let participant = participant_key(access.principal.as_deref(), &participant);
         if !state.participants.contains_key(&participant) {
             state.next_source += 1;
             let source = state.next_source;
             state.participants.insert(
                 participant.clone(),
                 ParticipantRecord {
+                    visitor: access.is_visitor(),
+                    departure: 0,
                     name: String::new(),
                     source,
                     connection: None,
@@ -820,22 +1274,31 @@ impl Hub {
             .expect("checked above");
         record.participant = Some(participant.clone());
         record.liveness.greeted = true;
-        let backends = self.backends.info();
-        let roots = self
-            .roots
-            .read()
-            .expect("workspace roots are never left poisoned")
-            .clone();
+        let role = access.role(None);
+        record.role = Some(role);
+        // Only owners create spaces, so only they are told what they could be created with.
+        let (backends, roots) = if role == ConnectionRole::Owner {
+            let roots = self
+                .roots
+                .read()
+                .expect("workspace roots are never left poisoned")
+                .clone();
+            (self.backends.info(), roots)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         outbox.message(ServerMessage::Welcome {
             protocol: PROTOCOL_VERSION,
             server: crate::SERVER_NAME.to_owned(),
             source,
+            role,
             backends,
             roots,
             environments: self.environments.clone(),
         });
         match rejoin.filter(|space| state.space(space).is_some()) {
             Some(space) => state.join(&participant, &space),
+            None if role == ConnectionRole::Pairing => {}
             None => outbox.spaces(),
         }
     }
@@ -987,6 +1450,7 @@ impl Hub {
                 if let Some(record) = state.participants.get_mut(participant) {
                     record.last_space = None;
                 }
+                state.update_role(participant);
                 outbox.spaces();
             }
             ClientMessage::Gate { .. } => {
@@ -1020,6 +1484,7 @@ impl Hub {
                     id,
                     UtteranceRecord {
                         participant: participant.to_owned(),
+                        source: state.participants[participant].source,
                         client: utterance.clone(),
                         space,
                     },
@@ -1172,7 +1637,7 @@ impl Hub {
                     return;
                 };
                 let source = state.participants[participant].source;
-                for other in &space.model.participants {
+                for other in space.model.members() {
                     if other != participant {
                         state.send(
                             other,
@@ -1197,6 +1662,101 @@ impl Hub {
                     .model
                     .set_attribution(enabled);
                 state.touch_space(&space);
+            }
+            ClientMessage::PairBegin { commitment } => {
+                if security::pairing::Nonce::parse(&commitment).is_none() {
+                    state.error(
+                        participant,
+                        "A pairing commitment is 64 hexadecimal digits.",
+                    );
+                    return;
+                }
+                let failed = |error: &str| ServerMessage::PairFailed {
+                    error: error.to_owned(),
+                };
+                if self.pairing.read().expect("never left poisoned").is_none() {
+                    outbox.message(failed("This server does not pair devices."));
+                    return;
+                }
+                if !self.encrypted.load(Ordering::Relaxed) {
+                    outbox.message(failed("Pairing needs a connection over TLS."));
+                    return;
+                }
+                // Refused even to the same connection, which must not get a fresh value from the server once it has seen one; see `design/security.md`.
+                if state.pairing.is_some() {
+                    outbox.message(failed(
+                        "A pairing is already in progress; try again shortly.",
+                    ));
+                    return;
+                }
+                let now = Instant::now();
+                while state
+                    .pairing_attempts
+                    .front()
+                    .is_some_and(|began| now.saturating_duration_since(*began) >= PAIRING_WINDOW)
+                {
+                    state.pairing_attempts.pop_front();
+                }
+                if state.pairing_attempts.len() >= PAIRING_ATTEMPTS {
+                    outbox.message(failed(
+                        "Too many pairings began recently; try again in a few minutes.",
+                    ));
+                    deferred.push(Deferred::PairingPrompt(PairingEvent::Paused));
+                    return;
+                }
+                state.pairing_attempts.push_back(now);
+                state.next_pairing += 1;
+                let server = security::pairing::Nonce::generate();
+                let name = state.participants[participant].name.clone();
+                log::info!("{name:?} began pairing.");
+                deferred.push(Deferred::PairingPrompt(PairingEvent::Began {
+                    name: name.clone(),
+                }));
+                state.pairing = Some(PendingPairing {
+                    serial: state.next_pairing,
+                    connection,
+                    name,
+                    commitment: commitment.to_ascii_lowercase(),
+                    server,
+                    code: None,
+                    started: now,
+                });
+                outbox.message(ServerMessage::PairNonce {
+                    nonce: server.to_hex(),
+                });
+            }
+            ClientMessage::PairReveal { nonce } => {
+                let Some(pairing) = state
+                    .pairing
+                    .as_mut()
+                    .filter(|pairing| pairing.connection == connection && pairing.code.is_none())
+                else {
+                    state.error(participant, "No pairing is waiting for that.");
+                    return;
+                };
+                let device = security::pairing::Nonce::parse(&nonce)
+                    .filter(|device| device.commitment() == pairing.commitment);
+                let setup = self.pairing.read().expect("never left poisoned").clone();
+                let (Some(device), Some(setup)) = (device, setup) else {
+                    state.end_pairing(
+                        Some(connection),
+                        "The pairing could not be checked; try again.",
+                    );
+                    return;
+                };
+                let code = security::pairing::code(setup.fingerprint, device, pairing.server);
+                let name = pairing.name.clone();
+                pairing.code = Some(code.clone());
+                outbox.message(ServerMessage::PairWaiting);
+                let shown = security::pairing::display(&code);
+                log::info!("Pairing request from {name:?}: code {shown}.");
+                deferred.push(Deferred::PairingPrompt(PairingEvent::Waiting {
+                    name,
+                    code: shown,
+                }));
+            }
+            ClientMessage::PairCancel => {
+                state.end_pairing(Some(connection), "The pairing was cancelled.");
             }
             ClientMessage::SetMode { mode } => {
                 if let Err(error) = limits::check(&mode, limits::IDENTIFIER_BYTES, "mode") {
@@ -1253,6 +1813,13 @@ impl Hub {
             let Some((participant, Some(space))) = state.member(connection) else {
                 return;
             };
+            // Visitors send no audio; anything they send is neither relayed nor transcribed. See `design/security.md`.
+            if !state.role(connection, Some(&space)).participates() {
+                log::debug!(
+                    "Dropped audio from {participant}, who does not participate in {space}."
+                );
+                return;
+            }
             let record = state
                 .connections
                 .get_mut(&connection)
@@ -1295,7 +1862,7 @@ impl Hub {
                 return;
             };
             if let Some(space) = state.space(&space) {
-                for other in &space.model.participants {
+                for other in space.model.members() {
                     if *other != participant
                         && let Some(outbox) = state.outbox(other)
                     {
@@ -1327,13 +1894,8 @@ impl Hub {
             return;
         };
         let text = text.trim();
-        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. The participant's length comes first, so that no two participants' utterances share a key whatever their identifiers contain.
-        let key = format!(
-            "{}:{}/{}",
-            record.participant.len(),
-            record.participant,
-            record.client
-        );
+        // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
+        let key = format!("{}/{}", record.source, record.client);
         if let Some(queued) = state
             .space(&record.space)
             .and_then(|space| space.model.queued_text(&key))
@@ -1384,10 +1946,9 @@ impl Hub {
         }
         let speaker = state.participants[&record.participant].name.clone();
         if let Some(space) = state.space_mut(&record.space) {
-            let queued =
-                space
-                    .model
-                    .enqueue(key, record.participant.clone(), speaker, text.to_owned());
+            let queued = space
+                .model
+                .enqueue(key, record.source, speaker, text.to_owned());
             debug_assert!(queued, "repeats are acknowledged above");
         }
         state.send(
@@ -1668,21 +2229,21 @@ impl Hub {
         self.recount(&mut state);
     }
 
-    /// Announce an agent speech segment to the space's current participants, in order with its frames.
+    /// Announce an agent speech segment to everyone in the space now, in order with its frames.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn agent_speech(&self, space: &str, message: ServerMessage) {
         let state = self.lock();
         let Some(record) = state.space(space) else {
             return;
         };
-        for participant in &record.model.participants {
-            if let Some(outbox) = state.outbox(participant) {
+        for member in record.model.members() {
+            if let Some(outbox) = state.outbox(member) {
                 outbox.agent_message(message.clone());
             }
         }
     }
 
-    /// Send one agent speech frame to the space's current participants. A participant who joined mid-segment receives from here on.
+    /// Send one agent speech frame to everyone in the space now. Someone who joined mid-segment receives from here on.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn agent_audio(&self, space: &str, frame: &AudioFrame) {
         let Ok(encoded) = Frame::audio(frame).try_encode() else {
@@ -1693,22 +2254,22 @@ impl Hub {
         let Some(record) = state.space(space) else {
             return;
         };
-        for participant in &record.model.participants {
-            if let Some(outbox) = state.outbox(participant) {
+        for member in record.model.members() {
+            if let Some(outbox) = state.outbox(member) {
                 outbox.agent_audio(encoded.clone());
             }
         }
     }
 
-    /// Tell the space's participants that agent speech could not be produced.
+    /// Tell everyone in the space that agent speech could not be produced.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn speech_failed(&self, space: &str, error: String) {
         let state = self.lock();
         let Some(record) = state.space(space) else {
             return;
         };
-        for participant in &record.model.participants {
-            state.error(participant, error.clone());
+        for member in record.model.members() {
+            state.error(member, error.clone());
         }
     }
 
@@ -1776,14 +2337,13 @@ mod tests {
 
     /// Connect and say hello as `participant`.
     fn greet(hub: &Hub, participant: &str) -> ConnectionId {
-        let (connection, ..) = hub.connect(Cancellation::new());
+        let (connection, ..) = hub.connect(Cancellation::new(), Access::open()).unwrap();
         hub.handle(
             connection,
             ClientMessage::Hello {
                 protocol: PROTOCOL_VERSION,
                 participant: participant.to_owned(),
                 name: participant.to_owned(),
-                credentials: None,
             },
         );
         connection
@@ -1825,12 +2385,76 @@ mod tests {
     }
 
     #[test]
+    fn visitors_are_not_counted_as_participants() {
+        let hub = hub();
+        let (visitor, ..) = hub.connect(Cancellation::new(), Access::visitor()).unwrap();
+        hub.handle(
+            visitor,
+            ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                participant: "vic".to_owned(),
+                name: "Vic".to_owned(),
+            },
+        );
+        assert_eq!(hub.counts(), counts(0, 0));
+        greet(&hub, "ada");
+        assert_eq!(hub.counts(), counts(0, 1));
+
+        // The limit applies to visitors only.
+        hub.set_max_visitors(1);
+        assert!(
+            hub.connect(Cancellation::new(), Access::visitor())
+                .is_none()
+        );
+        assert!(hub.connect(Cancellation::new(), Access::open()).is_some());
+        hub.disconnect(visitor);
+        assert!(
+            hub.connect(Cancellation::new(), Access::visitor())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn only_so_many_disconnected_visitors_are_remembered() {
+        let hub = hub();
+        let visit = |identity: &str| {
+            let (connection, ..) = hub.connect(Cancellation::new(), Access::visitor()).unwrap();
+            hub.handle(
+                connection,
+                ClientMessage::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    participant: identity.to_owned(),
+                    name: identity.to_owned(),
+                },
+            );
+            connection
+        };
+        let owner = greet(&hub, "ada");
+        hub.disconnect(owner);
+        for index in 0..=RETAINED_VISITORS {
+            let connection = visit(&format!("visitor-{index}"));
+            hub.disconnect(connection);
+        }
+        let state = hub.lock();
+        let visitors = state
+            .participants
+            .values()
+            .filter(|record| record.visitor)
+            .count();
+        assert_eq!(visitors, RETAINED_VISITORS);
+        // The first to leave was forgotten; the owner, not a visitor, is kept for the whole retention.
+        assert!(!state.participants.contains_key("/visitor-0"));
+        assert!(state.participants.contains_key("/visitor-1"));
+        assert!(state.participants.contains_key("/ada"));
+    }
+
+    #[test]
     fn counts_follow_connections_and_listed_spaces() {
         let hub = hub();
         assert_eq!(hub.counts(), counts(0, 0));
 
         // A connection counts once it has said hello.
-        let (silent, ..) = hub.connect(Cancellation::new());
+        let (silent, ..) = hub.connect(Cancellation::new(), Access::open()).unwrap();
         assert_eq!(hub.counts(), counts(0, 0));
         let mut ada = 0;
         assert!(notifies(&hub, || ada = greet(&hub, "ada")));
@@ -1897,9 +2521,11 @@ mod tests {
         };
         let hello = Duration::from_secs(3600);
         let blocked = Cancellation::new();
-        let (_, _, blocked_received, blocked_output) = hub.connect(blocked.clone());
+        let (_, _, blocked_received, blocked_output) =
+            hub.connect(blocked.clone(), Access::open()).unwrap();
         let flowing = Cancellation::new();
-        let (_, _, flowing_received, flowing_output) = hub.connect(flowing.clone());
+        let (_, _, flowing_received, flowing_output) =
+            hub.connect(flowing.clone(), Access::open()).unwrap();
 
         let start = Instant::now();
         // Both peers keep sending. One write is never accepted; the other connection's writes complete.

@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
@@ -20,11 +21,12 @@ use protocol::{
     AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, Frame, FrameDecoder, FrameKind,
     PROTOCOL_VERSION, ServerMessage,
 };
+use security::{Fingerprint, Pinned};
 
 use crate::client::Shared;
 use crate::outbox::Batch;
 use crate::resolve::resolve_in_background;
-use crate::{ConnectionState, Disconnect, Event, Options};
+use crate::{ConnectionState, Disconnect, Event, Options, Transport};
 
 /// The most encoded bytes written to the request body at once.
 const BATCH_LIMIT: usize = 32 * 1024;
@@ -34,6 +36,8 @@ pub(crate) struct Context<'a> {
     pub shared: &'a Shared,
     pub options: &'a Options,
     pub audio: &'a SyncSender<AudioFrame>,
+    /// The certificate of the first connection over TLS that the server welcomed, pinned for every connection after it, so that a reconnect never accepts another certificate, nor falls back to plain HTTP.
+    pub learned: Cell<Option<Fingerprint>>,
 }
 
 impl Context<'_> {
@@ -120,7 +124,7 @@ async fn session(context: &Context<'_>, welcomed: &Cell<Option<Instant>>) -> Dis
     reason
 }
 
-/// Run one connection to `address` until it ends, returning why. `opened` is set once the request is open.
+/// Run one connection to `address` until it ends, returning why, over the transport the options choose. `opened` is set once the request is open.
 async fn connection(
     context: &Context<'_>,
     address: SocketAddr,
@@ -128,15 +132,100 @@ async fn connection(
     opened: &Cell<bool>,
     welcomed: &Cell<Option<Instant>>,
 ) -> Disconnect {
-    let (client, driver) = HttpClient::new(
-        context.scheduler,
-        Endpoint::new(address),
-        Default::default(),
-    )
-    .expect("the default HTTP client options are valid");
+    match effective(context.options.transport, context.learned.get()) {
+        Transport::Plain => attempt(context, address, None, deadline, opened, welcomed).await,
+        Transport::Tls { pin } => {
+            let pinned = Pinned::new(pin);
+            attempt(context, address, Some(pinned), deadline, opened, welcomed).await
+        }
+        Transport::Automatic { pin } => {
+            let pinned = Pinned::new(pin);
+            let reason = attempt(
+                context,
+                address,
+                Some(pinned.clone()),
+                deadline,
+                opened,
+                welcomed,
+            )
+            .await;
+            // A server that presented no certificate does not speak TLS, as in `--auth open` mode: try plain HTTP, which presents no token.
+            if speaks_plain(&reason, opened.get(), pinned.seen())
+                && context.scheduler.now() < deadline
+            {
+                return attempt(context, address, None, deadline, opened, welcomed).await;
+            }
+            reason
+        }
+    }
+}
+
+/// The transport for the next connection: the options' choice, pinning the certificate `learned` from an earlier connection if the options pin none.
+fn effective(transport: Transport, learned: Option<Fingerprint>) -> Transport {
+    match transport {
+        Transport::Plain => Transport::Plain,
+        // Once a certificate is known, whether given or learned, the server speaks TLS: never fall back to plain HTTP, so that a changed certificate is reported.
+        Transport::Automatic { pin: None } if learned.is_none() => {
+            Transport::Automatic { pin: None }
+        }
+        Transport::Tls { pin } | Transport::Automatic { pin } => Transport::Tls {
+            pin: pin.or(learned),
+        },
+    }
+}
+
+/// Whether an automatic connection should try plain HTTP after TLS failed with `reason`: the connection failed before its request opened, and no certificate was presented.
+fn speaks_plain(reason: &Disconnect, opened: bool, seen: Option<Fingerprint>) -> bool {
+    !opened && seen.is_none() && matches!(reason, Disconnect::Transport(_))
+}
+
+/// The `Authorization` field value for `token`, which is presented only over TLS.
+fn authorization(token: Option<&str>, tls: bool) -> Option<String> {
+    token.filter(|_| tls).map(|token| format!("Bearer {token}"))
+}
+
+/// Why a TLS connection failed before its request opened: a certificate other than the pinned one, or the transport `error`.
+fn refused(pinned: Option<&Pinned>, error: Disconnect) -> Disconnect {
+    match (
+        pinned.and_then(Pinned::seen),
+        pinned.and_then(Pinned::expected),
+    ) {
+        (Some(seen), Some(expected)) if seen != expected => {
+            Disconnect::Certificate(seen.to_string())
+        }
+        _ => error,
+    }
+}
+
+/// One connection to `address`, over TLS if `pinned` is given, which decides the certificate accepted.
+async fn attempt(
+    context: &Context<'_>,
+    address: SocketAddr,
+    pinned: Option<Arc<Pinned>>,
+    deadline: Instant,
+    opened: &Cell<bool>,
+    welcomed: &Cell<Option<Instant>>,
+) -> Disconnect {
+    let endpoint = match &pinned {
+        // The certificate is pinned rather than checked against its name, so the name is only for the handshake.
+        Some(pinned) => {
+            Endpoint::new(address).with_tls(security::client_config(pinned.clone()), "tomori")
+        }
+        None => Endpoint::new(address),
+    };
+    let (client, driver) = HttpClient::new(context.scheduler, endpoint, Default::default())
+        .expect("the default HTTP client options are valid");
     let lifetime = Cancellation::new();
     let exchange = async {
-        let exchange = exchange(context, &client, &lifetime, deadline, opened, welcomed);
+        let exchange = exchange(
+            context,
+            &client,
+            &lifetime,
+            deadline,
+            opened,
+            welcomed,
+            pinned.as_deref(),
+        );
         let reason = or(exchange, async {
             // Closing lets the exchange deliver queued control messages, but only for so long.
             context.shared.closing.cancelled().await;
@@ -162,8 +251,19 @@ async fn exchange(
     deadline: Instant,
     opened: &Cell<bool>,
     welcomed: &Cell<Option<Instant>>,
+    pinned: Option<&Pinned>,
 ) -> Disconnect {
     let mut metadata = RequestMetadata::new(Method::POST);
+    if let Some(authorization) = authorization(context.options.token.as_deref(), pinned.is_some()) {
+        // A token that is not a valid field value is not presented, and the server admits the connection as it would without one.
+        let _ = metadata.fields.set("authorization", authorization);
+    }
+    if context.options.pairing {
+        metadata
+            .fields
+            .set("tomori-pairing", "1")
+            .expect("a valid field value");
+    }
     metadata.path = Some(CONNECT_PATH.into());
     metadata
         .fields
@@ -184,9 +284,21 @@ async fn exchange(
         .await;
     let (mut output, response) = match request {
         Ok(request) => request.split(),
+        Err(reason) => return refused(pinned, reason),
+    };
+    let certificate = pinned.and_then(Pinned::seen);
+    opened.set(true);
+    // Wait for the server's answer before sending anything. A server that refuses the connection, such as with 401, closes it after answering, and data it has not read would reset the connection and lose the answer. The server sends its response head at once, before any frame.
+    let response = context
+        .within(context.options.connect_timeout, async {
+            response.await.map_err(transport)
+        })
+        .await;
+    let mut response = match response {
+        Ok(response) if response.status.is_success() => response,
+        Ok(response) => return Disconnect::Status(response.status.as_u16()),
         Err(reason) => return reason,
     };
-    opened.set(true);
 
     let upload = async {
         let options = context.options;
@@ -194,7 +306,6 @@ async fn exchange(
             protocol: PROTOCOL_VERSION,
             participant: options.participant.clone(),
             name: options.name.clone(),
-            credentials: options.credentials.clone(),
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
@@ -217,14 +328,6 @@ async fn exchange(
 
     let download = async {
         let result: Result<Infallible, Disconnect> = async {
-            let mut response = context
-                .within(context.options.connect_timeout, async {
-                    response.await.map_err(transport)
-                })
-                .await?;
-            if !response.status.is_success() {
-                return Err(Disconnect::Status(response.status.as_u16()));
-            }
             let received = Cell::new(context.scheduler.now());
             let mut reader = FrameReader {
                 body: &mut response.body,
@@ -237,7 +340,10 @@ async fn exchange(
             let first = context
                 .within(context.options.connect_timeout, reader.next())
                 .await?;
-            let source = welcome(context, first)?;
+            let source = welcome(context, first, certificate)?;
+            if context.learned.get().is_none() {
+                context.learned.set(certificate);
+            }
             welcomed.set(Some(context.scheduler.now()));
             let frames = async {
                 loop {
@@ -294,8 +400,12 @@ async fn keepalive(context: &Context<'_>, received: &Cell<Instant>) -> Disconnec
     }
 }
 
-/// Check the server's Welcome, returning this client's participant number.
-fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
+/// Check the server's Welcome, returning this client's participant number. `certificate` is the server's, over TLS.
+fn welcome(
+    context: &Context<'_>,
+    frame: Frame,
+    certificate: Option<Fingerprint>,
+) -> Result<u32, Disconnect> {
     let message = frame
         .to_server_message()
         .map_err(|error| Disconnect::Protocol(error.to_string()))?;
@@ -304,6 +414,7 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
             protocol,
             server,
             source,
+            role,
             backends,
             roots,
             environments,
@@ -316,6 +427,8 @@ fn welcome(context: &Context<'_>, frame: Frame) -> Result<u32, Disconnect> {
             context.set_state(ConnectionState::Connected {
                 source,
                 server,
+                role,
+                certificate,
                 backends,
                 roots,
                 environments,
@@ -401,5 +514,94 @@ impl FrameReader<'_, '_> {
                 BodyFrame::End => true,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_http_is_tried_only_when_no_certificate_was_presented() {
+        let failed = Disconnect::Transport("handshake".into());
+        let seen = Some(Fingerprint::of(b"certificate"));
+        assert!(speaks_plain(&failed, false, None));
+        assert!(!speaks_plain(&failed, false, seen));
+        assert!(!speaks_plain(&failed, true, None));
+        assert!(!speaks_plain(&Disconnect::Timeout, false, None));
+    }
+
+    #[test]
+    fn debugging_options_never_shows_secrets() {
+        let mut options = Options::new("studio:8765", "device-secret", "Ada");
+        options.token = Some("tomori_secret".into());
+        let debugged = format!("{options:?}");
+        assert!(!debugged.contains("tomori_secret"), "{debugged}");
+        assert!(!debugged.contains("device-secret"), "{debugged}");
+        assert!(debugged.contains("studio:8765"));
+    }
+
+    #[test]
+    fn the_token_is_presented_only_over_tls() {
+        assert_eq!(
+            authorization(Some("tomori_abc"), true),
+            Some("Bearer tomori_abc".to_owned())
+        );
+        assert_eq!(authorization(Some("tomori_abc"), false), None);
+        assert_eq!(authorization(None, true), None);
+    }
+
+    #[test]
+    fn a_different_certificate_is_reported_as_changed() {
+        let ours = Fingerprint::of(b"ours");
+        let pinned = Pinned::new(Some(ours));
+        let error = || Disconnect::Transport("handshake".into());
+        // Nothing presented yet: the transport error stands.
+        assert_eq!(refused(Some(&pinned), error()), error());
+        use rustls::client::danger::ServerCertVerifier;
+        let _ = pinned.verify_server_cert(
+            &rustls::pki_types::CertificateDer::from(b"theirs".to_vec()),
+            &[],
+            &rustls::pki_types::ServerName::try_from("tomori").unwrap(),
+            &[],
+            rustls::pki_types::UnixTime::now(),
+        );
+        let theirs = Fingerprint::of(b"theirs").to_string();
+        assert_eq!(
+            refused(Some(&pinned), error()),
+            Disconnect::Certificate(theirs)
+        );
+        assert_eq!(refused(None, error()), error());
+        // Without a pin, any certificate is accepted, so a failure is the transport's.
+        assert_eq!(refused(Some(&Pinned::new(None)), error()), error());
+    }
+
+    #[test]
+    fn a_learned_certificate_is_pinned_from_then_on() {
+        let learned = Some(Fingerprint::of(b"learned"));
+        let given = Some(Fingerprint::of(b"given"));
+        assert_eq!(effective(Transport::Plain, learned), Transport::Plain);
+        assert_eq!(
+            effective(Transport::Automatic { pin: None }, None),
+            Transport::Automatic { pin: None }
+        );
+        // Once TLS has worked, an automatic connection no longer falls back to plain HTTP.
+        assert_eq!(
+            effective(Transport::Automatic { pin: None }, learned),
+            Transport::Tls { pin: learned }
+        );
+        assert_eq!(
+            effective(Transport::Tls { pin: None }, learned),
+            Transport::Tls { pin: learned }
+        );
+        assert_eq!(
+            effective(Transport::Tls { pin: given }, learned),
+            Transport::Tls { pin: given }
+        );
+        // An automatic connection given a pin speaks TLS from the start.
+        assert_eq!(
+            effective(Transport::Automatic { pin: given }, None),
+            Transport::Tls { pin: given }
+        );
     }
 }

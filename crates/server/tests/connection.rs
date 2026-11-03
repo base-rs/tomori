@@ -125,7 +125,7 @@ fn a_silent_client_is_released_and_keeps_its_identity() {
                 if state
                     .participants
                     .iter()
-                    .all(|participant| participant.id != "ada") =>
+                    .all(|participant| participant.source != ada.source) =>
             {
                 break;
             }
@@ -165,7 +165,6 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
         protocol: protocol::PROTOCOL_VERSION,
         participant: "ada".into(),
         name: "Ada".into(),
-        credentials: None,
     }));
     request.extend(chunk(&ClientMessage::Join {
         space: space.to_owned(),

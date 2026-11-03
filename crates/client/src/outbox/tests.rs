@@ -351,7 +351,6 @@ fn hello_is_reserved_and_closing_drains_control() {
         protocol: 1,
         participant: "p".into(),
         name: "n".into(),
-        credentials: None,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();

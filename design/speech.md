@@ -22,7 +22,7 @@ Speech recognition and synthesis run on the PC server.
 
 **Only speakable text is spoken.** Speakable text is selected from Markdown structure: code blocks, tool output, internal reasoning, raw HTML and Markdown syntax are not spoken, and tables are not read cell by cell. A line that later becomes a table header or setext heading is never spoken as a paragraph, because its block has not closed before the line's role is known.
 
-**Agent speech is not interrupted by participant input.** Each space has one agent speech stream that every participant receives. Recording, sending or queueing input does not stop, pause or skip it. A participant may mute their own playback locally. A client silences its own playback while its participant records push-to-talk, as `live-audio.md` requires, so that the reply is not transcribed as their input; the stream continues meanwhile, and they hear it again, live, when they stop recording.
+**Agent speech is not interrupted by participant input.** Each space has one agent speech stream that everyone in the space receives, participants and visitors alike. Recording, sending or queueing input does not stop, pause or skip it. A participant may mute their own playback locally. A client silences its own playback while its participant records push-to-talk, as `live-audio.md` requires, so that the reply is not transcribed as their input; the stream continues meanwhile, and they hear it again, live, when they stop recording.
 
 Only newly produced assistant text is spoken; existing history is not read aloud when joining a space.
 

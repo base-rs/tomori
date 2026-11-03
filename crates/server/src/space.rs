@@ -30,8 +30,10 @@ pub struct SpaceModel {
     pub environment: String,
     /// The bound session's identifier, namespaced by backend.
     pub session: String,
-    /// Participant identifiers, in join order.
+    /// Participants (owners and collaborators), by their hub key, in join order.
     pub participants: Vec<String>,
+    /// Visitors watching the space, by their hub key, in join order. They receive what participants receive, but are not participants; see `design/security.md`.
+    pub visitors: Vec<String>,
     busy: Option<bool>,
     closed: bool,
     messages: Vec<MessageModel>,
@@ -198,6 +200,7 @@ impl SpaceModel {
             environment,
             session,
             participants: Vec::new(),
+            visitors: Vec::new(),
             busy: snapshot.busy,
             closed: false,
             messages: Vec::new(),
@@ -596,15 +599,9 @@ impl SpaceModel {
         self.queue.queued_text(key)
     }
 
-    /// Queue finalized input from `participant`, shown as spoken by `speaker`. Returns false if this key was already queued.
-    pub fn enqueue(
-        &mut self,
-        key: String,
-        participant: String,
-        speaker: String,
-        text: String,
-    ) -> bool {
-        self.queue.push(key, participant, speaker, text)
+    /// Queue finalized input from the participant numbered `source`, shown as spoken by `speaker`. Returns false if this key was already queued.
+    pub fn enqueue(&mut self, key: String, source: u32, speaker: String, text: String) -> bool {
+        self.queue.push(key, source, speaker, text)
     }
 
     /// Entries waiting to be delivered.
@@ -783,6 +780,11 @@ impl SpaceModel {
         }
     }
 
+    /// Everyone in the space, participants and visitors, who receive its state, presence, audio and speech.
+    pub fn members(&self) -> impl Iterator<Item = &String> {
+        self.participants.iter().chain(&self.visitors)
+    }
+
     pub fn state(&self, participants: Vec<Participant>) -> SpaceState {
         SpaceState {
             id: self.id.clone(),
@@ -908,8 +910,8 @@ mod tests {
     #[test]
     fn input_is_delivered_only_while_idle() {
         let mut space = model();
-        space.enqueue("a".into(), "ada".into(), "Ada".into(), "hello".into());
-        space.enqueue("b".into(), "bob".into(), "Bob".into(), "there".into());
+        space.enqueue("a".into(), 1, "Ada".into(), "hello".into());
+        space.enqueue("b".into(), 2, "Bob".into(), "there".into());
         let prompt = space.next_prompt().unwrap();
         assert_eq!(prompt.text, "Ada: hello");
         assert!(space.next_prompt().is_none());
@@ -931,7 +933,7 @@ mod tests {
             description: None,
             options: Vec::new(),
         }));
-        space.enqueue("a".into(), "ada".into(), "Ada".into(), "hello".into());
+        space.enqueue("a".into(), 1, "Ada".into(), "hello".into());
         assert_eq!(space.activity(), Activity::Waiting);
         assert!(space.next_prompt().is_none());
         assert!(space.claim_approval("p", None).is_ok());
@@ -1090,7 +1092,7 @@ mod tests {
         // While reconnecting, the state may be stale, so queued input waits
         // for the session to be read again. An error that is not the gap's
         // stays visible.
-        assert!(space.enqueue("u1".into(), "ada".into(), "Ada".into(), "hello".into()));
+        assert!(space.enqueue("u1".into(), 1, "Ada".into(), "hello".into()));
         space.apply(Event::Reconnecting {
             reason: "Lost the connection.".into(),
         });
@@ -1322,7 +1324,7 @@ mod tests {
         space.apply(Event::PermissionRequested(permission("p1")));
         space.apply(Event::PermissionRequested(permission("p2")));
         space.apply(Event::PermissionRequested(permission("p1")));
-        space.enqueue("a".into(), "ada".into(), "Ada".into(), "hello".into());
+        space.enqueue("a".into(), 1, "Ada".into(), "hello".into());
         assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
         assert!(space.claim_approval("p2", None).is_err());
         assert!(space.claim_approval("p1", None).is_ok());
@@ -1346,9 +1348,9 @@ mod tests {
     #[test]
     fn closing_fails_waiting_input() {
         let mut space = model();
-        space.enqueue("a".into(), "ada".into(), "Ada".into(), "first".into());
+        space.enqueue("a".into(), 1, "Ada".into(), "first".into());
         space.next_prompt().unwrap();
-        space.enqueue("b".into(), "bob".into(), "Bob".into(), "second".into());
+        space.enqueue("b".into(), 2, "Bob".into(), "second".into());
         space.apply(Event::PermissionRequested(permission("p")));
         space.apply(Event::Closed { reason: None });
         assert_eq!(space.activity(), Activity::Closed);
@@ -1463,7 +1465,7 @@ mod tests {
     #[test]
     fn user_message_events_do_not_duplicate_delivered_input() {
         let mut space = model();
-        space.enqueue("a".into(), "ada".into(), "Ada".into(), "hello".into());
+        space.enqueue("a".into(), 1, "Ada".into(), "hello".into());
         space.next_prompt().unwrap();
         space.sent("a", Ok(()));
         space.apply(Event::MessageStarted {

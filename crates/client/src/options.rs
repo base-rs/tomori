@@ -7,16 +7,32 @@ use protocol::Keepalive;
 
 use crate::Backoff;
 
+/// How a [`crate::Client`] reaches the server. A Tomori server that admits by tokens serves only TLS with a self-signed certificate, which the client pins by its fingerprint. See `design/security.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// Plain HTTP, as to a server in `--auth open` mode. No token is presented.
+    Plain,
+    /// TLS, accepting only the certificate with `pin`'s fingerprint, or, without one, whichever certificate the server presents, which [`crate::ConnectionState::Connected`] reports so that it can be pinned from then on.
+    Tls { pin: Option<security::Fingerprint> },
+    /// TLS as [`Self::Tls`], or plain HTTP if the server presents no certificate, for an address nothing is known about yet, such as one typed in. No token is presented over plain HTTP. With a pin, or once a connection has learned the server's certificate, it is TLS only.
+    Automatic { pin: Option<security::Fingerprint> },
+}
+
 /// How a [`crate::Client`] reaches and identifies itself to the server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Options {
     /// `host:port`, or a host alone for [`protocol::DEFAULT_PORT`]. Resolved again on every connection attempt.
     pub address: String,
-    /// A stable identity, so the server recognizes a reconnect as the same participant.
+    /// A stable identity, so the server recognizes a reconnect as the same participant. A secret of this device, which the server never sends to other clients.
     pub participant: String,
     /// The display name used for speaker attribution.
     pub name: String,
-    pub credentials: Option<String>,
+    /// A token from the server, presented on each connection, and only over TLS. See `design/security.md`.
+    pub token: Option<String>,
+    /// Whether to connect over TLS, and which certificate to accept.
+    pub transport: Transport,
+    /// Ask to be admitted only to pair, on a server that refuses visitors. See `design/security.md`.
+    pub pairing: bool,
     pub backoff: Backoff,
     /// The limit for establishing the connection and for receiving the server's Welcome.
     pub connect_timeout: Duration,
@@ -35,6 +51,32 @@ pub struct Options {
     pub microphone_rearm_on_disconnect: bool,
 }
 
+/// Written without the participant identity or the token, which are secrets, so that logging options cannot reveal them.
+impl std::fmt::Debug for Options {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Options")
+            .field("address", &self.address)
+            .field("participant", &"[redacted]")
+            .field("name", &self.name)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("transport", &self.transport)
+            .field("pairing", &self.pairing)
+            .field("backoff", &self.backoff)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("close_timeout", &self.close_timeout)
+            .field("keepalive", &self.keepalive)
+            .field("outgoing_audio_limit", &self.outgoing_audio_limit)
+            .field("outgoing_utterance_limit", &self.outgoing_utterance_limit)
+            .field("incoming_audio_limit", &self.incoming_audio_limit)
+            .field(
+                "microphone_rearm_on_disconnect",
+                &self.microphone_rearm_on_disconnect,
+            )
+            .finish()
+    }
+}
+
 impl Options {
     pub fn new(
         address: impl Into<String>,
@@ -45,7 +87,9 @@ impl Options {
             address: address.into(),
             participant: participant.into(),
             name: name.into(),
-            credentials: None,
+            token: None,
+            transport: Transport::Plain,
+            pairing: false,
             backoff: Backoff::default(),
             connect_timeout: Duration::from_secs(5),
             close_timeout: Duration::from_secs(1),

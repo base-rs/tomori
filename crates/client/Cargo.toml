@@ -10,13 +10,15 @@ publish = false
 
 [dependencies]
 base-http = "0.2.0"
-base-http-client = "0.2.0"
+base-http-client = { version = "0.2.0", features = ["rustls"] }
 base-scheduler = "0.3.0"
 base-scheduler-native = "0.3.1"
 discovery = { path = "../discovery" }
 futures-lite = "2.6.1"
 protocol = { path = "../protocol" }
+security = { path = "../security" }
 
 [dev-dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 base-endpoint = "0.1.0"
 base-http-server = "0.2.0"

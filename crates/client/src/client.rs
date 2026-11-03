@@ -175,6 +175,7 @@ impl Client {
                     shared: &thread_shared,
                     options: &options,
                     audio: &audio_sender,
+                    learned: std::cell::Cell::new(None),
                 };
                 futures_lite::future::block_on(session::run(&context));
                 futures_lite::future::block_on(scheduler.shutdown());

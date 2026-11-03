@@ -69,7 +69,6 @@ impl Participant {
             protocol: PROTOCOL_VERSION,
             participant: participant.to_owned(),
             name: name.to_owned(),
-            credentials: None,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),

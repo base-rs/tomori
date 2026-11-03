@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use base_http::body::{BodyFrame, ReadableBody};
-use base_http::{InterimHandler, InterimResponses, Request, Response};
+use base_http::{InterimHandler, InterimResponses, Method, Request, Response};
 use base_http_server::Handler;
 use base_scheduler::Cancellation;
 
@@ -133,9 +133,14 @@ impl Handler for Admitted<'_> {
         // The request head is complete.
         let path = request.path.as_ref().map_or("", |path| path.as_str());
         let path = path.split('?').next().unwrap_or_default();
-        let path: String = path.chars().take(LOGGED_PATH).collect();
-        self.watch
-            .set(Idle::Serving(format!("{} {path}", request.method)));
+        // A posted form's body is read in the handler, so the request stays under the request timeout until it is answered: a peer that trickles a form cannot hold the connection. Only `/connect` streams for as long as it lasts, under the keepalive sweep instead.
+        if request.method == Method::POST && path != protocol::CONNECT_PATH {
+            self.watch.set(Idle::Unseen);
+        } else {
+            let path: String = path.chars().take(LOGGED_PATH).collect();
+            self.watch
+                .set(Idle::Serving(format!("{} {path}", request.method)));
+        }
         let response = self
             .application
             .call(request, interim, cancellation)

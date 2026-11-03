@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), p (pair this device as an owner, or cancel), q (quit).";
 
 pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
     let (sender, input) = mpsc::channel();
@@ -52,6 +52,7 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                             let recording = conversation.recording().is_some();
                             conversation.talk(!recording);
                         }
+                        "p" => conversation.pair(),
                         "q" => return Ok(()),
                         _ => println!("{HELP}"),
                     }

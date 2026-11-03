@@ -66,6 +66,8 @@ pub enum Key {
     Session(Option<String>),
     /// A choice on the environment ring, by identifier.
     Environment(String),
+    /// The object that pairs this device as an owner, on the connected server's orbit. See `design/security.md`.
+    Pair,
 }
 
 /// How an object should look, as far as arrival knows.
@@ -88,6 +90,8 @@ pub enum Kind {
     Create { open: bool },
     /// A choice on one of the creation rings.
     Choice,
+    /// The pairing object, `pending` while its code waits to be confirmed.
+    Pair { pending: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -394,6 +398,7 @@ fn size(kind: Kind) -> f32 {
         Kind::Space { .. } => 0.08,
         Kind::Create { .. } => 0.08,
         Kind::Choice => 0.05,
+        Kind::Pair { .. } => 0.06,
     }
 }
 

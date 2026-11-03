@@ -110,7 +110,7 @@ fn desktop_connection(
 ) -> (conversation::Conversation, connection::Connection) {
     let store = identity::Store::new(None);
     let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
-    let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
+    let mut conversation = conversation::Conversation::new(&identity.name);
     let connection = connection::Connection::new(
         identity,
         store,
@@ -278,7 +278,7 @@ fn android_main(app: android_activity::AndroidApp) {
     }
 }
 
-/// The intent extras `tomori.server` and `tomori.name` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
+/// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
 #[cfg(target_os = "android")]
 fn android_connection(
     android: std::sync::Arc<android::Android>,
@@ -292,6 +292,7 @@ fn android_connection(
     let overrides = Overrides {
         server: extra("tomori.server"),
         name: extra("tomori.name"),
+        token: extra("tomori.token"),
     };
     let device = android.device_name().unwrap_or_else(|error| {
         log::warn!("Cannot read the device name: {error:#}");
@@ -299,7 +300,7 @@ fn android_connection(
     });
     let store = identity::Store::new(android.data());
     let identity = identity::Identity::new(&store, device.as_deref(), overrides);
-    let mut conversation = conversation::Conversation::new(&identity.participant, &identity.name);
+    let mut conversation = conversation::Conversation::new(&identity.name);
     let capture = Box::new(capture::Android::new(android.clone()));
     let multicast = Box::new(android::MulticastLock::new(android));
     let playback = Box::new(playback::Android);

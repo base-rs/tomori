@@ -25,6 +25,7 @@ pub fn welcome() -> Vec<u8> {
         protocol: protocol::PROTOCOL_VERSION,
         server: "mini".into(),
         source: 1,
+        role: protocol::ConnectionRole::Owner,
         backends: vec![],
         roots: vec![],
         environments: vec![],

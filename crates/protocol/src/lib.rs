@@ -21,13 +21,13 @@ pub use keepalive::Keepalive;
 pub use message::{ClientMessage, Decision, Pose, ServerMessage};
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{
-    Activity, Approval, ApprovalOption, BackendInfo, EnvironmentInfo, Message, Mode, Participant,
-    Presentation, PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary,
-    SpaceState, SpaceSummary, Worker, WorkerState, WorkspaceRoot,
+    Activity, Approval, ApprovalOption, BackendInfo, ConnectionRole, EnvironmentInfo, Message,
+    Mode, Participant, Presentation, PresentationKind, Question, QueueEntry, QueueState, Role,
+    SessionSummary, SpaceState, SpaceSummary, Worker, WorkerState, WorkspaceRoot,
 };
 
 /// The protocol version sent in [`ClientMessage::Hello`] and [`ServerMessage::Welcome`].
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The HTTP path that clients use to open their connection.
 pub const CONNECT_PATH: &str = "/connect";

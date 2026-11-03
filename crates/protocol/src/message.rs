@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BackendInfo, EnvironmentInfo, Gate, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
+    BackendInfo, ConnectionRole, EnvironmentInfo, Gate, SessionSummary, SpaceState, SpaceSummary,
+    WorkspaceRoot,
 };
 
 /// A tracked pose in the space's coordinate system.
@@ -33,13 +34,10 @@ pub enum ClientMessage {
     /// The first message on every connection.
     Hello {
         protocol: u32,
-        /// A stable identity chosen by the client, so a reconnect is recognized as the same participant.
+        /// A stable identity chosen by the client, so a reconnect is recognized as the same participant. A secret of the device: the server never sends it to other clients. See `design/security.md`.
         participant: String,
         /// The display name used for speaker attribution.
         name: String,
-        /// Reserved for future authentication. Ignored by servers that do not authenticate.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        credentials: Option<String>,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
@@ -113,6 +111,16 @@ pub enum ClientMessage {
     SetMode {
         mode: String,
     },
+    /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
+    PairBegin {
+        commitment: String,
+    },
+    /// Reveal the value committed to, as 64 hexadecimal digits, once the server has sent its own. Both sides then derive the pairing code.
+    PairReveal {
+        nonce: String,
+    },
+    /// Stop pairing.
+    PairCancel,
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,
@@ -132,9 +140,12 @@ pub enum ServerMessage {
         server: String,
         /// The participant number used as [`crate::AudioFrame::source`] for this client's forwarded audio.
         source: u32,
-        /// The server's backends, so a client shows only actions each supports.
+        /// What this connection may do in the lobby; [`ServerMessage::Role`] follows whenever it changes. Unknown if absent.
+        #[serde(default)]
+        role: ConnectionRole,
+        /// The server's backends, so a client shows only actions each supports. Empty unless the connection is an owner, since only owners create spaces.
         backends: Vec<BackendInfo>,
-        /// The directories a space may run in, so a client can choose one without typing a path.
+        /// The directories a space may run in, so a client can choose one without typing a path. Empty unless the connection is an owner.
         roots: Vec<WorkspaceRoot>,
         /// The environments a space may be bound to, the first being the one bound when a `CreateSpace` names none. Absent from older servers.
         #[serde(default)]
@@ -142,6 +153,10 @@ pub enum ServerMessage {
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
+    },
+    /// What this connection may now do, sent whenever its role changes, such as on joining or leaving a space. See `design/security.md`.
+    Role {
+        role: ConnectionRole,
     },
     /// The answer to [`ClientMessage::ListSessions`].
     Sessions {
@@ -188,6 +203,20 @@ pub enum ServerMessage {
         /// The space a refused `Join` named, so that a client can tell its join was refused rather than some other request. Absent for other errors.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
+    },
+    /// The server's random value for a pairing, as 64 hexadecimal digits, sent once the device has committed to its own.
+    PairNonce {
+        nonce: String,
+    },
+    /// Both sides have derived the pairing code, which now waits for the operator or an owner to confirm it.
+    PairWaiting,
+    /// The pairing was confirmed: an owner token for this server, to present from now on, over TLS to the certificate this connection presented.
+    Paired {
+        token: String,
+    },
+    /// The pairing ended without a token: declined, withdrawn, or refused.
+    PairFailed {
+        error: String,
     },
     /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
     Ping {
@@ -369,17 +398,16 @@ mod tests {
     }
 
     #[test]
-    fn hello_credentials_are_optional() {
-        let message: ClientMessage = serde_json::from_str(
-            r#"{"type": "hello", "protocol": 1, "participant": "p", "name": "Ada"}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            message,
-            ClientMessage::Hello {
-                credentials: None,
-                ..
-            }
-        ));
+    fn hello_carries_no_credentials() {
+        // Credentials belong on the HTTP request that opens the connection; see `design/security.md`.
+        let hello = ClientMessage::Hello {
+            protocol: 2,
+            participant: "p".into(),
+            name: "Ada".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&hello).unwrap(),
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"})
+        );
     }
 }

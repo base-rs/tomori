@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{Backend, Event, Session, SessionSpec};
+use base_endpoint::tls::TlsAcceptor;
+use base_endpoint::tls::rustls::RustlsAcceptor;
 use base_http_server::{Error, Statistics};
 use base_scheduler::{
     Cancellation, OperationError, OperationResult, SocketAccept, SocketAddress, SocketBind,
@@ -25,6 +27,7 @@ use protocol::Keepalive;
 use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT, Watch};
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
+use crate::door::Door;
 use crate::hub::{CreateRequest, Hub, Job, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
@@ -53,10 +56,47 @@ pub struct Server {
     /// Told the counts to advertise as they change; see [`Self::with_counts`].
     counts: Option<Box<dyn Fn(Counts) + Send + Sync>>,
     counts_interval: Duration,
+    /// Serve TLS with this configuration, rather than plain HTTP; see [`Self::with_tls`].
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
+
+/// Confirms or declines the pairing waiting, from outside the server, such as its console. See `design/security.md`.
+#[derive(Clone)]
+pub struct Pairing(Arc<Hub>);
+
+impl Pairing {
+    /// The pairing pending, revealed or not, if any.
+    pub fn pending(&self) -> Option<crate::hub::PairingView> {
+        self.0.pending_pairing()
+    }
+
+    /// Confirm the pairing waiting, if `typed` is the code its device shows. Returns the device's name.
+    pub fn confirm(&self, typed: &str) -> Result<String, &'static str> {
+        self.0
+            .confirm_pairing(crate::hub::Confirmation::Typed(typed))
+    }
+
+    /// Decline the pairing pending, revealed or not. Returns whether one was pending.
+    pub fn decline(&self) -> bool {
+        self.0.decline_pairing(None)
+    }
+
+    /// Whether pairings are paused, since too many began recently.
+    pub fn paused(&self) -> bool {
+        self.0.pairing_paused()
+    }
+
+    /// Allow pairings again after they were paused.
+    pub fn allow(&self) {
+        self.0.allow_pairing();
+    }
 }
 
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
 pub const DEFAULT_PARTICIPANT_RETENTION: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// The most visitors connected at once, so that visitors cannot take every connection slot from participants. See `design/security.md`.
+pub const DEFAULT_MAX_VISITORS: usize = 64;
 
 /// The most connections served at once; further peers wait in the listen backlog.
 const MAX_CONNECTIONS: usize = 256;
@@ -97,6 +137,7 @@ impl Server {
         let (sender, jobs) = async_channel::unbounded();
         let slots = SpaceSlots::new(DEFAULT_MAX_SPACES);
         let hub = Hub::new(backends, transcriber, sender, Vec::new(), slots.clone());
+        hub.set_max_visitors(DEFAULT_MAX_VISITORS);
         Self {
             application: Application::new(hub.clone()),
             hub,
@@ -111,7 +152,15 @@ impl Server {
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             counts: None,
             counts_interval: COUNTS_INTERVAL,
+            tls: None,
         }
+    }
+
+    /// Serve only TLS, with `config`, such as from [`security::ServerCertificate::server_config`]. A handshake that has not completed within the request timeout is closed, as a request head would be. See `design/security.md`.
+    pub fn with_tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
+        self.tls = Some(config);
+        self.hub.set_encrypted(true);
+        self
     }
 
     /// How many spaces are listed and participants connected now, for advertising before [`run`](Self::run) starts.
@@ -146,6 +195,64 @@ impl Server {
             self.hub.set_roots(roots.to_protocol());
         }
         self.roots.get_or_insert(roots);
+        self
+    }
+
+    /// Admit holders of the tokens in `store` as what each grants, and anyone without credentials as a visitor if `visitors`, or not at all. Without this, everyone is an owner, as with `tomori-server --auth open`. See `design/security.md`.
+    pub fn with_tokens(mut self, store: Arc<security::TokenStore>, visitors: bool) -> Self {
+        self.application.set_door(Door::tokens(store, visitors));
+        self
+    }
+
+    /// Pair devices, deriving the code from `fingerprint`, the certificate served with [`Self::with_tls`], and issuing tokens from the store given to [`Self::with_tokens`], which must come first. See `design/security.md`.
+    ///
+    /// # Panics
+    ///
+    /// Without a token store from [`Self::with_tokens`], since pairing issues tokens.
+    pub fn with_pairing(self, fingerprint: security::Fingerprint) -> Self {
+        let tokens = self
+            .application
+            .door()
+            .store()
+            .expect("pairing issues tokens, so `with_tokens` comes first")
+            .clone();
+        self.hub.set_pairing(crate::hub::PairingSetup {
+            fingerprint,
+            tokens,
+        });
+        self
+    }
+
+    /// Pair over plain HTTP, as tests' raw clients do. Pairing otherwise needs [`Self::with_tls`], so that the token it issues never crosses the network in the clear.
+    #[cfg(feature = "fake")]
+    pub fn with_pairing_over_plain_http_for_tests(self) -> Self {
+        self.hub.set_encrypted(true);
+        self
+    }
+
+    /// Call `prompt` with each [`crate::PairingEvent`], such as a pairing that waits to be confirmed, so that the server shows it on its console.
+    pub fn with_pairing_prompt(
+        self,
+        prompt: impl Fn(&crate::PairingEvent) + Send + Sync + 'static,
+    ) -> Self {
+        self.hub.set_pairing_prompt(Box::new(prompt));
+        self
+    }
+
+    /// Change how long a pairing waits to be confirmed; see [`crate::PAIRING_TIMEOUT`].
+    pub fn with_pairing_timeout(self, timeout: Duration) -> Self {
+        self.hub.set_pairing_timeout(timeout);
+        self
+    }
+
+    /// A handle to confirm or decline pairings, such as from the console, while the server runs.
+    pub fn pairing(&self) -> Pairing {
+        Pairing(self.hub.clone())
+    }
+
+    /// Change the most visitors connected at once; see [`DEFAULT_MAX_VISITORS`].
+    pub fn with_max_visitors(self, limit: usize) -> Self {
+        self.hub.set_max_visitors(limit);
         self
     }
 
@@ -306,7 +413,13 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
-        let options = base_http_server::Options::default().http1;
+        let server_options = base_http_server::Options::default();
+        let options = server_options.http1.clone();
+        let acceptor = self.tls.as_ref().map(|config| {
+            let mut config = (**config).clone();
+            config.alpn_protocols = server_options.protocols.alpn_protocols();
+            RustlsAcceptor::new(Arc::new(config))
+        });
         let connections_cancellation = cancellation.child();
         let mut connections = FuturesUnordered::new();
         let mut tracker = Tracker::default();
@@ -381,6 +494,8 @@ impl Server {
                 let serial = tracker.statistics.connections;
                 let connection = connections_cancellation.child();
                 let options = &options;
+                let server_options = &server_options;
+                let acceptor = acceptor.as_ref();
                 // Each connection is watched so that one which never completes a request is closed, freeing its slot.
                 let watch = self.admission.watch(connection.clone());
                 tracker.open.insert(
@@ -396,14 +511,32 @@ impl Server {
                     watch,
                 };
                 connections.push(async move {
-                    let outcome = base_http_server::serve_connection(
-                        scheduler,
-                        socket,
-                        &handler,
-                        options,
-                        &connection,
-                    )
-                    .await;
+                    let outcome = match acceptor {
+                        None => {
+                            base_http_server::serve_connection(
+                                scheduler,
+                                socket,
+                                &handler,
+                                options,
+                                &connection,
+                            )
+                            .await
+                        }
+                        // The handshake is cancelled with the connection, so the admission sweep closes one that stalls.
+                        Some(acceptor) => match acceptor.accept(scheduler, socket, &connection).await {
+                            Ok(tls) => {
+                                base_http_server::serve_tls_connection(
+                                    scheduler,
+                                    tls,
+                                    &handler,
+                                    server_options,
+                                    &connection,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error.into()),
+                        },
+                    };
                     (serial, outcome)
                 });
             }
@@ -490,6 +623,7 @@ impl Server {
                     self.admission.sweep(now, self.request_timeout);
                     self.hub.sweep(now, &self.keepalive, self.request_timeout);
                     self.hub.forget_departed(now, self.retention);
+                    self.revoke_withdrawn();
                 }
                 Err(error) => {
                     if !cancellation.is_cancelled() {
@@ -499,6 +633,18 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// End the connections whose tokens are no longer issued, such as after `tomori-server auth revoke` in another process. Every connection is checked each sweep, not only after the store changes, so that one admitted just before a revocation is ended too. See `design/security.md`.
+    fn revoke_withdrawn(&self) {
+        let Some(store) = self.application.door().store() else {
+            return;
+        };
+        if let Err(error) = store.reload() {
+            log::warn!("Could not read the token store: {error}.");
+        }
+        self.hub
+            .revoke(|principal| store.entry(principal).is_some());
     }
 
     /// Start requested spaces and drive their sessions until cancelled.

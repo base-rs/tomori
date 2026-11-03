@@ -29,6 +29,14 @@ name = "spaces"
 required-features = ["fake"]
 
 [[test]]
+name = "security"
+required-features = ["fake"]
+
+[[test]]
+name = "pairing"
+required-features = ["fake"]
+
+[[test]]
 name = "workspaces"
 required-features = ["fake"]
 
@@ -55,7 +63,8 @@ backend = { path = "../backend" }
 backend-claude-code = { path = "../backend-claude-code", optional = true }
 backend-opencode = { path = "../backend-opencode", optional = true }
 base-http = "0.2.0"
-base-http-server = "0.2.0"
+base-endpoint = { version = "0.1.0", features = ["rustls"] }
+base-http-server = { version = "0.2.0", features = ["rustls"] }
 base-scheduler = "0.3.0"
 base-scheduler-native = "0.3.1"
 discovery = { path = "../discovery" }
@@ -66,6 +75,8 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc",
 gethostname = "1.1"
 log = "0.4"
 protocol = { path = "../protocol" }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+security = { path = "../security", features = ["issue"] }
 serde = "1"
 serde_json = "1"
 speech = { path = "../speech", optional = true }
@@ -74,4 +85,6 @@ speech = { path = "../speech", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+security = { path = "../security", features = ["issue"] }
 client = { path = "../client" }

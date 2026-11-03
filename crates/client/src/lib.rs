@@ -25,6 +25,7 @@ pub use client::{Client, Sender};
 pub use connection_state::{ConnectionState, Disconnect, Event};
 pub use events::Events;
 pub use microphone::Microphone;
-pub use options::Options;
+pub use options::{Options, Transport};
 pub use outbox::{FailedUtterance, Membership, SendError, UtteranceFailure};
 pub use protocol::Keepalive;
+pub use security::Fingerprint;

@@ -1,0 +1,21 @@
+[package]
+name = "security"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "Tomori's authentication, tokens, certificates and pinning, shared by the server and clients"
+repository = "https://github.com/ioquatix/tomori"
+license = "MIT"
+publish = false
+
+[features]
+# Issue and store tokens, and generate the server's certificate: the server's side.
+issue = ["dep:rcgen", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+getrandom = "0.3"
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+sha2 = "0.10"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }

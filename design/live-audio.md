@@ -7,8 +7,10 @@ This describes the Rust server and the headset client, which uses it. The curren
 Participants in a space can talk to each other. Each participant sends one microphone stream, and each audio frame carries a gate:
 
 - `off`: nothing is sent.
-- `live`: heard by the other participants and the spectator feed.
-- `agent` (push-to-talk): heard by the other participants and the spectator feed, and also transcribed for the agent.
+- `live`: heard by the other participants, visitors watching the space (see `security.md`) and the spectator feed.
+- `agent` (push-to-talk): heard by the other participants, visitors and the spectator feed, and also transcribed for the agent.
+
+Visitors send no audio; the server neither relays nor transcribes audio from a visitor's connection.
 
 Push-to-talk audio is not a separate upload path. Only `agent` audio is transcribed; open-microphone conversation between participants never reaches the agent.
 

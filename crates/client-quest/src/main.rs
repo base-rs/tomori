@@ -9,6 +9,7 @@ fn main() -> anyhow::Result<()> {
     let mut overrides = tomori::Overrides {
         server: std::env::var("TOMORI_SERVER").ok(),
         name: None,
+        token: std::env::var("TOMORI_TOKEN").ok(),
     };
     let mut space = None;
     let mut follow = None;
@@ -21,6 +22,9 @@ fn main() -> anyhow::Result<()> {
             }
             "--name" => {
                 overrides.name = Some(arguments.next().context("--name needs a name")?);
+            }
+            "--token" => {
+                overrides.token = Some(arguments.next().context("--token needs a token")?);
             }
             "--space" => {
                 space = Some(arguments.next().context("--space needs a space id")?);
@@ -60,10 +64,12 @@ fn main() -> anyhow::Result<()> {
         // Only the spectator modes join a space and follow a participant.
         anyhow::bail!("--space and --follow apply only to the spectator modes; use --help");
     }
+    let token = overrides.token.clone();
     let spectator_options = |server: Option<String>| tomori::SpectatorOptions {
         server,
         space: space.clone(),
         follow: follow.clone(),
+        token: token.clone(),
     };
     match mode.as_deref() {
         None => tomori::run(),
@@ -87,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--help" | "-h") => {
             println!(
-                "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME]\n\nModes:\n  (none)                  desktop window (no headset needed).\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n  --licenses              show the bundled controller assets' license.\n\nOptions:\n  --server ADDRESS  with --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --xr or --console, the display name other participants see (default: this computer's name).\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n\nDesktop controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the desktop window's initial environment (default sky); with a server, the space chooses it."
+                "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME]\n\nModes:\n  (none)                  desktop window (no headset needed).\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n  --licenses              show the bundled controller assets' license.\n\nOptions:\n  --server ADDRESS  with --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n\nDesktop controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the desktop window's initial environment (default sky); with a server, the space chooses it."
             );
             Ok(())
         }
