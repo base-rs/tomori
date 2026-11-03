@@ -8,6 +8,7 @@ Each kind of hardware or output has its own client implementation in a separate 
 
 - `crates/client`: the server connection, reconnection, outgoing audio, per-source jitter buffers, the playback mixer and the player that feeds it received audio for a device callback. It contains no rendering, windowing or device code, and builds for every client target.
 - A shared scene model derived from space state and participant presence, also free of rendering code, so that clients with different renderers present the same scene.
+- Engagement, whether the participant is wearing the device and attending, is derived in the core from platform-neutral signals (whether the application has input, and whether a sensor reports the device worn) by one state machine free of rendering and platform code. Each client feeds it its platform's signals, such as the OpenXR session state and the user presence extension on Quest, and the protocol carries only the resulting device-neutral fact; see `spaces.md`.
 - Rendering code shared by clients that use the same engine lives in its own crate, not in one client that others depend on.
 
 The protocol stays device-neutral. A client reports optional capabilities, such as hand tracking or controllers, through its messages; the server never branches on which hardware a participant uses.

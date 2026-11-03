@@ -52,6 +52,11 @@ pub fn run(
         supported.meta_simultaneous_hands_and_controllers,
         supported.meta_detached_controllers
     );
+    // Whether the headset is worn, from its proximity sensor, where the runtime reports it. Meta's runtime advertises it, but its "removed" event is not always delivered, so the session state is followed too.
+    log::info!(
+        "OpenXR user presence extension: {}",
+        supported.ext_user_presence
+    );
     ensure!(
         supported.khr_vulkan_enable2,
         "Runtime does not support XR_KHR_vulkan_enable2"
@@ -61,6 +66,7 @@ pub fn run(
     extensions.ext_local_floor = supported.ext_local_floor;
     extensions.fb_render_model = supported.fb_render_model;
     extensions.ext_hand_tracking = supported.ext_hand_tracking;
+    extensions.ext_user_presence = supported.ext_user_presence;
     #[cfg(target_os = "android")]
     {
         extensions.khr_android_create_instance = true;
@@ -192,6 +198,9 @@ pub fn run(
     let mut workers = crate::delegation::Workers::default();
     let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
     let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
+    // Whether the headset is worn and Tomori has input, reported to the server; see `design/spaces.md`.
+    let mut engagement = client::engagement::Tracker::new();
+    conversation.set_engagement(engagement.engagement());
     log::info!(
         "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose or reset.",
         images.len()
@@ -220,6 +229,15 @@ pub fn run(
                         presentation_navigation.release();
                     }
                     focused = state == xr::SessionState::FOCUSED;
+                    let focus = match state {
+                        xr::SessionState::FOCUSED => client::engagement::Focus::Focused,
+                        xr::SessionState::VISIBLE => client::engagement::Focus::Visible,
+                        _ => client::engagement::Focus::Hidden,
+                    };
+                    if let Some(changed) = engagement.set_focus(focus) {
+                        log::info!("Engagement: {changed:?}, as the session is {state:?}");
+                        conversation.set_engagement(changed);
+                    }
                     if focused && !microphone_requested {
                         microphone_requested = true;
                         connection.request_microphone();
@@ -239,6 +257,16 @@ pub fn run(
                     }
                 }
                 xr::Event::InstanceLossPending(_) => break 'main,
+                xr::Event::UserPresenceChangedEXT(change)
+                    if change.session() == session.as_raw() =>
+                {
+                    let worn = change.is_user_present();
+                    log::info!("Headset {}", if worn { "put on" } else { "taken off" });
+                    if let Some(changed) = engagement.set_worn(worn) {
+                        log::info!("Engagement: {changed:?}");
+                        conversation.set_engagement(changed);
+                    }
+                }
                 xr::Event::InteractionProfileChanged(_) => {
                     input.log_interaction_profiles(&instance, &session);
                 }
@@ -339,8 +367,13 @@ pub fn run(
             conversation.talk(talking);
         }
         was_talking = talking;
-        // Spoken replies return with server playback.
-        let _ = (controls.sound_toggle, controls.replay);
+        // Left stick click mutes spoken replies locally; right stick click plays the latest reply again, or stops it.
+        if controls.sound_toggle {
+            conversation.toggle_mute();
+        }
+        if controls.replay {
+            conversation.replay();
+        }
         presentation_navigation.update(
             None,
             &crate::delegation::Workspace::default(),

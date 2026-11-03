@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use protocol::AudioFrame;
+use protocol::{AudioFrame, REPLAY_SOURCE};
 
 use super::{Mixer, MixerOptions, PlaybackStatistics};
 
@@ -16,11 +16,14 @@ const FADE: Duration = Duration::from_millis(10);
 enum Command {
     LocalSource(Option<u32>),
     Clear,
+    AgentMuted(bool),
 }
 
 #[derive(Default)]
 struct Shared {
     silenced: AtomicBool,
+    /// Whether agent speech played again for this participant was playing at the last render.
+    replaying: AtomicBool,
     statistics: Mutex<PlaybackStatistics>,
 }
 
@@ -38,6 +41,7 @@ pub struct Player {
     options: MixerOptions,
     mixer: Option<Mixer>,
     local_source: Option<u32>,
+    agent_muted: bool,
     /// How far playback has faded out, in samples: 0 is full volume, and the fade length is silent.
     faded: u32,
 }
@@ -61,6 +65,7 @@ impl Player {
             options,
             mixer: None,
             local_source: None,
+            agent_muted: false,
             faded: 0,
         };
         (player, PlayerControl { commands, shared })
@@ -78,6 +83,7 @@ impl Player {
                 ..self.options
             });
             mixer.set_local_source(self.local_source);
+            mixer.set_agent_muted(self.agent_muted);
             self.mixer = Some(mixer);
         }
         let mixer = self.mixer.as_mut().expect("created above");
@@ -86,6 +92,10 @@ impl Player {
                 Command::LocalSource(source) => {
                     self.local_source = source;
                     mixer.set_local_source(source);
+                }
+                Command::AgentMuted(muted) => {
+                    self.agent_muted = muted;
+                    mixer.set_agent_muted(muted);
                 }
                 Command::Clear => {
                     mixer.clear();
@@ -99,6 +109,9 @@ impl Player {
         }
         // Silenced audio is still mixed, so that it is consumed in real time and resumes live rather than replaying what was missed.
         mixer.mix(output);
+        self.shared
+            .replaying
+            .store(mixer.is_source_playing(REPLAY_SOURCE), Ordering::Relaxed);
         let length = (FADE.as_secs_f64() * f64::from(sample_rate))
             .ceil()
             .max(1.0) as u32;
@@ -132,6 +145,16 @@ impl PlayerControl {
     /// Discard buffered audio when what the participant hears changes context: on leaving a space, after reconnecting, and when an output starts after nothing played. Every frame received before the next render is discarded too, including any that arrived just after this call.
     pub fn clear(&self) {
         let _ = self.commands.send(Command::Clear);
+    }
+
+    /// Mute or unmute agent speech locally, live or played again, while other participants still play. Muted speech is still consumed in real time, so unmuting resumes it live. See `design/speech.md`.
+    pub fn set_agent_muted(&self, muted: bool) {
+        let _ = self.commands.send(Command::AgentMuted(muted));
+    }
+
+    /// Whether agent speech played again for this participant, a replay or catch-up, was playing at the last render.
+    pub fn is_replaying(&self) -> bool {
+        self.shared.replaying.load(Ordering::Relaxed)
     }
 
     /// Silence playback, fading out over a few milliseconds, while still consuming what arrives in real time. Used while the microphone records push-to-talk, so that playback cannot be picked up and transcribed; see `design/live-audio.md`.

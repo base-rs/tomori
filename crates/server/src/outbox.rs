@@ -299,6 +299,7 @@ mod tests {
             message: "m".into(),
             text: "Hello.".into(),
             sample_rate: 24_000,
+            replay: false,
         }
     }
 

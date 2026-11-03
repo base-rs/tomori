@@ -11,6 +11,9 @@ pub const AUDIO_HEADER_BYTES: usize = 24;
 /// The [`AudioFrame::source`] of the space's agent speech stream.
 pub const AGENT_SOURCE: u32 = u32::MAX;
 
+/// The [`AudioFrame::source`] of agent speech played again for one participant only: a replay they asked for, or the catch-up they hear on joining or returning. It is mixed like [`AGENT_SOURCE`], and never sent together with live agent speech of the same reply. See `design/speech.md`.
+pub const REPLAY_SOURCE: u32 = u32::MAX - 1;
+
 const VERSION: u8 = 1;
 
 /// Where a participant's microphone audio goes. See `design/live-audio.md`.

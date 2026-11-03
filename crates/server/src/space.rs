@@ -4,7 +4,9 @@
 use std::collections::{HashSet, VecDeque};
 
 use backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
-use protocol::{Activity, Attention, Participant, QueueState, SpaceState, SpaceSummary};
+use protocol::{
+    Activity, Attention, Participant, QueueState, SpaceState, SpaceSummary, SpeechSetting,
+};
 
 use crate::limits;
 use crate::projection;
@@ -52,6 +54,8 @@ pub struct SpaceModel {
     workers: Vec<protocol::Worker>,
     workers_authoritative: bool,
     attribution: bool,
+    /// How much of each reply is spoken; see `design/speech.md`.
+    speech: SpeechSetting,
     /// The modes the session offers and its current one, as the agent last reported them.
     modes: Modes,
     error: Option<String>,
@@ -234,6 +238,7 @@ impl SpaceModel {
             workers,
             workers_authoritative: true,
             attribution: true,
+            speech: SpeechSetting::Brief,
             modes: snapshot.modes,
             error: None,
             worker_error: None,
@@ -456,6 +461,22 @@ impl SpaceModel {
         let (unattended, unheard) = (self.unattended, self.unheard);
         self.resynchronize(snapshot);
         (self.unattended, self.unheard) = (unattended, unheard);
+    }
+
+    /// How much of each reply is spoken. Brief unless a participant chose otherwise.
+    pub fn speech(&self) -> SpeechSetting {
+        self.speech
+    }
+
+    /// Change how much of each reply is spoken, from the next reply on. An unknown setting is refused.
+    pub fn set_speech(&mut self, speech: SpeechSetting) -> Result<(), &'static str> {
+        match speech {
+            SpeechSetting::Full | SpeechSetting::Brief => {
+                self.speech = speech;
+                Ok(())
+            }
+            SpeechSetting::Unknown => Err("Tomori does not know that speech setting."),
+        }
     }
 
     /// Whether `mode` is one the space shows as offered, so a participant may choose it.
@@ -936,6 +957,7 @@ impl SpaceModel {
             participants,
             visitors: self.visitors.len(),
             attribution: self.attribution,
+            speech: self.speech,
             error: match (&self.error, &self.worker_error) {
                 (Some(error), Some(worker_error)) => Some(format!("{error} {worker_error}")),
                 (Some(error), None) => Some(error.clone()),

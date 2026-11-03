@@ -153,6 +153,52 @@ pub struct SpaceState {
     /// servers.
     #[serde(default)]
     pub modes: Vec<Mode>,
+    /// How much of each reply is spoken, shared by everyone in the space. `Unknown` from older servers, which speak
+    /// every reply in full.
+    ///
+    /// A server that sends a known setting also retains speech, and accepts [`crate::ClientMessage::Replay`],
+    /// [`crate::ClientMessage::StopReplay`], [`crate::ClientMessage::Engagement`] and
+    /// [`crate::ClientMessage::SetSpeech`]; a client sends those only to such a server. See `design/speech.md`.
+    #[serde(default)]
+    pub speech: SpeechSetting,
+}
+
+/// How much of each reply a space speaks. See `design/speech.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeechSetting {
+    /// Every reply is spoken in full.
+    Full,
+    /// Each reply's first blocks are spoken, up to about 20 seconds, followed by "More on the panel."
+    Brief,
+    /// A setting a newer server sends that this build does not know, or none from an older server.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// Whether a participant is wearing their device and attending to Tomori, as their client reports it. See
+/// `design/spaces.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engagement {
+    /// Worn, and Tomori has input.
+    Engaged,
+    /// Worn, but something else, such as a system menu, has input for now. Still listening.
+    Distracted,
+    /// Removed, asleep or in the background: not listening.
+    Away,
+    /// A state a newer client or server sends that this build does not know.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl Engagement {
+    /// Whether a participant in this state hears speech as it plays. Only `Away` does not.
+    pub fn is_listening(self) -> bool {
+        self != Self::Away
+    }
 }
 
 impl SpaceState {
@@ -334,6 +380,10 @@ pub struct Participant {
     pub name: String,
     /// The participant's number: their public handle, and the source of their audio frames. A participant's identity is never sent to other clients; see `design/security.md`.
     pub source: u32,
+    /// What the participant's client last reported, if it reports engagement at all. Absent from older servers and
+    /// for clients that do not report it, which count as listening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engagement: Option<Engagement>,
 }
 
 #[cfg(test)]
@@ -379,6 +429,33 @@ mod tests {
         let mode: Mode =
             serde_json::from_value(serde_json::json!({"id": "plan", "name": "Plan"})).unwrap();
         assert_eq!(mode.description, None);
+    }
+
+    #[test]
+    fn speech_and_engagement_are_unknown_from_older_servers() {
+        let mut json = serde_json::to_value(SpaceState {
+            participants: vec![Participant {
+                name: "Ada".into(),
+                source: 1,
+                engagement: None,
+            }],
+            ..SpaceState::default()
+        })
+        .unwrap();
+        assert!(json["participants"][0].get("engagement").is_none());
+        json.as_object_mut().unwrap().remove("speech");
+        let state: SpaceState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.speech, SpeechSetting::Unknown);
+        assert_eq!(state.participants[0].engagement, None);
+        assert_eq!(
+            serde_json::from_str::<SpeechSetting>("\"terse\"").unwrap(),
+            SpeechSetting::Unknown
+        );
+        let participant: Participant = serde_json::from_value(
+            serde_json::json!({"name": "Ada", "source": 1, "engagement": "away"}),
+        )
+        .unwrap();
+        assert_eq!(participant.engagement, Some(Engagement::Away));
     }
 
     #[test]

@@ -117,6 +117,8 @@ impl Feed {
         let store = Store::new(None);
         let identity = Identity::new(&store, crate::identity::host_name().as_deref(), overrides);
         let mut conversation = Conversation::new(&identity.name);
+        // The spectator follows live speech, and is never played what it missed.
+        conversation.follow_live_speech_only();
 
         // The connection enqueues a `Connect` action when a server is given,
         // so it must be created before `join_space` queues a `Send(Join)`:

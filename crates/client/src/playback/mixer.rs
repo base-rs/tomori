@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use protocol::{AGENT_SOURCE, AudioFrame, Gate};
+use protocol::{AGENT_SOURCE, AudioFrame, Gate, REPLAY_SOURCE};
 
 use super::{JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
 
@@ -47,7 +47,7 @@ impl Source {
 
 /// Mixes every remote participant and the agent speech stream into one mono `i16` stream at the device rate.
 ///
-/// Feed it every received [`AudioFrame`] with [`Self::push`] and pull output from the audio callback with [`Self::mix`]. Each source has its own [`JitterBuffer`], so one late or bursty participant does not delay the others. Agent volume and mute are local to this mixer; muting still consumes agent audio in real time, so unmuting resumes live speech rather than replaying what was missed.
+/// Feed it every received [`AudioFrame`] with [`Self::push`] and pull output from the audio callback with [`Self::mix`]. Each source has its own [`JitterBuffer`], so one late or bursty participant does not delay the others. Agent volume and mute are local to this mixer, and apply to agent speech played again from [`REPLAY_SOURCE`] as to live agent speech; muting still consumes agent audio in real time, so unmuting resumes live speech rather than replaying what was missed.
 pub struct Mixer {
     options: MixerOptions,
     sources: HashMap<u32, Source>,
@@ -170,7 +170,11 @@ impl Mixer {
         let release =
             (-(output.len() as f64) / (LEVEL_RELEASE.as_secs_f64() * f64::from(rate))).exp() as f32;
         for (&id, source) in self.sources.iter_mut() {
-            let gain = if id == AGENT_SOURCE { agent_gain } else { 1.0 };
+            let gain = if id == AGENT_SOURCE || id == REPLAY_SOURCE {
+                agent_gain
+            } else {
+                1.0
+            };
             // Mixed at unity gain and measured before the gain is applied, so muted agent speech still shows as speaking.
             self.scratch.clear();
             self.scratch.resize(output.len(), 0.0);
