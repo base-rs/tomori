@@ -114,10 +114,17 @@ const MAX_RESYNCS: usize = 16;
 /// Attempts to read a session again after reconnecting before its space is
 /// closed.
 const RESYNC_ATTEMPTS: u8 = 3;
+/// Connections lost before a session could be read again, after the first
+/// loss, before its space is closed.
+const RESYNC_INTERRUPTIONS: u8 = 5;
 /// Events held for a session while it is read again; more close it, as an
 /// overflowing event channel does. Well below the channel's capacity, so the
 /// held events and the state they follow can be delivered together.
 const MAX_RESYNC_EVENTS: usize = 512;
+/// Why a request fails when too many already wait for a connection.
+const TOO_MANY_HELD: &str = "OpenCode is not reachable and too many requests are waiting for it";
+/// Why a request fails once the backend is shutting down.
+const SHUTTING_DOWN: &str = "the OpenCode backend is shutting down";
 /// What a session is told when the event stream is lost.
 const DISCONNECTED: &str = "Lost the connection to OpenCode; reconnecting.";
 
@@ -175,6 +182,7 @@ pub struct Events {
     worker_incomplete: Arc<AtomicBool>,
     ordinary_incomplete: Arc<AtomicBool>,
     consumer_started: Arc<AtomicBool>,
+    close_reason: Arc<Mutex<Option<String>>>,
 }
 
 /// A session's event receiver and the identity of its specific registration.
@@ -187,6 +195,9 @@ pub(crate) struct RegistrationEvents {
     prefer_workers: Arc<AtomicBool>,
     ordinary_incomplete: Arc<AtomicBool>,
     consumer_started: Arc<AtomicBool>,
+    /// Why the registration ended, kept beside the channel so that it still
+    /// arrives when the channel had no room for the closing event.
+    close_reason: Arc<Mutex<Option<String>>>,
     pub(crate) identity: Arc<AtomicU64>,
 }
 
@@ -219,11 +230,27 @@ impl RegistrationEvents {
         Err(async_channel::TryRecvError::Empty)
     }
 
+    /// The end of a registration whose channel has closed: its reason, once,
+    /// if it ended with one.
+    fn ended(&self) -> std::result::Result<QueuedEvent, async_channel::RecvError> {
+        match self
+            .close_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            Some(reason) => Ok(QueuedEvent::Ordinary(Event::Closed {
+                reason: Some(reason),
+            })),
+            None => Err(async_channel::RecvError),
+        }
+    }
+
     pub(crate) async fn recv(&self) -> std::result::Result<QueuedEvent, async_channel::RecvError> {
         self.consumer_started.store(true, Ordering::Release);
         match self.try_recv() {
             Ok(event) => return Ok(event),
-            Err(async_channel::TryRecvError::Closed) => return Err(async_channel::RecvError),
+            Err(async_channel::TryRecvError::Closed) => return self.ended(),
             Err(async_channel::TryRecvError::Empty) => {}
         }
         let result = futures_lite::future::race(self.receiver.recv(), async {
@@ -236,8 +263,8 @@ impl RegistrationEvents {
             }
         })
         .await;
-        if self.ordinary_incomplete.load(Ordering::Acquire) {
-            Err(async_channel::RecvError)
+        if self.ordinary_incomplete.load(Ordering::Acquire) || result.is_err() {
+            self.ended()
         } else {
             result
         }
@@ -258,6 +285,7 @@ impl Events {
         let pending = Arc::new(Mutex::new(PendingWorkers::default()));
         let ordinary_incomplete = Arc::new(AtomicBool::new(false));
         let consumer_started = Arc::new(AtomicBool::new(false));
+        let close_reason = Arc::new(Mutex::new(None));
         (
             Self {
                 tx,
@@ -268,6 +296,7 @@ impl Events {
                 worker_incomplete: Arc::new(AtomicBool::new(false)),
                 ordinary_incomplete: ordinary_incomplete.clone(),
                 consumer_started: consumer_started.clone(),
+                close_reason: close_reason.clone(),
             },
             RegistrationEvents {
                 receiver: rx,
@@ -277,6 +306,7 @@ impl Events {
                 prefer_workers: Arc::new(AtomicBool::new(true)),
                 ordinary_incomplete,
                 consumer_started,
+                close_reason,
                 identity,
             },
         )
@@ -294,6 +324,27 @@ impl Events {
                 false
             }
             Err(async_channel::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    /// End the registration with `reason`. The reason is kept beside the
+    /// channel first, so the session receives it even if the channel is full
+    /// and the closing event cannot be queued.
+    fn close_with(&self, reason: Option<String>) {
+        if let Some(reason) = &reason {
+            *self
+                .close_reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.clone());
+        }
+        if self.deliver(Event::Closed { reason }) {
+            // Delivered in order; the kept copy is not needed.
+            self.close_reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        } else {
+            self.tx.close();
         }
     }
 
@@ -409,11 +460,19 @@ pub struct Registration {
 /// A session waiting to be read again after the event stream was lost.
 #[derive(Default)]
 struct Resync {
-    /// Ordinary events since the connection was restored, delivered after the
-    /// state read again, in order, as when a space first opens.
-    events: Vec<Event>,
+    /// Ordinary events that arrived during the current read, with their place
+    /// in the event stream, delivered after the state read again, in order, as
+    /// when a space first opens.
+    events: Vec<(u64, Event)>,
     /// Failed attempts on connections since the loss.
     failures: u8,
+    /// Connections lost again before the session was read.
+    interruptions: u8,
+    /// Too many events arrived during the current read, which is abandoned.
+    overflowed: bool,
+    /// Where the current read's message listing fell among dispatched events:
+    /// held events up to it are reflected in that listing.
+    mark: Arc<AtomicU64>,
     /// A failed attempt is retried no sooner than this, so that a service
     /// still starting, or about to be lost again, is not read in a burst.
     retry_at: Option<Instant>,
@@ -566,6 +625,12 @@ impl Registration {
     }
 
     fn publish_modes(&mut self) {
+        // While the session is read again, its modes are reported with that
+        // state, after the events held for it.
+        if self.resync.is_some() {
+            self.modes_dirty = false;
+            return;
+        }
         self.modes_dirty = !self.deliver_state(Event::ModesChanged(self.modes.clone()));
     }
 
@@ -762,6 +827,9 @@ pub enum Command {
         id: String,
         identity: Arc<AtomicU64>,
     },
+    /// The backend is shutting down: fail every waiting and later request,
+    /// and close every registration, without waiting for OpenCode.
+    Shutdown,
 }
 
 struct SnapshotResult {
@@ -826,12 +894,27 @@ struct ReconcileResult {
 #[derive(Clone)]
 pub struct Commands {
     tx: async_channel::Sender<Command>,
+    /// Set once the backend is shutting down; later requests fail at once.
+    stopping: Arc<AtomicBool>,
 }
 
 impl Commands {
     pub fn new() -> (Self, async_channel::Receiver<Command>) {
         let (tx, rx) = async_channel::bounded(256);
-        (Self { tx }, rx)
+        (
+            Self {
+                tx,
+                stopping: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    /// Stop waiting for OpenCode: requests waiting for a connection, or for
+    /// one in flight, fail at once, and so do later ones. Never blocks.
+    pub fn shutdown(&self) {
+        self.stopping.store(true, Ordering::Release);
+        let _ = self.tx.try_send(Command::Shutdown);
     }
 
     /// The raw sender, including nonblocking registration cleanup.
@@ -846,6 +929,12 @@ impl Commands {
         &self,
         build: impl FnOnce(async_channel::Sender<std::result::Result<T, backend::Error>>) -> Command,
     ) -> std::result::Result<T, backend::Error> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(backend::Error::new(
+                backend::ErrorKind::Unavailable,
+                SHUTTING_DOWN,
+            ));
+        }
         let (reply, waiting) = async_channel::bounded(1);
         let command = build(reply);
         self.tx.send(command).await.map_err(|_| {
@@ -869,7 +958,9 @@ fn map_failure(failure: Failure) -> backend::Error {
 /// How the backend finds the OpenCode service. It is called before every
 /// connection attempt, so a service that restarts on another port or with
 /// another password is found again.
-pub type Resolve = Box<dyn FnMut() -> Resolved + Send>;
+/// It fails when the service's address is not known yet, as when its
+/// registration file is missing mid-run, and the attempt is retried later.
+pub type Resolve = Box<dyn FnMut() -> std::result::Result<Resolved, String> + Send>;
 
 /// Run the connection until its command channel closes, reconnecting whenever
 /// the service cannot be reached or its event stream ends. Blocking: called on
@@ -900,6 +991,8 @@ async fn drive(
 #[derive(Default)]
 struct Sessions {
     registrations: HashMap<String, Registration>,
+    /// How many events the event streams have dispatched, across connections.
+    sequence: Arc<AtomicU64>,
     /// Commands received while no connection is open, performed in order once
     /// one opens, or refused if the attempt fails.
     held: VecDeque<Command>,
@@ -938,14 +1031,23 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
         // A command waiting for a connection brings the next attempt forward,
         // but never to less than the initial delay after this one.
         earliest = started + RECONNECT_INITIAL;
-        let resolved = resolve();
-        match connect(scheduler, &resolved, &commands, &mut sessions, announce).await {
+        let outcome = match resolve() {
+            Ok(resolved) => {
+                let outcome =
+                    connect(scheduler, &resolved, &commands, &mut sessions, announce).await;
+                match outcome {
+                    Outcome::Unreachable(reason) => Outcome::Unreachable(format!(
+                        "OpenCode is not reachable at {}: {reason}",
+                        resolved.authority()
+                    )),
+                    outcome => outcome,
+                }
+            }
+            Err(reason) => Outcome::Unreachable(format!("OpenCode is not reachable: {reason}")),
+        };
+        match outcome {
             Outcome::Shutdown => break,
-            Outcome::Unreachable(reason) => {
-                let message = format!(
-                    "OpenCode is not reachable at {}: {reason}",
-                    resolved.authority()
-                );
+            Outcome::Unreachable(message) => {
                 // Report each distinct failure once, not every retry.
                 if reported.as_deref() != Some(message.as_str()) {
                     eprintln!("{message}; retrying");
@@ -980,11 +1082,20 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
         }
     }
     // Deliver Closed to every session still bound, so no session waits forever
-    // for its event channel to fill.
-    for registration in sessions.registrations.values() {
-        registration.events.deliver(Event::Closed {
-            reason: Some("the connection ended".to_owned()),
-        });
+    // for its event channel to fill, and fail every waiting request.
+    for (_, registration) in sessions.registrations.drain() {
+        registration
+            .events
+            .close_with(Some("the connection ended".to_owned()));
+    }
+    let shutting_down = || backend::Error::new(backend::ErrorKind::Unavailable, SHUTTING_DOWN);
+    for command in sessions.held.drain(..) {
+        refuse(command, shutting_down());
+    }
+    // Sessions may still send commands, such as closing, until they are
+    // dropped; answer them at once rather than leave them waiting.
+    while let Ok(command) = commands.recv().await {
+        refuse(command, shutting_down());
     }
 }
 
@@ -1011,7 +1122,7 @@ fn refuse(command: Command, error: backend::Error) {
             let _ = reply.try_send(Err(error));
         }
         // Closing needs no connection; see `hold`.
-        Command::Close { .. } => {}
+        Command::Close { .. } | Command::Shutdown => {}
     }
 }
 
@@ -1027,26 +1138,26 @@ fn abandoned(command: &Command) -> bool {
         | Command::Decide { reply, .. }
         | Command::Answer { reply, .. }
         | Command::SetMode { reply, .. } => reply.is_closed(),
-        Command::Close { .. } => false,
+        Command::Close { .. } | Command::Shutdown => false,
     }
 }
 
 /// Take a command while no connection is open: a close is performed at once,
 /// and anything else waits for the next attempt.
-fn hold(sessions: &mut Sessions, command: Command) {
+/// Returns false when the backend is shutting down.
+fn hold(sessions: &mut Sessions, command: Command) -> bool {
     match command {
+        Command::Shutdown => return false,
         Command::Close { id, identity } => {
             close_registration(&mut sessions.registrations, &id, &identity);
         }
         command if sessions.held.len() < MAX_HELD => sessions.held.push_back(command),
         command => refuse(
             command,
-            backend::Error::new(
-                backend::ErrorKind::Unavailable,
-                "OpenCode is not reachable and too many requests are waiting for it",
-            ),
+            backend::Error::new(backend::ErrorKind::Unavailable, TOO_MANY_HELD),
         ),
     }
+    true
 }
 
 /// Run `future` for at most `timeout` while no connection is open, taking
@@ -1067,7 +1178,9 @@ async fn holding<T, S: Timers>(
         futures_util::select! {
             result = &mut future => return Some(result),
             command = Fused::new(commands.recv()) => match command {
-                Ok(command) => hold(sessions, command),
+                Ok(command) => if !hold(sessions, command) {
+                    return None;
+                },
                 Err(_) => return None,
             },
             due = Fused::new(timers.timer_wait_until(&mut timer, deadline, &cancellation)) => {
@@ -1103,7 +1216,9 @@ async fn wait_until_attempt<S: Timers>(
         }
         futures_util::select! {
             command = Fused::new(commands.recv()) => match command {
-                Ok(command) => hold(sessions, command),
+                Ok(command) => if !hold(sessions, command) {
+                    return false;
+                },
                 Err(_) => return false,
             },
             due = Fused::new(timers.timer_wait_until(&mut timer, deadline, &cancellation)) => {
@@ -1201,6 +1316,7 @@ where
 /// reading it later would present events from before the gap as current.
 fn connection_lost(registrations: &mut HashMap<String, Registration>) {
     let mut unread = Vec::new();
+    let mut unsettled = Vec::new();
     for (id, registration) in registrations.iter_mut() {
         // Their futures were dropped with the connection.
         registration.snapshot_in_flight = None;
@@ -1211,16 +1327,37 @@ fn connection_lost(registrations: &mut HashMap<String, Registration>) {
             // Events held from a connection lost before the session was read
             // again precede the next read, which covers them; delivering them
             // after it would present them as newer.
+            //
+            // Failures are not forgotten, and a connection lost again before
+            // the session was read counts too, so a service that keeps
+            // dropping its stream cannot leave a space reconnecting forever.
+            let again = registration.resync.is_some();
             let resync = registration.resync.get_or_insert_with(Resync::default);
             resync.events.clear();
-            resync.failures = 0;
             resync.retry_at = None;
+            if again {
+                resync.interruptions = resync.interruptions.saturating_add(1);
+                if resync.interruptions >= RESYNC_INTERRUPTIONS {
+                    unsettled.push(id.clone());
+                    continue;
+                }
+            }
             registration.events.deliver(Event::Reconnecting {
                 reason: DISCONNECTED.to_owned(),
             });
         } else {
             unread.push(id.clone());
         }
+    }
+    for id in unsettled {
+        end_registration(
+            registrations,
+            &id,
+            Some(
+                "the connection to OpenCode kept dropping before the session could be read again"
+                    .to_owned(),
+            ),
+        );
     }
     for id in unread {
         end_registration(
@@ -1345,6 +1482,7 @@ async fn connected<S: Timers>(
     let Sessions {
         registrations,
         held,
+        sequence,
     } = sessions;
 
     let mut pending = String::new();
@@ -1355,11 +1493,13 @@ async fn connected<S: Timers>(
     let mut resyncs: ResyncFutures<'_> = FuturesUnordered::new();
     let mut reconciliations: FuturesUnordered<Pin<Box<dyn Future<Output = ReconcileResult> + '_>>> =
         FuturesUnordered::new();
+    let mut operations: Operations<'_> = FuturesUnordered::new();
     // The stream is open, so whatever happens from now on is observed: read
     // again every session whose events were lost.
     start_resyncs(
         registrations,
         &mut resyncs,
+        sequence,
         client,
         resolved,
         cancellation,
@@ -1367,216 +1507,214 @@ async fn connected<S: Timers>(
     );
 
     let outcome = loop {
-        let (command, was_held) = match held.pop_front() {
-            Some(command) => (command, true),
-            None => (
-                futures_util::select! {
-                    command = Fused::new(commands.recv()) => match command {
-                        Ok(command) => command,
-                        Err(_) => break Outcome::Shutdown,
-                    },
-                    completed = Fused::new(async {
-                        if snapshots.is_empty() {
-                            std::future::pending::<Option<SnapshotResult>>().await
-                        } else {
-                            snapshots.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed {
-                            let result = match registrations.get_mut(&completed.id) {
-                                Some(registration) if Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration) => {
-                                    registration.snapshot_in_flight = None;
-                                    let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
-                                    let result = completed.result.and_then(|mut snapshot| {
-                                        if overflow {
-                                            return Err(backend::Error::new(backend::ErrorKind::Unavailable, "Too many sessions were deleted during the snapshot; please retry."));
-                                        }
-                                        registration.install_workers(&mut snapshot.workers)?;
-                                        Ok(registration.events.snapshot_reply(snapshot))
-                                    });
-                                    registration.snapshot_deletions.clear();
-                                    result
-                                }
-                                _ => Err(backend::Error::new(backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
-                            };
-                            let _ = completed.reply.try_send(result);
-                        }
-                        continue;
-                    }
-                    completed = Fused::new(async {
-                        if resyncs.is_empty() {
-                            std::future::pending::<Option<ResyncResult>>().await
-                        } else {
-                            resyncs.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed {
-                            finish_resync(registrations, completed, timers.now());
-                        }
-                        // A slot is free: start the next waiting session at once.
-                        start_resyncs(registrations, &mut resyncs, client, resolved, cancellation, timers);
-                        continue;
-                    }
-                    completed = Fused::new(async {
-                        if reconciliations.is_empty() {
-                            std::future::pending::<Option<ReconcileResult>>().await
-                        } else {
-                            reconciliations.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed
-                            && let Some(registration) = registrations.get_mut(&completed.id)
-                            && Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
-                        {
-                            registration.reconcile_in_flight = None;
-                            if registration.event_revision == completed.revision && registration.resync.is_none() {
-                                if let Some(modes) = completed.modes
-                                    && !modes.offered.is_empty()
-                                    && registration.modes.offered.is_empty()
-                                {
-                                    registration.modes = modes;
-                                    registration.publish_modes();
-                                }
-                                if let Some(running) = completed.running {
-                                    let running = if running { RunningState::Running } else { RunningState::Idle };
-                                    registration.reconcile_running(running);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    result = Fused::new(stream.read(cancellation)) => {
-                        let frame = match result {
-                            Ok(frame) => frame,
-                            Err(error) => break Outcome::Lost(format!("failed: {error}")),
-                        };
-                        let end = frame.is_end();
-                        if let base_http::body::BodyFrame::Data { data, .. } = frame {
-                            pending.push_str(&String::from_utf8_lossy(&data));
-                            while let Some(index) = pending.find("\n\n") {
-                                let group = pending[..index + 2].to_owned();
-                                pending = pending[index + 2..].to_owned();
-                                if let Some(payload) = sse_payload(&group) {
-                                    dispatch_events(&payload, registrations);
-                                }
-                            }
-                        }
-                        if end {
-                            break Outcome::Lost("ended".to_owned());
-                        }
-                        continue;
-                    }
-                    // Re-check each session's running state against the server's record,
-                    // so a missed idle event cannot leave a busy state — and the queue it
-                    // gates — stuck. A no-op while no session is registered.
-                    due = Fused::new(timers.timer_wait_until(&mut timer, next_reconcile, cancellation)) => {
-                        if let Err(error) = due {
-                            break Outcome::Lost(format!("stopped: the state reconciliation timer failed: {error}"));
-                        }
-                        let mut ids: Vec<_> = registrations.keys().cloned().collect();
-                        for id in &ids {
-                            close_abandoned_registration(registrations, id);
-                        }
-                        // A session read again after reconnecting reports its
-                        // running state from that read.
-                        ids.retain(|id| registrations.get(id).is_some_and(|registration| registration.resync.is_none()));
-                        ids.sort();
-                        if !ids.is_empty() {
-                            let start = reconcile_offset % ids.len();
-                            ids.rotate_left(start);
-                            reconcile_offset = (start + MAX_RECONCILIATIONS) % ids.len();
-                        }
-                        for id in ids {
-                            let registration = registrations.get_mut(&id).expect("registered at the start of this tick");
-                            if registration.reconcile_in_flight.is_some() || reconciliations.len() >= MAX_RECONCILIATIONS {
-                                continue;
-                            }
-                            let local_cancel = cancellation.child();
-                            registration.reconcile_in_flight = Some(local_cancel.clone());
-                            let identity = registration.events.worker_epoch.clone();
-                            let revision = registration.event_revision;
-                            let directory = registration.directory.clone();
-                            let current = registration.modes.current.clone();
-                            let list = registration.modes.offered.is_empty() && registration.listings > 0;
-                            if list { registration.listings -= 1; }
-                            reconciliations.push(Box::pin(async move {
-                                let (modes, running) = futures_lite::future::race(
-                                    async {
-                                        let modes = if list {
-                                            let info = current.map_or(Value::Null, |agent| serde_json::json!({"agent":agent}));
-                                            Some(modes(client, resolved, &directory, &info, &local_cancel).await)
-                                        } else { None };
-                                        let running = api::session_running(client, resolved, &id, &local_cancel, timers).await.ok().flatten();
-                                        (modes, running)
-                                    },
-                                    async {
-                                        let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
-                                        (None, None)
-                                    },
-                                ).await;
-                                local_cancel.cancel();
-                                ReconcileResult { id, registration: identity, revision, modes, running }
-                            }));
-                        }
-                        // Retry a session whose read again failed.
-                        start_resyncs(registrations, &mut resyncs, client, resolved, cancellation, timers);
-                        retry_worker_delivery(registrations);
-                        next_reconcile = timers.now() + RECONCILE_INTERVAL;
-                        continue;
-                    }
-                },
-                false,
-            ),
-        };
-        // A caller that gave up while OpenCode was unreachable no longer
-        // wants its command performed, such as a session created for nobody.
-        if was_held && abandoned(&command) {
-            continue;
-        }
-        match command {
-            Command::Snapshot {
-                id,
-                identity,
-                reply,
-            } => schedule_snapshot(
+        // Commands that waited for this connection start as operations, as
+        // many as the limit allows; the loop keeps serving the stream, reads
+        // and other commands while they run.
+        while operations.len() < MAX_OPERATIONS
+            && let Some(command) = held.pop_front()
+        {
+            start_command(
+                command,
+                true,
                 registrations,
+                &mut operations,
                 &mut snapshots,
-                id,
-                &identity,
-                reply,
                 client,
                 resolved,
                 cancellation,
                 timers,
-            ),
-            command => {
-                let open = if was_held {
-                    // Commands that waited for this connection run one after
-                    // another before anything else, so each is bounded.
-                    futures_lite::future::race(
-                        handle_command(command, client, resolved, registrations, cancellation),
-                        async {
-                            let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
-                            true
-                        },
-                    )
-                    .await
-                } else {
-                    handle_command(command, client, resolved, registrations, cancellation).await
-                };
-                if !open {
-                    break Outcome::Shutdown;
-                }
-            }
+            );
         }
         retry_worker_delivery(registrations);
+        futures_util::select! {
+            command = Fused::new(commands.recv()) => match command {
+                Ok(Command::Shutdown) | Err(_) => break Outcome::Shutdown,
+                // Beyond the limit, commands wait their turn.
+                Ok(command) if operations.len() >= MAX_OPERATIONS && takes_operation(&command) => {
+                    held.push_back(command);
+                }
+                Ok(command) => start_command(
+                    command,
+                    false,
+                    registrations,
+                    &mut operations,
+                    &mut snapshots,
+                    client,
+                    resolved,
+                    cancellation,
+                    timers,
+                ),
+            },
+            completed = Fused::new(async {
+                if operations.is_empty() {
+                    std::future::pending::<Option<Option<Completion>>>().await
+                } else {
+                    operations.next().await
+                }
+            }) => {
+                if let Some(Some(completion)) = completed {
+                    complete(completion, registrations);
+                }
+            },
+            completed = Fused::new(async {
+                if snapshots.is_empty() {
+                    std::future::pending::<Option<SnapshotResult>>().await
+                } else {
+                    snapshots.next().await
+                }
+            }) => {
+                if let Some(completed) = completed {
+                    let result = match registrations.get_mut(&completed.id) {
+                        Some(registration) if Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration) => {
+                            registration.snapshot_in_flight = None;
+                            let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
+                            let result = completed.result.and_then(|mut snapshot| {
+                                if overflow {
+                                    return Err(backend::Error::new(backend::ErrorKind::Unavailable, "Too many sessions were deleted during the snapshot; please retry."));
+                                }
+                                registration.install_workers(&mut snapshot.workers)?;
+                                Ok(registration.events.snapshot_reply(snapshot))
+                            });
+                            registration.snapshot_deletions.clear();
+                            result
+                        }
+                        _ => Err(backend::Error::new(backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
+                    };
+                    let _ = completed.reply.try_send(result);
+                }
+                continue;
+            }
+            completed = Fused::new(async {
+                if resyncs.is_empty() {
+                    std::future::pending::<Option<ResyncResult>>().await
+                } else {
+                    resyncs.next().await
+                }
+            }) => {
+                if let Some(completed) = completed {
+                    finish_resync(registrations, completed, timers.now());
+                }
+                // A slot is free: start the next waiting session at once.
+                start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                continue;
+            }
+            completed = Fused::new(async {
+                if reconciliations.is_empty() {
+                    std::future::pending::<Option<ReconcileResult>>().await
+                } else {
+                    reconciliations.next().await
+                }
+            }) => {
+                if let Some(completed) = completed
+                    && let Some(registration) = registrations.get_mut(&completed.id)
+                    && Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
+                {
+                    registration.reconcile_in_flight = None;
+                    if registration.event_revision == completed.revision && registration.resync.is_none() {
+                        if let Some(modes) = completed.modes
+                            && !modes.offered.is_empty()
+                            && registration.modes.offered.is_empty()
+                        {
+                            registration.modes = modes;
+                            registration.publish_modes();
+                        }
+                        if let Some(running) = completed.running {
+                            let running = if running { RunningState::Running } else { RunningState::Idle };
+                            registration.reconcile_running(running);
+                        }
+                    }
+                }
+                continue;
+            }
+            result = Fused::new(stream.read(cancellation)) => {
+                let frame = match result {
+                    Ok(frame) => frame,
+                    Err(error) => break Outcome::Lost(format!("failed: {error}")),
+                };
+                let end = frame.is_end();
+                if let base_http::body::BodyFrame::Data { data, .. } = frame {
+                    pending.push_str(&String::from_utf8_lossy(&data));
+                    while let Some(index) = pending.find("\n\n") {
+                        let group = pending[..index + 2].to_owned();
+                        pending = pending[index + 2..].to_owned();
+                        if let Some(payload) = sse_payload(&group) {
+                            let number = sequence.fetch_add(1, Ordering::AcqRel) + 1;
+                        dispatch_events_at(&payload, registrations, number);
+                        }
+                    }
+                }
+                if end {
+                    break Outcome::Lost("ended".to_owned());
+                }
+                continue;
+            }
+            // Re-check each session's running state against the server's record,
+            // so a missed idle event cannot leave a busy state — and the queue it
+            // gates — stuck. A no-op while no session is registered.
+            due = Fused::new(timers.timer_wait_until(&mut timer, next_reconcile, cancellation)) => {
+                if let Err(error) = due {
+                    break Outcome::Lost(format!("stopped: the state reconciliation timer failed: {error}"));
+                }
+                let mut ids: Vec<_> = registrations.keys().cloned().collect();
+                for id in &ids {
+                    close_abandoned_registration(registrations, id);
+                }
+                // A session read again after reconnecting reports its
+                // running state from that read.
+                ids.retain(|id| registrations.get(id).is_some_and(|registration| registration.resync.is_none()));
+                ids.sort();
+                if !ids.is_empty() {
+                    let start = reconcile_offset % ids.len();
+                    ids.rotate_left(start);
+                    reconcile_offset = (start + MAX_RECONCILIATIONS) % ids.len();
+                }
+                for id in ids {
+                    let registration = registrations.get_mut(&id).expect("registered at the start of this tick");
+                    if registration.reconcile_in_flight.is_some() || reconciliations.len() >= MAX_RECONCILIATIONS {
+                        continue;
+                    }
+                    let local_cancel = cancellation.child();
+                    registration.reconcile_in_flight = Some(local_cancel.clone());
+                    let identity = registration.events.worker_epoch.clone();
+                    let revision = registration.event_revision;
+                    let directory = registration.directory.clone();
+                    let current = registration.modes.current.clone();
+                    let list = registration.modes.offered.is_empty() && registration.listings > 0;
+                    if list { registration.listings -= 1; }
+                    reconciliations.push(Box::pin(async move {
+                        let (modes, running) = futures_lite::future::race(
+                            async {
+                                let modes = if list {
+                                    let info = current.map_or(Value::Null, |agent| serde_json::json!({"agent":agent}));
+                                    Some(modes(client, resolved, &directory, &info, &local_cancel).await)
+                                } else { None };
+                                let running = api::session_running(client, resolved, &id, &local_cancel, timers).await.ok().flatten();
+                                (modes, running)
+                            },
+                            async {
+                                let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
+                                (None, None)
+                            },
+                        ).await;
+                        local_cancel.cancel();
+                        ReconcileResult { id, registration: identity, revision, modes, running }
+                    }));
+                }
+                // Retry a session whose read again failed.
+                start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                retry_worker_delivery(registrations);
+                next_reconcile = timers.now() + RECONCILE_INTERVAL;
+                continue;
+            }
+        }
     };
     cancellation.cancel();
     outcome
 }
 
 /// Read a session within [`SNAPSHOT_TIMEOUT`], cancelling its requests when the
-/// read ends either way.
+/// read ends either way. `on_messages` is called once its messages are read.
+#[allow(clippy::too_many_arguments)]
 async fn bounded_snapshot<S: Timers>(
     client: &Client<'_>,
     resolved: &Resolved,
@@ -1585,10 +1723,11 @@ async fn bounded_snapshot<S: Timers>(
     local: &Cancellation,
     cancellation: &Cancellation,
     timers: &S,
+    on_messages: impl FnOnce(),
 ) -> backend::Result<Snapshot> {
     let result = futures_lite::future::race(
         async {
-            snapshot(client, resolved, id, modes, local, timers)
+            snapshot(client, resolved, id, modes, local, timers, on_messages)
                 .await
                 .map_err(map_failure)
         },
@@ -1649,8 +1788,17 @@ fn schedule_snapshot<'a, S: Timers>(
     let identity = registration.events.worker_epoch.clone();
     let modes = registration.modes.clone();
     snapshots.push(Box::pin(async move {
-        let result =
-            bounded_snapshot(client, resolved, &id, modes, &local, cancellation, timers).await;
+        let result = bounded_snapshot(
+            client,
+            resolved,
+            &id,
+            modes,
+            &local,
+            cancellation,
+            timers,
+            || {},
+        )
+        .await;
         SnapshotResult {
             id,
             registration: identity,
@@ -1666,9 +1814,11 @@ fn schedule_snapshot<'a, S: Timers>(
 /// snapshot, so a slow session never holds up another or the event stream.
 /// The read also lists the directory's agents and the session's current one,
 /// which a restarted service may report differently.
+#[allow(clippy::too_many_arguments)]
 fn start_resyncs<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     resyncs: &mut ResyncFutures<'a>,
+    sequence: &Arc<AtomicU64>,
     client: &'a Client<'_>,
     resolved: &'a Resolved,
     cancellation: &'a Cancellation,
@@ -1696,17 +1846,33 @@ fn start_resyncs<'a, S: Timers>(
         registration.snapshot_in_flight = Some(local.clone());
         registration.snapshot_deletions.clear();
         registration.snapshot_deletions_overflow = false;
-        if let Some(resync) = registration.resync.as_mut() {
-            resync.modes_changed = false;
-            resync.changes.clear();
-            resync.changes_overflow = false;
-        }
+        let Some(resync) = registration.resync.as_mut() else {
+            continue;
+        };
+        // What arrived before this read is covered by it.
+        resync.events.clear();
+        resync.overflowed = false;
+        resync.modes_changed = false;
+        resync.changes.clear();
+        resync.changes_overflow = false;
+        resync.mark = Arc::new(AtomicU64::new(0));
+        let mark = resync.mark.clone();
+        let sequence = sequence.clone();
         let identity = registration.events.worker_epoch.clone();
         let current = registration.modes.clone();
         let directory = registration.directory.clone();
         resyncs.push(Box::pin(async move {
             let (result, modes) = futures_lite::future::zip(
-                bounded_snapshot(client, resolved, &id, current, &local, cancellation, timers),
+                bounded_snapshot(
+                    client,
+                    resolved,
+                    &id,
+                    current,
+                    &local,
+                    cancellation,
+                    timers,
+                    move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
+                ),
                 async {
                     // Optional, like the listing at attach: a failure keeps
                     // the modes already known.
@@ -1758,7 +1924,14 @@ fn finish_resync(
     registration.snapshot_in_flight = None;
     let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
     let mut resync = registration.resync.take().unwrap_or_default();
+    let overflowed = resync.overflowed;
     let result = completed.result.and_then(|mut snapshot| {
+        if overflowed {
+            return Err(backend::Error::new(
+                backend::ErrorKind::Unavailable,
+                "too many OpenCode events arrived while it was read",
+            ));
+        }
         if overflow || resync.changes_overflow {
             return Err(backend::Error::new(
                 backend::ErrorKind::Unavailable,
@@ -1791,7 +1964,15 @@ fn finish_resync(
                 };
             }
             snapshot.modes = registration.modes.clone();
-            let held = std::mem::take(&mut resync.events);
+            // Conversation events that arrived before the messages were
+            // listed are already in the listing; applying them again would
+            // repeat their text.
+            let mark = resync.mark.load(Ordering::Acquire);
+            let held: Vec<Event> = std::mem::take(&mut resync.events)
+                .into_iter()
+                .filter(|(sequence, event)| *sequence > mark || !reflected(&snapshot, event))
+                .map(|(_, event)| event)
+                .collect();
             let mut running = match snapshot.busy {
                 Some(true) => RunningState::Running,
                 Some(false) => RunningState::Idle,
@@ -1836,6 +2017,29 @@ fn finish_resync(
         }
     };
     end_registration(registrations, &completed.id, Some(reason));
+}
+
+/// Whether the conversation `snapshot` lists already shows `event`: a start,
+/// text or tool call of a message it lists, a completion of a message it shows
+/// completed, or the end of a tool it shows finished.
+fn reflected(snapshot: &Snapshot, event: &Event) -> bool {
+    let listed = |id: &str| snapshot.messages.iter().find(|message| message.id == id);
+    match event {
+        Event::MessageStarted { message, .. }
+        | Event::TextDelta { message, .. }
+        | Event::ToolStarted { message, .. } => listed(message).is_some(),
+        Event::MessageCompleted { message } => {
+            listed(message).is_some_and(|message| message.completed)
+        }
+        Event::ToolFinished { id, .. } => snapshot
+            .messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .any(|part| {
+                matches!(part, backend::Part::Tool { id: tool, finished: true, .. } if tool == id)
+            }),
+        _ => false,
+    }
 }
 
 /// The JSON payload of one SSE group, `None` for keep-alive and comment groups.
@@ -1887,43 +2091,24 @@ async fn modes(
     Modes { offered, current }
 }
 
-/// List the agents of a session that offers none yet, and report them once there are some.
-async fn list_modes(
-    client: &Client<'_>,
-    resolved: &Resolved,
-    registration: &mut Registration,
-    cancellation: &Cancellation,
-) {
-    if !registration.modes.offered.is_empty() || registration.listings == 0 {
-        return;
-    }
-    registration.listings -= 1;
-    let info = match &registration.modes.current {
-        Some(agent) => serde_json::json!({ "agent": agent }),
-        None => Value::Null,
-    };
-    let modes = modes(
-        client,
-        resolved,
-        &registration.directory,
-        &info,
-        cancellation,
-    )
-    .await;
-    if !modes.offered.is_empty() {
-        registration.modes = modes;
-        registration.publish_modes();
-    }
-}
-
 /// Feed one complete SSE event to its session and to any parent that owns its
 /// worker. Child events are authoritative; no paginated scan infers removal.
+#[cfg(test)]
 fn dispatch_events(event: &str, registrations: &mut HashMap<String, Registration>) {
+    dispatch_events_at(event, registrations, 0);
+}
+
+/// [`dispatch_events`] for the event stream's `sequence`th event, which a
+/// session being read again holds with that number.
+fn dispatch_events_at(
+    event: &str,
+    registrations: &mut HashMap<String, Registration>,
+    sequence: u64,
+) {
     let Ok(value) = serde_json::from_str::<Value>(event) else {
         return;
     };
     apply_worker_event(&value, registrations);
-    let mut overflowed = None;
     if let Some(session_id) = wire::session_id_of(&value)
         && let Some(registration) = registrations.get_mut(&session_id)
     {
@@ -1947,10 +2132,21 @@ fn dispatch_events(event: &str, registrations: &mut HashMap<String, Registration
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             ) {
-                if resync.events.len() < MAX_RESYNC_EVENTS {
-                    resync.events.push(event);
-                } else {
-                    overflowed = Some(session_id);
+                // Only events during a read are held. One that arrives while
+                // no read is in flight is covered by the next read, which
+                // starts after it.
+                if let Some(read) = &registration.snapshot_in_flight
+                    && !resync.overflowed
+                {
+                    if resync.events.len() < MAX_RESYNC_EVENTS {
+                        resync.events.push((sequence, event));
+                    } else {
+                        // Abandon this read as a failed attempt; the next
+                        // one covers what was held.
+                        resync.events.clear();
+                        resync.overflowed = true;
+                        read.cancel();
+                    }
                 }
             }
         } else if let Some(event) = wire::event_for(
@@ -1974,16 +2170,6 @@ fn dispatch_events(event: &str, registrations: &mut HashMap<String, Registration
                 registration.events.deliver(event);
             }
         }
-    }
-    if let Some(session_id) = overflowed {
-        end_registration(
-            registrations,
-            &session_id,
-            Some(
-                "too many OpenCode events arrived while the session was read again after reconnecting"
-                    .to_owned(),
-            ),
-        );
     }
     retry_worker_delivery(registrations);
 }
@@ -2245,7 +2431,7 @@ fn end_registration(
         if let Some(cancellation) = registration.reconcile_in_flight {
             cancellation.cancel();
         }
-        registration.events.deliver(Event::Closed { reason });
+        registration.events.close_with(reason);
     }
 }
 
@@ -2308,31 +2494,130 @@ fn session_summaries(sessions: &[Value]) -> Vec<SessionSummary> {
         .collect()
 }
 
-/// Service one command, returning whether the connection should stay open.
-async fn handle_command(
-    command: Command,
-    client: &Client<'_>,
-    resolved: &Resolved,
-    registrations: &mut HashMap<String, Registration>,
-    cancellation: &Cancellation,
-) -> bool {
+/// The rest of a command whose network part has finished, applied to the
+/// registrations by the loop.
+enum Completion {
+    Created {
+        id: String,
+        directory: String,
+        modes: Modes,
+        reply: async_channel::Sender<backend::Result<(String, RegistrationEvents)>>,
+    },
+    Attached {
+        id: String,
+        directory: String,
+        modes: Modes,
+        reply: async_channel::Sender<backend::Result<RegistrationEvents>>,
+    },
+    /// Agents listed for a session that offered none.
+    Listed {
+        id: String,
+        identity: Arc<AtomicU64>,
+        modes: Modes,
+    },
+}
+
+type Operations<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = Option<Completion>> + 'a>>>;
+
+/// Commands performed against OpenCode at once. Each runs isolated from the
+/// loop, so one slow request never holds up the event stream, the re-reads,
+/// or another space's commands.
+const MAX_OPERATIONS: usize = 32;
+/// A command that waited for a connection is refused if it has not finished
+/// this long after the connection opened.
+const HELD_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether `command` runs as an operation, and so counts against
+/// [`MAX_OPERATIONS`].
+fn takes_operation(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Close { .. } | Command::Snapshot { .. } | Command::Shutdown
+    )
+}
+
+/// A way to answer `command` with an error after it has been moved into its
+/// operation.
+fn refuser(command: &Command) -> Box<dyn FnOnce(backend::Error)> {
+    fn answer<T: 'static>(
+        reply: &async_channel::Sender<backend::Result<T>>,
+    ) -> Box<dyn FnOnce(backend::Error)> {
+        let reply = reply.clone();
+        Box::new(move |error| {
+            let _ = reply.try_send(Err(error));
+        })
+    }
     match command {
+        Command::Sessions { reply, .. } => answer(reply),
+        Command::Create { reply, .. } => answer(reply),
+        Command::Attach { reply, .. } => answer(reply),
+        Command::Snapshot { reply, .. } => answer(reply),
+        Command::Prompt { reply, .. }
+        | Command::Interrupt { reply, .. }
+        | Command::Decide { reply, .. }
+        | Command::Answer { reply, .. }
+        | Command::SetMode { reply, .. } => answer(reply),
+        Command::Close { .. } | Command::Shutdown => Box::new(|_| {}),
+    }
+}
+
+/// Start one command. Closing and snapshots are handled at once; the others
+/// start an isolated operation whose result, if it needs the registrations,
+/// the loop applies with [`complete`]. A command that waited for this
+/// connection is dropped if its caller has given up, and otherwise bounded by
+/// [`HELD_COMMAND_TIMEOUT`].
+#[allow(clippy::too_many_arguments)]
+fn start_command<'a, S: Timers>(
+    command: Command,
+    held: bool,
+    registrations: &mut HashMap<String, Registration>,
+    operations: &mut Operations<'a>,
+    snapshots: &mut SnapshotFutures<'a>,
+    client: &'a Client<'_>,
+    resolved: &'a Resolved,
+    cancellation: &'a Cancellation,
+    timers: &'a S,
+) {
+    // A caller that gave up while OpenCode was unreachable no longer wants
+    // its command performed, such as a session created for nobody.
+    if held && abandoned(&command) {
+        return;
+    }
+    let late = held.then(|| refuser(&command));
+    let operation: Pin<Box<dyn Future<Output = Option<Completion>> + 'a>> = match command {
+        Command::Shutdown => return,
         Command::Close { id, identity } => {
             close_registration(registrations, &id, &identity);
-            // Keep the shared connection available for other registrations and
-            // for a later retry after the last one closes.
-            true
+            return;
         }
-        Command::Sessions { directory, reply } => {
+        Command::Snapshot {
+            id,
+            identity,
+            reply,
+        } => {
+            schedule_snapshot(
+                registrations,
+                snapshots,
+                id,
+                &identity,
+                reply,
+                client,
+                resolved,
+                cancellation,
+                timers,
+            );
+            return;
+        }
+        Command::Sessions { directory, reply } => Box::pin(async move {
             let result = api::list_sessions(client, resolved, &directory, cancellation)
                 .await
                 .map(|sessions| session_summaries(&sessions))
                 .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
-        }
-        Command::Create { spec, reply } => {
-            let result = match api::create_session(
+            let _ = reply.try_send(result);
+            None
+        }),
+        Command::Create { spec, reply } => Box::pin(async move {
+            let info = match api::create_session(
                 client,
                 resolved,
                 &spec.directory,
@@ -2341,37 +2626,27 @@ async fn handle_command(
             )
             .await
             {
-                Ok(info) => match info.get("id").and_then(Value::as_str) {
-                    Some(id) => {
-                        close_abandoned_registration(registrations, id);
-                        if registrations.contains_key(id) {
-                            let _ = reply.try_send(Err(backend::Error::new(
-                                backend::ErrorKind::Unavailable,
-                                "The server returned a session that is already attached.",
-                            )));
-                            return true;
-                        }
-                        let modes =
-                            modes(client, resolved, &spec.directory, &info, cancellation).await;
-                        let rx = insert_registration(
-                            registrations,
-                            id.to_owned(),
-                            &spec.directory,
-                            modes,
-                        );
-                        Ok((id.to_owned(), rx))
-                    }
-                    None => Err(Failure {
-                        status: None,
-                        message: "the server did not return the new session's id".to_owned(),
-                    }),
-                },
-                Err(failure) => Err(failure),
-            }
-            .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
-        }
+                Ok(info) => info,
+                Err(failure) => {
+                    let _ = reply.try_send(Err(map_failure(failure)));
+                    return None;
+                }
+            };
+            let Some(id) = info.get("id").and_then(Value::as_str).map(str::to_owned) else {
+                let _ = reply.try_send(Err(backend::Error::new(
+                    backend::ErrorKind::Unavailable,
+                    "the server did not return the new session's id",
+                )));
+                return None;
+            };
+            let modes = modes(client, resolved, &spec.directory, &info, cancellation).await;
+            Some(Completion::Created {
+                id,
+                directory: spec.directory,
+                modes,
+                reply,
+            })
+        }),
         Command::Attach {
             id,
             directory,
@@ -2381,39 +2656,39 @@ async fn handle_command(
             if registrations.contains_key(&id) {
                 let _ = reply.try_send(Err(backend::Error::new(
                     backend::ErrorKind::Unavailable,
-                    "That OpenCode session is already attached; join its existing space.",
+                    ALREADY_ATTACHED,
                 )));
-                return true;
+                return;
             }
-            let result = match api::session_info(client, resolved, &id, cancellation).await {
-                Ok(info) => {
-                    let session_directory = info
-                        .get("location")
-                        .and_then(|location| location.get("directory"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if session_directory == directory {
-                        let modes = modes(client, resolved, &directory, &info, cancellation).await;
-                        Ok(insert_registration(
-                            registrations,
-                            id.clone(),
-                            &directory,
-                            modes,
-                        ))
-                    } else {
-                        Err(Failure {
-                            status: Some(404),
-                            message: "the session is not in that directory".to_owned(),
-                        })
+            Box::pin(async move {
+                let info = match api::session_info(client, resolved, &id, cancellation).await {
+                    Ok(info) => info,
+                    Err(failure) => {
+                        let _ = reply.try_send(Err(map_failure(failure)));
+                        return None;
                     }
+                };
+                let session_directory = info
+                    .get("location")
+                    .and_then(|location| location.get("directory"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if session_directory != directory {
+                    let _ = reply.try_send(Err(backend::Error::new(
+                        backend::ErrorKind::NotFound,
+                        "the session is not in that directory",
+                    )));
+                    return None;
                 }
-                Err(failure) => Err(failure),
-            }
-            .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
+                let modes = modes(client, resolved, &directory, &info, cancellation).await;
+                Some(Completion::Attached {
+                    id,
+                    directory,
+                    modes,
+                    reply,
+                })
+            })
         }
-        Command::Snapshot { .. } => unreachable!("snapshots are scheduled by the service loop"),
         Command::Prompt {
             id,
             identity,
@@ -2422,47 +2697,15 @@ async fn handle_command(
             reply,
         } => {
             if !owns_registration(registrations, &id, &identity, &reply) {
-                return true;
+                return;
             }
-            let result = api::send_prompt(client, resolved, &id, &key, &text, cancellation)
-                .await
-                .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
-        }
-        Command::SetMode {
-            id,
-            identity,
-            mode,
-            reply,
-        } => {
-            if !owns_registration(registrations, &id, &identity, &reply) {
-                return true;
-            }
-            // OpenCode accepts any agent name, so only an offered one is passed on. The mode changes when the server
-            // confirms the switch on the event stream.
-            if let Some(registration) = registrations.get_mut(&id) {
-                list_modes(client, resolved, registration, cancellation).await;
-            }
-            let offered = registrations.get(&id).is_some_and(|registration| {
-                registration
-                    .modes
-                    .offered
-                    .iter()
-                    .any(|offered| offered.id == mode)
-            });
-            let result = if offered {
-                api::switch_agent(client, resolved, &id, &mode, cancellation)
+            Box::pin(async move {
+                let result = api::send_prompt(client, resolved, &id, &key, &text, cancellation)
                     .await
-                    .map_err(map_failure)
-            } else {
-                Err(backend::Error::new(
-                    backend::ErrorKind::Invalid,
-                    format!("the session does not offer the {mode} agent"),
-                ))
-            };
-            reply.send(result).await.ok();
-            true
+                    .map_err(map_failure);
+                let _ = reply.try_send(result);
+                None
+            })
         }
         Command::Interrupt {
             id,
@@ -2470,13 +2713,15 @@ async fn handle_command(
             reply,
         } => {
             if !owns_registration(registrations, &id, &identity, &reply) {
-                return true;
+                return;
             }
-            let result = api::interrupt(client, resolved, &id, cancellation)
-                .await
-                .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
+            Box::pin(async move {
+                let result = api::interrupt(client, resolved, &id, cancellation)
+                    .await
+                    .map_err(map_failure);
+                let _ = reply.try_send(result);
+                None
+            })
         }
         Command::Decide {
             id,
@@ -2486,14 +2731,16 @@ async fn handle_command(
             reply,
         } => {
             if !owns_registration(registrations, &id, &identity, &reply) {
-                return true;
+                return;
             }
-            let result =
-                api::reply_permission(client, resolved, &id, &request, &decision, cancellation)
-                    .await
-                    .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
+            Box::pin(async move {
+                let result =
+                    api::reply_permission(client, resolved, &id, &request, &decision, cancellation)
+                        .await
+                        .map_err(map_failure);
+                let _ = reply.try_send(result);
+                None
+            })
         }
         Command::Answer {
             id,
@@ -2503,16 +2750,145 @@ async fn handle_command(
             reply,
         } => {
             if !owns_registration(registrations, &id, &identity, &reply) {
-                return true;
+                return;
             }
-            let result = api::reply_form(client, resolved, &id, &form, &answer, cancellation)
-                .await
-                .map_err(map_failure);
-            reply.send(result).await.ok();
-            true
+            Box::pin(async move {
+                let result = api::reply_form(client, resolved, &id, &form, &answer, cancellation)
+                    .await
+                    .map_err(map_failure);
+                let _ = reply.try_send(result);
+                None
+            })
+        }
+        Command::SetMode {
+            id,
+            identity,
+            mode,
+            reply,
+        } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return;
+            }
+            let registration = registrations.get_mut(&id).expect("owned above");
+            // OpenCode answers an empty listing while it loads a directory,
+            // so a session offering none lists its agents again first.
+            let list = registration.modes.offered.is_empty() && registration.listings > 0;
+            if list {
+                registration.listings -= 1;
+            }
+            let offered = registration.modes.offered.clone();
+            let current = registration.modes.current.clone();
+            let directory = registration.directory.clone();
+            Box::pin(async move {
+                let listed = if list {
+                    let info =
+                        current.map_or(Value::Null, |agent| serde_json::json!({ "agent": agent }));
+                    Some(modes(client, resolved, &directory, &info, cancellation).await)
+                        .filter(|modes| !modes.offered.is_empty())
+                } else {
+                    None
+                };
+                // OpenCode accepts any agent name, so only an offered one is
+                // passed on. The mode changes when the server confirms the
+                // switch on the event stream.
+                let offered = listed.as_ref().map_or(&offered, |modes| &modes.offered);
+                let result = if offered.iter().any(|offered| offered.id == mode) {
+                    api::switch_agent(client, resolved, &id, &mode, cancellation)
+                        .await
+                        .map_err(map_failure)
+                } else {
+                    Err(backend::Error::new(
+                        backend::ErrorKind::Invalid,
+                        format!("the session does not offer the {mode} agent"),
+                    ))
+                };
+                let _ = reply.try_send(result);
+                listed.map(|modes| Completion::Listed {
+                    id,
+                    identity,
+                    modes,
+                })
+            })
+        }
+    };
+    let operation = match late {
+        Some(refuse) => Box::pin(async move {
+            futures_lite::future::race(operation, async move {
+                let _ = timers.sleep(HELD_COMMAND_TIMEOUT, cancellation).await;
+                refuse(backend::Error::new(
+                    backend::ErrorKind::Unavailable,
+                    "OpenCode did not answer in time after reconnecting",
+                ));
+                None
+            })
+            .await
+        }),
+        None => operation,
+    };
+    operations.push(operation);
+}
+
+/// Apply a finished operation to the registrations.
+fn complete(completion: Completion, registrations: &mut HashMap<String, Registration>) {
+    match completion {
+        Completion::Created {
+            id,
+            directory,
+            modes,
+            reply,
+        } => {
+            close_abandoned_registration(registrations, &id);
+            if registrations.contains_key(&id) {
+                let _ = reply.try_send(Err(backend::Error::new(
+                    backend::ErrorKind::Unavailable,
+                    "The server returned a session that is already attached.",
+                )));
+            } else {
+                let events = insert_registration(registrations, id.clone(), &directory, modes);
+                let _ = reply.try_send(Ok((id, events)));
+            }
+        }
+        Completion::Attached {
+            id,
+            directory,
+            modes,
+            reply,
+        } => {
+            // Another attachment of the same session may have finished first.
+            close_abandoned_registration(registrations, &id);
+            if registrations.contains_key(&id) {
+                let _ = reply.try_send(Err(backend::Error::new(
+                    backend::ErrorKind::Unavailable,
+                    ALREADY_ATTACHED,
+                )));
+            } else {
+                let events = insert_registration(registrations, id, &directory, modes);
+                let _ = reply.try_send(Ok(events));
+            }
+        }
+        Completion::Listed {
+            id,
+            identity,
+            modes,
+        } => {
+            if let Some(registration) = registrations.get_mut(&id)
+                && Arc::ptr_eq(&registration.events.worker_epoch, &identity)
+                && registration.modes.offered.is_empty()
+            {
+                // A switch confirmed meanwhile is newer than the listing.
+                let current = registration.modes.current.take().or(modes.current);
+                registration.modes = Modes {
+                    offered: modes.offered,
+                    current,
+                };
+                registration.publish_modes();
+            }
         }
     }
 }
+
+const ALREADY_ATTACHED: &str =
+    "That OpenCode session is already attached; join its existing space.";
 
 async fn snapshot<S: Timers>(
     client: &Client<'_>,
@@ -2521,9 +2897,10 @@ async fn snapshot<S: Timers>(
     modes: Modes,
     cancellation: &Cancellation,
     timers: &S,
+    on_messages: impl FnOnce(),
 ) -> std::result::Result<Snapshot, Failure> {
     let (parts, active) = futures_lite::future::zip(
-        api::SnapshotParts::fetch(client, resolved, id, cancellation),
+        api::SnapshotParts::fetch(client, resolved, id, cancellation, on_messages),
         api::active_sessions_with_timeout(
             client,
             resolved,
@@ -3825,8 +4202,9 @@ mod tests {
         });
         let (commands, receiver) = Commands::new();
         let resolved = crate::endpoint::resolve(Some(&format!("http://{address}")));
-        let connection =
-            std::thread::spawn(move || run_thread(Box::new(move || resolved.clone()), receiver));
+        let connection = std::thread::spawn(move || {
+            run_thread(Box::new(move || Ok(resolved.clone())), receiver)
+        });
         let attach = |id: &str| {
             let id = id.to_owned();
             block_on(commands.reply_with(|reply| Command::Attach {
@@ -4599,6 +4977,12 @@ mod tests {
         failing: HashMap<String, usize>,
         /// When each session's messages were listed.
         listed: HashMap<String, Vec<std::time::Instant>>,
+        /// While set, an event stream request waits before it is answered.
+        hold_events: bool,
+        /// Event stream requests received.
+        event_requests: usize,
+        /// Sessions whose prompts wait until they are removed.
+        stalled_prompts: HashSet<String>,
         stopping: bool,
     }
 
@@ -4768,6 +5152,17 @@ mod tests {
             return;
         }
         if path == "/api/event" {
+            let mut state = shared.state.lock().unwrap();
+            state.event_requests += 1;
+            shared.changed.notify_all();
+            while state.hold_events && !state.stopping {
+                state = shared
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(50))
+                    .unwrap()
+                    .0;
+            }
+            drop(state);
             let _ = write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -4791,8 +5186,24 @@ mod tests {
             ("200 OK", r#"{"data":{}}"#.to_owned())
         } else if path.starts_with("/api/session?parentID=") {
             ("200 OK", r#"{"data":[],"cursor":{"next":null}}"#.to_owned())
+        } else if path.starts_with("/api/session?directory=") {
+            ("200 OK", r#"{"data":[]}"#.to_owned())
         } else if let Some(id) = session {
             let mut state = shared.state.lock().unwrap();
+            while state.stalled_prompts.contains(&id)
+                && path.ends_with("/prompt")
+                && !state.stopping
+            {
+                state = shared
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(50))
+                    .unwrap()
+                    .0;
+            }
+            if state.stopping {
+                // Leave without answering, as a service that went away.
+                return;
+            }
             while state.stalled.contains(&id) && path.contains("/message?") && !state.stopping {
                 state = shared
                     .changed
@@ -4828,6 +5239,7 @@ mod tests {
                     ("200 OK", json!({ "data": permissions }).to_string())
                 }
                 Some(_) if path.ends_with("/form") => ("200 OK", r#"{"data":[]}"#.to_owned()),
+                Some(_) if path.ends_with("/prompt") => ("200 OK", "{}".to_owned()),
                 Some(_) => ("200 OK", json!({ "data": fake_record(&id) }).to_string()),
             }
         } else {
@@ -4887,14 +5299,6 @@ mod tests {
         }
     }
 
-    /// An address nothing listens on, so a test never reaches a real service.
-    fn closed_address() -> std::net::SocketAddr {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-    }
-
     fn join_within(thread: std::thread::JoinHandle<()>, limit: Duration) {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -4914,18 +5318,15 @@ mod tests {
         let shared = Arc::new(FakeShared::default());
         let mut first = FakeService::start(shared.clone(), "first");
         write_service_file(&path, first.address, "first");
-        let fallback = closed_address();
         let resolve_path = path.clone();
+        // The production resolver, reading this service file. It found the
+        // service through the file, so it never falls back to the default
+        // address, where a real service may listen.
+        let mut resolver = crate::endpoint::Resolver::new(None);
         let (commands, receiver) = Commands::new();
         let connection = std::thread::spawn(move || {
             run_thread(
-                Box::new(move || {
-                    crate::endpoint::read_service_file_at(&resolve_path).unwrap_or(Resolved {
-                        host: "127.0.0.1".into(),
-                        port: fallback.port(),
-                        auth: None,
-                    })
-                }),
+                Box::new(move || resolver.next_from(None, Some(&resolve_path))),
                 receiver,
             )
         });
@@ -5118,6 +5519,267 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
+    /// Start a connection to whichever service `address` names, with the
+    /// simulated service's password.
+    fn connect_to(
+        address: &Arc<Mutex<std::net::SocketAddr>>,
+    ) -> (Commands, std::thread::JoinHandle<()>) {
+        let address = address.clone();
+        let (commands, receiver) = Commands::new();
+        let connection = std::thread::spawn(move || {
+            run_thread(
+                Box::new(move || {
+                    let address = *address.lock().unwrap();
+                    Ok(Resolved {
+                        host: "127.0.0.1".into(),
+                        port: address.port(),
+                        auth: Some(("opencode".into(), "secret".into())),
+                    })
+                }),
+                receiver,
+            )
+        });
+        (commands, connection)
+    }
+
+    fn wait_for(shared: &FakeShared, what: &str, ready: impl Fn(&FakeState) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut state = shared.state.lock().unwrap();
+        while !ready(&state) {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            state = shared
+                .changed
+                .wait_timeout(state, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+    }
+
+    fn in_thread<T: Send + 'static>(
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> std::sync::mpsc::Receiver<(T, std::time::Instant)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = work();
+            let _ = tx.send((result, std::time::Instant::now()));
+        });
+        rx
+    }
+
+    #[test]
+    fn a_stalled_or_held_command_does_not_hold_up_the_others() {
+        let shared = Arc::new(FakeShared::default());
+        let mut first = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(first.address));
+        let (commands, connection) = connect_to(&address);
+        let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Commands".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        let identity = events.identity.clone();
+        block_on(commands.reply_with(|reply| Command::Snapshot {
+            id: id.clone(),
+            identity: identity.clone(),
+            reply,
+        }))
+        .and_then(SnapshotReply::accept)
+        .unwrap();
+        let watched = watch(&events);
+        let prompt = |commands: &Commands| {
+            let commands = commands.clone();
+            let identity = identity.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Prompt {
+                    id: "s1".into(),
+                    identity,
+                    key: "k".into(),
+                    text: "hello".into(),
+                    reply,
+                }))
+            })
+        };
+        let list = |commands: &Commands| {
+            let commands = commands.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Sessions {
+                    directory: "/tmp".into(),
+                    reply,
+                }))
+            })
+        };
+
+        // A prompt OpenCode does not answer leaves the stream, and other
+        // commands, served.
+        shared.update(|state| {
+            state.stalled_prompts.insert("s1".into());
+        });
+        let stalled = prompt(&commands);
+        let listed = list(&commands);
+        assert!(
+            listed
+                .recv_timeout(Duration::from_secs(2))
+                .expect("a listing waited behind a stalled prompt")
+                .0
+                .is_ok()
+        );
+        first.send(json!({"type":"session.execution.started","data":{"sessionID":"s1"}}));
+        until(&watched, "a live event behind a stalled prompt", |event| {
+            matches!(event, Event::Busy)
+        });
+        shared.update(|state| {
+            state.stalled_prompts.clear();
+        });
+        assert!(
+            stalled
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .0
+                .is_ok()
+        );
+
+        // OpenCode restarts, and its new event stream is slow to answer, so
+        // commands made meanwhile wait for the connection.
+        shared.update(|state| {
+            state.hold_events = true;
+            state.stalled_prompts.insert("s1".into());
+        });
+        let requests = shared.state.lock().unwrap().event_requests;
+        first.stop();
+        until(&watched, "the disconnection notice", |event| {
+            matches!(event, Event::Reconnecting { .. })
+        });
+        let second = FakeService::start(shared.clone(), "secret");
+        *address.lock().unwrap() = second.address;
+        wait_for(
+            &shared,
+            "the event stream was never requested again",
+            |state| state.event_requests > requests,
+        );
+        let held_prompt = prompt(&commands);
+        let held_list = list(&commands);
+        // A caller who gave up: its session must not be created.
+        let (abandoned, gave_up) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Create {
+                spec: SessionSpec {
+                    directory: "/tmp".into(),
+                    title: "Nobody".into(),
+                },
+                reply: abandoned,
+            })
+            .unwrap();
+        drop(gave_up);
+        std::thread::sleep(Duration::from_millis(100));
+        let created = shared.state.lock().unwrap().created;
+        let opened = std::time::Instant::now();
+        shared.update(|state| state.hold_events = false);
+
+        // The listing is answered at once although the held prompt stalls,
+        // and the prompt is refused once its bound has passed.
+        let (result, answered) = held_list
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the held listing waited behind the held prompt");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(answered - opened < Duration::from_secs(2));
+        let (result, answered) = held_prompt
+            .recv_timeout(HELD_COMMAND_TIMEOUT + Duration::from_secs(3))
+            .expect("the held prompt was never answered");
+        let error = result.expect_err("the stalled prompt succeeded");
+        assert!(
+            error.message.contains("did not answer in time"),
+            "{error:?}"
+        );
+        assert!(answered - opened >= HELD_COMMAND_TIMEOUT - Duration::from_millis(100));
+        assert_eq!(shared.state.lock().unwrap().created, created);
+
+        shared.update(|state| state.stalled_prompts.clear());
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        drop(second);
+    }
+
+    #[test]
+    fn shutdown_fails_held_commands_at_once() {
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| state.hold_events = true);
+        let service = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(service.address));
+        let (commands, connection) = connect_to(&address);
+        // The event stream never answers, so the attempt holds commands.
+        wait_for(&shared, "the event stream was never requested", |state| {
+            state.event_requests > 0
+        });
+        let held = {
+            let commands = commands.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Sessions {
+                    directory: "/tmp".into(),
+                    reply,
+                }))
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        commands.shutdown();
+        let (result, answered) = held
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the held command was not failed");
+        assert!(result.is_err());
+        assert!(answered - started < Duration::from_millis(500));
+        // Later requests fail without waiting.
+        let later = block_on(commands.reply_with(|reply| Command::Sessions {
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap_err();
+        assert!(later.message.contains("shutting down"), "{later:?}");
+        drop(commands);
+        join_within(connection, Duration::from_secs(1));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    #[test]
+    fn requests_beyond_the_held_limit_are_refused() {
+        let mut sessions = Sessions::default();
+        let mut waiting = Vec::new();
+        for _ in 0..=MAX_HELD {
+            let (reply, receiver) = async_channel::bounded(1);
+            assert!(hold(
+                &mut sessions,
+                Command::Sessions {
+                    directory: "/tmp".into(),
+                    reply,
+                }
+            ));
+            waiting.push(receiver);
+        }
+        assert_eq!(sessions.held.len(), MAX_HELD);
+        assert!(
+            waiting[..MAX_HELD]
+                .iter()
+                .all(|receiver| receiver.is_empty())
+        );
+        let refused = waiting[MAX_HELD].try_recv().unwrap().unwrap_err();
+        assert_eq!(refused.message, TOO_MANY_HELD);
+        assert!(!hold(&mut sessions, Command::Shutdown));
+        // Whether a held request's caller has given up.
+        let (reply, receiver) = async_channel::bounded::<backend::Result<()>>(1);
+        let command = Command::Interrupt {
+            id: "s".into(),
+            identity: Arc::new(AtomicU64::new(0)),
+            reply,
+        };
+        assert!(!abandoned(&command));
+        drop(receiver);
+        assert!(abandoned(&command));
+    }
+
     #[test]
     fn reconnecting_backs_off_and_shutdown_stays_prompt() {
         // A service that accepts connections and drops them at once, so every
@@ -5147,9 +5809,10 @@ mod tests {
         };
         let (commands, receiver) = Commands::new();
         let resolved =
-            crate::endpoint::resolve_from(Some(&format!("http://{address}")), None, None);
-        let connection =
-            std::thread::spawn(move || run_thread(Box::new(move || resolved.clone()), receiver));
+            crate::endpoint::resolve_from(Some(&format!("http://{address}")), None, None).0;
+        let connection = std::thread::spawn(move || {
+            run_thread(Box::new(move || Ok(resolved.clone())), receiver)
+        });
         // A command while the service is unreachable fails rather than waits.
         let refused = block_on(commands.reply_with(|reply| Command::Sessions {
             directory: "/tmp".into(),
@@ -5193,7 +5856,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_loss_discards_events_held_from_the_connection_between() {
+    fn connection_losses_before_a_session_is_read_are_bounded() {
         let mut registrations = HashMap::new();
         let read = insert_registration(&mut registrations, "read".into(), "/tmp", Modes::default());
         let unread = insert_registration(
@@ -5213,16 +5876,10 @@ mod tests {
             Some(Event::Closed { reason: Some(_) })
         ));
         assert!(!registrations.contains_key("unread"));
-        // The stream reopens, an event is held, and the stream is lost again
-        // before the session is read: the next read covers that event.
         let busy =
             json!({"type":"session.execution.started","data":{"sessionID":"read"}}).to_string();
+        // With no read in flight, an event is covered by the next read.
         dispatch_events(&busy, &mut registrations);
-        assert_eq!(
-            registrations["read"].resync.as_ref().unwrap().events.len(),
-            1
-        );
-        connection_lost(&mut registrations);
         assert!(
             registrations["read"]
                 .resync
@@ -5231,11 +5888,39 @@ mod tests {
                 .events
                 .is_empty()
         );
+        // During a read it is held; a loss before the read finishes discards
+        // it, since the next read covers it, and keeps failures counted.
+        let registration = registrations.get_mut("read").unwrap();
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        registration.resync.as_mut().unwrap().failures = 2;
+        dispatch_events(&busy, &mut registrations);
+        assert_eq!(
+            registrations["read"].resync.as_ref().unwrap().events.len(),
+            1
+        );
+        connection_lost(&mut registrations);
+        let resync = registrations["read"].resync.as_ref().unwrap();
+        assert!(resync.events.is_empty());
+        assert_eq!((resync.failures, resync.interruptions), (2, 1));
         assert!(matches!(
             read.try_recv().unwrap().into_current(),
             Some(Event::Reconnecting { .. })
         ));
-        assert!(read.try_recv().is_err());
+        // A service that keeps dropping the stream before the session can be
+        // read closes the space, with the reason, rather than leaving it
+        // reconnecting forever.
+        for _ in 1..RESYNC_INTERRUPTIONS {
+            connection_lost(&mut registrations);
+        }
+        assert!(!registrations.contains_key("read"));
+        let mut last = None;
+        while let Ok(event) = read.try_recv() {
+            last = event.into_current();
+        }
+        assert!(
+            matches!(&last, Some(Event::Closed { reason: Some(reason) }) if reason.contains("kept dropping")),
+            "{last:?}"
+        );
     }
 
     #[test]
@@ -5301,7 +5986,7 @@ mod tests {
             assert!(registration.events.deliver(Event::Busy));
         }
         registration.resync = Some(Resync {
-            events: vec![Event::Idle; 100],
+            events: vec![(1, Event::Idle); 100],
             ..Resync::default()
         });
         let identity = registration.events.worker_epoch.clone();
@@ -5337,11 +6022,11 @@ mod tests {
             run_thread(
                 Box::new(move || {
                     let address = *resolve_address.lock().unwrap();
-                    Resolved {
+                    Ok(Resolved {
                         host: "127.0.0.1".into(),
                         port: address.port(),
                         auth: Some(("opencode".into(), "secret".into())),
-                    }
+                    })
                 }),
                 receiver,
             )
@@ -5409,7 +6094,225 @@ mod tests {
     }
 
     #[test]
-    fn held_events_beyond_the_limit_close_only_that_session() {
+    fn a_close_reason_arrives_even_when_the_channel_is_full() {
+        let mut registrations = HashMap::new();
+        let events =
+            insert_registration(&mut registrations, "full".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("full").unwrap();
+        while registration.events.room() > 0 {
+            assert!(registration.events.deliver(Event::Busy));
+        }
+        end_registration(&mut registrations, "full", Some("the reason".into()));
+        // Events already queued were lost with the channel's room, but the
+        // session still learns why it ended.
+        let ended = block_on(events.recv()).unwrap().into_current();
+        assert!(
+            matches!(&ended, Some(Event::Closed { reason: Some(reason) }) if reason == "the reason"),
+            "{ended:?}"
+        );
+        assert!(block_on(events.recv()).is_err());
+    }
+
+    #[test]
+    fn modes_seen_during_a_read_follow_its_resynchronization() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.resync = Some(Resync::default());
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        // An agent switch during the read, and agents listed for a mode
+        // change, are not reported ahead of the state read again.
+        dispatch_events(
+            &json!({"type":"session.agent.switched","data":{"sessionID":"s","agent":"plan"}})
+                .to_string(),
+            &mut registrations,
+        );
+        let mode = |id: &str| backend::Mode {
+            id: id.into(),
+            name: id.into(),
+            description: None,
+        };
+        let identity = registrations["s"].events.worker_epoch.clone();
+        complete(
+            Completion::Listed {
+                id: "s".into(),
+                identity: identity.clone(),
+                modes: Modes {
+                    offered: vec![mode("build")],
+                    current: Some("build".into()),
+                },
+            },
+            &mut registrations,
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "modes were reported before the read"
+        );
+        // The read lists the restarted service's agents; the switch is newer.
+        finish_resync(
+            &mut registrations,
+            ResyncResult {
+                id: "s".into(),
+                registration: identity,
+                result: Ok(Snapshot::default()),
+                modes: Some(Modes {
+                    offered: vec![mode("build"), mode("plan")],
+                    current: Some("build".into()),
+                }),
+            },
+            Instant::now(),
+        );
+        let Some(Event::Resynchronized { snapshot }) = events.try_recv().unwrap().into_current()
+        else {
+            panic!("the resynchronization was not first");
+        };
+        assert_eq!(snapshot.modes.current.as_deref(), Some("plan"));
+        assert_eq!(snapshot.modes.offered.len(), 2);
+    }
+
+    #[test]
+    fn held_conversation_events_already_in_the_listing_are_not_repeated() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.resync = Some(Resync::default());
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        let event = |kind: &str, data: Value| {
+            let mut data = data;
+            data["sessionID"] = json!("s");
+            json!({ "type": kind, "data": data }).to_string()
+        };
+        // Before the messages were listed: these are in the listing.
+        let before = [
+            event("session.text.started", json!({"assistantMessageID":"m"})),
+            event(
+                "session.text.delta",
+                json!({"assistantMessageID":"m","delta":"Hello "}),
+            ),
+            event(
+                "session.tool.called",
+                json!({"assistantMessageID":"m","id":"t1","input":{}}),
+            ),
+            event(
+                "session.tool.success",
+                json!({"assistantMessageID":"m","id":"t1"}),
+            ),
+        ];
+        for (number, payload) in before.iter().enumerate() {
+            dispatch_events_at(payload, &mut registrations, number as u64 + 1);
+        }
+        let mark = before.len() as u64;
+        registrations["s"]
+            .resync
+            .as_ref()
+            .unwrap()
+            .mark
+            .store(mark, Ordering::Release);
+        // After: these are not.
+        let after = [
+            event(
+                "session.text.delta",
+                json!({"assistantMessageID":"m","delta":"world"}),
+            ),
+            event("session.text.ended", json!({"assistantMessageID":"m"})),
+        ];
+        for (number, payload) in after.iter().enumerate() {
+            dispatch_events_at(payload, &mut registrations, mark + number as u64 + 1);
+        }
+        let identity = registrations["s"].events.worker_epoch.clone();
+        finish_resync(
+            &mut registrations,
+            ResyncResult {
+                id: "s".into(),
+                registration: identity,
+                result: Ok(Snapshot {
+                    messages: vec![backend::SnapshotMessage {
+                        id: "m".into(),
+                        role: backend::Role::Assistant,
+                        parts: vec![
+                            backend::Part::Text {
+                                text: "Hello ".into(),
+                            },
+                            backend::Part::Tool {
+                                id: "t1".into(),
+                                tool: "bash".into(),
+                                input: Value::Null,
+                                finished: true,
+                            },
+                        ],
+                        completed: false,
+                    }],
+                    ..Snapshot::default()
+                }),
+                modes: None,
+            },
+            Instant::now(),
+        );
+        let mut delivered = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            // Workers travel on their own lane.
+            if let Some(event) = event.into_current()
+                && !matches!(event, Event::WorkersChanged { .. })
+            {
+                delivered.push(event);
+            }
+        }
+        assert!(
+            matches!(delivered[0], Event::Resynchronized { .. }),
+            "{delivered:?}"
+        );
+        assert_eq!(
+            delivered[1..].to_vec(),
+            [
+                Event::TextDelta {
+                    message: "m".into(),
+                    text: "world".into(),
+                },
+                Event::MessageCompleted {
+                    message: "m".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn closing_during_a_read_cancels_it_and_ignores_its_result() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let read = Cancellation::new();
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.resync = Some(Resync::default());
+        registration.snapshot_in_flight = Some(read.clone());
+        let identity = events.identity.clone();
+        close_registration(&mut registrations, "s", &identity);
+        assert!(read.is_cancelled());
+        assert!(matches!(
+            events.try_recv().unwrap().into_current(),
+            Some(Event::Closed { reason: None })
+        ));
+        // A later registration of the same session is not touched by the
+        // abandoned read's result.
+        let replacement =
+            insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        finish_resync(
+            &mut registrations,
+            ResyncResult {
+                id: "s".into(),
+                registration: identity,
+                result: Ok(Snapshot::default()),
+                modes: None,
+            },
+            Instant::now(),
+        );
+        assert!(replacement.try_recv().is_err());
+        assert!(registrations["s"].resync.is_none());
+    }
+
+    #[test]
+    fn held_events_beyond_the_limit_abandon_only_that_read() {
         let mut registrations = HashMap::new();
         let resyncing = insert_registration(
             &mut registrations,
@@ -5419,19 +6322,49 @@ mod tests {
         );
         let other =
             insert_registration(&mut registrations, "other".into(), "/tmp", Modes::default());
-        registrations.get_mut("parent").unwrap().resync = Some(Resync::default());
+        let read = Cancellation::new();
+        let registration = registrations.get_mut("parent").unwrap();
+        registration.resync = Some(Resync::default());
+        registration.snapshot_in_flight = Some(read.clone());
         let busy =
             json!({"type":"session.execution.started","data":{"sessionID":"parent"}}).to_string();
         for _ in 0..MAX_RESYNC_EVENTS {
             dispatch_events(&busy, &mut registrations);
         }
         assert!(resyncing.try_recv().is_err(), "held events were delivered");
+        assert!(!read.is_cancelled());
         dispatch_events(&busy, &mut registrations);
-        assert!(!registrations.contains_key("parent"));
-        assert!(matches!(
-            resyncing.try_recv().unwrap().into_current(),
-            Some(Event::Closed { reason: Some(reason) }) if reason.contains("too many")
-        ));
+        // The read is abandoned and what was held is discarded: the next
+        // read covers it. The space stays open.
+        assert!(read.is_cancelled());
+        let resync = registrations["parent"].resync.as_ref().unwrap();
+        assert!(resync.overflowed && resync.events.is_empty());
+        dispatch_events(&busy, &mut registrations);
+        assert!(
+            registrations["parent"]
+                .resync
+                .as_ref()
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        let identity = registrations["parent"].events.worker_epoch.clone();
+        let now = Instant::now();
+        finish_resync(
+            &mut registrations,
+            ResyncResult {
+                id: "parent".into(),
+                registration: identity,
+                result: Ok(Snapshot::default()),
+                modes: None,
+            },
+            now,
+        );
+        // Counted as a failed attempt, retried at the cadence.
+        let resync = registrations["parent"].resync.as_ref().unwrap();
+        assert_eq!(resync.failures, 1);
+        assert_eq!(resync.retry_at, Some(now + RECONCILE_INTERVAL));
+        assert!(resyncing.try_recv().is_err());
         assert!(registrations.contains_key("other"));
         assert!(other.try_recv().is_err());
     }

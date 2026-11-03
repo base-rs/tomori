@@ -99,46 +99,121 @@ pub fn read_service_file_at(path: &std::path::Path) -> Option<Resolved> {
     Some(resolved)
 }
 
-/// Resolve the OpenCode service in the canonical order: `explicit`, the
-/// `OPENCODE_URL` environment variable, the XDG state file, then the default
-/// URL. The backend calls this before every connection attempt, because a
-/// restarted service may record another port and password.
-pub fn resolve(explicit: Option<&str>) -> Resolved {
-    let environment = std::env::var("OPENCODE_URL").ok();
-    let service_file = xdg_state_dir().map(|directory| directory.join("service.json"));
-    resolve_from(explicit, environment.as_deref(), service_file.as_deref())
+/// Where a resolved endpoint came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Explicit,
+    Environment,
+    ServiceFile,
+    Default,
 }
 
-/// [`resolve`] with its sources given: the explicit URL, the value of
-/// `OPENCODE_URL`, and the path of the registration file.
+/// Resolve the OpenCode service in the canonical order: `explicit`, the
+/// `OPENCODE_URL` environment variable, the XDG state file, then the default
+/// URL.
+#[cfg(test)]
+pub fn resolve(explicit: Option<&str>) -> Resolved {
+    Resolver::new(explicit.map(str::to_owned)).sources().0
+}
+
+/// Finds the service before every connection attempt, because a restarted
+/// service may record another port and password. Once the service has been
+/// found through the environment or its registration file, it is never
+/// assumed to be at the default address instead: a registration file that is
+/// missing or unreadable mid-run means the service has not recorded itself
+/// yet, so the attempt waits for it rather than reaching whatever listens on
+/// the default port.
+pub struct Resolver {
+    explicit: Option<String>,
+    found: Option<Source>,
+}
+
+impl Resolver {
+    pub fn new(explicit: Option<String>) -> Self {
+        Self {
+            explicit,
+            found: None,
+        }
+    }
+
+    fn sources(&self) -> (Resolved, Source) {
+        let environment = std::env::var("OPENCODE_URL").ok();
+        let service_file = xdg_state_dir().map(|directory| directory.join("service.json"));
+        resolve_from(
+            self.explicit.as_deref(),
+            environment.as_deref(),
+            service_file.as_deref(),
+        )
+    }
+
+    /// The service's endpoint for the next attempt, or why it is not known.
+    pub fn next(&mut self) -> Result<Resolved, String> {
+        let resolution = self.sources();
+        self.accept(resolution)
+    }
+
+    /// [`next`](Self::next) with its sources given.
+    #[cfg(test)]
+    pub fn next_from(
+        &mut self,
+        environment: Option<&str>,
+        service_file: Option<&std::path::Path>,
+    ) -> Result<Resolved, String> {
+        let resolution = resolve_from(self.explicit.as_deref(), environment, service_file);
+        self.accept(resolution)
+    }
+
+    fn accept(&mut self, (resolved, source): (Resolved, Source)) -> Result<Resolved, String> {
+        match (source, self.found) {
+            (Source::Default, Some(found)) if found != Source::Default => Err(format!(
+                "the OpenCode service has not recorded its address yet (it was found through {})",
+                match found {
+                    Source::Environment => "OPENCODE_URL",
+                    _ => "its service.json",
+                }
+            )),
+            _ => {
+                self.found = Some(source);
+                Ok(resolved)
+            }
+        }
+    }
+}
+
+/// [`Resolver`]'s order with its sources given: the explicit URL, the value
+/// of `OPENCODE_URL`, and the path of the registration file.
 pub fn resolve_from(
     explicit: Option<&str>,
     environment: Option<&str>,
     service_file: Option<&std::path::Path>,
-) -> Resolved {
-    for url in [explicit, environment].into_iter().flatten() {
-        let url = url.trim();
-        if !url.is_empty()
+) -> (Resolved, Source) {
+    for (url, source) in [
+        (explicit, Source::Explicit),
+        (environment, Source::Environment),
+    ] {
+        if let Some(url) = url.map(str::trim).filter(|url| !url.is_empty())
             && let Some(resolved) = resolve_url(url)
         {
-            return resolved;
+            return (resolved, source);
         }
     }
     if let Some(path) = service_file {
         if let Some(resolved) = read_service_file_at(path) {
-            return resolved;
+            return (resolved, Source::ServiceFile);
         }
         // A file that exists but cannot be read may be mid-rewrite by a
-        // restarting service; read it once more before falling back to the
-        // default, where another service may be listening.
+        // restarting service; read it once more before going on.
         if path.exists() {
             std::thread::sleep(std::time::Duration::from_millis(50));
             if let Some(resolved) = read_service_file_at(path) {
-                return resolved;
+                return (resolved, Source::ServiceFile);
             }
         }
     }
-    resolve_url(DEFAULT_URL).expect("the default URL is well-formed")
+    (
+        resolve_url(DEFAULT_URL).expect("the default URL is well-formed"),
+        Source::Default,
+    )
 }
 
 /// The standard base64 alphabet with padding, as HTTP basic auth requires:
@@ -211,7 +286,7 @@ mod tests {
             r#"{"url":"http://127.0.0.1:4100","password":"first"}"#,
         )
         .unwrap();
-        let first = resolve_from(None, None, Some(&path));
+        let first = resolve_from(None, None, Some(&path)).0;
         assert_eq!(first.port, 4100);
         assert_eq!(first.auth, Some(("opencode".into(), "first".into())));
         // A restarted service records another port and password.
@@ -220,21 +295,54 @@ mod tests {
             r#"{"url":"http://127.0.0.1:4200","password":"second"}"#,
         )
         .unwrap();
-        let second = resolve_from(None, None, Some(&path));
+        let second = resolve_from(None, None, Some(&path)).0;
         assert_eq!(second.port, 4200);
         assert_eq!(second.auth, Some(("opencode".into(), "second".into())));
-        let overridden = resolve_from(None, Some(" http://127.0.0.1:4300 "), Some(&path));
+        let overridden = resolve_from(None, Some(" http://127.0.0.1:4300 "), Some(&path)).0;
         assert_eq!(overridden.port, 4300);
         assert!(overridden.auth.is_none());
         let explicit = resolve_from(
             Some("http://127.0.0.1:4400"),
             Some("http://127.0.0.1:4300"),
             Some(&path),
-        );
+        )
+        .0;
         assert_eq!(explicit.port, 4400);
+        // Once the service was found through its file, a missing file means
+        // it has not recorded itself yet, not that it moved to the default.
+        let mut resolver = Resolver::new(None);
+        assert_eq!(resolver.next_from(None, Some(&path)).unwrap().port, 4200);
+        std::fs::remove_file(&path).unwrap();
+        let waiting = resolver.next_from(None, Some(&path)).unwrap_err();
+        assert!(waiting.contains("service.json"), "{waiting}");
+        std::fs::write(
+            &path,
+            r#"{"url":"http://127.0.0.1:4500","password":"third"}"#,
+        )
+        .unwrap();
+        assert_eq!(resolver.next_from(None, Some(&path)).unwrap().port, 4500);
+        // Likewise for OPENCODE_URL, should it be unset.
+        let mut resolver = Resolver::new(None);
+        assert_eq!(
+            resolver
+                .next_from(Some("http://127.0.0.1:4300"), None)
+                .unwrap()
+                .port,
+            4300
+        );
+        assert!(resolver.next_from(None, None).is_err());
         std::fs::remove_dir_all(&directory).unwrap();
-        // Without the file, the well-known default applies.
-        assert_eq!(resolve_from(None, Some(""), Some(&path)).port, 4096);
+        // Without the file, and before anything else was found, the
+        // well-known default applies.
+        let (default, source) = resolve_from(None, Some(""), Some(&path));
+        assert_eq!((default.port, source), (4096, Source::Default));
+        assert_eq!(
+            Resolver::new(None)
+                .next_from(None, Some(&path))
+                .unwrap()
+                .port,
+            4096
+        );
     }
 
     #[test]

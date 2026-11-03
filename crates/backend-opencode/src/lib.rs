@@ -51,6 +51,9 @@ pub struct OpenCode {
     connection: Mutex<Option<std::result::Result<Connection, Error>>>,
 }
 
+/// Why a request fails once the backend has been shut down.
+const SHUT_DOWN: &str = "the OpenCode backend is shutting down";
+
 impl OpenCode {
     pub fn new(config: Config) -> Self {
         Self {
@@ -73,9 +76,8 @@ impl OpenCode {
             None => {
                 // Resolved again before every connection attempt: a restarted
                 // service may record another port and password.
-                let url = self.config.url.clone();
-                let resolve: connection::Resolve =
-                    Box::new(move || endpoint::resolve(url.as_deref()));
+                let mut resolver = endpoint::Resolver::new(self.config.url.clone());
+                let resolve: connection::Resolve = Box::new(move || resolver.next());
                 let (commands, receiver) = connection::Commands::new();
                 let thread = std::thread::Builder::new()
                     .name("opencode-connection".to_owned())
@@ -129,6 +131,18 @@ impl Backend for OpenCode {
             .reply_with(move |reply| connection::Command::Create { spec, reply })
             .await?;
         Ok(OpenCodeSession::new(id, events, commands))
+    }
+
+    fn shutdown(&self) {
+        let mut guard = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_ref() {
+            Some(Ok(connection)) => connection.commands.shutdown(),
+            // Never start a connection once shutting down.
+            _ => *guard = Some(Err(Error::new(ErrorKind::Closed, SHUT_DOWN))),
+        }
     }
 
     async fn attach(&self, id: &str, directory: &str) -> Result<OpenCodeSession> {

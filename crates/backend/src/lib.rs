@@ -403,6 +403,11 @@ pub trait Backend: Send + Sync {
         id: &str,
         directory: &str,
     ) -> impl Future<Output = Result<Self::Session>> + Send;
+
+    /// The server is shutting down: stop waiting for the agent. Requests still waiting for it, such as for a
+    /// connection to return, fail at once, and so do later ones, so that shutdown never waits on the agent. Sessions
+    /// are closed separately. Must not block.
+    fn shutdown(&self) {}
 }
 
 /// One live agent session, bound to one space.

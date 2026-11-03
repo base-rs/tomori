@@ -916,11 +916,14 @@ impl SnapshotParts {
     }
 
     /// Fetch every piece for `session_id`.
+    /// `on_messages` is called once the messages have been read, so a caller
+    /// can tell which of the events it observed the listing reflects.
     pub async fn fetch<'scope>(
         client: &Client<'scope>,
         resolved: &Resolved,
         session_id: &str,
         cancellation: &Cancellation,
+        on_messages: impl FnOnce(),
     ) -> Result<Self, Failure> {
         // Validate the session exists before fetching its parts, and record
         // whether it is currently running a turn (time.busy after time.idle).
@@ -935,6 +938,7 @@ impl SnapshotParts {
         }
         let busy = running_from_record(&info);
         let messages = session_messages(client, resolved, session_id, cancellation).await?;
+        on_messages();
         let permissions = open_permissions(client, resolved, session_id, cancellation).await?;
         let forms = open_forms(client, resolved, session_id, cancellation).await?;
         let mut permission_ids = std::collections::HashSet::new();

@@ -10,6 +10,9 @@ use crate::limits;
 use crate::projection;
 use crate::queue::InputQueue;
 
+/// Why a participant's decision, answer or mode choice is refused while the backend reconnects.
+pub const RECONNECTING: &str = "The agent is reconnecting; try again once it is back.";
+
 /// Messages kept in the shared conversation.
 const MESSAGE_LIMIT: usize = 50;
 
@@ -55,6 +58,9 @@ pub struct SpaceModel {
     /// The backend reported a lost connection and has not yet read the session again, with the reason it gave. The
     /// space's state may be stale meanwhile, so no input is released.
     reconnecting: Option<String>,
+    /// Requests whose decision or answers the backend accepted since it reported reconnecting. The state it reads
+    /// again may predate them, so a resynchronization does not present them again.
+    settled: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -190,6 +196,7 @@ impl SpaceModel {
             error: None,
             worker_error: None,
             reconnecting: None,
+            settled: HashSet::new(),
         };
         model.load_messages(snapshot.messages);
         model
@@ -249,23 +256,36 @@ impl SpaceModel {
             .iter()
             .map(|permission| permission.id.as_str())
             .collect();
+        let settled = std::mem::take(&mut self.settled);
+        let listed: HashSet<&str> = listed
+            .into_iter()
+            .filter(|id| !settled.contains(*id))
+            .collect();
         self.approvals
             .retain(|pending| listed.contains(pending.id.as_str()));
         self.deciding
             .retain(|pending| listed.contains(pending.id.as_str()));
         for permission in permissions {
-            self.apply(Event::PermissionRequested(permission));
+            if !settled.contains(&permission.id) {
+                self.apply(Event::PermissionRequested(permission));
+            }
         }
         let listed: HashSet<&str> = questions
             .iter()
             .map(|question| question.id.as_str())
+            .collect();
+        let listed: HashSet<&str> = listed
+            .into_iter()
+            .filter(|id| !settled.contains(*id))
             .collect();
         self.questions
             .retain(|pending| listed.contains(pending.question.id.as_str()));
         self.submitting
             .retain(|pending| listed.contains(pending.question.id.as_str()));
         for question in questions {
-            self.apply(Event::QuestionAsked(question));
+            if !settled.contains(&question.id) {
+                self.apply(Event::QuestionAsked(question));
+            }
         }
         if let Some(reason) = self.reconnecting.take()
             && self.error.as_deref() == Some(reason.as_str())
@@ -298,6 +318,19 @@ impl SpaceModel {
 
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// Whether the backend reported reconnecting and has not yet read the session again.
+    pub fn is_reconnecting(&self) -> bool {
+        self.reconnecting.is_some()
+    }
+
+    /// Remember a request settled while reconnecting; see `settled`.
+    fn settle(&mut self, id: &str) {
+        // Bounded by the requests the space holds, which are bounded themselves.
+        if self.reconnecting.is_some() {
+            self.settled.insert(id.to_owned());
+        }
     }
 
     pub fn set_attribution(&mut self, enabled: bool) {
@@ -471,6 +504,7 @@ impl SpaceModel {
                 if !self.closed {
                     self.error = Some(reason.clone());
                     self.reconnecting = Some(reason);
+                    self.settled.clear();
                 }
             }
             Event::Resynchronized { snapshot } => {
@@ -481,6 +515,7 @@ impl SpaceModel {
             Event::Closed { reason } => {
                 self.closed = true;
                 self.reconnecting = None;
+                self.settled.clear();
                 self.workers_authoritative = false;
                 self.worker_error = None;
                 self.busy = None;
@@ -598,6 +633,10 @@ impl SpaceModel {
         request: &str,
         option: Option<&str>,
     ) -> Result<(), &'static str> {
+        // The approval may already have been resolved during the gap; the session read again will say.
+        if self.reconnecting.is_some() {
+            return Err(RECONNECTING);
+        }
         match self.approvals.front() {
             Some(pending)
                 if pending.id == request
@@ -620,6 +659,9 @@ impl SpaceModel {
 
     /// The backend accepted a decision.
     pub fn decided(&mut self, request: &str) {
+        if self.deciding.iter().any(|pending| pending.id == request) {
+            self.settle(request);
+        }
         self.deciding.retain(|pending| pending.id != request);
     }
 
@@ -642,6 +684,9 @@ impl SpaceModel {
         field: &str,
         text: &str,
     ) -> Result<AnswerOutcome, String> {
+        if self.reconnecting.is_some() {
+            return Err(RECONNECTING.to_owned());
+        }
         let pending = self
             .questions
             .front_mut()
@@ -667,6 +712,13 @@ impl SpaceModel {
 
     /// The backend accepted the answers to a question.
     pub fn answered(&mut self, question: &str) {
+        if self
+            .submitting
+            .iter()
+            .any(|pending| pending.question.id == question)
+        {
+            self.settle(question);
+        }
         self.submitting
             .retain(|pending| pending.question.id != question);
     }
@@ -1042,6 +1094,56 @@ mod tests {
             snapshot: Snapshot::default(),
         });
         assert_eq!(space.activity(), Activity::Closed);
+    }
+
+    #[test]
+    fn a_request_settled_while_reconnecting_is_not_presented_again() {
+        let question = |id: &str| backend::Question {
+            id: id.into(),
+            title: id.into(),
+            fields: Vec::new(),
+        };
+        let mut space = model();
+        space.apply(Event::PermissionRequested(permission("decided")));
+        space.apply(Event::PermissionRequested(permission("waiting")));
+        space.apply(Event::QuestionAsked(question("answered")));
+        assert!(space.claim_approval("decided", None).is_ok());
+        let complete = space.questions.pop_front().unwrap();
+        space.submitting.push(complete);
+        space.apply(Event::Reconnecting {
+            reason: "Lost the connection.".into(),
+        });
+        // Claims and answers wait for the session to be read again.
+        assert_eq!(space.claim_approval("waiting", None), Err(RECONNECTING));
+        assert_eq!(
+            space.answer("answered", "field", "text"),
+            Err(RECONNECTING.to_owned())
+        );
+        // Decisions already on their way are accepted during the gap; the
+        // state read again predates them.
+        space.decided("decided");
+        space.answered("answered");
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                busy: Some(false),
+                permissions: vec![permission("decided"), permission("waiting")],
+                questions: vec![question("answered")],
+                ..Snapshot::default()
+            },
+        });
+        let approvals: Vec<_> = space.approvals.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(approvals, ["waiting"]);
+        assert!(space.questions.is_empty());
+        assert!(space.claim_approval("waiting", None).is_ok());
+        // The memory lasts for one resynchronization only.
+        space.decided("waiting");
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                permissions: vec![permission("waiting")],
+                ..Snapshot::default()
+            },
+        });
+        assert_eq!(space.approvals.len(), 1);
     }
 
     #[test]
