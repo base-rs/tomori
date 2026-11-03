@@ -1,12 +1,14 @@
 [package]
 name = "tomori-speech"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "Streaming speech recognition, speakable text selection and synthesis for the Tomori server"
-repository = "https://github.com/ioquatix/tomori"
-license = "MIT"
-publish = false
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "speech", "asr", "tts", "sherpa-onnx"]
+categories = ["multimedia::audio", "accessibility"]
 
 [features]
 # Link sherpa-onnx and ONNX Runtime as shared libraries from `SHERPA_ONNX_LIB_DIR`, such as the CUDA build, instead of the static CPU libraries downloaded by default.
@@ -15,7 +17,7 @@ shared = ["sherpa-onnx/shared"]
 [dependencies]
 base-markdown = "0.1.4"
 log = "0.4"
-tomori-protocol = { path = "../protocol" }
+tomori-protocol = { version = "0.1.0", path = "../protocol" }
 # 1.13.8 rather than 2.x: 2.0 removed the espeak-ng fallback for words missing from Kokoro's lexicon and skips such words instead; see readme.md.
 sherpa-onnx = { version = "=1.13.8", default-features = false }
 

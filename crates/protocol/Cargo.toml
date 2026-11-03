@@ -1,12 +1,14 @@
 [package]
 name = "tomori-protocol"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "Wire protocol shared by Tomori clients and the Tomori server"
-repository = "https://github.com/ioquatix/tomori"
-license = "MIT"
-publish = false
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "protocol", "agents", "xr"]
+categories = ["network-programming", "encoding"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

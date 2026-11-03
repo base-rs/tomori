@@ -1,11 +1,11 @@
 [package]
 name = "tomori-environment-sky"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "Tomori's moonlit sky environment renderer"
-repository = "https://github.com/ioquatix/tomori"
-license = "MIT"
+repository.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
