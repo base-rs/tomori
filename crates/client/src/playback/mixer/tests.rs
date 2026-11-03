@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::playback::CEILING;
+use crate::playback::duck;
+use crate::playback::spatial::Listener;
 
 const RATE: u32 = 1_000;
 
@@ -275,7 +277,7 @@ fn clearing_forgets_levels() {
 fn plays_sound_cues_locally_without_making_them_sources() {
     let mut mixer = mixer();
     mixer.set_agent_muted(true);
-    mixer.play(Earcon::Sent);
+    mixer.play(Earcon::Sent, Direction::Centre);
     assert_eq!(mixer.playing_cues(), 1);
     let expected: Vec<i16> = Bank::new(RATE)
         .samples(Earcon::Sent)
@@ -293,13 +295,13 @@ fn plays_sound_cues_locally_without_making_them_sources() {
 #[test]
 fn a_cue_continues_across_mixes_and_clearing_does_not_stop_it() {
     let mut mixer = mixer();
-    mixer.play(Earcon::Request);
+    mixer.play(Earcon::Request, Direction::Centre);
     let length = Bank::new(RATE).samples(Earcon::Request).len();
     mix(&mut mixer, length / 2);
     assert_eq!(mixer.playing_cues(), 1);
     mix(&mut mixer, length);
     assert_eq!(mixer.playing_cues(), 0);
-    mixer.play(Earcon::Request);
+    mixer.play(Earcon::Request, Direction::Centre);
     mixer.clear();
     assert_eq!(mixer.playing_cues(), 1);
     assert!(mix(&mut mixer, length).iter().any(|sample| *sample != 0));
@@ -308,13 +310,13 @@ fn a_cue_continues_across_mixes_and_clearing_does_not_stop_it() {
 #[test]
 fn at_most_eight_cues_play_and_a_new_one_replaces_the_furthest_through() {
     let mut mixer = mixer();
-    mixer.play(Earcon::Request);
+    mixer.play(Earcon::Request, Direction::Centre);
     mix(&mut mixer, 5);
     for _ in 0..7 {
-        mixer.play(Earcon::Knock);
+        mixer.play(Earcon::Knock, Direction::Centre);
     }
     assert_eq!(mixer.playing_cues(), 8);
-    mixer.play(Earcon::Choose);
+    mixer.play(Earcon::Choose, Direction::Centre);
     assert_eq!(mixer.playing_cues(), 8);
     // The request chime, furthest through, was replaced: once the knocks end, nothing is left.
     let knock = Bank::new(RATE).samples(Earcon::Knock).len();
@@ -339,7 +341,7 @@ fn silencing_fades_out_received_audio_and_cues_but_not_the_opening_tick() {
         (Earcon::On, true),
         (Earcon::Failed, false),
     ] {
-        mixer.play(earcon);
+        mixer.play(earcon, Direction::Centre);
         let mut output = vec![0; bank.samples(earcon).len()];
         mixer.mix(&mut output);
         let peak = output.iter().map(|sample| sample.unsigned_abs()).max();
@@ -371,7 +373,7 @@ fn silencing_fades_out_received_audio_and_cues_but_not_the_opening_tick() {
         [100, 200, 300, 400, 500, 600, 700, 800, 900, 1_000]
     );
     mixer.set_silenced(false);
-    mixer.play(Earcon::Sent);
+    mixer.play(Earcon::Sent, Direction::Centre);
     let mut output = vec![0; bank.samples(Earcon::Sent).len()];
     mixer.mix(&mut output);
     assert!(
@@ -382,4 +384,203 @@ fn silencing_fades_out_received_audio_and_cues_but_not_the_opening_tick() {
             .unwrap()
             > 1_000
     );
+}
+
+fn stereo(mixer: &mut Mixer, frames: usize) -> (Vec<i16>, Vec<i16>) {
+    let mut output = vec![0; frames * 2];
+    mixer.mix_stereo(&mut output);
+    (
+        output.iter().step_by(2).copied().collect(),
+        output.iter().skip(1).step_by(2).copied().collect(),
+    )
+}
+
+fn listener() -> Listener {
+    Listener {
+        position: [0.0, 1.6, 0.0],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+fn energy(channel: &[i16]) -> f64 {
+    channel
+        .iter()
+        .map(|sample| f64::from(*sample).powi(2))
+        .sum()
+}
+
+#[test]
+fn without_a_scene_stereo_plays_the_mono_mix_in_both_ears() {
+    let mut mixer = mixer();
+    mixer.push(frame(1, 0, 100));
+    mixer.push(frame(AGENT_SOURCE, 0, 20));
+    let (left, right) = stereo(&mut mixer, 4);
+    assert_eq!(left, [120; 4]);
+    assert_eq!(right, [120; 4]);
+}
+
+#[test]
+fn places_each_source_on_its_side_and_agent_speech_played_again_at_the_agent() {
+    let mut mixer = Mixer::new(MixerOptions {
+        sample_rate: 48_000,
+        jitter: JitterOptions {
+            target_latency: Duration::ZERO,
+            latency_limit: Duration::from_millis(200),
+        },
+    });
+    *mixer.scene_mut() = Scene {
+        listener: Some(listener()),
+        sources: vec![(1, [-2.0, 1.6, 0.0]), (AGENT_SOURCE, [2.0, 1.6, 0.0])],
+        mono: false,
+    };
+    let frame = |source: u32| AudioFrame {
+        gate: Gate::Live,
+        source,
+        sequence: 0,
+        timestamp: 0,
+        sample_rate: 48_000,
+        samples: vec![1_000; 960],
+    };
+    mixer.push(frame(1));
+    let (left, right) = stereo(&mut mixer, 960);
+    assert!(energy(&left) > 5.0 * energy(&right));
+    mixer.clear();
+    mixer.push(frame(REPLAY_SOURCE));
+    let (left, right) = stereo(&mut mixer, 960);
+    assert!(energy(&right) > 5.0 * energy(&left));
+    // In mono, both ears hear the same.
+    mixer.scene_mut().mono = true;
+    mixer.clear();
+    mixer.push(frame(1));
+    let (left, right) = stereo(&mut mixer, 960);
+    assert_eq!(left, right);
+}
+
+#[test]
+fn agent_speech_ducks_while_a_person_speaks_and_keeps_its_level() {
+    let mut mixer = mixer();
+    let mut sequence = 0;
+    let mut play = |mixer: &mut Mixer, person: bool| {
+        if person {
+            mixer.push(frame(1, sequence, 2_000));
+        }
+        mixer.push(frame(AGENT_SOURCE, sequence, 1_000));
+        sequence += 1;
+        mix(mixer, 4)
+    };
+    // The agent alone, at full volume.
+    for _ in 0..3 {
+        play(&mut mixer, false);
+    }
+    assert_eq!(mixer.duck_depth(), 0.0);
+    // A person speaking for more than 100 ms ducks it by 8 dB over 80 ms.
+    for _ in 0..60 {
+        play(&mut mixer, true);
+    }
+    assert_eq!(mixer.duck_depth(), duck::DEPTH_DB);
+    let output = play(&mut mixer, true);
+    let agent = f32::from(output[0] - 2_000);
+    assert!((agent - 1_000.0 * 0.398).abs() < 2.0, "{agent}");
+    // Ducking is not muting: the agent's level is still measured before its gain.
+    assert!(mixer.source_level(AGENT_SOURCE) > 0.03);
+    // Once the person stops, it comes back up.
+    for _ in 0..250 {
+        play(&mut mixer, false);
+    }
+    assert_eq!(mixer.duck_depth(), 0.0);
+    assert_eq!(play(&mut mixer, false), [1_000; 4]);
+}
+
+#[test]
+fn cues_sound_towards_the_hand_or_the_agent() {
+    let mut mixer = Mixer::new(MixerOptions::default());
+    *mixer.scene_mut() = Scene {
+        listener: Some(listener()),
+        sources: vec![(AGENT_SOURCE, [2.0, 1.6, -0.1])],
+        mono: false,
+    };
+    let length = Bank::new(48_000).samples(Earcon::Request).len();
+    for (direction, louder) in [
+        (Direction::Left, Some(true)),
+        (Direction::Right, Some(false)),
+        (Direction::Agent, Some(false)),
+        (Direction::Centre, None),
+    ] {
+        mixer.play(Earcon::Request, direction);
+        let (left, right) = stereo(&mut mixer, length);
+        match louder {
+            Some(left_louder) => {
+                assert_eq!(energy(&left) > energy(&right), left_louder, "{direction:?}")
+            }
+            None => assert_eq!(left, right),
+        }
+    }
+    // Without the agent placed, or in mono, a cue is centred.
+    mixer.scene_mut().sources.clear();
+    mixer.play(Earcon::Request, Direction::Agent);
+    let (left, right) = stereo(&mut mixer, length);
+    assert_eq!(left, right);
+    mixer.scene_mut().mono = true;
+    mixer.play(Earcon::Request, Direction::Left);
+    let (left, right) = stereo(&mut mixer, length);
+    assert_eq!(left, right);
+    assert_eq!(Layout::Mono.channels(), 1);
+}
+
+#[test]
+fn silencing_fades_both_ears_together() {
+    let mut mixer = mixer();
+    for sequence in 0..10 {
+        mixer.push(frame(AGENT_SOURCE, sequence, 1_000));
+    }
+    stereo(&mut mixer, 4);
+    mixer.set_silenced(true);
+    let (left, right) = stereo(&mut mixer, 12);
+    assert_eq!(left, right);
+    assert_eq!(left, [900, 800, 700, 600, 500, 400, 300, 200, 100, 0, 0, 0]);
+}
+
+#[test]
+fn plays_the_echo_probe_once_in_both_ears() {
+    let mut mixer = Mixer::new(MixerOptions::default());
+    // Not loaded: nothing to play.
+    mixer.play_probe();
+    assert!(!mixer.is_probing());
+    mixer.load_probe();
+    mixer.play_probe();
+    assert!(mixer.is_probing());
+    let length = crate::playback::probe(48_000).len();
+    let (left, right) = stereo(&mut mixer, length);
+    assert_eq!(left, right);
+    assert!(energy(&left) > 0.0);
+    assert!(!mixer.is_probing());
+    assert_eq!(stereo(&mut mixer, 4).0, [0; 4]);
+}
+
+#[test]
+fn a_single_loud_frame_does_not_duck_the_agent() {
+    let mut mixer = mixer();
+    let mut sequence = 0;
+    let mut play = |mixer: &mut Mixer, value: i16| {
+        mixer.push(frame(1, sequence, value));
+        mixer.push(frame(AGENT_SOURCE, sequence, 1_000));
+        sequence += 1;
+        mix(mixer, 4)
+    };
+    play(&mut mixer, 0);
+    // A 4 ms click, far louder than speech: the speaking indicator holds it for a while, but ducking ignores it.
+    play(&mut mixer, 30_000);
+    for _ in 0..100 {
+        play(&mut mixer, 0);
+        assert_eq!(mixer.duck_depth(), 0.0);
+    }
+}
+
+#[test]
+fn without_a_listener_cues_play_in_the_middle() {
+    let mut mixer = Mixer::new(MixerOptions::default());
+    mixer.play(Earcon::Choose, Direction::Right);
+    let length = Bank::new(48_000).samples(Earcon::Choose).len();
+    let (left, right) = stereo(&mut mixer, length);
+    assert_eq!(left, right);
 }

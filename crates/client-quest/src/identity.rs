@@ -506,6 +506,7 @@ mod tests {
         let settings = Settings {
             sounds: Level::Reduced,
             vibration: Level::Off,
+            mono: false,
         };
         store.remember_feedback(settings);
         assert_eq!(Store::new(Some(directory.clone())).feedback(), settings);

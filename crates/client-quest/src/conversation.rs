@@ -992,11 +992,25 @@ impl Conversation {
         let settings = crate::feedback::Settings {
             sounds: sounds.unwrap_or(self.feedback.sounds),
             vibration: vibration.unwrap_or(self.feedback.vibration),
+            ..self.feedback
         };
+        self.keep_feedback(settings);
+    }
+
+    /// Play every source in both ears alike, or place each where it is, and keep it. See `design/spatial-audio.md`.
+    pub fn set_mono(&mut self, mono: bool) {
+        self.keep_feedback(crate::feedback::Settings {
+            mono,
+            ..self.feedback
+        });
+    }
+
+    fn keep_feedback(&mut self, settings: crate::feedback::Settings) {
         log::info!(
-            "Feedback: sounds {}, vibration {}",
+            "Feedback: sounds {}, vibration {}, {}",
             settings.sounds.label(),
-            settings.vibration.label()
+            settings.vibration.label(),
+            if settings.mono { "mono" } else { "stereo" }
         );
         self.feedback = settings;
         self.actions.push(Action::SetFeedback(settings));
@@ -1205,6 +1219,7 @@ impl Conversation {
             crate::hand_menu::Choice::Vibration => {
                 self.change_feedback(None, Some(self.feedback.vibration.next()))
             }
+            crate::hand_menu::Choice::Mono => self.set_mono(!self.feedback.mono),
         }
     }
 
@@ -6312,6 +6327,7 @@ mod tests {
         let kept = Settings {
             sounds: Level::Off,
             vibration: Level::Reduced,
+            mono: false,
         };
         conversation.set_feedback(kept);
         assert_eq!(conversation.menu_model().feedback, kept);
@@ -6321,10 +6337,12 @@ mod tests {
         let full = Settings {
             sounds: Level::Full,
             vibration: Level::Reduced,
+            mono: false,
         };
         let stepped = Settings {
             sounds: Level::Full,
             vibration: Level::Off,
+            mono: false,
         };
         assert_eq!(
             conversation.take_actions(),

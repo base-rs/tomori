@@ -23,6 +23,8 @@ This describes how a client tells the participant, by sound and by controller vi
 | A panel appears | the right wrist's transcript opens on the hand, or Y pins the hand menu open; not when either closes | none | one very light tick, as hover | right for the transcript, left for the menu |
 | Nearing the limit | a recording reaches 30 seconds, and then 10, before the server's utterance limit, as the recording card turns amber and then red (see `hand-menu.md`); only the nearer when both are passed at once | none | one tap of 25 ms at 0.5, then two at 0.6 | left |
 
+A cue felt on a hand is heard slightly towards that side, and the request chime, its reminder and the catch-up's swell from the agent; sent is heard in the middle (see `spatial-audio.md`).
+
 Visitors, who cannot decide requests or let anyone in, are not cued for requests or knocks.
 
 **Cues mark changes, never states.** Nothing hums or repeats while a state lasts, except the hold-to-leave ramp while B is held. Every cue duplicates something already shown, such as the panel, a highlight or the wrist's glow, so turning them off loses nothing but the cue. Agent speech, streaming messages, tool calls, worker changes, brief reconnections and presence changes have no cue; speech is its own signal.

@@ -132,3 +132,35 @@ fn a_cue_without_notes_is_silent() {
     };
     assert!(silent.render(RATE).iter().all(|sample| *sample == 0.0));
 }
+
+#[test]
+fn the_echo_probe_rises_and_falls_like_speech_at_its_level_and_never_clips() {
+    let samples = probe(RATE);
+    assert_eq!(samples.len(), 72_000);
+    let rms = |part: &[f32]| {
+        (part.iter().map(|sample| sample * sample).sum::<f32>() / part.len() as f32).sqrt()
+            / f32::from(i16::MAX)
+    };
+    assert!(
+        (rms(&samples) - PROBE_LEVEL).abs() < 0.005,
+        "{}",
+        rms(&samples)
+    );
+    // Like syllables: louder and quieter four times a second, faded at the ends.
+    let syllables: Vec<f32> = samples.chunks(2_400).map(rms).collect();
+    let (quietest, loudest) = syllables[2..syllables.len() - 2]
+        .iter()
+        .fold((f32::MAX, 0.0_f32), |(low, high), level| {
+            (low.min(*level), high.max(*level))
+        });
+    assert!(loudest > 2.5 * quietest, "{syllables:?}");
+    assert!(samples[0].abs() < 1.0);
+    assert!(peak(&samples) < 0.9 * f32::from(i16::MAX));
+    // Only loaded for the echo test.
+    let mut bank = Bank::new(RATE);
+    assert!(bank.probe().is_empty());
+    bank.load_probe();
+    bank.load_probe();
+    assert_eq!(bank.probe(), &samples[..]);
+    assert!(probe(0).len() <= 2);
+}

@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use protocol::{AGENT_SOURCE, AudioFrame, Gate, REPLAY_SOURCE};
 
-use super::{Bank, Earcon, JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
+use super::spatial::{self, Ears, Placement, Scene};
+use super::{Bank, Duck, Earcon, JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
 
 /// How long a source may go without frames before its buffer is released.
 const IDLE_LIMIT: Duration = Duration::from_secs(10);
@@ -16,6 +17,36 @@ const LEVEL_RELEASE: Duration = Duration::from_millis(150);
 const FADE: Duration = Duration::from_millis(10);
 /// The most sound cues that play at once; another replaces the one furthest through.
 const VOICES: usize = 8;
+/// How far to the side a cue for one hand sounds.
+const HAND_PAN: f32 = 0.4;
+
+/// Where a sound cue sounds from, relative to the head.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Direction {
+    #[default]
+    Centre,
+    /// Towards the hand that acted.
+    Left,
+    Right,
+    /// From the agent, for what the agent needs.
+    Agent,
+}
+
+/// The output's channels: mono, or interleaved left and right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Mono,
+    Stereo,
+}
+
+impl Layout {
+    pub fn channels(self) -> usize {
+        match self {
+            Self::Mono => 1,
+            Self::Stereo => 2,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixerOptions {
@@ -38,14 +69,47 @@ struct Source {
     buffer: JitterBuffer,
     /// See [`Mixer::source_level`].
     level: f32,
+    /// Whether the last mix of this source was at least [`super::duck::THRESHOLD`], which ducking follows.
+    loud: bool,
+    ears: Ears,
 }
 
 impl Source {
-    fn new(sample_rate: u32, options: JitterOptions) -> Self {
+    fn new(sample_rate: u32, output_rate: u32, options: JitterOptions) -> Self {
         Self {
             buffer: JitterBuffer::new(sample_rate, options),
             level: 0.0,
+            loud: false,
+            ears: Ears::new(output_rate),
         }
+    }
+}
+
+fn is_agent(source: u32) -> bool {
+    source == AGENT_SOURCE || source == REPLAY_SOURCE
+}
+
+/// How `source` sounds now at `sample_rate`: where `scene` places it, or centred. Agent speech played again comes from where the agent is.
+fn placement(scene: &Scene, sample_rate: u32, source: u32, layout: Layout) -> Placement {
+    let floor = if is_agent(source) {
+        spatial::AGENT_FLOOR
+    } else {
+        spatial::PERSON_FLOOR
+    };
+    let position = scene.position(source).or_else(|| {
+        is_agent(source)
+            .then(|| scene.position(AGENT_SOURCE))
+            .flatten()
+    });
+    match (scene.listener, position) {
+        (Some(listener), Some(position)) => spatial::place(
+            &listener,
+            position,
+            floor,
+            sample_rate,
+            scene.mono || layout == Layout::Mono,
+        ),
+        _ => Placement::CENTRE,
     }
 }
 
@@ -53,12 +117,13 @@ impl Source {
 #[derive(Clone, Copy, Debug)]
 struct Voice {
     earcon: Earcon,
+    direction: Direction,
     position: usize,
 }
 
-/// Mixes every remote participant and the agent speech stream into one mono `i16` stream at the device rate, with this client's own sound cues.
+/// Mixes every remote participant and the agent speech stream into one `i16` stream at the device rate, mono or stereo, with this client's own sound cues.
 ///
-/// Feed it every received [`AudioFrame`] with [`Self::push`] and pull output from the audio callback with [`Self::mix`]. Each source has its own [`JitterBuffer`], so one late or bursty participant does not delay the others. Agent volume and mute are local to this mixer, and apply to agent speech played again from [`REPLAY_SOURCE`] as to live agent speech; muting still consumes agent audio in real time, so unmuting resumes live speech rather than replaying what was missed.
+/// Feed it every received [`AudioFrame`] with [`Self::push`] and pull output from the audio callback with [`Self::mix`] or [`Self::mix_stereo`]. In stereo, each source is placed where the [`Scene`] says it is, relative to its listener (see [`spatial::place`]); a source the scene does not place plays centred. Agent speech ducks while a person speaks ([`Duck`]). Each source has its own [`JitterBuffer`], so one late or bursty participant does not delay the others. Agent volume and mute are local to this mixer, and apply to agent speech played again from [`REPLAY_SOURCE`] as to live agent speech; muting still consumes agent audio in real time, so unmuting resumes live speech rather than replaying what was missed.
 ///
 /// Sound cues ([`Self::play`]) are local: never sent, never a source, never muted with agent speech. They are rendered once when the mixer is created, so playing one allocates nothing. Silencing ([`Self::set_silenced`]) fades out everything but the cues that bypass it, then the limiter comes last.
 pub struct Mixer {
@@ -78,6 +143,12 @@ pub struct Mixer {
     /// The cues that play through silencing, for the current [`Self::mix`] call.
     bypass: Vec<f32>,
     silenced: bool,
+    scene: Scene,
+    duck: Duck,
+    /// How far through the echo probe playback is, while it plays.
+    probe: Option<usize>,
+    /// The layout the limiter was made for, since it counts its release in samples.
+    limited: Layout,
     /// How far playback has faded out, in samples: 0 is full volume, and the fade length is silent.
     faded: u32,
 }
@@ -103,13 +174,28 @@ impl Mixer {
             bypass: Vec::new(),
             silenced: false,
             faded: 0,
+            scene: Scene::default(),
+            duck: Duck::default(),
+            probe: None,
+            limited: Layout::Mono,
         }
     }
 
-    /// Play a sound cue from its start. When [`VOICES`] already play, it replaces the one furthest through.
-    pub fn play(&mut self, earcon: Earcon) {
+    /// Where the listener and the sources are, which the next mix glides to. The application keeps the scene current, typically once a frame; see [`super::PlayerControl::set_scene`].
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        &mut self.scene
+    }
+
+    /// How far agent speech is ducked now, in decibels.
+    pub fn duck_depth(&self) -> f32 {
+        self.duck.depth()
+    }
+
+    /// Play a sound cue from its start, from `direction`. When [`VOICES`] already play, it replaces the one furthest through.
+    pub fn play(&mut self, earcon: Earcon, direction: Direction) {
         let voice = Some(Voice {
             earcon,
+            direction,
             position: 0,
         });
         let slot = match self.voices.iter().position(Option::is_none) {
@@ -119,6 +205,21 @@ impl Mixer {
                 .expect("there are voices"),
         };
         self.voices[slot] = voice;
+    }
+
+    /// Render the echo probe, so that [`Self::play_probe`] can play it. It is synthesized only for the echo test.
+    pub fn load_probe(&mut self) {
+        self.bank.load_probe();
+    }
+
+    /// Play the echo probe from its start, centred, once [`Self::load_probe`] has rendered it: the echo test measures how much of it the microphone hears. See [`super::probe`].
+    pub fn play_probe(&mut self) {
+        self.probe = (!self.bank.probe().is_empty()).then_some(0);
+    }
+
+    /// Whether the echo probe is playing.
+    pub fn is_probing(&self) -> bool {
+        self.probe.is_some()
     }
 
     /// How many sound cues are playing.
@@ -214,48 +315,105 @@ impl Mixer {
         if frame.gate == Gate::Off || Some(frame.source) == self.local_source {
             return;
         }
-        let source = self
-            .sources
-            .entry(frame.source)
-            .or_insert_with(|| Source::new(frame.sample_rate, self.options.jitter));
+        let source = self.sources.entry(frame.source).or_insert_with(|| {
+            Source::new(
+                frame.sample_rate,
+                self.options.sample_rate,
+                self.options.jitter,
+            )
+        });
         if source.buffer.sample_rate() != frame.sample_rate {
             // A new speech segment can change rate; restart the source rather than play mismatched audio.
-            *source = Source::new(frame.sample_rate, self.options.jitter);
+            *source = Source::new(
+                frame.sample_rate,
+                self.options.sample_rate,
+                self.options.jitter,
+            );
         }
         source.buffer.push(frame, &mut self.statistics);
     }
 
-    /// Fill `output` with the next mixed samples. Never blocks: missing audio is silence.
+    /// Fill mono `output` with the next mixed samples. Sources are not panned, but their distance still changes their loudness. Never blocks: missing audio is silence.
     pub fn mix(&mut self, output: &mut [i16]) {
+        self.render(output, Layout::Mono);
+    }
+
+    /// Fill `output`, interleaved left and right, with the next mixed samples, each source placed by the scene. Never blocks: missing audio is silence.
+    pub fn mix_stereo(&mut self, output: &mut [i16]) {
+        self.render(output, Layout::Stereo);
+    }
+
+    /// Each ear's gain for a cue from `direction`.
+    fn direction(&self, direction: Direction, layout: Layout) -> [f32; 2] {
+        // Without a listener, as on the console, nothing is placed, cues included.
+        if layout == Layout::Mono || self.scene.mono || self.scene.listener.is_none() {
+            return [1.0, 1.0];
+        }
+        match direction {
+            Direction::Centre => [1.0, 1.0],
+            Direction::Left => Placement::panned(-HAND_PAN).gain,
+            Direction::Right => Placement::panned(HAND_PAN).gain,
+            Direction::Agent => match (self.scene.listener, self.scene.position(AGENT_SOURCE)) {
+                (Some(listener), Some(agent)) => {
+                    Placement::panned(spatial::pan(&listener, agent)).gain
+                }
+                _ => [1.0, 1.0],
+            },
+        }
+    }
+
+    fn render(&mut self, output: &mut [i16], layout: Layout) {
+        let channels = layout.channels();
+        let frames = output.len() / channels;
         self.accumulator.clear();
         self.accumulator.resize(output.len(), 0.0);
         let rate = self.options.sample_rate;
+        if self.limited != layout {
+            self.limited = layout;
+            self.limiter = Limiter::new(rate * channels as u32);
+        }
         let agent_gain = if self.agent_muted {
             0.0
         } else {
             self.agent_volume
         };
+        // People speaking in the last mix, as measured then rather than by the slower speaking indicator, duck agent speech.
+        let speaking = self
+            .sources
+            .iter()
+            .any(|(&id, source)| !is_agent(id) && source.loud);
+        let (duck_from, duck_to) = self.duck.update(speaking, frames, rate);
         let release =
-            (-(output.len() as f64) / (LEVEL_RELEASE.as_secs_f64() * f64::from(rate))).exp() as f32;
+            (-(frames as f64) / (LEVEL_RELEASE.as_secs_f64() * f64::from(rate))).exp() as f32;
         for (&id, source) in self.sources.iter_mut() {
-            let gain = if id == AGENT_SOURCE || id == REPLAY_SOURCE {
-                agent_gain
+            let placement = placement(&self.scene, rate, id, layout);
+            let gain = if is_agent(id) {
+                (agent_gain * duck_from, agent_gain * duck_to)
             } else {
-                1.0
+                (1.0, 1.0)
             };
             // Mixed at unity gain and measured before the gain is applied, so muted agent speech still shows as speaking.
             self.scratch.clear();
-            self.scratch.resize(output.len(), 0.0);
+            self.scratch.resize(frames, 0.0);
             source
                 .buffer
                 .mix_into(&mut self.scratch, rate, 1.0, &mut self.statistics);
-            let mut energy = 0.0;
-            for (total, &sample) in self.accumulator.iter_mut().zip(&self.scratch) {
-                *total += sample * gain;
-                energy += sample * sample;
-            }
-            let rms = (energy / output.len().max(1) as f32).sqrt() / f32::from(i16::MAX);
+            let energy: f32 = self.scratch.iter().map(|sample| sample * sample).sum();
+            let rms = (energy / frames.max(1) as f32).sqrt() / f32::from(i16::MAX);
             source.level = rms.min(1.0).max(source.level * release);
+            source.loud = rms >= super::duck::THRESHOLD;
+            match layout {
+                Layout::Mono => {
+                    source
+                        .ears
+                        .render_mono(&self.scratch, placement, gain, &mut self.accumulator)
+                }
+                Layout::Stereo => {
+                    source
+                        .ears
+                        .render(&self.scratch, placement, gain, &mut self.accumulator)
+                }
+            }
         }
         let idle_limit = (IDLE_LIMIT.as_secs_f64() * f64::from(rate)) as u64;
         self.sources.retain(|_, source| {
@@ -265,33 +423,46 @@ impl Mixer {
         });
         self.bypass.clear();
         self.bypass.resize(output.len(), 0.0);
-        for slot in &mut self.voices {
-            let Some(voice) = slot else {
+        for index in 0..VOICES {
+            let Some(voice) = self.voices[index] else {
                 continue;
             };
+            let gains = self.direction(voice.direction, layout);
             let samples = &self.bank.samples(voice.earcon)[voice.position..];
             let target = if voice.earcon.bypasses_silence() {
                 &mut self.bypass
             } else {
                 &mut self.accumulator
             };
-            for (total, sample) in target.iter_mut().zip(samples) {
-                *total += sample;
+            for (frame, sample) in target.chunks_exact_mut(channels).zip(samples) {
+                for (total, gain) in frame.iter_mut().zip(gains) {
+                    *total += sample * gain;
+                }
             }
-            voice.position += samples.len().min(output.len());
-            if voice.position >= self.bank.samples(voice.earcon).len() {
-                *slot = None;
+            let position = voice.position + samples.len().min(frames);
+            self.voices[index] = (position < self.bank.samples(voice.earcon).len())
+                .then_some(Voice { position, ..voice });
+        }
+        if let Some(position) = self.probe {
+            let samples = &self.bank.probe()[position..];
+            for (frame, sample) in self.accumulator.chunks_exact_mut(channels).zip(samples) {
+                frame.iter_mut().for_each(|total| *total += sample);
             }
+            let position = position + samples.len().min(frames);
+            self.probe = (position < self.bank.probe().len()).then_some(position);
         }
         let length = (FADE.as_secs_f64() * f64::from(rate)).ceil().max(1.0) as u32;
         if self.silenced || self.faded > 0 {
-            for sample in self.accumulator.iter_mut() {
+            for frame in self.accumulator.chunks_exact_mut(channels) {
                 self.faded = if self.silenced {
                     (self.faded + 1).min(length)
                 } else {
                     self.faded.saturating_sub(1)
                 };
-                *sample *= 1.0 - self.faded as f32 / length as f32;
+                let gain = 1.0 - self.faded as f32 / length as f32;
+                for sample in frame {
+                    *sample *= gain;
+                }
             }
         }
         for (total, sample) in self.accumulator.iter_mut().zip(&self.bypass) {

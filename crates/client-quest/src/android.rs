@@ -113,6 +113,188 @@ impl Android {
     }
 }
 
+/// The platform's acoustic echo canceller on one audio session, released when dropped. See `design/spatial-audio.md`.
+pub struct EchoCanceller {
+    android: Arc<Android>,
+    effect: GlobalRef,
+}
+
+impl Android {
+    /// Log once which of the platform's voice pre-processing effects the device reports, as `AcousticEchoCanceler`, `NoiseSuppressor` and `AutomaticGainControl` say. See `design/client-logging.md`.
+    pub fn log_audio_effects(&self) {
+        let available = |class: &'static str| {
+            self.with(|env, _| {
+                env.call_static_method(class, "isAvailable", "()Z", &[])?
+                    .z()
+            })
+        };
+        let report = |class| match available(class) {
+            Ok(true) => "available",
+            Ok(false) => "not available",
+            Err(_) => "unknown",
+        };
+        log::info!(
+            "Audio effects: echo canceller {}, noise suppressor {}, automatic gain control {}",
+            report("android/media/audiofx/AcousticEchoCanceler"),
+            report("android/media/audiofx/NoiseSuppressor"),
+            report("android/media/audiofx/AutomaticGainControl")
+        );
+    }
+
+    /// The platform's echo canceller on audio `session`, enabled if `enable` or else disabled, as the echo test compares; `None` where the device has none or will not create one for it. Logs what it reports.
+    pub fn echo_canceller(
+        self: &Arc<Self>,
+        session: i32,
+        enable: bool,
+        level: log::Level,
+    ) -> Result<Option<EchoCanceller>> {
+        const CLASS: &str = "android/media/audiofx/AcousticEchoCanceler";
+        let effect = self.with(|env, _| {
+            if !env.call_static_method(CLASS, "isAvailable", "()Z", &[])?.z()? {
+                log::log!(level, "Echo canceller: not available on this device");
+                return Ok(None);
+            }
+            let effect = env
+                .call_static_method(
+                    CLASS,
+                    "create",
+                    "(I)Landroid/media/audiofx/AcousticEchoCanceler;",
+                    &[JValue::Int(session)],
+                )?
+                .l()?;
+            if effect.is_null() {
+                log::log!(level, "Echo canceller: none created for session {session}");
+                return Ok(None);
+            }
+            let was = env.call_method(&effect, "getEnabled", "()Z", &[])?.z()?;
+            let status = if was == enable {
+                0
+            } else {
+                env.call_method(
+                    &effect,
+                    "setEnabled",
+                    "(Z)I",
+                    &[JValue::Bool(u8::from(enable))],
+                )?
+                .i()?
+            };
+            let enabled = env.call_method(&effect, "getEnabled", "()Z", &[])?.z()?;
+            log::log!(
+                level,
+                "Echo canceller on session {session}: enabled {enabled} (was {was}; asked for {enable}, which returned {status})"
+            );
+            Ok(Some(env.new_global_ref(effect)?))
+        })?;
+        Ok(effect.map(|effect| EchoCanceller {
+            android: self.clone(),
+            effect,
+        }))
+    }
+}
+
+impl Android {
+    /// Log, at `level`, what else shapes the live microphone: on its audio `session`, if it has one, whether the platform's noise suppressor and automatic gain control are enabled; and the audio mode, and the call and media volumes, since playing as voice communication uses the call volume. See `design/spatial-audio.md`.
+    pub fn log_audio_state(&self, session: Option<i32>, level: log::Level) {
+        let effect = |class: &'static str, signature: &'static str| {
+            let Some(session) = session else {
+                return Ok(None);
+            };
+            self.with(|env, _| {
+                if !env
+                    .call_static_method(class, "isAvailable", "()Z", &[])?
+                    .z()?
+                {
+                    return Ok(None);
+                }
+                let effect = env
+                    .call_static_method(class, "create", signature, &[JValue::Int(session)])?
+                    .l()?;
+                if effect.is_null() {
+                    return Ok(None);
+                }
+                let enabled = env
+                    .call_method(&effect, "getEnabled", "()Z", &[])
+                    .and_then(|enabled| enabled.z());
+                // Released whatever it said, so that only reading it adds nothing to the session; a pending exception is cleared first, as JNI requires.
+                if enabled.is_err() {
+                    env.exception_clear()?;
+                }
+                env.call_method(&effect, "release", "()V", &[])?;
+                Ok(Some(enabled?))
+            })
+        };
+        let report = |state: Result<Option<bool>>| match state {
+            Ok(Some(true)) => "on",
+            Ok(Some(false)) => "off",
+            Ok(None) => "none",
+            Err(_) => "unknown",
+        };
+        let audio = self.with(|env, activity| {
+            let name = env.new_string("audio")?;
+            let manager = env
+                .call_method(
+                    activity,
+                    "getSystemService",
+                    "(Ljava/lang/String;)Ljava/lang/Object;",
+                    &[JValue::Object(&name)],
+                )?
+                .l()?;
+            let mode = env.call_method(&manager, "getMode", "()I", &[])?.i()?;
+            let mut volume = |stream: i32| -> jni::errors::Result<(i32, i32)> {
+                Ok((
+                    env.call_method(&manager, "getStreamVolume", "(I)I", &[JValue::Int(stream)])?
+                        .i()?,
+                    env.call_method(
+                        &manager,
+                        "getStreamMaxVolume",
+                        "(I)I",
+                        &[JValue::Int(stream)],
+                    )?
+                    .i()?,
+                ))
+            };
+            // `STREAM_VOICE_CALL` and `STREAM_MUSIC`.
+            Ok((mode, volume(0)?, volume(3)?))
+        });
+        let audio = match audio {
+            Ok((mode, (call, call_max), (media, media_max))) => {
+                format!(
+                    "audio mode {mode}, call volume {call}/{call_max}, media volume {media}/{media_max}"
+                )
+            }
+            Err(error) => format!("audio mode and volumes unknown ({error:#})"),
+        };
+        let session = session.map_or_else(
+            || "without a session".into(),
+            |session| format!("session {session}"),
+        );
+        log::log!(
+            level,
+            "Live microphone {session}: noise suppressor {}, automatic gain control {}, {audio}",
+            report(effect(
+                "android/media/audiofx/NoiseSuppressor",
+                "(I)Landroid/media/audiofx/NoiseSuppressor;"
+            )),
+            report(effect(
+                "android/media/audiofx/AutomaticGainControl",
+                "(I)Landroid/media/audiofx/AutomaticGainControl;"
+            )),
+        );
+    }
+}
+
+impl Drop for EchoCanceller {
+    fn drop(&mut self) {
+        let released = self.android.with(|env, _| {
+            env.call_method(self.effect.as_obj(), "release", "()V", &[])
+                .map(drop)
+        });
+        if let Err(error) = released {
+            log::debug!("Cannot release the echo canceller: {error:#}");
+        }
+    }
+}
+
 fn string(env: &mut JNIEnv, value: JObject) -> jni::errors::Result<Option<String>> {
     if value.is_null() {
         return Ok(None);

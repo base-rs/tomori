@@ -44,6 +44,7 @@ mod playback;
 mod pointing;
 mod recording;
 mod server_choice;
+mod spatial_audio;
 mod speakers;
 #[cfg(not(target_os = "android"))]
 mod spectator;
@@ -339,10 +340,35 @@ fn android_connection(
     let store = identity::Store::new(android.data());
     let identity = identity::Identity::new(&store, device.as_deref(), overrides);
     let mut conversation = conversation::Conversation::new(&identity.name);
-    let capture = Box::new(capture::Android::new(android.clone()));
+    // `am start -e tomori.echo_test on` measures the echo each time the live microphone opens, with the platform's echo canceller; `canceller-off` with it disabled, all else equal; and `uncancelled` with the recognition preset and media output, as push-to-talk captures. See `design/spatial-audio.md`.
+    let echo_test = extra("tomori.echo_test");
+    let (label, uncancelled, canceller) = match echo_test.as_deref() {
+        None => (None, false, true),
+        Some("on") => (Some("communication preset, echo canceller on"), false, true),
+        Some("canceller-off") => (
+            Some("communication preset, echo canceller off"),
+            false,
+            false,
+        ),
+        Some("uncancelled") => (
+            Some("recognition preset, media output, no echo canceller"),
+            true,
+            true,
+        ),
+        Some(other) => {
+            log::warn!("Ignored tomori.echo_test {other:?}: use on, canceller-off or uncancelled");
+            (None, false, true)
+        }
+    };
+    android.log_audio_effects();
+    let capture = Box::new(capture::Android::new(
+        android.clone(),
+        uncancelled,
+        canceller,
+    ));
     let multicast = Box::new(android::MulticastLock::new(android));
     let playback = Box::new(playback::Android);
-    let connection = connection::Connection::new(
+    let mut connection = connection::Connection::new(
         identity,
         store,
         multicast,
@@ -350,6 +376,9 @@ fn android_connection(
         playback,
         &mut conversation,
     );
+    if let Some(label) = label {
+        connection.set_echo_test(label, !uncancelled);
+    }
     (conversation, connection)
 }
 
