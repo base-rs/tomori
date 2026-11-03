@@ -73,9 +73,10 @@ pub struct SpaceModel {
     /// The agent completed a reply in the current turn while nobody was in the space, so its turn ending is a reply
     /// nobody heard.
     unheard: bool,
-    /// The space's own instructions to the agent, or `None` when its backend takes no instructions. See
-    /// `design/spaces.md`.
-    instructions: Option<String>,
+    /// The space's own instructions to the agent, kept even while its backend takes none. See `design/spaces.md`.
+    instructions: String,
+    /// The space's backend takes instructions.
+    takes_instructions: bool,
     /// Why the agent may not have the instructions shown, until they are next given successfully.
     instructions_error: Option<String>,
 }
@@ -251,7 +252,8 @@ impl SpaceModel {
             settled: HashSet::new(),
             unattended: None,
             unheard: false,
-            instructions: None,
+            instructions: String::new(),
+            takes_instructions: false,
             instructions_error: None,
         };
         model.load_messages(snapshot.messages);
@@ -470,24 +472,27 @@ impl SpaceModel {
         (self.unattended, self.unheard) = (unattended, unheard);
     }
 
-    /// The space's backend takes instructions, and the space's own are `space`.
-    pub fn take_instructions(&mut self, space: String) {
-        self.instructions = Some(space);
+    /// The space's own instructions are `space`, and its backend takes instructions if `takes`. A space whose backend
+    /// is not enabled keeps them, for when it is.
+    pub fn set_instructions(&mut self, space: String, takes: bool) {
+        self.instructions = space;
+        self.takes_instructions = takes;
     }
 
-    /// The space's own instructions, empty when it has none or its backend takes none.
+    /// The space's own instructions, empty when it has none.
     pub fn space_instructions(&self) -> &str {
-        self.instructions.as_deref().unwrap_or_default()
+        &self.instructions
     }
 
     /// The instruction layers in effect, or `None` when the backend takes none.
     pub fn instructions(&self) -> Option<protocol::AgentInstructions> {
-        let space = self.instructions.as_deref()?;
-        Some(crate::instructions::layers(
-            &self.environment,
-            space,
-            self.instructions_error.clone(),
-        ))
+        self.takes_instructions.then(|| {
+            crate::instructions::layers(
+                &self.environment,
+                &self.instructions,
+                self.instructions_error.clone(),
+            )
+        })
     }
 
     /// The entries giving the agent every layer, or none when its backend takes none or the session has closed.
@@ -498,33 +503,37 @@ impl SpaceModel {
         }
     }
 
-    /// Replace the space's own instructions with `text`, which is trimmed, and return the entry to set, or why not.
-    pub fn set_space_instructions(
-        &mut self,
-        text: &str,
-    ) -> Result<(String, Option<String>), &'static str> {
+    /// Replace the space's own instructions with `text`, which is trimmed, or say why not.
+    pub fn set_space_instructions(&mut self, text: &str) -> Result<(), &'static str> {
         if self.closed {
             return Err("The agent session has stopped.");
         }
-        let Some(instructions) = self.instructions.as_mut() else {
+        if !self.takes_instructions {
             return Err("This agent takes no instructions from Tomori.");
-        };
-        *instructions = text.trim().to_owned();
-        Ok((
-            crate::instructions::SPACE_KEY.to_owned(),
-            crate::instructions::entry(instructions),
-        ))
+        }
+        self.instructions = text.trim().to_owned();
+        Ok(())
     }
 
-    /// The agent was given instructions, or refused them with `error`, which is shown until it next takes them. The
-    /// space works without them, so a refusal is not a problem that needs attention.
-    pub fn instructed(&mut self, result: Result<(), String>) {
-        self.instructions_error = result.err().map(|error| {
-            limits::truncate(
-                &format!("The agent did not take Tomori's instructions: {error}"),
-                limits::ERROR_BYTES,
-            )
-        });
+    /// Whether the agent has refused instructions since it last took every layer.
+    pub fn instructions_failed(&self) -> bool {
+        self.instructions_error.is_some()
+    }
+
+    /// The agent was given instructions, every layer if `all`, or refused them with `error`, which is shown until it
+    /// next takes every layer: taking one alone, or removing one, does not show that it has the others. The space works
+    /// without them, so a refusal is not a problem that needs attention.
+    pub fn instructed(&mut self, result: Result<(), String>, all: bool) {
+        match result {
+            Err(error) => {
+                self.instructions_error = Some(limits::truncate(
+                    &format!("The agent did not take Tomori's instructions: {error}"),
+                    limits::ERROR_BYTES,
+                ));
+            }
+            Ok(()) if all => self.instructions_error = None,
+            Ok(()) => {}
+        }
     }
 
     /// How much of each reply is spoken. Brief unless a participant chose otherwise.
@@ -1073,6 +1082,45 @@ mod tests {
                 ..Snapshot::default()
             },
         )
+    }
+
+    #[test]
+    fn instructions_are_kept_without_a_backend_that_takes_them_and_refusals_are_shown() {
+        let mut space = model();
+        // A space whose backend is not enabled keeps its own instructions, shows none and gives none.
+        space.set_instructions("Mind the docs.".into(), false);
+        assert_eq!(space.space_instructions(), "Mind the docs.");
+        assert_eq!(space.instructions(), None);
+        assert!(space.instruction_entries().is_empty());
+        assert_eq!(
+            space.set_space_instructions("Mind the tests."),
+            Err("This agent takes no instructions from Tomori.")
+        );
+        assert_eq!(space.space_instructions(), "Mind the docs.");
+
+        space.set_instructions("Mind the docs.".into(), true);
+        assert_eq!(space.instruction_entries().len(), 3);
+        assert_eq!(space.set_space_instructions("  Mind the tests. "), Ok(()));
+        assert!(!space.instructions_failed());
+        space.instructed(Err("gone".into()), false);
+        assert!(space.instructions_failed());
+        let shown = space.state(Vec::new()).instructions.unwrap();
+        assert_eq!(shown.space, "Mind the tests.");
+        assert_eq!(
+            shown.error.as_deref(),
+            Some("The agent did not take Tomori's instructions: gone")
+        );
+        // Not a problem of the space, which needs no attention for it.
+        assert_eq!(space.attention(), None);
+        // Taking the space's layer alone, or removing it, does not show that the agent has the others.
+        space.instructed(Ok(()), false);
+        assert!(space.instructions_failed());
+        space.instructed(Ok(()), true);
+        assert_eq!(space.instructions().unwrap().error, None);
+        // A closed session is given none, and its layer cannot be changed.
+        space.apply(Event::Closed { reason: None });
+        assert!(space.instruction_entries().is_empty());
+        assert!(space.set_space_instructions("x").is_err());
     }
 
     #[test]

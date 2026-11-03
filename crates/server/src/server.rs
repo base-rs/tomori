@@ -1263,7 +1263,11 @@ async fn drive(
                     let result = session.set_mode(&mode).await;
                     hub.space_mode_set(space, &participant, result);
                 }
-                SpaceCommand::Instructions(entries) => {
+                SpaceCommand::Instructions => {
+                    let (entries, all) = hub.instructions_due(space);
+                    if entries.is_empty() {
+                        continue;
+                    }
                     let mut result = Ok(());
                     for (key, value) in entries {
                         result = session.set_instruction(&key, value.as_deref()).await;
@@ -1272,7 +1276,7 @@ async fn drive(
                             break;
                         }
                     }
-                    hub.space_instructed(space, result);
+                    hub.space_instructed(space, result, all);
                 }
                 SpaceCommand::Close => break,
             }

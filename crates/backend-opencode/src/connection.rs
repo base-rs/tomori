@@ -887,7 +887,8 @@ pub enum Command {
         value: Option<String>,
         reply: async_channel::Sender<backend::Result<()>>,
     },
-    /// Remove the instruction entries `keys` from the session `id`, which need not be attached.
+    /// Remove the instruction entries `keys` from the session `id`, unless it is attached when this is performed:
+    /// then a space was bound to it again, and the entries are that space's.
     ForgetInstructions {
         id: String,
         keys: Vec<String>,
@@ -3019,6 +3020,12 @@ fn prepare_command<'a, S: Timers>(
                 let _ = reply.try_send(result.map_err(map_failure));
                 None
             })
+        }
+        // Commands are performed in order, so an attachment that finished first is seen here, and one that follows
+        // sets its own entries afterwards.
+        Command::ForgetInstructions { id, reply, .. } if registrations.contains_key(&id) => {
+            let _ = reply.try_send(Ok(()));
+            return None;
         }
         Command::ForgetInstructions { id, keys, reply } => Box::pin(async move {
             let mut result = Ok(());
@@ -5999,7 +6006,33 @@ mod tests {
             ])
         );
 
-        // Forgetting removes the entries without an attached session, and a session that no longer exists has none.
+        // Setting one on a session that no longer exists says so.
+        let (gone, gone_events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Gone".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        shared.update(|state| {
+            state.sessions.remove(&gone);
+        });
+        let gone_session = crate::OpenCodeSession::new(gone.clone(), gone_events, commands.clone());
+        let missing = block_on(gone_session.set_instruction("tomori", Some("x"))).unwrap_err();
+        assert_eq!(missing.kind, backend::ErrorKind::NotFound);
+        block_on(gone_session.close()).unwrap();
+
+        // A session attached when forgetting is performed keeps its entries: a space was bound to it again.
+        block_on(commands.reply_with(|reply| Command::ForgetInstructions {
+            id: id.clone(),
+            keys: vec!["tomori".into()],
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(entries(&shared).len(), 2);
+        // Once it is closed, forgetting removes them, and a session that no longer exists has none.
+        block_on(session.close()).unwrap();
         block_on(commands.reply_with(|reply| Command::ForgetInstructions {
             id: id.clone(),
             keys: vec![
@@ -6020,9 +6053,6 @@ mod tests {
             reply,
         }))
         .unwrap();
-        // Setting one on a session that no longer exists says so.
-        let missing = block_on(session.set_instruction("tomori", Some("x"))).unwrap_err();
-        assert_eq!(missing.kind, backend::ErrorKind::NotFound);
         assert!(
             shared
                 .state
@@ -6030,10 +6060,11 @@ mod tests {
                 .unwrap()
                 .instruction_requests
                 .iter()
-                .all(|(_, session, key)| *session == id && backend::valid_instruction_key(key))
+                .all(|(_, _, key)| backend::valid_instruction_key(key))
         );
 
         drop(session);
+        drop(gone_session);
         drop(commands);
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);

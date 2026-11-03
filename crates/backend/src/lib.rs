@@ -434,7 +434,8 @@ pub trait Backend: Send + Sync {
     ) -> impl Future<Output = Result<Self::Session>> + Send;
 
     /// Remove the instruction entries `keys` from the session `id`, which no space is bound to any more, as when the
-    /// server forgets a closed space. A key the session does not have is not an error. Fails with
+    /// server forgets a closed space. A key the session does not have is not an error. A session the backend has bound
+    /// again by the time this is performed keeps its entries, which are then the new binding's. Fails with
     /// [`ErrorKind::Unsupported`] unless the backend has [`Capabilities::instructions`].
     fn forget_instructions(
         &self,

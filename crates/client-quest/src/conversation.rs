@@ -24,6 +24,9 @@ use std::{
 
 const BODY_ROWS: usize = ROWS - 4;
 
+/// The longest instructions an owner gives a space, as the server limits them.
+const INSTRUCTIONS_BYTES: usize = 4096;
+
 /// Said when a visitor tries to talk or act in the space they are watching. See `design/security.md`.
 const VISITING: &str = "Visitors can watch and listen, but not talk or act here.";
 
@@ -1018,6 +1021,13 @@ impl Conversation {
             self.notice = Some("Only owners can give a space instructions.".into());
             return;
         }
+        // The server's limit, checked here so that a space is not refused for them.
+        if text.len() > INSTRUCTIONS_BYTES {
+            self.notice = Some(format!(
+                "Instructions can be at most {INSTRUCTIONS_BYTES} bytes."
+            ));
+            return;
+        }
         let in_space = self.mode == Mode::Space;
         match self.space.as_ref().filter(|_| in_space) {
             Some(space) if space.instructions.is_none() => {
@@ -1039,7 +1049,8 @@ impl Conversation {
                 self.notice = Some(if text.is_empty() {
                     "The next space you create has no instructions of its own.".into()
                 } else {
-                    "The next space you create is given these instructions.".into()
+                    "The next space you create is given these instructions, if its agent takes them."
+                        .into()
                 });
             }
         }
@@ -4321,6 +4332,12 @@ mod tests {
         conversation.instruct("Ignore the tests.");
         assert!(sent(&mut conversation).is_empty());
         assert!(conversation.text().contains("Only owners"));
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Owner,
+        }));
+        conversation.instruct(&"x".repeat(INSTRUCTIONS_BYTES + 1));
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("at most 4096 bytes"));
     }
 
     #[test]

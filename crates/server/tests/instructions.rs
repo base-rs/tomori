@@ -75,6 +75,7 @@ fn the_layers_are_given_on_creation_shown_to_everyone_and_changed_by_an_owner() 
     until(&session, "the prompt was never delivered", |session| {
         !session.log().prompts.is_empty()
     });
+    assert_eq!(session.log().instructed_at_prompts, [KEYS.len()]);
 
     // Everyone in the space sees them, and an owner's change reaches the agent and them.
     let mut bob = server.connect("bob", "Bob");
@@ -118,11 +119,21 @@ fn the_layers_are_given_on_creation_shown_to_everyone_and_changed_by_an_owner() 
             .is_some_and(|layers| layers.space.is_empty())
     });
 
-    // Too long is refused without changing anything.
+    // Too long is refused without changing anything, when changed or when creating a space.
     ada.send(&ClientMessage::SetInstructions {
         text: "x".repeat(4097),
     });
     assert!(ada.error().contains("instructions is too long"));
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Long".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: None,
+        instructions: Some("x".repeat(4097)),
+    });
+    assert!(ada.error().contains("instructions is too long"));
+    assert_eq!(server.backend.started().len(), 1);
 }
 
 #[test]
@@ -181,6 +192,20 @@ fn a_refusal_is_shown_and_the_space_works_without_them() {
         !session.log().prompts.is_empty()
     });
 
+    // Removing the space's layer alone cannot show that the agent took the rest, so while the warning stands an
+    // owner's change gives every layer, which is refused again.
+    ada.send(&ClientMessage::SetInstructions {
+        text: String::new(),
+    });
+    ada.space(|state| {
+        state
+            .instructions
+            .as_ref()
+            .is_some_and(|layers| layers.space.is_empty() && layers.error.is_some())
+    });
+    // The refusal of every layer follows.
+    assert!(ada.space(|_| true).instructions.unwrap().error.is_some());
+
     // Once the agent takes them, after it is read again, the warning clears.
     backend.fail_instructions(false);
     session.emit(Event::Reconnecting {
@@ -198,7 +223,7 @@ fn a_refusal_is_shown_and_the_space_works_without_them() {
             .as_ref()
             .is_some_and(|layers| layers.error.is_none())
     });
-    assert_eq!(session.instructions(), entries(Some("Mind the docs.")));
+    assert_eq!(session.instructions(), entries(None));
 }
 
 #[test]

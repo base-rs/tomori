@@ -224,7 +224,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         session: session.into(),
         environment: "sky".into(),
         attribution: true,
-        instructions: String::new(),
+        instructions: "Mind the docs.".into(),
         closed: None,
         closed_order: None,
     };
@@ -273,6 +273,8 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
     let kept = state.kept();
     assert!(kept[0].closed.is_some());
     assert_eq!(kept[1].closed, None);
+    // Its own instructions are kept for when its backend is enabled again.
+    assert_eq!(kept[1].instructions, "Mind the docs.");
 }
 
 #[test]

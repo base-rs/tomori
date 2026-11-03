@@ -29,6 +29,8 @@ pub struct FakeLog {
     pub modes: Vec<String>,
     /// The instruction entries the server set, or removed with `None`, in order.
     pub instructions: Vec<(String, Option<String>)>,
+    /// How many of [`Self::instructions`] the server had given when each prompt was delivered.
+    pub instructed_at_prompts: Vec<usize>,
     /// Whether the server closed the session.
     pub closed: bool,
 }
@@ -206,6 +208,10 @@ impl Backend for FakeBackend {
             .into_iter()
             .find(|session| session.inner.id == id)
         {
+            // Bound again: its entries are the new binding's.
+            if session.inner.bound.lock().unwrap().is_some() {
+                return Ok(());
+            }
             let mut entries = session.inner.instructions.lock().unwrap();
             for key in &keys {
                 entries.remove(key);
@@ -487,7 +493,12 @@ impl Session for FakeSession {
         {
             return Ok(());
         }
-        self.inner.log.lock().unwrap().prompts.push(prompt.clone());
+        {
+            let mut log = self.inner.log.lock().unwrap();
+            log.prompts.push(prompt.clone());
+            let given = log.instructions.len();
+            log.instructed_at_prompts.push(given);
+        }
         self.emit(Event::Delivered {
             key: prompt.key.clone(),
         });

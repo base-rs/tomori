@@ -166,8 +166,8 @@ pub enum SpaceCommand {
         mode: String,
         participant: String,
     },
-    /// Set each instruction entry to its value, or remove it with `None`, in order. See `design/spaces.md`.
-    Instructions(Vec<(String, Option<String>)>),
+    /// Give the agent the space's instructions as they are when the driver performs this, from [`Hub::instructions_due`]. At most one is queued for each space at a time. See `design/spaces.md`.
+    Instructions,
     Close,
 }
 
@@ -390,6 +390,8 @@ struct SpaceRecord {
     speech: Retention,
     /// Wakes the space's speech pacer, so that it paces a replay or catch-up that just started.
     waker: Option<Box<dyn Fn() + Send>>,
+    /// While an instructions command is queued for the driver, whether it gives every layer rather than the space's own alone, so that changes made meanwhile join it rather than queue without bound.
+    instructing: Cell<Option<bool>>,
     /// The keys and texts of the latest spoken answers applied, so that a repeated finalization of one is acknowledged rather than answered again; see [`ANSWERED`].
     answered: std::collections::VecDeque<(String, String)>,
 }
@@ -419,10 +421,18 @@ impl SpaceRecord {
         summary
     }
 
-    /// Give the agent `entries`, if any, before any input queued after them. A driver that has stopped needs none.
-    fn instruct(&self, entries: Vec<(String, Option<String>)>) {
-        if !entries.is_empty() {
-            let _ = self.commands.try_send(SpaceCommand::Instructions(entries));
+    /// Give the agent the space's instructions, every layer if `all` and otherwise the space's own, before any input queued after this. A command already queued gives them as they are when it is performed, so it is widened rather than another queued. A driver that has stopped needs none.
+    fn instruct(&self, all: bool) {
+        if self.model.instructions().is_none() || self.model.is_closed() {
+            return;
+        }
+        if let Some(queued) = self.instructing.get() {
+            self.instructing.set(Some(queued || all));
+            return;
+        }
+        self.instructing.set(Some(all));
+        if self.commands.try_send(SpaceCommand::Instructions).is_err() {
+            self.instructing.set(None);
         }
     }
 
@@ -2346,8 +2356,9 @@ impl Hub {
                 };
                 let record = state.space_mut(&space).expect("checked above");
                 match record.model.set_space_instructions(&text) {
-                    Ok(entry) => {
-                        record.instruct(vec![entry]);
+                    Ok(()) => {
+                        // While the agent has not taken them all, every layer is given again, so that taking this one alone does not hide that.
+                        record.instruct(record.model.instructions_failed());
                         state.touch_space(&space);
                         deferred.push(Deferred::Keep);
                     }
@@ -2683,9 +2694,10 @@ impl Hub {
             session,
             snapshot,
         );
-        if self.takes_instructions(&request.backend) {
-            model.take_instructions(request.instructions.trim().to_owned());
-        }
+        model.set_instructions(
+            request.instructions.trim().to_owned(),
+            self.takes_instructions(&request.backend),
+        );
         log::info!(
             "Space {id} {:?} is bound to {} session {} in the {} environment.",
             model.title,
@@ -2704,10 +2716,10 @@ impl Hub {
             speech: Retention::default(),
             waker: None,
             answered: std::collections::VecDeque::new(),
+            instructing: Cell::new(None),
         });
         // Given before any input, so that the agent has them for its first turn.
-        let record = state.spaces.last().expect("pushed above");
-        record.instruct(record.model.instruction_entries());
+        state.spaces.last().expect("pushed above").instruct(true);
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
         self.keep();
@@ -2773,9 +2785,8 @@ impl Hub {
                     Snapshot::default(),
                 );
                 model.set_attribution(kept.attribution);
-                if self.takes_instructions(&kept.backend) {
-                    model.take_instructions(kept.instructions);
-                }
+                let takes = self.takes_instructions(&kept.backend);
+                model.set_instructions(kept.instructions, takes);
                 let (commands, receiver) = async_channel::unbounded();
                 match kept.closed {
                     Some(reason) => {
@@ -2810,6 +2821,7 @@ impl Hub {
                     speech: Retention::default(),
                     waker: None,
                     answered: std::collections::VecDeque::new(),
+                    instructing: Cell::new(None),
                 });
             }
             for id in closed {
@@ -2850,7 +2862,7 @@ impl Hub {
             record.model.session
         );
         // Given again before any input, as the agent may have lost them while the server was stopped.
-        record.instruct(record.model.instruction_entries());
+        record.instruct(true);
         state.pump(id);
         state.touch_space(id);
         drop(state);
@@ -2927,7 +2939,7 @@ impl Hub {
         record.model.apply(event);
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
-            record.instruct(record.model.instruction_entries());
+            record.instruct(true);
         }
         // Stamped now rather than when the snapshot is sent, so a level that ends and starts again within one
         // snapshot interval starts its age again.
@@ -3077,7 +3089,7 @@ impl Hub {
     }
 
     /// The agent was given the space's instructions, or refused them. The space works without them, so a refusal is shown in the space rather than closing it. See `design/spaces.md`.
-    pub(crate) fn space_instructed(&self, space: &str, result: backend::Result<()>) {
+    pub(crate) fn space_instructed(&self, space: &str, result: backend::Result<()>, all: bool) {
         let mut state = self.lock();
         let Some(record) = state.space_mut(space) else {
             return;
@@ -3090,8 +3102,22 @@ impl Hub {
         }
         record
             .model
-            .instructed(result.map_err(|error| error.message));
+            .instructed(result.map_err(|error| error.message), all);
         state.touch_space(space);
+    }
+
+    /// The instruction entries the driver of `space` gives now, for its queued [`SpaceCommand::Instructions`], and whether they are every layer. Empty once the space has closed.
+    pub(crate) fn instructions_due(&self, space: &str) -> (Vec<(String, Option<String>)>, bool) {
+        let state = self.lock();
+        let Some(record) = state.space(space) else {
+            return (Vec::new(), false);
+        };
+        let all = record.instructing.take().unwrap_or(true);
+        let mut entries = record.model.instruction_entries();
+        if !all {
+            entries.retain(|(key, _)| key == crate::instructions::SPACE_KEY);
+        }
+        (entries, all)
     }
 
     /// Whether the backend named `backend` takes instruction entries.
@@ -3287,6 +3313,65 @@ mod tests {
             Vec::new(),
             SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
         )
+    }
+
+    #[cfg(feature = "fake")]
+    #[test]
+    fn instructions_queue_once_and_are_read_when_given() {
+        let (jobs, _) = async_channel::unbounded();
+        let hub = Hub::new(
+            Backends::new().with(crate::fake::FakeBackend::new()),
+            Arc::new(NullTranscriber::new()),
+            jobs,
+            Vec::new(),
+            SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
+        );
+        let (commands, receiver) = async_channel::unbounded();
+        let request = CreateRequest {
+            title: "Space".to_owned(),
+            backend: "fake".to_owned(),
+            directory: "/tmp".to_owned(),
+            session: None,
+            creator: "ada".to_owned(),
+            creator_space: None,
+            environment: "sky".to_owned(),
+            instructions: "Mind the docs.".to_owned(),
+        };
+        let id = hub
+            .register_space(
+                &request,
+                "session".to_owned(),
+                Snapshot::default(),
+                commands,
+            )
+            .unwrap();
+        // Changes made while the command given on creation waits join it.
+        for _ in 0..3 {
+            hub.lock().space(&id).unwrap().instruct(false);
+        }
+        assert_eq!(receiver.len(), 1);
+        let (entries, all) = hub.instructions_due(&id);
+        assert!(all);
+        assert_eq!(entries.len(), 3);
+        // Once it is performed, a change of the space's own layer gives that alone, as it is when performed.
+        hub.lock().space(&id).unwrap().instruct(false);
+        hub.lock()
+            .space_mut(&id)
+            .unwrap()
+            .model
+            .set_space_instructions("Mind the tests.")
+            .unwrap();
+        assert_eq!(receiver.len(), 2);
+        assert_eq!(
+            hub.instructions_due(&id),
+            (
+                vec![(
+                    crate::instructions::SPACE_KEY.to_owned(),
+                    Some("Mind the tests.".to_owned())
+                )],
+                false
+            )
+        );
     }
 
     /// Connect and say hello as `participant`.
