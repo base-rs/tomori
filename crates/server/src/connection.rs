@@ -21,6 +21,9 @@ const CHUNK_TARGET: usize = 64 * 1024;
 /// The most request reads applied before each outgoing chunk when both directions are busy.
 const INPUT_READS_PER_OUTPUT: usize = 8;
 
+/// The most waits for output that may end with input already read, without returning, before yielding once. Every connection, the keepalive sweep and the space drivers are polled by one task, and a request read completes without waiting while the peer's data is buffered, so without this a peer that keeps sending faster than its input is applied would keep the rest of the server from running.
+const INPUT_WAITS_PER_YIELD: usize = 8;
+
 /// The response body of `POST /connect`: server frames out, while reading client frames from the request body it owns.
 ///
 /// The HTTP server pulls this body to write the response. Each read returns the next outgoing frames, and while none are waiting it reads the request body and applies incoming frames to the [`Hub`]. No separate task is needed, so the connection's lifetime is exactly the HTTP exchange's. Dropping the body disconnects the participant.
@@ -150,6 +153,7 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
     async fn read(&mut self, cancellation: &Cancellation) -> Result<BodyFrame<Vec<u8>>, BodyError> {
         // The HTTP server reads the body again only once the previous chunk is written. Until then, the request body is not read either, so input from the peer is not seen while a write is blocked; the keepalive sweep releases a connection whose write makes no progress.
         self.output.asked();
+        let mut inputs = 0;
         loop {
             if self.finished {
                 return Ok(BodyFrame::End);
@@ -184,6 +188,11 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
             };
             if let Some(frame) = received {
                 self.input(frame)?;
+                inputs += 1;
+                if inputs % INPUT_WAITS_PER_YIELD == 0 {
+                    // Input already applied stays applied if this read is dropped meanwhile; the next read continues from the same position.
+                    futures_lite::future::yield_now().await;
+                }
             }
         }
     }

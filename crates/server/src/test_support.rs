@@ -25,6 +25,21 @@ use crate::{Backends, Server, Transcriber, TranscriptSink, UtteranceId, Workspac
 /// How long test helpers wait for an expected message.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Call `check` until it returns a value, for state that the server updates after telling clients, such as what a space's driver has sent its session. Panics after [`TIMEOUT`].
+pub fn eventually<T>(mut check: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Some(value) = check() {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for a condition"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// A transcriber that reads each sample as a Unicode scalar value, so tests can "speak" exact text. See [`speech`].
 #[derive(Default)]
 pub struct TextTranscriber {
