@@ -517,3 +517,17 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
     }
     owner.close();
 }
+
+#[test]
+fn a_paired_token_revoked_elsewhere_ends_its_connection() {
+    let (server, pairing) = pairing_server(true, |server| server);
+    let mut quest = server.connect("quest", "Quest 3");
+    let code = pair(&mut quest);
+    pairing.confirm(&code).unwrap();
+    let token = paired(&quest);
+    let owner = server.connect_with_token("quest", "Quest 3", &token);
+    assert_eq!(owner.role, ConnectionRole::Owner);
+    let id = server.tokens.as_ref().unwrap().entries()[0].id.clone();
+    assert!(server.revoke_elsewhere(&id));
+    assert!(owner.is_closed(TIMEOUT));
+}
