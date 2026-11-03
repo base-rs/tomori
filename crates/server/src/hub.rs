@@ -64,8 +64,33 @@ pub struct SpaceStatus {
 /// How long a pairing waits to be confirmed before it is withdrawn. See `design/security.md`.
 pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long a device has to reveal its value once the server has sent its own.
+pub const REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most pairings that begin within [`PAIRING_WINDOW`], so that a relay cannot keep trying values until the two codes happen to match.
+pub const PAIRING_ATTEMPTS: usize = 3;
+pub const PAIRING_WINDOW: Duration = Duration::from_secs(600);
+
+/// A pairing as the console and status page show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairingView {
+    /// Names this pairing, so that the status page confirms the one it showed.
+    pub serial: u64,
+    pub name: String,
+    /// The code, written as the device shows it, once the device has revealed its value.
+    pub code: Option<String>,
+}
+
+/// How a pairing is confirmed: by typing the code the device shows, on the console, or by the pairing the status page showed, whose code an owner compared.
+#[derive(Clone, Copy, Debug)]
+pub enum Confirmation<'a> {
+    Typed(&'a str),
+    Shown(u64),
+}
+
 /// A device pairing: its commitment, the server's value, and the code once the device has revealed its own value.
 struct PendingPairing {
+    serial: u64,
     connection: ConnectionId,
     /// The device's display name, which names the token it receives.
     name: String,
@@ -154,6 +179,8 @@ pub struct Hub {
     counts_changed: Notify,
     /// The most visitors connected at once; see `design/security.md`.
     max_visitors: AtomicUsize,
+    /// Whether the server serves only TLS, which pairing needs: the token it issues must not cross the network in the clear.
+    encrypted: AtomicBool,
     pairing: RwLock<Option<PairingSetup>>,
     pairing_prompt: RwLock<Option<PairingPrompt>>,
     pairing_timeout: RwLock<Duration>,
@@ -182,6 +209,9 @@ struct HubState {
     shutting_down: bool,
     /// The one pairing pending, if any; see `design/security.md`.
     pairing: Option<PendingPairing>,
+    next_pairing: u64,
+    /// When recent pairings began, for [`PAIRING_ATTEMPTS`].
+    pairing_attempts: std::collections::VecDeque<Instant>,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
 }
@@ -295,6 +325,8 @@ enum Deferred {
     Push(UtteranceId, AudioFrame),
     End(UtteranceId),
     Cancel(UtteranceId),
+    /// Show a pairing waiting to be confirmed on the console: the device's name and the code.
+    PairingPrompt(String, String),
 }
 
 /// A token for this server run, so space identifiers are not reused after a restart: 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
@@ -468,6 +500,8 @@ impl HubState {
         for record in self.participants.values() {
             if record.space.is_none()
                 && let Some(connection) = record.connection.and_then(|id| self.connections.get(&id))
+                // A connection admitted only to pair learns nothing about the spaces.
+                && connection.access.grant != Grant::Pairing
             {
                 connection.outbox.spaces();
             }
@@ -628,6 +662,7 @@ impl Hub {
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
+            encrypted: AtomicBool::new(false),
             pairing: RwLock::new(None),
             pairing_prompt: RwLock::new(None),
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
@@ -656,46 +691,96 @@ impl Hub {
         *self.pairing_timeout.write().expect("never left poisoned") = timeout;
     }
 
-    /// The device and code of the pairing waiting to be confirmed, if any, with the code written as the device shows it.
-    pub fn pending_pairing(&self) -> Option<(String, String)> {
-        let state = self.lock();
-        let pairing = state.pairing.as_ref()?;
-        let code = pairing.code.as_deref()?;
-        Some((pairing.name.clone(), security::pairing::display(code)))
+    /// Mark the server as serving only TLS, so that it pairs devices.
+    pub(crate) fn set_encrypted(&self, encrypted: bool) {
+        self.encrypted.store(encrypted, Ordering::Relaxed);
     }
 
-    /// Confirm the pairing waiting, issuing its device an owner token. `typed`, from the console, must be the code the device shows; an owner on the status page confirms without typing it, having compared the codes. Returns the device's name.
-    pub fn confirm_pairing(&self, typed: Option<&str>) -> Result<String, &'static str> {
-        let mut state = self.lock();
-        let pairing = state.pairing.as_ref().ok_or("No pairing is waiting.")?;
-        let code = pairing.code.as_deref().ok_or("No pairing is waiting.")?;
-        if typed.is_some_and(|typed| typed != code) {
-            return Err("That code does not match, so nothing was confirmed.");
-        }
-        let setup = self
+    /// The pairing pending, revealed or not, if any.
+    pub fn pending_pairing(&self) -> Option<PairingView> {
+        let state = self.lock();
+        let pairing = state.pairing.as_ref()?;
+        Some(PairingView {
+            serial: pairing.serial,
+            name: pairing.name.clone(),
+            code: pairing.code.as_deref().map(security::pairing::display),
+        })
+    }
+
+    /// Confirm the pairing waiting, issuing its device an owner token. Returns the device's name.
+    pub fn confirm_pairing(&self, confirmation: Confirmation<'_>) -> Result<String, &'static str> {
+        let pairing = {
+            let mut state = self.lock();
+            let pairing = state.pairing.as_ref().ok_or("No pairing is waiting.")?;
+            let code = pairing
+                .code
+                .as_deref()
+                .ok_or("The device has not shown its code yet.")?;
+            let confirmed = match confirmation {
+                Confirmation::Typed(typed) => typed == code,
+                Confirmation::Shown(serial) => serial == pairing.serial,
+            };
+            if !confirmed {
+                return Err(match confirmation {
+                    Confirmation::Typed(_) => "That code does not match, so nothing was confirmed.",
+                    Confirmation::Shown(_) => {
+                        "A different pairing is waiting now, so nothing was confirmed."
+                    }
+                });
+            }
+            state.pairing.take().expect("checked above")
+        };
+        // The token is issued outside the hub's lock, since issuing writes the token store.
+        let issued = self
             .pairing
             .read()
             .expect("never left poisoned")
             .clone()
-            .ok_or("This server does not pair devices.")?;
-        let pairing = state.pairing.take().expect("checked above");
-        let (entry, token) = setup
-            .tokens
-            .issue(&pairing.name, security::Grant::Owner)
-            .map_err(|error| {
-                log::error!("Could not issue a token for a pairing: {error}.");
-                "The token could not be issued."
-            })?;
-        log::info!("Paired {:?} as owner token {}.", pairing.name, entry.id);
-        if let Some(record) = state.connections.get(&pairing.connection) {
-            record.outbox.message(ServerMessage::Paired { token });
+            .ok_or("This server does not pair devices.")
+            .and_then(|setup| {
+                setup
+                    .tokens
+                    .issue(&pairing.name, security::Grant::Owner)
+                    .map_err(|error| {
+                        log::error!("Could not issue a token for a pairing: {error}.");
+                        "The token could not be issued."
+                    })
+            });
+        let state = self.lock();
+        let outbox = state
+            .connections
+            .get(&pairing.connection)
+            .map(|record| record.outbox.clone());
+        match issued {
+            Ok((entry, token)) => {
+                log::info!("Paired {:?} as owner token {}.", pairing.name, entry.id);
+                if let Some(outbox) = outbox {
+                    outbox.message(ServerMessage::Paired { token });
+                }
+                Ok(pairing.name)
+            }
+            Err(error) => {
+                if let Some(outbox) = outbox {
+                    outbox.message(ServerMessage::PairFailed {
+                        error: format!("{error} Try again."),
+                    });
+                }
+                Err(error)
+            }
         }
-        Ok(pairing.name)
     }
 
-    /// Decline the pairing waiting, telling its device. Returns whether one was waiting.
-    pub fn decline_pairing(&self) -> bool {
+    /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
+    pub fn decline_pairing(&self, serial: Option<u64>) -> bool {
         let mut state = self.lock();
+        if serial.is_some_and(|serial| {
+            state
+                .pairing
+                .as_ref()
+                .is_none_or(|pairing| pairing.serial != serial)
+        }) {
+            return false;
+        }
         state.end_pairing(None, "The pairing was declined.")
     }
 
@@ -790,6 +875,12 @@ impl Hub {
                 Deferred::Push(id, frame) => self.transcriber.push(id, &frame),
                 Deferred::End(id) => self.transcriber.end(id),
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
+                Deferred::PairingPrompt(name, code) => {
+                    if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
+                    {
+                        prompt(&name, &code);
+                    }
+                }
             }
         }
     }
@@ -913,13 +1004,19 @@ impl Hub {
         {
             let timeout = *self.pairing_timeout.read().expect("never left poisoned");
             let mut state = self.lock();
-            if state
-                .pairing
-                .as_ref()
-                .is_some_and(|pairing| now.saturating_duration_since(pairing.started) >= timeout)
-            {
-                log::info!("A pairing was withdrawn because nobody confirmed it in time.");
-                state.end_pairing(None, "The pairing was not confirmed in time.");
+            let expired = state.pairing.as_ref().and_then(|pairing| {
+                let waited = now.saturating_duration_since(pairing.started);
+                if pairing.code.is_none() && waited >= REVEAL_TIMEOUT {
+                    Some("The pairing was not completed in time.")
+                } else if waited >= timeout {
+                    Some("The pairing was not confirmed in time.")
+                } else {
+                    None
+                }
+            });
+            if let Some(error) = expired {
+                log::info!("A pairing was withdrawn: {error}");
+                state.end_pairing(None, error);
             }
         }
         for (id, cancellation) in expired {
@@ -1173,6 +1270,7 @@ impl Hub {
         });
         match rejoin.filter(|space| state.space(space).is_some()) {
             Some(space) => state.join(&participant, &space),
+            None if role == ConnectionRole::Pairing => {}
             None => outbox.spaces(),
         }
     }
@@ -1552,22 +1650,44 @@ impl Hub {
                     outbox.message(failed("This server does not pair devices."));
                     return;
                 }
-                if state
-                    .pairing
-                    .as_ref()
-                    .is_some_and(|pairing| pairing.connection != connection)
-                {
-                    outbox.message(failed("Another device is pairing; try again shortly."));
+                if !self.encrypted.load(Ordering::Relaxed) {
+                    outbox.message(failed("Pairing needs a connection over TLS."));
                     return;
                 }
+                // Refused even to the same connection, which must not get a fresh value from the server once it has seen one; see `design/security.md`.
+                if state.pairing.is_some() {
+                    outbox.message(failed(
+                        "A pairing is already in progress; try again shortly.",
+                    ));
+                    return;
+                }
+                let now = Instant::now();
+                while state
+                    .pairing_attempts
+                    .front()
+                    .is_some_and(|began| now.saturating_duration_since(*began) >= PAIRING_WINDOW)
+                {
+                    state.pairing_attempts.pop_front();
+                }
+                if state.pairing_attempts.len() >= PAIRING_ATTEMPTS {
+                    outbox.message(failed(
+                        "Too many pairings began recently; try again in a few minutes.",
+                    ));
+                    return;
+                }
+                state.pairing_attempts.push_back(now);
+                state.next_pairing += 1;
                 let server = security::pairing::Nonce::generate();
+                let name = state.participants[participant].name.clone();
+                log::info!("{name:?} began pairing.");
                 state.pairing = Some(PendingPairing {
+                    serial: state.next_pairing,
                     connection,
-                    name: state.participants[participant].name.clone(),
-                    commitment,
+                    name,
+                    commitment: commitment.to_ascii_lowercase(),
                     server,
                     code: None,
-                    started: Instant::now(),
+                    started: now,
                 });
                 outbox.message(ServerMessage::PairNonce {
                     nonce: server.to_hex(),
@@ -1598,9 +1718,7 @@ impl Hub {
                 outbox.message(ServerMessage::PairWaiting);
                 let shown = security::pairing::display(&code);
                 log::info!("Pairing request from {name:?}: code {shown}.");
-                if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned") {
-                    prompt(&name, &shown);
-                }
+                deferred.push(Deferred::PairingPrompt(name, shown));
             }
             ClientMessage::PairCancel => {
                 state.end_pairing(Some(connection), "The pairing was cancelled.");

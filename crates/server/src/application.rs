@@ -157,7 +157,7 @@ impl Application {
                     200,
                     pages::status(
                         &self.hub.status(),
-                        self.hub.pending_pairing(),
+                        self.hub.pending_pairing().as_ref(),
                         tokens.as_deref(),
                         Self::signed_in(fields),
                     ),
@@ -186,28 +186,38 @@ impl Application {
             pages::SIGN_IN_PATH => self.sign_in(form.as_deref()),
             pages::SIGN_OUT_PATH => redirect(pages::SIGN_IN_PATH, Some(token_cookie(None))),
             pages::CONFIRM_PAIRING_PATH | pages::DECLINE_PAIRING_PATH => {
-                self.decide_pairing(fields, path == pages::CONFIRM_PAIRING_PATH)
+                self.decide_pairing(fields, form.as_deref(), path == pages::CONFIRM_PAIRING_PATH)
             }
             _ => self.revoke(fields, form.as_deref()),
         }
     }
 
-    /// Confirm or decline the pairing waiting, as an owner who compared the codes.
+    /// Confirm or decline the pairing the status page showed, as an owner who compared the codes. A different pairing pending now is left alone.
     fn decide_pairing<B: ReadableBody>(
         &self,
         fields: &Fields,
+        form: Option<&[u8]>,
         confirm: bool,
     ) -> Response<ResponseBody<B>> {
         if !matches!(self.viewer(fields), Viewer::Owner) {
             return html(403, pages::not_an_owner());
         }
+        let Some(serial) = form
+            .and_then(|form| pages::form_value(form, "pairing"))
+            .and_then(|serial| serial.parse::<u64>().ok())
+        else {
+            return redirect(pages::STATUS_PATH, None);
+        };
         if confirm {
-            match self.hub.confirm_pairing(None) {
+            match self
+                .hub
+                .confirm_pairing(crate::hub::Confirmation::Shown(serial))
+            {
                 Ok(name) => log::info!("Confirmed pairing {name:?} from the status page."),
                 Err(error) => log::info!("Could not confirm a pairing: {error}"),
             }
         } else {
-            self.hub.decline_pairing();
+            self.hub.decline_pairing(Some(serial));
         }
         redirect(pages::STATUS_PATH, None)
     }

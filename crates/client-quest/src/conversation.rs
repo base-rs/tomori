@@ -451,6 +451,8 @@ impl Conversation {
 
     fn receive(&mut self, message: ServerMessage) {
         match message {
+            // A connection admitted only to pair is not shown spaces, even if a server sends them.
+            ServerMessage::Spaces { .. } if self.role == ConnectionRole::Pairing => {}
             ServerMessage::PairNonce { nonce } => self.pair_with(&nonce),
             ServerMessage::PairWaiting => {}
             ServerMessage::Paired { token } => {

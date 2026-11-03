@@ -8,7 +8,7 @@ use std::fmt::Write;
 use protocol::{Activity, ConnectionRole};
 use security::{Entry, Grant};
 
-use crate::hub::Status;
+use crate::hub::{PairingView, Status};
 
 /// The paths of the pages and their actions.
 pub const STATUS_PATH: &str = "/";
@@ -139,7 +139,7 @@ fn people(people: &[(String, ConnectionRole)]) -> String {
 /// The status page: the spaces and who is in them, the pairing waiting, the issued tokens, which an owner can revoke, and whether `signed_in` with a cookie, so that signing out is offered.
 pub fn status(
     status: &Status,
-    pairing: Option<(String, String)>,
+    pairing: Option<&PairingView>,
     tokens: Option<&[Entry]>,
     signed_in: bool,
 ) -> String {
@@ -168,15 +168,33 @@ pub fn status(
     let _ = writeln!(body, "<h2>Lobby</h2>\n<p>{}</p>", people(&status.lobby));
     body.push_str("<h2>Pairing</h2>\n");
     match pairing {
-        Some((name, code)) => {
-            let _ = writeln!(
-                body,
-                "<p>{} asks to pair with code <strong>{}</strong>. Confirm only if the device shows the same code.</p>\n\
-<form class=\"inline\" method=\"post\" action=\"{CONFIRM_PAIRING_PATH}\"><button>Confirm</button></form> \
-<form class=\"inline\" method=\"post\" action=\"{DECLINE_PAIRING_PATH}\"><button>Decline</button></form>",
-                escape(&name),
-                escape(&code)
+        Some(pairing) => {
+            // Each form names the pairing shown, so that it acts on no other.
+            let target = format!(
+                "<input type=\"hidden\" name=\"pairing\" value=\"{}\">",
+                pairing.serial
             );
+            let decline = format!(
+                "<form class=\"inline\" method=\"post\" action=\"{DECLINE_PAIRING_PATH}\">{target}<button>Decline</button></form>"
+            );
+            match &pairing.code {
+                Some(code) => {
+                    let _ = writeln!(
+                        body,
+                        "<p>{} asks to pair with code <strong>{}</strong>. Confirm only if the device shows the same code.</p>\n\
+<form class=\"inline\" method=\"post\" action=\"{CONFIRM_PAIRING_PATH}\">{target}<button>Confirm</button></form> {decline}",
+                        escape(&pairing.name),
+                        escape(code)
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        body,
+                        "<p>{} is pairing; its code is not shown yet.</p>\n{decline}",
+                        escape(&pairing.name)
+                    );
+                }
+            }
         }
         None => body.push_str("<p>No pairing is pending.</p>\n"),
     }
@@ -272,15 +290,21 @@ mod tests {
 
         let empty = super::status(&Status::default(), None, None, false);
         assert!(empty.contains("No pairing is pending"));
-        let pairing = super::status(
-            &Status::default(),
-            Some(("<Quest>".into(), "042 917".into())),
-            None,
-            false,
-        );
+        let mut view = PairingView {
+            serial: 7,
+            name: "<Quest>".into(),
+            code: Some("042 917".into()),
+        };
+        let pairing = super::status(&Status::default(), Some(&view), None, false);
         assert!(pairing.contains("&lt;Quest&gt; asks to pair with code <strong>042 917</strong>"));
         assert!(pairing.contains("action=\"/pairing/confirm\""));
         assert!(pairing.contains("action=\"/pairing/decline\""));
+        assert!(pairing.contains("name=\"pairing\" value=\"7\""));
+        view.code = None;
+        let unrevealed = super::status(&Status::default(), Some(&view), None, false);
+        assert!(unrevealed.contains("is pairing; its code is not shown yet"));
+        assert!(!unrevealed.contains("/pairing/confirm"));
+        assert!(unrevealed.contains("/pairing/decline"));
         assert!(empty.contains("No spaces."));
         assert!(!empty.contains("Tokens"));
         assert!(!empty.contains("Sign out"));

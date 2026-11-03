@@ -65,19 +65,20 @@ pub struct Server {
 pub struct Pairing(Arc<Hub>);
 
 impl Pairing {
-    /// The device and code of the pairing waiting, if any.
-    pub fn pending(&self) -> Option<(String, String)> {
+    /// The pairing pending, revealed or not, if any.
+    pub fn pending(&self) -> Option<crate::hub::PairingView> {
         self.0.pending_pairing()
     }
 
     /// Confirm the pairing waiting, if `typed` is the code its device shows. Returns the device's name.
     pub fn confirm(&self, typed: &str) -> Result<String, &'static str> {
-        self.0.confirm_pairing(Some(typed))
+        self.0
+            .confirm_pairing(crate::hub::Confirmation::Typed(typed))
     }
 
-    /// Decline the pairing waiting. Returns whether one was waiting.
+    /// Decline the pairing pending, revealed or not. Returns whether one was pending.
     pub fn decline(&self) -> bool {
-        self.0.decline_pairing()
+        self.0.decline_pairing(None)
     }
 }
 
@@ -148,6 +149,7 @@ impl Server {
     /// Serve only TLS, with `config`, such as from [`security::ServerCertificate::server_config`]. A handshake that has not completed within the request timeout is closed, as a request head would be. See `design/security.md`.
     pub fn with_tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
         self.tls = Some(config);
+        self.hub.set_encrypted(true);
         self
     }
 
@@ -193,13 +195,28 @@ impl Server {
     }
 
     /// Pair devices, deriving the code from `fingerprint`, the certificate served with [`Self::with_tls`], and issuing tokens from the store given to [`Self::with_tokens`], which must come first. See `design/security.md`.
+    ///
+    /// # Panics
+    ///
+    /// Without a token store from [`Self::with_tokens`], since pairing issues tokens.
     pub fn with_pairing(self, fingerprint: security::Fingerprint) -> Self {
-        if let Some(tokens) = self.application.door().store() {
-            self.hub.set_pairing(crate::hub::PairingSetup {
-                fingerprint,
-                tokens: tokens.clone(),
-            });
-        }
+        let tokens = self
+            .application
+            .door()
+            .store()
+            .expect("pairing issues tokens, so `with_tokens` comes first")
+            .clone();
+        self.hub.set_pairing(crate::hub::PairingSetup {
+            fingerprint,
+            tokens,
+        });
+        self
+    }
+
+    /// Pair over plain HTTP, as tests' raw clients do. Pairing otherwise needs [`Self::with_tls`], so that the token it issues never crosses the network in the clear.
+    #[cfg(feature = "fake")]
+    pub fn with_pairing_over_plain_http_for_tests(self) -> Self {
+        self.hub.set_encrypted(true);
         self
     }
 
