@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), q (quit).";
 
 pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
     let (sender, input) = mpsc::channel();
@@ -55,6 +55,19 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                         }
                         "p" => conversation.pair(),
                         "k" => conversation.knock(),
+                        // The hand menu's People & security section, for a terminal without hands; see `design/hand-menu.md`.
+                        "m" => {
+                            let model = conversation.menu_model();
+                            for item in crate::hand_menu::items(
+                                Some(crate::hand_menu::Section::PeopleAndSecurity),
+                                &model,
+                            )
+                            .into_iter()
+                            .skip(1)
+                            {
+                                println!("  {}", item.text);
+                            }
+                        }
                         "+" | "-" => {
                             match conversation.knocks().first().map(|knock| knock.id.clone()) {
                                 Some(id) => conversation.decide_knock(&id, command == "+"),
