@@ -8,6 +8,8 @@ A space's participants are the owners and collaborators in it; visitors watching
 
 The server hosts multiple spaces concurrently. Clients can list, create, join, leave and move between spaces. Only owners create spaces. Creating a space either starts a new agent session or binds an existing one, where the backend supports binding. A client is in at most one space at a time, as a participant or a visitor; moving to another space leaves the previous one. Starting a session can take time; once it has started, the creator joins the new space, unless they have joined another space since asking.
 
+Spaces survive a server restart. The server keeps each space's identifier, title, backend, directory, bound session, environment and settings, such as attribution, in its state directory, and when it starts it binds each space again to its agent session, so that a client restoring a space by identifier after a restart lands in the same space, and a collaborator admitted to it stays admitted. The conversation, pending approvals and questions come from the agent's own record of the session as it is bound again. A space whose session cannot be bound again is listed as closed, with the reason. A space is removed, and no longer kept, when a closed space is forgotten.
+
 Space identifiers are never reused, including by a later run of the server, because a client restores its space by identifier when it reconnects and must not land in an unrelated space. Refusing a join because the space does not exist names that space in the error, so a client can tell the refusal from errors about other requests.
 
 A participant who disconnects leaves their space but keeps their identity and audio source, and rejoins that space when they reconnect, unless they left it explicitly. A client may send `leave` straight after Hello to restore a leave made while it was disconnected; this overrides the rejoin, and is harmless when the participant is in no space. The server forgets a participant who has been disconnected for longer than a generous retention, 12 hours by default; after that they reconnect as a new participant in the lobby. A visitor is kept, rejoins and is forgotten in the same way, and keeps their public handle while they are kept, except that the server keeps at most 256 disconnected visitors, forgetting those longest gone first, since anyone can connect as a new visitor.
@@ -38,12 +40,15 @@ In November 2026 the user chose to refuse and retry an initial snapshot failure 
 
 In November 2026 an OpenCode service restart closed every space. The user asked for spaces to keep working across a reconnection where that is sound, and for no approval request to be silently lost. Replacing the conversation and reconciling requests from the session as read again is the same trust the space places in its initial snapshot; the gap is shown while it lasts.
 
+In November 2026 the user decided that spaces should survive a server restart, so that a space, and a collaborator's admission to it, last as long as the work it holds; it is implemented separately from knocking.
+
 ## Scope
 
-The server's space registry, the client protocol for joining and leaving spaces, the input queue, and approval and question handling. How spaces persist across server restarts is not yet decided.
+The server's space registry and what it keeps of spaces across restarts, the client protocol for joining and leaving spaces, the input queue, and approval and question handling. Whether input still queued when the server stops is kept is not yet decided.
 
 ## Validation
 
+- Test that spaces survive a restart: after the server stops and starts again with the same state directory, each space is listed with the same identifier, title, directory, environment and settings, is bound again to its session with that session's conversation, and a client rejoining by identifier lands in it; a space whose session cannot be bound again is listed as closed with the reason; and a forgotten closed space is not kept.
 - Test that an initial snapshot failure opens no space, reports a retryable error, closes only the failed handle and allows a later retry; an already running space remains unaffected.
 - Test that attaching an OpenCode (or fake) session already bound to a space is refused without closing that space, that a stale handle cannot close or command a reattachment, and that an initial snapshot with several pending approvals and questions presents them all in order.
 - Inspect the space model: a space has exactly one session binding, and per-space stores are keyed by space.
