@@ -465,7 +465,10 @@ pub fn run(
         renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
         // Report this participant's head, controllers and hands to the server, in
         // the space's scene coordinates, so the others in the space can render them.
-        if let Some(head) = scene_anchor.to_scene_transform(head_pose(&views)) {
+        // Visitors send no presence; see `design/security.md`.
+        if conversation.role().participates()
+            && let Some(head) = scene_anchor.to_scene_transform(head_pose(&views))
+        {
             connection.send_presence(
                 head,
                 controller_poses[controller::LEFT],

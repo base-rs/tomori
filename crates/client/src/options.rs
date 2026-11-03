@@ -7,6 +7,17 @@ use protocol::Keepalive;
 
 use crate::Backoff;
 
+/// How a [`crate::Client`] reaches the server. A Tomori server that admits by tokens serves only TLS with a self-signed certificate, which the client pins by its fingerprint. See `design/security.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// Plain HTTP, as to a server in `--auth open` mode. No token is presented.
+    Plain,
+    /// TLS, accepting only the certificate with `pin`'s fingerprint, or, without one, whichever certificate the server presents, which [`crate::ConnectionState::Connected`] reports so that it can be pinned from then on.
+    Tls { pin: Option<security::Fingerprint> },
+    /// TLS as [`Self::Tls`], or plain HTTP if the server presents no certificate, for an address nothing is known about yet, such as one typed in. No token is presented over plain HTTP.
+    Automatic { pin: Option<security::Fingerprint> },
+}
+
 /// How a [`crate::Client`] reaches and identifies itself to the server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -16,6 +27,10 @@ pub struct Options {
     pub participant: String,
     /// The display name used for speaker attribution.
     pub name: String,
+    /// A token from the server, presented on each connection, and only over TLS. See `design/security.md`.
+    pub token: Option<String>,
+    /// Whether to connect over TLS, and which certificate to accept.
+    pub transport: Transport,
     pub backoff: Backoff,
     /// The limit for establishing the connection and for receiving the server's Welcome.
     pub connect_timeout: Duration,
@@ -44,6 +59,8 @@ impl Options {
             address: address.into(),
             participant: participant.into(),
             name: name.into(),
+            token: None,
+            transport: Transport::Plain,
             backoff: Backoff::default(),
             connect_timeout: Duration::from_secs(5),
             close_timeout: Duration::from_secs(1),

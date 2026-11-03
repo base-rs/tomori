@@ -20,6 +20,8 @@ case "$command" in
             # TOMORI_SERVER=host:port connects straight to that server instead of showing the server list.
             extras=()
             if [[ -n "${TOMORI_SERVER:-}" ]]; then extras+=(-e tomori.server "$TOMORI_SERVER"); fi
+            # TOMORI_TOKEN=tomori_… gives the headset a token, such as from `tomori-server auth mint`, for the server it connects to.
+            if [[ -n "${TOMORI_TOKEN:-}" ]]; then extras+=(-e tomori.token "$TOMORI_TOKEN"); fi
             adb shell am start -n "$package/android.app.NativeActivity" ${extras[@]+"${extras[@]}"}
         fi
         ;;

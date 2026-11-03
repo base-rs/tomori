@@ -278,7 +278,7 @@ fn android_main(app: android_activity::AndroidApp) {
     }
 }
 
-/// The intent extras `tomori.server` and `tomori.name` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
+/// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
 #[cfg(target_os = "android")]
 fn android_connection(
     android: std::sync::Arc<android::Android>,
@@ -292,6 +292,7 @@ fn android_connection(
     let overrides = Overrides {
         server: extra("tomori.server"),
         name: extra("tomori.name"),
+        token: extra("tomori.token"),
     };
     let device = android.device_name().unwrap_or_else(|error| {
         log::warn!("Cannot read the device name: {error:#}");

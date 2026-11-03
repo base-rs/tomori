@@ -362,3 +362,120 @@ fn a_stalled_handshake_is_closed_after_the_request_timeout() {
     assert_eq!(silent.read(&mut buffer).unwrap_or(0), 0);
     assert!(started.elapsed() < TIMEOUT);
 }
+
+/// The first connection state of `client` that `select` accepts.
+fn state<T>(
+    client: &client::Client,
+    mut select: impl FnMut(&client::ConnectionState) -> Option<T>,
+) -> T {
+    let deadline = std::time::Instant::now() + TIMEOUT * 2;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("the state arrives in time");
+        if let client::Event::State(state) = client.events().recv_timeout(remaining).unwrap()
+            && let Some(value) = select(&state)
+        {
+            return value;
+        }
+    }
+}
+
+fn client_with(
+    server: &TestServer,
+    transport: client::Transport,
+    token: Option<String>,
+) -> client::Client {
+    let mut options = client::Options::new(server.address.to_string(), "ada", "Ada");
+    options.transport = transport;
+    options.token = token;
+    client::Client::connect(options).unwrap()
+}
+
+fn connected(client: &client::Client) -> (ConnectionRole, Option<security::Fingerprint>) {
+    state(client, |state| match state {
+        client::ConnectionState::Connected {
+            role, certificate, ..
+        } => Some((*role, *certificate)),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_client_presents_its_token_over_tls_to_the_pinned_certificate() {
+    let (server, fingerprint) = tls_server(|server| server);
+    let (_, token) = server.issue("Ada", Grant::Owner);
+
+    // Pinned, with a token: an owner.
+    let pinned = client_with(
+        &server,
+        client::Transport::Tls {
+            pin: Some(fingerprint),
+        },
+        Some(token.clone()),
+    );
+    assert_eq!(
+        connected(&pinned),
+        (ConnectionRole::Owner, Some(fingerprint))
+    );
+    pinned.close();
+
+    // Nothing pinned yet: the certificate presented is accepted and reported, to pin from then on.
+    let first = client_with(
+        &server,
+        client::Transport::Automatic { pin: None },
+        Some(token.clone()),
+    );
+    assert_eq!(
+        connected(&first),
+        (ConnectionRole::Owner, Some(fingerprint))
+    );
+    first.close();
+
+    // Another certificate pinned: nothing is sent, and the change is reported.
+    let other = security::ServerCertificate::generate().fingerprint();
+    let changed = client_with(
+        &server,
+        client::Transport::Tls { pin: Some(other) },
+        Some(token),
+    );
+    let reason = state(&changed, |state| match state {
+        client::ConnectionState::Disconnected { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        reason,
+        client::Disconnect::Certificate(fingerprint.to_string())
+    );
+    changed.close();
+}
+
+#[test]
+fn an_automatic_client_falls_back_to_plain_http_without_its_token() {
+    let server = TestServer::start();
+    let client = client_with(
+        &server,
+        client::Transport::Automatic { pin: None },
+        Some(security::generate_token()),
+    );
+    assert_eq!(connected(&client), (ConnectionRole::Owner, None));
+    client.close();
+}
+
+#[test]
+fn a_refused_token_is_reported_as_unauthorized() {
+    let (server, fingerprint) = tls_server(|server| server);
+    let client = client_with(
+        &server,
+        client::Transport::Tls {
+            pin: Some(fingerprint),
+        },
+        Some(security::generate_token()),
+    );
+    let reason = state(&client, |state| match state {
+        client::ConnectionState::Disconnected { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(reason, client::Disconnect::Status(401));
+    client.close();
+}

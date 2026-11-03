@@ -493,6 +493,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "pin-project-lite",
+ "rustls",
 ]
 
 [[package]]
@@ -840,6 +841,8 @@ dependencies = [
  "discovery",
  "futures-lite",
  "protocol",
+ "rustls",
+ "security",
 ]
 
 [[package]]

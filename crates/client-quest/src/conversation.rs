@@ -23,6 +23,9 @@ use std::{
 
 const BODY_ROWS: usize = ROWS - 4;
 
+/// Said when a visitor tries to talk or act in the space they are watching. See `design/security.md`.
+const VISITING: &str = "Visitors can watch and listen, but not talk or act here.";
+
 const LOST: &str = "Connection lost; your words were not sent.";
 
 /// What the conversation needs done with the connection.
@@ -338,6 +341,23 @@ impl Conversation {
     }
 
     /// Report a problem the connection found, such as a client that could not start.
+    /// Tell the participant something about the connection's security, such as that the server's identity changed. See `design/security.md`.
+    pub fn security_notice(&mut self, notice: impl Into<String>) {
+        let notice = notice.into();
+        log::warn!("{notice}");
+        self.notice = Some(notice);
+    }
+
+    /// What this connection may do where it is now.
+    pub fn role(&self) -> ConnectionRole {
+        self.role
+    }
+
+    /// Whether this connection may create spaces, so that the create object is offered. Only owners create spaces; see `design/security.md`.
+    fn creates(&self) -> bool {
+        self.role == ConnectionRole::Owner
+    }
+
     pub fn fail(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
     }
@@ -381,6 +401,7 @@ impl Conversation {
             server,
             source,
             role,
+            certificate: _,
             backends,
             roots,
             environments,
@@ -593,16 +614,31 @@ impl Conversation {
         self.actions.push(Action::Send(ClientMessage::ListSpaces));
     }
 
-    fn send(&mut self, message: ClientMessage) {
+    /// Send `message`, unless it acts in the space and this connection only watches. Returns whether it was sent.
+    fn send(&mut self, message: ClientMessage) -> bool {
+        // A visitor only watches: acting in the space, such as deciding an approval, is not sent. See `design/security.md`.
+        let acts = matches!(
+            message,
+            ClientMessage::CancelQueued { .. }
+                | ClientMessage::Decide { .. }
+                | ClientMessage::Answer { .. }
+                | ClientMessage::SetAttribution { .. }
+                | ClientMessage::SetMode { .. }
+        );
+        if acts && !self.role.participates() {
+            self.notice = Some(VISITING.into());
+            return false;
+        }
         self.error = None;
         self.actions.push(Action::Send(message));
+        true
     }
 
     /// The number of entries in the list shown at `step`, so the stick stays on one of them.
     fn step_list(&self, step: LobbyStep) -> usize {
         match step {
             // The spaces, then the create object.
-            LobbyStep::Spaces => self.spaces.len() + 1,
+            LobbyStep::Spaces => self.spaces.len() + usize::from(self.creates()),
             LobbyStep::Backend => self.backends.len(),
             LobbyStep::Directory => self.roots.len(),
             // "New session", then the existing sessions.
@@ -863,10 +899,11 @@ impl Conversation {
                             self.send(ClientMessage::Join { space });
                         }
                         // The create object opens its first ring.
-                        None => {
+                        None if self.creates() => {
                             self.ended = None;
                             self.open_menu();
                         }
+                        None => {}
                     },
                     LobbyStep::Backend => {
                         if let Some(backend) = self.backends.get(self.menu) {
@@ -923,12 +960,13 @@ impl Conversation {
                     None => (Decision::AllowOnce, None),
                     Some(index) => (Decision::Grant, Some(approval.options[index].id.clone())),
                 };
-                self.decided = Some(request.clone());
-                self.send(ClientMessage::Decide {
-                    request,
+                if self.send(ClientMessage::Decide {
+                    request: request.clone(),
                     decision,
                     option,
-                });
+                }) {
+                    self.decided = Some(request);
+                }
                 false
             }
         }
@@ -952,12 +990,13 @@ impl Conversation {
                     .is_some_and(|space| space.approval.is_some());
                 if let Some(approval) = self.approval() {
                     let request = approval.id.clone();
-                    self.decided = Some(request.clone());
-                    self.send(ClientMessage::Decide {
-                        request,
+                    if self.send(ClientMessage::Decide {
+                        request: request.clone(),
                         decision: Decision::Deny,
                         option: None,
-                    });
+                    }) {
+                        self.decided = Some(request);
+                    }
                 } else if pending {
                     // Wait for the decision already sent.
                 } else if let Some(entry) = self.own_queued().map(|entry| entry.id.clone()) {
@@ -1029,6 +1068,10 @@ impl Conversation {
             self.notice = Some("Join a space to talk to the agent.".into());
             return;
         }
+        if !self.role.participates() {
+            self.notice = Some(VISITING.into());
+            return;
+        }
         if !matches!(self.state, Some(ConnectionState::Connected { .. })) {
             self.error = Some("Offline; cannot record.".into());
             return;
@@ -1060,6 +1103,10 @@ impl Conversation {
         }
         if self.mode != Mode::Space || self.space.is_none() {
             self.notice = Some("Join a space to use live audio.".into());
+            return;
+        }
+        if !self.role.participates() {
+            self.notice = Some(VISITING.into());
             return;
         }
         if !matches!(self.state, Some(ConnectionState::Connected { .. })) {
@@ -1315,8 +1362,10 @@ impl Conversation {
                         "Joining...".into()
                     } else if !self.listed {
                         "Listing spaces...".into()
-                    } else if self.spaces.is_empty() {
+                    } else if self.spaces.is_empty() && self.creates() {
                         "No spaces yet; create one.".into()
+                    } else if self.spaces.is_empty() {
+                        "No spaces yet.".into()
                     } else {
                         format!("You are {}.", self.name)
                     }
@@ -1338,7 +1387,7 @@ impl Conversation {
                     }
                 )
             })
-            .chain(["+ New space".to_owned()]);
+            .chain(self.creates().then(|| "+ New space".to_owned()));
         let start = window(self.selected, self.step_list(LobbyStep::Spaces), rows);
         for (index, entry) in entries.enumerate().skip(start).take(rows) {
             let marker = if index == self.selected { '>' } else { ' ' };
@@ -1525,8 +1574,10 @@ impl Conversation {
                         Some("Listing spaces...".into())
                     } else if !spaces {
                         Some(self.ring_hint(self.step).into())
-                    } else if self.spaces.is_empty() {
+                    } else if self.spaces.is_empty() && self.creates() {
                         Some("No spaces yet; create one.".into())
+                    } else if self.spaces.is_empty() {
+                        Some("No spaces yet.".into())
                     } else {
                         None
                     }
@@ -1546,13 +1597,13 @@ impl Conversation {
                         detail: Some(activity_label(space.activity).into()),
                         selected: spaces && index == self.selected,
                     })
-                    .chain([arrival::Item {
+                    .chain(self.creates().then(|| arrival::Item {
                         key: arrival::Key::Create,
                         kind: arrival::Kind::Create { open: !spaces },
                         label: if spaces { "New space" } else { "Back" }.into(),
                         detail: None,
                         selected: spaces && self.selected >= self.spaces.len(),
-                    }])
+                    }))
                     .collect();
                 Some(arrival::View {
                     heading: match ring {
@@ -1612,6 +1663,7 @@ impl Conversation {
                     self.accept();
                 }
             }
+            (Mode::Lobby, arrival::Key::Create) if !self.creates() => {}
             (Mode::Lobby, arrival::Key::Create) => {
                 self.error = None;
                 if self.step == LobbyStep::Spaces {
@@ -1918,6 +1970,7 @@ mod tests {
             source: 1,
             server: "studio".into(),
             role: ConnectionRole::Owner,
+            certificate: None,
             backends,
             roots,
             environments: sky(),
@@ -2156,6 +2209,52 @@ mod tests {
         );
         // The create object stays selected as the spaces change.
         assert!(view.items[1].selected);
+    }
+
+    /// Told the role `role`, as the server does whenever it changes.
+    fn role(role: ConnectionRole) -> Event {
+        Event::Message(ServerMessage::Role { role })
+    }
+
+    #[test]
+    fn only_owners_are_offered_the_create_object() {
+        let mut conversation = in_lobby(vec![], vec![]);
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert_eq!(conversation.role(), ConnectionRole::Visitor);
+        listed(&mut conversation, vec![]);
+        let view = conversation.arrival().unwrap();
+        assert!(view.items.is_empty());
+        assert_eq!(view.status.as_deref(), Some("No spaces yet."));
+        assert!(!conversation.text().contains("New space"));
+        // Choosing it anyway, as a stale pointer might, opens nothing.
+        conversation.choose_object(&arrival::Key::Create);
+        assert!(!conversation.text().contains("NEW SPACE"));
+
+        listed(&mut conversation, vec![summary("one", "One")]);
+        let view = conversation.arrival().unwrap();
+        assert_eq!(keys(&view.items), [arrival::Key::Space("one".into())]);
+        assert!(!conversation.text().contains("New space"));
+    }
+
+    #[test]
+    fn a_visitor_watches_but_does_not_talk_or_act() {
+        let mut conversation = joined(|state| state.approval = Some(approval(&[])));
+        conversation.apply(role(ConnectionRole::Visitor));
+        conversation.talk(true);
+        assert_eq!(conversation.status().as_deref(), Some(VISITING));
+        assert!(conversation.take_actions().is_empty());
+        conversation.toggle_live();
+        assert!(conversation.take_actions().is_empty());
+        conversation.accept();
+        assert!(sent(&mut conversation).is_empty());
+
+        // Admitted as a collaborator, they can.
+        conversation.apply(role(ConnectionRole::Collaborator));
+        conversation.accept();
+        assert!(matches!(
+            sent(&mut conversation)[..],
+            [ClientMessage::Decide { .. }]
+        ));
     }
 
     #[test]
@@ -2437,6 +2536,7 @@ mod tests {
             source: 1,
             server: "studio".into(),
             role: ConnectionRole::Owner,
+            certificate: None,
             backends: backends(),
             roots: roots(),
             environments: vec![
@@ -2486,6 +2586,7 @@ mod tests {
             source: 1,
             server: "studio".into(),
             role: ConnectionRole::Owner,
+            certificate: None,
             backends: backends(),
             roots: roots(),
             environments: vec![],
@@ -3015,6 +3116,7 @@ mod tests {
             source: 2,
             server: "studio".into(),
             role: ConnectionRole::Owner,
+            certificate: None,
             backends: vec![],
             roots: vec![],
             environments: sky(),

@@ -30,6 +30,11 @@ impl Pinned {
         })
     }
 
+    /// The fingerprint accepted, if one is pinned.
+    pub fn expected(&self) -> Option<Fingerprint> {
+        self.expected
+    }
+
     /// The fingerprint of the certificate the server last presented, whether or not it was accepted.
     pub fn seen(&self) -> Option<Fingerprint> {
         *self.seen.lock().expect("the pin is never left poisoned")
@@ -119,6 +124,7 @@ mod tests {
     #[test]
     fn accepts_only_the_pinned_certificate() {
         let pinned = Pinned::new(Some(Fingerprint::of(b"ours")));
+        assert_eq!(pinned.expected(), Some(Fingerprint::of(b"ours")));
         assert_eq!(pinned.seen(), None);
         assert!(verify(&pinned, b"ours").is_ok());
         assert_eq!(pinned.seen(), Some(Fingerprint::of(b"ours")));
