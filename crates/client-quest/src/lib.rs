@@ -35,6 +35,7 @@ mod interaction;
 mod log_cadence;
 mod markdown_lite;
 mod panel_anchor;
+mod pill;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
 mod playback;

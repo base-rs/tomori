@@ -127,7 +127,6 @@ pub struct Renderer {
     scene: Vec<Instance>,
     vertex_count: u32,
     controllers: Controllers,
-    caption_offset: f32,
     base_scene_len: usize,
     workspace: crate::workspace_graphics::WorkspaceGraphics,
     arrival: crate::arrival_graphics::ArrivalLabels,
@@ -285,7 +284,6 @@ impl Renderer {
             scene: Vec::with_capacity(MAX_INSTANCES),
             vertex_count: mesh.len() as u32,
             controllers,
-            caption_offset: 0.0,
             base_scene_len: 0,
             workspace,
             arrival,
@@ -296,11 +294,6 @@ impl Renderer {
     /// A panel drawn by this renderer's scene pass, holding at most `capacity` vertices.
     pub fn panel(&self, device: &wgpu::Device, capacity: usize) -> crate::ui_panel::Panel {
         crate::ui_panel::Panel::new(device, &self.panels, capacity)
-    }
-
-    /// How far the floating panel drops while the swarm is busy, so that it does not cover it.
-    pub fn caption_offset(&self) -> f32 {
-        self.caption_offset
     }
 
     /// Each eye's multisampled color target, which its scene pass resolves into the eye's own target; none for a single sample.
@@ -399,12 +392,6 @@ impl Renderer {
         self.scene.clear();
         self.workspace.hide();
         self.arrival.hide();
-        // Keep the debug console, but move it below the conversational body.
-        self.caption_offset = if swarm.visual.mode == Mode::Neutral {
-            0.0
-        } else {
-            -0.4
-        };
         swarm_instances(swarm, &mut self.scene);
         if self.environment == Environment::Minimal || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
@@ -1839,7 +1826,13 @@ mod tests {
                 }],
                 ..Default::default()
             });
-            let caption_text = "Hello from the desktop window.";
+            let pill = crate::pill::rows(&crate::pill::Status {
+                activity: protocol::Activity::Running,
+                mode: Some("build".into()),
+                title: "Hello from the desktop window.".into(),
+                replaying: false,
+                need: Some(crate::pill::Need::Approval),
+            });
             let mut swarm = Swarm::new();
             for _ in 0..120 {
                 swarm.step(1.0 / 72.0, None);
@@ -1875,15 +1868,22 @@ mod tests {
                         time: 1.0,
                     },
                 );
-                let mut caption = crate::caption::Caption::new(&device, &renderer);
-                caption.set_text(&queue, caption_text);
+                let mut panel = renderer.panel(&device, 24_000);
+                let mut canvas =
+                    crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                canvas.rows = pill.clone();
+                panel.set(&queue, &canvas);
                 renderer.render(
                     &device,
                     &queue,
                     std::slice::from_ref(&view),
                     &[matrix],
                     Mat4::IDENTITY,
-                    &caption.panels(Mat4::from_translation(eye)),
+                    &[(
+                        &panel,
+                        Mat4::from_translation(eye)
+                            * Mat4::from_translation(crate::controller_ui::PILL_OFFSET),
+                    )],
                 );
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("multisample test readback"),
@@ -2045,6 +2045,7 @@ mod tests {
                     elapsed: std::time::Duration::from_secs(15),
                     heard: "Hello from the headset.".into(),
                     answering: None,
+                    about: None,
                 },
                 Some(std::time::Duration::from_secs(60)),
                 0.5,
@@ -2102,12 +2103,21 @@ mod tests {
                         time: 1.0,
                     },
                 );
-                let mut caption = crate::caption::Caption::new(&device, &renderer);
-                caption.set_text(&queue, "Hello from the headset.");
+                let mut pill = renderer.panel(&device, 24_000);
+                let mut canvas =
+                    crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                canvas.rows = vec![crate::ui_text::Row::text(
+                    "Hello from the headset.",
+                    crate::ui_text::Style::plain([1.0; 4]),
+                    crate::pill::COLUMNS,
+                )];
+                pill.set(&queue, &canvas);
                 let mut card = renderer.panel(&device, 24_000);
                 card.set(&queue, &indicator);
-                let mut panels =
-                    caption.panels(Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)));
+                let mut panels = vec![(
+                    &pill,
+                    Mat4::from_translation(glam::Vec3::new(0.0, 1.1, -1.5)),
+                )];
                 panels.push((
                     &card,
                     crate::recording::facing(
@@ -2246,17 +2256,22 @@ mod tests {
             let projection = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
             let matrices = [-0.032, 0.032]
                 .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
-            let mut caption = crate::caption::Caption::new(&device, &renderer);
-            caption.set_text(
-                &queue,
-                "VOICE TO TEXT\nReady.\n\nHello from the Quest microphone!",
-            );
+            let mut pill = renderer.panel(&device, 24_000);
+            let mut canvas = crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+            canvas.rows = vec![crate::ui_text::Row::text(
+                "Hello from the Quest microphone!",
+                crate::ui_text::Style::plain([1.0; 4]),
+                crate::pill::COLUMNS,
+            )];
+            pill.set(&queue, &canvas);
             // Exercise the recording indicator through its states, beside the panel, and drawing no panel at all.
             let mut indicator = renderer.panel(&device, 24_000);
             let limit = Some(std::time::Duration::from_secs(60));
             for elapsed in [Some(0), Some(15), Some(50), Some(55), Some(60), None] {
-                let mut panels =
-                    caption.panels(Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)));
+                let mut panels = vec![(
+                    &pill,
+                    Mat4::from_translation(glam::Vec3::new(0.0, 1.1, -1.5)),
+                )];
                 if let Some(elapsed) = elapsed {
                     indicator.set(
                         &queue,
@@ -2265,6 +2280,7 @@ mod tests {
                                 elapsed: std::time::Duration::from_secs(elapsed),
                                 heard: "Hello from the Quest microphone!".into(),
                                 answering: None,
+                                about: None,
                             },
                             limit,
                             0.5,

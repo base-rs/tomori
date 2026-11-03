@@ -105,6 +105,54 @@ pub fn view_spot(head: Mat4) -> Vec3 {
     head.transform_point3(Vec3::new(0.0, -0.22, -0.55))
 }
 
+/// Where the status pill's top edge stands from the pose the floating panel is placed at: about 20° below eye level, 1.6 m away.
+pub const PILL_OFFSET: Vec3 = Vec3::new(0.0, -0.5, -1.5);
+
+/// The status pill, which stands in the world, placed lazily in front of the participant. See `design/interaction.md`.
+pub struct Pill {
+    panel: Panel,
+    /// Its height, so that its top edge stays put as its second row comes and goes.
+    height: Option<f32>,
+}
+
+impl Pill {
+    pub fn new(device: &wgpu::Device, renderer: &Renderer) -> Self {
+        Self {
+            panel: renderer.panel(device, CAPACITY),
+            height: None,
+        }
+    }
+
+    /// Follow the conversation at `now`, unless `hidden`, as while a hand's panel shows.
+    pub fn update(
+        &mut self,
+        queue: &wgpu::Queue,
+        conversation: &mut Conversation,
+        now: Instant,
+        hidden: bool,
+    ) {
+        let status = conversation.pill_status(now).filter(|_| !hidden);
+        self.height = status.map(|status| {
+            let mut canvas = Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+            canvas.rows = crate::pill::rows(&status);
+            canvas.padding = (10, 6);
+            canvas.background = [0.008, 0.018, 0.035, 0.82];
+            self.panel.set(queue, &canvas);
+            canvas.size().1
+        });
+    }
+
+    /// The pill to draw, placed relative to `pose`, the floating panel's, in the eyes' space.
+    pub fn panels(&self, pose: Mat4) -> Option<(&Panel, Mat4)> {
+        self.height.map(|height| {
+            (
+                &self.panel,
+                pose * Mat4::from_translation(PILL_OFFSET - Vec3::Y * (height / 2.0)),
+            )
+        })
+    }
+}
+
 /// The transcript shows once the right palm has faced within this angle of straight up for [`HOLD`](crate::hand_menu::HOLD), whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up.
 pub const WRIST_SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
 /// It hides once the palm has turned further than this from straight up, so that it does not flicker at the edge.
@@ -213,6 +261,8 @@ pub struct WristFrame {
     pub in_space: bool,
     /// The left hand menu is showing: whichever shows first wins.
     pub menu_shown: bool,
+    /// The left hand menu is pinned open with Y, which hides the transcript from the wrist; a detached one stays.
+    pub menu_pinned: bool,
     /// The right trigger is held, attracting or choosing, or the ray highlights a menu item: the palm turns while pointing across the body.
     pub pointing: bool,
     /// The right grip's value, while its action is active.
@@ -249,6 +299,11 @@ impl WristState {
     pub fn show(&mut self, frame: &WristFrame, now: Instant) -> bool {
         if !frame.in_space {
             *self = Self::default();
+            return false;
+        }
+        if frame.menu_pinned {
+            self.visibility = Visibility::default();
+            self.on_hand = false;
             return false;
         }
         // While the left menu shows, or the right hand points, it does not show, but it stays if it already shows.
@@ -590,6 +645,33 @@ mod tests {
             state.show(&blocked, start + hold * 2);
             assert!(state.on_hand());
         }
+    }
+
+    #[test]
+    fn pinning_the_left_menu_hides_it_from_the_wrist_but_not_from_the_world() {
+        let start = Instant::now();
+        let hold = crate::hand_menu::HOLD;
+        let pinned = WristFrame {
+            menu_shown: true,
+            menu_pinned: true,
+            ..frame(10.0)
+        };
+        let mut state = WristState::default();
+        state.show(&frame(10.0), start);
+        state.show(&frame(10.0), start + hold);
+        assert!(state.on_hand());
+        state.show(&pinned, start + hold * 2);
+        assert!(!state.active());
+        // Unpinned, it shows again after the hold.
+        assert!(!state.show(&frame(10.0), start + hold * 3));
+        assert!(state.show(&frame(10.0), start + hold * 4));
+        // Detached, it stays in the world.
+        state.toggle_detached(
+            Some(Vec3::new(0.1, 1.3, -0.4)),
+            Some(Vec3::new(0.0, 1.6, 0.0)),
+        );
+        state.show(&pinned, start + hold * 5);
+        assert!(state.detached());
     }
 
     #[test]

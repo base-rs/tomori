@@ -5,7 +5,6 @@
 
 use crate::{
     arrival, arrival_graphics, arrival_motion,
-    caption::Caption,
     connection::Connection,
     controller,
     conversation::Conversation,
@@ -34,7 +33,7 @@ const TITLE: &str = "Tomori";
 
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
 pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left button: choose what is pointed at, or attract the swarm; right drag: look around.\n\
-Enter: A. Backspace: B (hold for a second to leave the space). Space (hold): X, push-to-talk. Tab: Y.\n\
+Enter: A. Backspace: B (hold for a second to leave the space). Space (hold): X, push-to-talk. Tab: Y, which in a space pins the hand menu open at its Space section.\n\
 Arrow keys: left stick. [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
 V: mute spoken replies (left stick click). R: play the latest reply again, or stop it (right stick click).\n\
 M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
@@ -138,7 +137,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if state.participant.key(&event) == KeyResult::Quit {
+                // Esc lets go of a pinned hand menu before it quits.
+                if state.participant.key(&event) == KeyResult::Quit && !state.hand_menu.unpin() {
                     event_loop.exit();
                 }
             }
@@ -429,7 +429,7 @@ struct State {
     window: Arc<Window>,
     gpu: WindowGpu,
     renderer: Renderer,
-    caption: Caption,
+    pill: crate::controller_ui::Pill,
     indicator: crate::controller_ui::Indicator,
     wrist: crate::controller_ui::Wrist,
     size: PhysicalSize<u32>,
@@ -463,7 +463,7 @@ impl State {
             gpu.config.height,
             samples,
         );
-        let caption = Caption::new(&gpu.device, &renderer);
+        let pill = crate::controller_ui::Pill::new(&gpu.device, &renderer);
         let indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
         let wrist = crate::controller_ui::Wrist::new(&gpu.device, &renderer);
         log::info!(
@@ -476,7 +476,7 @@ impl State {
             window,
             gpu,
             renderer,
-            caption,
+            pill,
             indicator,
             wrist,
             size,
@@ -534,7 +534,7 @@ impl State {
         conversation.decide_on_wrist();
         let stick = Input::stick(input.left);
         let moving = stick.x.abs() > STICK || stick.y.abs() > STICK;
-        if moving && !p.stick_latched {
+        if moving && !p.stick_latched && conversation.joined_space().is_none() {
             if stick.y.abs() >= stick.x.abs() {
                 conversation.navigate(0, if stick.y > 0.0 { -1 } else { 1 });
             } else {
@@ -545,9 +545,15 @@ impl State {
         // While the right wrist's transcript shows, the right stick, A and B act on it; see `xr::run`.
         let wrist_active = self.wrist.state().active();
         let right = Input::stick(input.right);
-        let back_taken = self
-            .wrist
-            .input(conversation, right, a && !p.menu_was_shown, back, now);
+        // B lets go of a menu pinned with Tab (Y) first.
+        let unpinned = back && self.hand_menu.unpin();
+        let back_taken = self.wrist.input(
+            conversation,
+            right,
+            a && !p.menu_was_shown,
+            back && !unpinned,
+            now,
+        ) || unpinned;
         if back && !back_taken {
             conversation.back();
         }
@@ -566,8 +572,15 @@ impl State {
             None => {}
         }
         conversation.tick_space(now);
+        if conversation.joined_space().is_none() {
+            self.hand_menu.unpin();
+        }
         if y {
-            conversation.refresh();
+            if conversation.joined_space().is_some() {
+                self.hand_menu.toggle_pin();
+            } else {
+                conversation.refresh();
+            }
         }
         // A chooses what was pointed at last frame, and only in the hand menu while it shows; see `xr::run`.
         match &p.highlighted {
@@ -617,7 +630,6 @@ impl State {
             });
         }
         let queue = &self.gpu.queue;
-        self.caption.set_text(queue, &conversation.text());
         let visual = self.signals.update(
             crate::interaction::Inputs {
                 session: if focused {
@@ -645,7 +657,7 @@ impl State {
         self.motion
             .update(&crate::xr::arrival_target(conversation), self.arrival_time);
         let mut scene = self.motion.scene(self.arrival_time);
-        let palm = p.menu_open.then(|| p.head.palm());
+        let palm = (p.menu_open || self.hand_menu.pinned()).then(|| p.head.palm());
         let eye = arrival::HOME;
         let menu_shown = focused
             && self.hand_menu.update(
@@ -668,6 +680,7 @@ impl State {
                 viewer: Some(eye),
                 in_space,
                 menu_shown,
+                menu_pinned: self.hand_menu.pinned(),
                 pointing: p.input.trigger,
                 grip: Some(if p.input.grip { 1.0 } else { 0.0 }),
             },
@@ -678,8 +691,17 @@ impl State {
             },
         );
         let wrist_shown = self.wrist.state().on_hand();
+        // What the mouse pointed at last frame, so that a mode's description shows beneath it.
+        let pointed = match &p.highlighted {
+            Some(arrival::Key::Menu(key)) => Some(key.clone()),
+            _ => None,
+        };
         let menu = |hand_menu: &HandMenu, conversation: &Conversation| match palm {
-            Some(palm) if menu_shown => hand_menu.objects(&palm, &conversation.menu_model(), eye),
+            Some(palm) if menu_shown => {
+                let mut model = conversation.menu_model();
+                model.pointed = pointed.clone();
+                hand_menu.objects(&palm, &model, eye)
+            }
             _ => Vec::new(),
         };
         scene.objects.extend(menu(&self.hand_menu, conversation));
@@ -783,6 +805,12 @@ impl State {
             self.panel.reset();
         }
         let panel_pose = self.panel.update(head, dt);
+        self.pill.update(
+            queue,
+            &mut p.conversation,
+            now,
+            in_arrival || menu_shown || wrist_shown,
+        );
         if !render {
             return Ok(());
         }
@@ -797,22 +825,14 @@ impl State {
             &[p.head.view_projection(size.x / size.y)],
             Mat4::IDENTITY,
             // As on the headset: arrival has no panel, and the hand menu hides it.
-            &if !in_arrival && !menu_shown && !wrist_shown {
-                self.caption.panels(
-                    panel_pose
-                        * Mat4::from_translation(Vec3::new(
-                            0.0,
-                            self.renderer.caption_offset(),
-                            0.0,
-                        )),
-                )
-            } else {
-                Vec::new()
-            }
-            .into_iter()
-            .chain(self.indicator.panels(Mat4::IDENTITY))
-            .chain(self.wrist.panels(Mat4::IDENTITY))
-            .collect::<Vec<_>>(),
+            // As on the headset: arrival has no pill, and a hand's panel hides it.
+            &self
+                .pill
+                .panels(panel_pose)
+                .into_iter()
+                .chain(self.indicator.panels(Mat4::IDENTITY))
+                .chain(self.wrist.panels(Mat4::IDENTITY))
+                .collect::<Vec<_>>(),
         );
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
