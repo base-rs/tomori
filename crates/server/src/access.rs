@@ -81,7 +81,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::PairBegin { .. }
         | ClientMessage::PairReveal { .. }
         | ClientMessage::PairCancel => true,
-        ClientMessage::ListSpaces | ClientMessage::Join { .. } | ClientMessage::Leave => watcher,
+        ClientMessage::ListSpaces
+        | ClientMessage::Join { .. }
+        | ClientMessage::Leave
+        | ClientMessage::Knock => watcher,
         ClientMessage::CreateSpace { .. } | ClientMessage::ListSessions { .. } => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
@@ -92,7 +95,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::Answer { .. }
         | ClientMessage::Presence { .. }
         | ClientMessage::SetAttribution { .. }
-        | ClientMessage::SetMode { .. } => participant,
+        | ClientMessage::SetMode { .. }
+        | ClientMessage::DecideKnock { .. } => participant,
     };
     if permitted {
         None
@@ -169,6 +173,11 @@ mod tests {
             },
             ClientMessage::PairReveal { nonce: "n".into() },
             ClientMessage::PairCancel,
+            ClientMessage::Knock,
+            ClientMessage::DecideKnock {
+                knock: "k".into(),
+                admit: true,
+            },
         ]
     }
 
@@ -195,6 +204,7 @@ mod tests {
             "pair_begin",
             "pair_reveal",
             "pair_cancel",
+            "knock",
         ];
         assert_eq!(permitted(ConnectionRole::Visitor), watching);
         assert_eq!(permitted(ConnectionRole::Unknown), watching);

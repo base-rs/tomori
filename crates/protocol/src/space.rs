@@ -114,6 +114,9 @@ pub struct SpaceState {
     pub workers_authoritative: Option<bool>,
     pub presentations: Vec<Presentation>,
     pub participants: Vec<Participant>,
+    /// How many visitors are watching the space. See `design/security.md`.
+    #[serde(default)]
+    pub visitors: usize,
     pub attribution: bool,
     /// A space-level problem, such as a lost backend connection. Shared state is retained.
     pub error: Option<String>,
@@ -273,6 +276,31 @@ pub struct Presentation {
     pub text: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+}
+
+/// A visitor's request to collaborate in a space, as its participants see it. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnockRequest {
+    /// Names the knock when admitting or declining it.
+    pub id: String,
+    /// The visitor's display name.
+    pub name: String,
+}
+
+/// What became of a visitor's knock. `Unknown` stands for a state a newer server sends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnockState {
+    /// Waiting for a participant to admit or decline it.
+    Pending,
+    Declined,
+    /// Nobody answered in time.
+    Expired,
+    /// The visitor left the space, so the knock was withdrawn.
+    Withdrawn,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

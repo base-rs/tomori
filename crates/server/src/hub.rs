@@ -61,6 +61,27 @@ pub struct SpaceStatus {
     pub visitors: usize,
 }
 
+/// How long a knock waits for a participant to answer before it expires. See `design/security.md`.
+pub const KNOCK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a visitor waits after a declined or expired knock before knocking on the same space again.
+pub const KNOCK_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// The most knocks waiting on one space.
+pub const KNOCKS_PER_SPACE: usize = 8;
+
+/// A visitor's knock on a space, waiting for a participant to answer.
+#[derive(Clone, Debug)]
+struct KnockRecord {
+    id: String,
+    space: String,
+    /// The visitor, by hub key.
+    participant: String,
+    connection: ConnectionId,
+    name: String,
+    started: Instant,
+}
+
 /// How long a pairing waits to be confirmed before it is withdrawn. See `design/security.md`.
 pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -190,11 +211,14 @@ pub struct Hub {
     counts_changed: Notify,
     /// The most visitors connected at once; see `design/security.md`.
     max_visitors: AtomicUsize,
+    /// Issues collaborator tokens to admitted visitors; see [`Hub::set_tokens`].
+    tokens: RwLock<Option<Arc<security::TokenStore>>>,
     /// Whether the server serves only TLS, which pairing needs: the token it issues must not cross the network in the clear.
     encrypted: AtomicBool,
     pairing: RwLock<Option<PairingSetup>>,
     pairing_prompt: RwLock<Option<PairingPrompt>>,
     pairing_timeout: RwLock<Duration>,
+    knock_timeout: RwLock<Duration>,
     this: Weak<Hub>,
 }
 
@@ -223,6 +247,11 @@ struct HubState {
     next_pairing: u64,
     /// When recent pairings began, for [`PAIRING_ATTEMPTS`].
     pairing_attempts: std::collections::VecDeque<Instant>,
+    /// Knocks waiting for an answer, oldest first.
+    knocks: Vec<KnockRecord>,
+    next_knock: u64,
+    /// When a visitor, by hub key, may next knock on a space, after a knock there was declined or expired.
+    knock_cooldowns: HashMap<(String, String), Instant>,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
 }
@@ -338,6 +367,8 @@ enum Deferred {
     Cancel(UtteranceId),
     /// Show something about pairing on the console.
     PairingPrompt(PairingEvent),
+    /// Issue a collaborator token for an admitted knock, outside the lock, and admit its visitor.
+    Admit(KnockRecord),
 }
 
 /// A token for this server run, so space identifiers are not reused after a restart: 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
@@ -565,6 +596,7 @@ impl HubState {
             record.model.participants.retain(|id| id != participant);
             record.model.visitors.retain(|id| id != participant);
         }
+        self.withdraw_knock(participant, &space);
         self.touch_space(&space);
     }
 
@@ -595,8 +627,104 @@ impl HubState {
             outbox.clear_audio();
         }
         self.update_role(participant);
+        if participates {
+            let knocks = self.knocks_for(space);
+            self.send(participant, ServerMessage::Knocks { knocks });
+        }
         self.forget_closed();
         self.touch_space(space);
+    }
+
+    /// The knocks waiting on `space`, as its participants see them.
+    fn knocks_for(&self, space: &str) -> Vec<protocol::KnockRequest> {
+        self.knocks
+            .iter()
+            .filter(|knock| knock.space == space)
+            .map(|knock| protocol::KnockRequest {
+                id: knock.id.clone(),
+                name: knock.name.clone(),
+            })
+            .collect()
+    }
+
+    /// Tell the participants of `space` the knocks waiting on it.
+    fn announce_knocks(&self, space: &str) {
+        let Some(record) = self.space(space) else {
+            return;
+        };
+        let knocks = self.knocks_for(space);
+        for participant in &record.model.participants {
+            self.send(
+                participant,
+                ServerMessage::Knocks {
+                    knocks: knocks.clone(),
+                },
+            );
+        }
+    }
+
+    /// Withdraw the knock of `participant` on `space`, if any, telling them if they are still connected.
+    fn withdraw_knock(&mut self, participant: &str, space: &str) {
+        let before = self.knocks.len();
+        self.knocks
+            .retain(|knock| !(knock.participant == participant && knock.space == space));
+        if self.knocks.len() != before {
+            self.send(
+                participant,
+                ServerMessage::KnockState {
+                    state: protocol::KnockState::Withdrawn,
+                },
+            );
+            self.announce_knocks(space);
+        }
+    }
+
+    /// Admit the visitor of `knock`, on its connection, as a collaborator in its space under `principal`, telling it `token`. The participant is kept under its new key, so that it keeps its number and place. Returns false if the visitor has gone.
+    fn admit(&mut self, knock: &KnockRecord, principal: String, token: String) -> bool {
+        let still_here = self
+            .connections
+            .get(&knock.connection)
+            .is_some_and(|record| {
+                record.participant.as_deref() == Some(knock.participant.as_str())
+            });
+        let Some(identity) = knock.participant.strip_prefix('/').filter(|_| still_here) else {
+            return false;
+        };
+        let key = participant_key(Some(&principal), identity);
+        let Some(mut record) = self.participants.remove(&knock.participant) else {
+            return false;
+        };
+        record.visitor = false;
+        let space = record.space.clone();
+        self.participants.insert(key.clone(), record);
+        let connection = self
+            .connections
+            .get_mut(&knock.connection)
+            .expect("checked above");
+        connection.participant = Some(key.clone());
+        connection.access = Access {
+            principal: Some(principal),
+            grant: Grant::Collaborator {
+                space: knock.space.clone(),
+            },
+        };
+        connection.outbox.message(ServerMessage::Admitted { token });
+        if let Some(space) = &space
+            && let Some(record) = self.space_mut(space)
+        {
+            record.model.visitors.retain(|id| *id != knock.participant);
+            if *space == knock.space {
+                record.model.participants.push(key.clone());
+            } else {
+                record.model.visitors.push(key.clone());
+            }
+        }
+        self.update_role(&key);
+        if let Some(space) = space {
+            self.touch_space(&space);
+            self.announce_knocks(&space);
+        }
+        true
     }
 
     /// End the pending pairing, of `connection` if given, telling its device why. Returns whether one ended.
@@ -673,10 +801,12 @@ impl Hub {
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
+            tokens: RwLock::new(None),
             encrypted: AtomicBool::new(false),
             pairing: RwLock::new(None),
             pairing_prompt: RwLock::new(None),
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
+            knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             this: this.clone(),
         })
     }
@@ -700,6 +830,60 @@ impl Hub {
 
     pub(crate) fn set_pairing_timeout(&self, timeout: Duration) {
         *self.pairing_timeout.write().expect("never left poisoned") = timeout;
+    }
+
+    pub(crate) fn set_knock_timeout(&self, timeout: Duration) {
+        *self.knock_timeout.write().expect("never left poisoned") = timeout;
+    }
+
+    /// Admit visitors who knock with collaborator tokens from `tokens`.
+    pub(crate) fn set_tokens(&self, tokens: Arc<security::TokenStore>) {
+        *self.tokens.write().expect("never left poisoned") = Some(tokens);
+    }
+
+    /// Whether the space `id` is listed, so that a collaborator token for a space that is gone can be revoked.
+    pub fn has_space(&self, id: &str) -> bool {
+        self.lock().space(id).is_some()
+    }
+
+    /// Issue a collaborator token for `knock` and admit its visitor on the same connection, if it is still connected. Called outside the lock, since issuing writes the token store.
+    fn admit(&self, knock: KnockRecord) {
+        let Some(tokens) = self.tokens.read().expect("never left poisoned").clone() else {
+            return;
+        };
+        let (entry, token) = match tokens.issue(
+            &knock.name,
+            security::Grant::Collaborator {
+                space: knock.space.clone(),
+            },
+        ) {
+            Ok(issued) => issued,
+            Err(error) => {
+                log::error!("Could not issue a token for an admitted knock: {error}.");
+                if let Some(record) = self.lock().connections.get(&knock.connection) {
+                    record.outbox.message(ServerMessage::Error {
+                        error: "You were admitted, but the token could not be issued. Knock again."
+                            .to_owned(),
+                        space: None,
+                    });
+                }
+                return;
+            }
+        };
+        let admitted = {
+            let mut state = self.lock();
+            state.admit(&knock, entry.principal().id, token)
+        };
+        if admitted {
+            log::info!(
+                "Admitted {:?} to {} as collaborator token {}.",
+                knock.name,
+                knock.space,
+                entry.id
+            );
+        } else if let Err(error) = tokens.revoke(&entry.id) {
+            log::warn!("Could not revoke the token of a visitor who left: {error}.");
+        }
     }
 
     /// Mark the server as serving only TLS, so that it pairs devices.
@@ -903,6 +1087,7 @@ impl Hub {
                 Deferred::Push(id, frame) => self.transcriber.push(id, &frame),
                 Deferred::End(id) => self.transcriber.end(id),
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
+                Deferred::Admit(knock) => self.admit(knock),
                 Deferred::PairingPrompt(event) => {
                     if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
                     {
@@ -1031,6 +1216,7 @@ impl Hub {
         }
         {
             let timeout = *self.pairing_timeout.read().expect("never left poisoned");
+            let knock_timeout = *self.knock_timeout.read().expect("never left poisoned");
             let mut state = self.lock();
             let expired = state.pairing.as_ref().and_then(|pairing| {
                 let waited = now.saturating_duration_since(pairing.started);
@@ -1045,6 +1231,26 @@ impl Hub {
             if let Some(error) = expired {
                 log::info!("A pairing was withdrawn: {error}");
                 state.end_pairing(None, error);
+            }
+            let (expired, waiting): (Vec<KnockRecord>, Vec<KnockRecord>) =
+                std::mem::take(&mut state.knocks)
+                    .into_iter()
+                    .partition(|knock| {
+                        now.saturating_duration_since(knock.started) >= knock_timeout
+                    });
+            state.knocks = waiting;
+            state.knock_cooldowns.retain(|_, until| now < *until);
+            for knock in expired {
+                state.knock_cooldowns.insert(
+                    (knock.participant.clone(), knock.space.clone()),
+                    now + KNOCK_COOLDOWN,
+                );
+                if let Some(record) = state.connections.get(&knock.connection) {
+                    record.outbox.message(ServerMessage::KnockState {
+                        state: protocol::KnockState::Expired,
+                    });
+                }
+                state.announce_knocks(&knock.space);
             }
         }
         for (id, cancellation) in expired {
@@ -1754,6 +1960,103 @@ impl Hub {
                     name,
                     code: shown,
                 }));
+            }
+            ClientMessage::Knock => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                if state.role(connection, Some(&space)).participates() {
+                    state.error(participant, "You already take part in this space.");
+                    return;
+                }
+                if self.tokens.read().expect("never left poisoned").is_none() {
+                    state.error(participant, "This server does not admit by knocking.");
+                    return;
+                }
+                if !self.encrypted.load(Ordering::Relaxed) {
+                    state.error(participant, "Knocking needs a connection over TLS.");
+                    return;
+                }
+                if state
+                    .knocks
+                    .iter()
+                    .any(|knock| knock.participant == participant)
+                {
+                    state.error(participant, "Your knock is already waiting.");
+                    return;
+                }
+                let now = Instant::now();
+                let key = (participant.to_owned(), space.clone());
+                if state
+                    .knock_cooldowns
+                    .get(&key)
+                    .is_some_and(|until| now < *until)
+                {
+                    state.error(participant, "You knocked recently; try again in a minute.");
+                    return;
+                }
+                if state
+                    .knocks
+                    .iter()
+                    .filter(|knock| knock.space == space)
+                    .count()
+                    >= KNOCKS_PER_SPACE
+                {
+                    state.error(
+                        participant,
+                        "Too many knocks are waiting on this space; try again shortly.",
+                    );
+                    return;
+                }
+                state.next_knock += 1;
+                let knock = KnockRecord {
+                    id: format!("knock-{}", state.next_knock),
+                    space: space.clone(),
+                    participant: participant.to_owned(),
+                    connection,
+                    name: state.participants[participant].name.clone(),
+                    started: now,
+                };
+                log::info!("{:?} knocked on {space}.", knock.name);
+                state.knocks.push(knock);
+                outbox.message(ServerMessage::KnockState {
+                    state: protocol::KnockState::Pending,
+                });
+                state.announce_knocks(&space);
+            }
+            ClientMessage::DecideKnock { knock, admit } => {
+                if let Err(error) = limits::check(&knock, limits::IDENTIFIER_BYTES, "knock") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                // The first decision resolves a knock; later ones find it gone.
+                let Some(index) = state
+                    .knocks
+                    .iter()
+                    .position(|waiting| waiting.id == knock && waiting.space == space)
+                else {
+                    state.error(participant, "That knock was already answered.");
+                    return;
+                };
+                let knock = state.knocks.remove(index);
+                state.announce_knocks(&space);
+                if admit {
+                    deferred.push(Deferred::Admit(knock));
+                } else {
+                    log::info!("{:?} was declined from {space}.", knock.name);
+                    state.knock_cooldowns.insert(
+                        (knock.participant.clone(), space),
+                        Instant::now() + KNOCK_COOLDOWN,
+                    );
+                    if let Some(record) = state.connections.get(&knock.connection) {
+                        record.outbox.message(ServerMessage::KnockState {
+                            state: protocol::KnockState::Declined,
+                        });
+                    }
+                }
             }
             ClientMessage::PairCancel => {
                 state.end_pairing(Some(connection), "The pairing was cancelled.");

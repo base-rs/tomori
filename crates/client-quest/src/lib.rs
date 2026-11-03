@@ -22,7 +22,9 @@ mod desktop;
 mod discover;
 mod environment;
 mod graphics;
+mod hand_menu;
 mod hands;
+
 #[cfg(not(target_os = "android"))]
 mod headless_spectator;
 mod identity;

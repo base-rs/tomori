@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), p (pair this device as an owner, or cancel), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b, y, x (start talking to the agent, x again to send), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), q (quit).";
 
 pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
     let (sender, input) = mpsc::channel();
@@ -26,6 +26,7 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
         })?;
     println!("{HELP}");
     let mut shown = String::new();
+    let mut knocks = Vec::new();
     loop {
         connection.poll(true, &mut conversation);
         match input.recv_timeout(Duration::from_millis(50)) {
@@ -53,6 +54,13 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                             conversation.talk(!recording);
                         }
                         "p" => conversation.pair(),
+                        "k" => conversation.knock(),
+                        "+" | "-" => {
+                            match conversation.knocks().first().map(|knock| knock.id.clone()) {
+                                Some(id) => conversation.decide_knock(&id, command == "+"),
+                                None => println!("(No knock is waiting.)"),
+                            }
+                        }
                         "q" => return Ok(()),
                         _ => println!("{HELP}"),
                     }
@@ -63,6 +71,12 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
         connection.poll(true, &mut conversation);
+        if conversation.knocks() != knocks.as_slice() {
+            knocks = conversation.knocks().to_vec();
+            for knock in &knocks {
+                println!("{} is knocking: + admits, - declines.", knock.name);
+            }
+        }
         let text = conversation.text();
         if text != shown {
             let border = format!("+{}+", "-".repeat(COLUMNS));

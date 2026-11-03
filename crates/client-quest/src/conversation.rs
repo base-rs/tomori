@@ -54,6 +54,11 @@ pub enum Action {
         token: String,
         certificate: client::Fingerprint,
     },
+    /// A knock admitted this device to its space as a collaborator: a token to keep for the server with its certificate. The connection is already a collaborator's.
+    Admitted {
+        token: String,
+        certificate: client::Fingerprint,
+    },
 }
 
 /// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
@@ -132,6 +137,10 @@ pub struct Conversation {
     /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
     certificate: Option<client::Fingerprint>,
     pairing: Option<Pairing>,
+    /// The knocks waiting on the space, while this participant is in it.
+    knocks: Vec<protocol::KnockRequest>,
+    /// What became of this visitor's knock on the space, if they knocked.
+    knock: Option<protocol::KnockState>,
     name: String,
     mode: Mode,
     servers: Vec<Choice>,
@@ -211,6 +220,9 @@ impl Conversation {
             role: ConnectionRole::Unknown,
             certificate: None,
             pairing: None,
+            knocks: Vec::new(),
+            knock: None,
+
             name: name.into(),
             mode: Mode::Servers,
             servers: Vec::new(),
@@ -336,6 +348,9 @@ impl Conversation {
         self.role = ConnectionRole::Unknown;
         self.certificate = None;
         self.pairing = None;
+        self.knocks.clear();
+        self.knock = None;
+
         self.spaces.clear();
         self.listed = false;
         self.selected = 0;
@@ -458,6 +473,30 @@ impl Conversation {
             ServerMessage::Spaces { .. } if self.role == ConnectionRole::Pairing => {}
             ServerMessage::PairNonce { nonce } => self.pair_with(&nonce),
             ServerMessage::PairWaiting => {}
+            ServerMessage::Knocks { knocks } => self.knocks = knocks,
+            ServerMessage::KnockState { state } => {
+                self.notice = Some(
+                    match state {
+                        protocol::KnockState::Pending => {
+                            "You knocked; waiting for someone to let you in."
+                        }
+                        protocol::KnockState::Declined => "Your knock was declined.",
+                        protocol::KnockState::Expired => "Nobody answered your knock in time.",
+                        protocol::KnockState::Withdrawn | protocol::KnockState::Unknown => {
+                            "Your knock was withdrawn."
+                        }
+                    }
+                    .into(),
+                );
+                self.knock = Some(state);
+            }
+            ServerMessage::Admitted { token } => {
+                self.knock = None;
+                if let Some(certificate) = self.certificate {
+                    self.actions.push(Action::Admitted { token, certificate });
+                }
+                self.notice = Some("You were let in: you can now take part in this space.".into());
+            }
             ServerMessage::Paired { token } => {
                 self.pairing = None;
                 if let Some(certificate) = self.certificate {
@@ -647,6 +686,9 @@ impl Conversation {
     fn close_space(&mut self) {
         self.stop_live();
         self.stop_talking();
+        // Knocks belong to the space.
+        self.knocks.clear();
+        self.knock = None;
         self.space = None;
         self.joining = None;
         self.message = 0;
@@ -680,6 +722,78 @@ impl Conversation {
             detail: Some(detail.into()),
             selected: false,
         }
+    }
+
+    /// What the hand menu shows now. See `design/hand-menu.md`.
+    pub fn menu_model(&self) -> crate::hand_menu::Model {
+        let space = self.space.as_ref().filter(|_| self.mode == Mode::Space);
+        crate::hand_menu::Model {
+            name: self.name.clone(),
+            role: self.role,
+            in_space: space.is_some(),
+            participants: space
+                .map(|space| {
+                    space
+                        .participants
+                        .iter()
+                        .map(|participant| participant.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            visitors: space.map_or(0, |space| space.visitors),
+            knocks: self.knocks().to_vec(),
+            can_knock: self.can_knock(),
+            knock: self.knock_state(),
+            pairing: self.pairable().then(|| self.pairing_item().label),
+            notice: self.notice.clone(),
+        }
+    }
+
+    /// Act on a choice made in the hand menu.
+    pub fn choose_menu(&mut self, choice: crate::hand_menu::Choice) {
+        match choice {
+            crate::hand_menu::Choice::Knock => self.knock(),
+            crate::hand_menu::Choice::Admit(id) => self.decide_knock(&id, true),
+            crate::hand_menu::Choice::Decline(id) => self.decide_knock(&id, false),
+            crate::hand_menu::Choice::Pair => self.pair(),
+        }
+    }
+
+    /// The knocks waiting on the space, for a participant to admit or decline.
+    pub fn knocks(&self) -> &[protocol::KnockRequest] {
+        if self.role.participates() {
+            &self.knocks
+        } else {
+            &[]
+        }
+    }
+
+    /// What became of this visitor's knock, if they knocked.
+    pub fn knock_state(&self) -> Option<protocol::KnockState> {
+        self.knock
+    }
+
+    /// Whether this visitor can knock on the space they are watching: watching one, and not already waiting.
+    pub fn can_knock(&self) -> bool {
+        self.mode == Mode::Space
+            && self.space.is_some()
+            && self.role == ConnectionRole::Visitor
+            && self.knock != Some(protocol::KnockState::Pending)
+    }
+
+    /// Knock on the space this visitor is watching, to ask to take part. See `design/security.md`.
+    pub fn knock(&mut self) {
+        if self.can_knock() {
+            self.actions.push(Action::Send(ClientMessage::Knock));
+        }
+    }
+
+    /// Admit or decline the knock `id`, as a participant.
+    pub fn decide_knock(&mut self, id: &str, admit: bool) {
+        self.send(ClientMessage::DecideKnock {
+            knock: id.to_owned(),
+            admit,
+        });
     }
 
     /// Whether this device can pair with the server: connected over TLS, and not already an owner. See `design/security.md`.
@@ -749,6 +863,7 @@ impl Conversation {
                 | ClientMessage::Answer { .. }
                 | ClientMessage::SetAttribution { .. }
                 | ClientMessage::SetMode { .. }
+                | ClientMessage::DecideKnock { .. }
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());
@@ -2502,6 +2617,103 @@ mod tests {
             view.status.as_deref(),
             Some("This server admits only paired devices: pair to join.")
         );
+    }
+
+    #[test]
+    fn a_visitor_knocks_and_is_admitted() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        // Not in a space: nothing to knock on.
+        assert!(!conversation.can_knock());
+        conversation.apply(space(|_| {}));
+        conversation.take_actions();
+        assert!(conversation.can_knock());
+        conversation.knock();
+        assert_eq!(sent(&mut conversation), [ClientMessage::Knock]);
+        conversation.apply(Event::Message(ServerMessage::KnockState {
+            state: protocol::KnockState::Pending,
+        }));
+        assert_eq!(
+            conversation.knock_state(),
+            Some(protocol::KnockState::Pending)
+        );
+        assert!(!conversation.can_knock());
+        assert!(
+            conversation
+                .status()
+                .unwrap()
+                .contains("waiting for someone to let you in")
+        );
+
+        conversation.apply(Event::Message(ServerMessage::Admitted {
+            token: "tomori_admitted".into(),
+        }));
+        conversation.apply(role(ConnectionRole::Collaborator));
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Admitted {
+                token: "tomori_admitted".into(),
+                certificate
+            }]
+        );
+        assert_eq!(conversation.knock_state(), None);
+        assert!(!conversation.can_knock());
+    }
+
+    #[test]
+    fn a_participant_sees_and_answers_knocks_only_while_taking_part() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Owner, certificate);
+        conversation.apply(space(|_| {}));
+        conversation.take_actions();
+        let vic = protocol::KnockRequest {
+            id: "knock-1".into(),
+            name: "Vic".into(),
+        };
+        conversation.apply(Event::Message(ServerMessage::Knocks {
+            knocks: vec![vic.clone()],
+        }));
+        assert_eq!(conversation.knocks(), [vic]);
+        conversation.decide_knock("knock-1", true);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::DecideKnock {
+                knock: "knock-1".into(),
+                admit: true
+            }]
+        );
+        // Knocks belong to the space, and to participants.
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert!(conversation.knocks().is_empty());
+        let mut visitor = connected_securely(ConnectionRole::Visitor, certificate);
+        visitor.apply(Event::Message(ServerMessage::Knocks {
+            knocks: vec![protocol::KnockRequest {
+                id: "knock-2".into(),
+                name: "Wes".into(),
+            }],
+        }));
+        assert!(visitor.knocks().is_empty());
+        visitor.decide_knock("knock-2", false);
+        assert!(sent(&mut visitor).is_empty());
+    }
+
+    #[test]
+    fn a_declined_knock_is_said_and_may_be_tried_again() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.apply(space(|_| {}));
+        for (state, said) in [
+            (protocol::KnockState::Declined, "Your knock was declined."),
+            (
+                protocol::KnockState::Expired,
+                "Nobody answered your knock in time.",
+            ),
+            (protocol::KnockState::Withdrawn, "Your knock was withdrawn."),
+        ] {
+            conversation.apply(Event::Message(ServerMessage::KnockState { state }));
+            assert_eq!(conversation.status().as_deref(), Some(said));
+            assert!(conversation.can_knock());
+        }
     }
 
     #[test]

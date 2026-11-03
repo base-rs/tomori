@@ -68,6 +68,8 @@ pub enum Key {
     Environment(String),
     /// The object that pairs this device as an owner, on the connected server's orbit. See `design/security.md`.
     Pair,
+    /// An item of the hand menu. See `design/hand-menu.md`.
+    Menu(crate::hand_menu::MenuKey),
 }
 
 /// How an object should look, as far as arrival knows.
@@ -92,6 +94,8 @@ pub enum Kind {
     Choice,
     /// The pairing object, `pending` while its code waits to be confirmed.
     Pair { pending: bool },
+    /// An item of the hand menu, or the cue on the wrist.
+    Menu(crate::hand_menu::MenuKind),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -309,6 +313,12 @@ impl Scene {
                             center: object.position,
                             half_extents: Vec3::new(reach, reach, object.size * 0.6),
                         },
+                        // A row of the hand menu is chosen by its marker or its label, which runs to the right of it.
+                        Kind::Menu(_) => Shape::Sphere {
+                            center: object.position
+                                + (object.label.anchor - object.position).with_y(0.0) * 4.0,
+                            radius: 0.06,
+                        },
                         _ => Shape::Sphere {
                             center: object.position,
                             radius: reach,
@@ -399,6 +409,7 @@ fn size(kind: Kind) -> f32 {
         Kind::Create { .. } => 0.08,
         Kind::Choice => 0.05,
         Kind::Pair { .. } => 0.06,
+        Kind::Menu(_) => 0.009,
     }
 }
 

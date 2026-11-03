@@ -816,6 +816,7 @@ impl SpaceModel {
             workers_authoritative: Some(self.workers_authoritative),
             presentations: Vec::new(),
             participants,
+            visitors: self.visitors.len(),
             attribution: self.attribution,
             error: match (&self.error, &self.worker_error) {
                 (Some(error), Some(worker_error)) => Some(format!("{error} {worker_error}")),

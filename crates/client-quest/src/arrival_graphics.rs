@@ -7,6 +7,7 @@
 use crate::{
     arrival::{Align, Key, Kind, Label, Object, Scene, clip, facing},
     delegation::Cube,
+    hand_menu::MenuKind,
     server_choice::Source,
 };
 use bytemuck::{Pod, Zeroable};
@@ -183,6 +184,27 @@ fn form(object: &Object, time: f32, out: &mut Vec<Cube>) {
         Kind::Choice => {
             let turn = face * Quat::from_rotation_z(FRAC_PI_4);
             out.push(cube(p, Vec3::splat(s * 1.2), [0.7, 0.85, 1.0], turn));
+        }
+        Kind::Menu(kind) => {
+            let pulse = 0.6 + 0.4 * (time * 6.0).sin().abs();
+            match kind {
+                // A section that holds something waiting flashes.
+                MenuKind::Section { flashing } => {
+                    let color = if flashing {
+                        [1.0 * pulse, 0.6 * pulse, 0.2 * pulse]
+                    } else {
+                        [0.4, 0.85, 0.9]
+                    };
+                    out.push(cube(p, Vec3::splat(s), color, face));
+                }
+                MenuKind::Button => {
+                    out.push(cube(p, Vec3::splat(s * 0.8), [0.55, 0.75, 1.0], face))
+                }
+                MenuKind::Heading | MenuKind::Text => {}
+                MenuKind::Cue => {
+                    out.push(cube(p, Vec3::splat(s * pulse), [1.0, 0.6, 0.2], face));
+                }
+            }
         }
         Kind::Pair { pending } => {
             // A key: a diamond bow and a shaft with a bit, which pulses while its code waits to be confirmed.
