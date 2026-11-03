@@ -130,6 +130,29 @@ pub fn run_discover(server: Option<String>) -> anyhow::Result<()> {
     discover::run(server)
 }
 
+/// The application name for this process's audio streams, so that the audio server tells the spectator's speaker from a participant's.
+#[cfg(not(target_os = "android"))]
+pub fn audio_application_name(spectator: bool) -> &'static str {
+    if spectator {
+        "Tomori spectator"
+    } else {
+        "Tomori"
+    }
+}
+
+/// The `PIPEWIRE_ALSA` properties that name this process's streams, unless the user has set their own (`already_set`); `None` where PipeWire's ALSA plugin is not used.
+///
+/// PipeWire, and its PulseAudio layer, remember where a stream was routed by its application name, which the ALSA plugin otherwise derives from the executable's name. The spectator and the participant modes are the same executable, so routing the spectator to a capture sink, as `docs/slack-huddle.md` does, would also send a participant's speaker there, where they would hear nothing.
+#[cfg(not(target_os = "android"))]
+pub fn pipewire_alsa_properties(spectator: bool, already_set: bool) -> Option<String> {
+    (cfg!(target_os = "linux") && !already_set).then(|| {
+        format!(
+            "{{ application.name = \"{}\" }}",
+            audio_application_name(spectator)
+        )
+    })
+}
+
 /// Desktop runs keep nothing, so each is a new participant.
 #[cfg(not(target_os = "android"))]
 fn desktop_connection(
@@ -426,5 +449,29 @@ mod android_event_pump_tests {
         };
         assert!(drain_input_batch(&mut next));
         assert!(!drain_input_batch(&mut next));
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_spectator_and_participants_name_their_audio_differently() {
+        assert_ne!(audio_application_name(true), audio_application_name(false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pipewire_alsa_names_the_streams_unless_the_user_already_did() {
+        assert_eq!(
+            pipewire_alsa_properties(true, false).as_deref(),
+            Some("{ application.name = \"Tomori spectator\" }")
+        );
+        assert_eq!(
+            pipewire_alsa_properties(false, false).as_deref(),
+            Some("{ application.name = \"Tomori\" }")
+        );
+        assert_eq!(pipewire_alsa_properties(false, true), None);
     }
 }

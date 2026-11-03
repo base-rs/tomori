@@ -69,6 +69,13 @@ fn main() -> anyhow::Result<()> {
         // Only the spectator modes join a space and follow a participant.
         anyhow::bail!("--space and --follow apply only to the spectator modes; use --help");
     }
+    let spectator = SPECTATOR_MODES.contains(&mode.as_deref().unwrap_or(""));
+    if let Some(properties) =
+        tomori::pipewire_alsa_properties(spectator, std::env::var_os("PIPEWIRE_ALSA").is_some())
+    {
+        // SAFETY: the process has started no other thread yet, so nothing reads the environment concurrently.
+        unsafe { std::env::set_var("PIPEWIRE_ALSA", properties) };
+    }
     let token = overrides.token.clone();
     let spectator_options = |server: Option<String>| tomori::SpectatorOptions {
         server,
