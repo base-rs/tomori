@@ -65,11 +65,12 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
       - name: Install cargo-apk
         run: cargo install cargo-apk --version 0.10.0 --locked
-      - name: Build the client core
-        run: cargo apk -- build --package client --target aarch64-linux-android --locked
       - name: Build the headset application
         # Fetches the Khronos OpenXR loader, checked against its published SHA-256, and packages it.
         run: bash scripts/android.sh build
+      - name: Build the client core on its own
+        # After scripts/android.sh, which creates the directory cargo-apk needs for SHERPA_ONNX_ARCHIVE_DIR.
+        run: cargo apk -- build --package client --target aarch64-linux-android --locked
       - uses: actions/upload-artifact@v7
         with:
           name: tomori-apk

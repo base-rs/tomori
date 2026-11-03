@@ -11,6 +11,8 @@ command="${1:-build}"
 case "$command" in
     build|run)
         if [[ ! -s android/libs/arm64-v8a/libopenxr_loader.so ]]; then bash scripts/fetch-loader.sh; fi
+        # cargo-apk resolves the SHERPA_ONNX_ARCHIVE_DIR set in .cargo/config.toml and panics if it is missing, although the headset does not link the speech libraries: the directory is needed, not scripts/fetch-sherpa-onnx.sh.
+        mkdir -p .tools/sherpa-onnx
         cargo metadata --locked --format-version 1 --no-deps > /dev/null
         cargo apk build -p client-quest --lib
         if [[ "$command" == run ]]; then
