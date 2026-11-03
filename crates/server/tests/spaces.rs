@@ -1365,6 +1365,12 @@ fn a_spoken_answer_answers_the_presented_question_and_is_never_queued() {
     );
     let state = ada.space(|state| state.question.is_none());
     assert!(state.queue.is_empty());
+    assert!(state.voice_answers);
+    // Finalizing the same utterance again, as a client does after reconnecting, is acknowledged with the answer applied.
+    assert_eq!(
+        say_answer(&mut ada, "u2", &question, "Blue").unwrap(),
+        "Blue"
+    );
     assert_eq!(
         session.log().answers,
         [(

@@ -379,7 +379,12 @@ struct SpaceRecord {
     speech: Retention,
     /// Wakes the space's speech pacer, so that it paces a replay or catch-up that just started.
     waker: Option<Box<dyn Fn() + Send>>,
+    /// The keys and texts of the latest spoken answers applied, so that a repeated finalization of one is acknowledged rather than answered again; see [`ANSWERED`].
+    answered: std::collections::VecDeque<(String, String)>,
 }
+
+/// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
+const ANSWERED: usize = 16;
 
 impl SpaceRecord {
     /// Note when the space's attention changed level, at `now`.
@@ -2505,6 +2510,22 @@ impl Hub {
         }
         // A spoken answer goes to the presented question, never into the queue, where it would wait behind the question it answers. See `design/spaces.md`.
         if let Some(target) = &record.answer {
+            // A repeated finalization of an answer already applied is acknowledged with the text applied, as a repeated queued utterance is.
+            if let Some((_, applied)) = state
+                .space(&record.space)
+                .and_then(|space| space.answered.iter().find(|(answered, _)| *answered == key))
+            {
+                let text = applied.clone();
+                state.send(
+                    &record.participant,
+                    ServerMessage::Transcript {
+                        utterance: record.client,
+                        text,
+                        finished: true,
+                    },
+                );
+                return;
+            }
             let message = match state.answer(
                 &record.participant,
                 &record.space,
@@ -2512,11 +2533,19 @@ impl Hub {
                 &target.field,
                 text,
             ) {
-                Ok(()) => ServerMessage::Transcript {
-                    utterance: record.client,
-                    text: text.to_owned(),
-                    finished: true,
-                },
+                Ok(()) => {
+                    if let Some(space) = state.space_mut(&record.space) {
+                        if space.answered.len() == ANSWERED {
+                            space.answered.pop_front();
+                        }
+                        space.answered.push_back((key.clone(), text.to_owned()));
+                    }
+                    ServerMessage::Transcript {
+                        utterance: record.client,
+                        text: text.to_owned(),
+                        finished: true,
+                    }
+                }
                 Err(error) => ServerMessage::TranscriptFailed {
                     utterance: record.client,
                     error: limits::truncate(&error, limits::ERROR_BYTES),
@@ -2609,6 +2638,7 @@ impl Hub {
             attention: Cell::new(None),
             speech: Retention::default(),
             waker: None,
+            answered: std::collections::VecDeque::new(),
         });
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
@@ -2708,6 +2738,7 @@ impl Hub {
                     attention: Cell::new(None),
                     speech: Retention::default(),
                     waker: None,
+                    answered: std::collections::VecDeque::new(),
                 });
             }
             for id in closed {

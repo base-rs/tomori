@@ -27,14 +27,15 @@ struct Placement {
 }
 
 impl Placement {
-    /// The upright placement facing where `head` looks.
-    fn of(head: Mat4) -> Self {
+    /// The upright placement facing where `head` looks, keeping `yaw` while it looks nearly straight up or down, where its heading is unstable.
+    fn of(head: Mat4, yaw: Option<f32>) -> Self {
         let (_, rotation, position) = head.to_scale_rotation_translation();
         let forward = rotation * Vec3::NEG_Z;
-        Self {
-            position,
-            yaw: f32::atan2(-forward.x, -forward.z),
-        }
+        let yaw = match yaw {
+            Some(yaw) if forward.y.abs() > 0.95 => yaw,
+            _ => f32::atan2(-forward.x, -forward.z),
+        };
+        Self { position, yaw }
     }
 
     fn matrix(self) -> Mat4 {
@@ -84,7 +85,7 @@ impl PanelAnchor {
 
     /// The pose the panel is drawn relative to, given the head pose and the time since the last update, in seconds. The panel is drawn below and in front of this pose, as it was in front of the head.
     pub fn update(&mut self, head: Mat4, dt: f32) -> Mat4 {
-        let target = Placement::of(head);
+        let target = Placement::of(head, self.placed.map(|placed| placed.yaw));
         let placed = *self.placed.get_or_insert(target);
         if let Some((start, progress)) = &mut self.glide {
             *progress = (*progress + dt / GLIDE).min(1.0);
@@ -119,7 +120,7 @@ mod tests {
     }
 
     fn yaw(pose: Mat4) -> f32 {
-        Placement::of(pose).yaw.to_degrees()
+        Placement::of(pose, None).yaw.to_degrees()
     }
 
     #[test]
@@ -184,6 +185,20 @@ mod tests {
         anchor.reset();
         let placed = anchor.update(head(180.0, Vec3::ZERO), 0.0);
         assert!((yaw(placed).abs() - 180.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn looking_straight_down_does_not_turn_the_panel() {
+        let mut anchor = PanelAnchor::default();
+        let start = anchor.update(head(0.0, Vec3::new(0.0, 1.6, 0.0)), 0.0);
+        // Straight down, with the head rolled, the heading would otherwise be anywhere.
+        let down = Mat4::from_rotation_translation(
+            Quat::from_rotation_y(2.0) * Quat::from_rotation_x(-1.55),
+            Vec3::new(0.0, 1.6, 0.0),
+        );
+        for _ in 0..60 {
+            assert_eq!(anchor.update(down, 0.05), start);
+        }
     }
 
     #[test]

@@ -288,6 +288,8 @@ pub fn run(
                         change.change_time()
                     );
                     scene_anchor.schedule(change.change_time());
+                    // A recentre places the panel in front of the participant again.
+                    panel.reset();
                 }
                 _ => {}
             }
@@ -344,7 +346,8 @@ pub fn run(
         if controls.back {
             conversation.back();
         }
-        if controls.back_held {
+        // Only a hold that starts in a space can leave it, so B held while joining does not.
+        if controls.back_held && conversation.joined_space().is_some() {
             let since = *back_since.get_or_insert(now);
             conversation.hold_back(Some(now.duration_since(since)));
         } else if back_since.take().is_some() {
@@ -364,7 +367,8 @@ pub fn run(
         }
         choice_latched = choice_moving;
         // Otherwise the right stick up or down selects a waiting entry in the queue strip, which A cancels.
-        let queue_moving = !choosing && right.y.abs() > 0.6 && right.y.abs() > right.x.abs();
+        let selecting = conversation.selects_queue();
+        let queue_moving = selecting && right.y.abs() > 0.6 && right.y.abs() > right.x.abs();
         if queue_moving && !queue_latched {
             conversation.select_queued(if right.y > 0.0 { -1 } else { 1 });
         }
@@ -405,7 +409,8 @@ pub fn run(
             None,
             &crate::delegation::Workspace::default(),
             if choosing { 0.0 } else { right.x },
-            if choosing { 0.0 } else { right.y },
+            // The right stick up and down selects queued entries while any wait, so it does not also page a card.
+            if choosing || selecting { 0.0 } else { right.y },
         );
         caption.set_text(&gpu.queue, &conversation.text());
         caption.set_recording_progress(&gpu.queue, conversation.recording(), Duration::ZERO);
