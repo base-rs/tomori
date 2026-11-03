@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::pointing::{Ray, Shape, Target, nearest};
+#[cfg(test)]
+use crate::pointing::Target;
+use crate::pointing::{Ray, Shape};
 use crate::swarm::CENTER;
 
 pub const MAX_CUBES: usize = 4096;
@@ -410,7 +412,8 @@ impl Scene {
     }
 
     /// The workers that can be pointed at, keyed by identifier, where they stand now: each live worker's anchor, as a
-    /// sphere a little larger than its flock. Workers leaving cannot be pointed at.
+    /// sphere a little larger than its flock. Workers leaving cannot be pointed at. [`Self::point`] tests the same.
+    #[cfg(test)]
     pub fn targets(&self) -> Vec<Target<String>> {
         self.workers
             .iter()
@@ -425,18 +428,29 @@ impl Scene {
             .collect()
     }
 
-    /// Highlight the worker identified by `worker`, from the next [`Self::update`], or none.
-    pub fn set_highlighted(&mut self, worker: Option<&str>) {
-        if self.highlighted.as_deref() != worker {
-            self.highlighted = worker.map(str::to_owned);
-        }
-    }
-
     /// Point at the workers with `ray`, or with nothing: highlight the nearest worker it meets and return its
     /// identifier. Pointing only highlights; it never takes the trigger. See `design/interaction.md`.
     pub fn point(&mut self, ray: Option<Ray>) -> Option<&str> {
-        let hit = ray.and_then(|ray| nearest(&ray, &self.targets()));
-        self.set_highlighted(hit.map(|hit| hit.key).as_deref());
+        // Each frame, without allocating: the same test as [`Self::targets`] with [`crate::pointing::nearest`].
+        let mut hit: Option<(f32, &str)> = None;
+        if let Some(ray) = ray {
+            for (id, worker) in &self.workers {
+                let shape = Shape::Sphere {
+                    center: worker.anchor,
+                    radius: POINTING_RADIUS,
+                };
+                if worker.retired.is_none()
+                    && let Some(distance) = shape.intersect(&ray)
+                    && hit.is_none_or(|(nearest, _)| distance < nearest)
+                {
+                    hit = Some((distance, id));
+                }
+            }
+        }
+        let hit = hit.map(|(_, id)| id);
+        if self.highlighted.as_deref() != hit {
+            self.highlighted = hit.map(str::to_owned);
+        }
         self.highlighted.as_deref()
     }
 
@@ -3499,6 +3513,13 @@ mod space_tests {
         let eye = Vec3::new(0.0, 1.6, 0.0);
         let at = |target: Vec3| Ray::new(eye, target - eye);
         assert_eq!(scene.targets().len(), 2);
+        // Pointing tests what the targets describe.
+        for ray in [at(a), at(b), at(Vec3::ZERO), at((a + b) / 2.0)] {
+            let expected = ray
+                .and_then(|ray| crate::pointing::nearest(&ray, &scene.targets()))
+                .map(|hit| hit.key);
+            assert_eq!(scene.point(ray), expected.as_deref());
+        }
         assert_eq!(scene.point(at(a)), Some("a"));
         assert_eq!(scene.point(at(b)), Some("b"));
         // Passing within the pointing radius of a worker's anchor still points at it; the floor is nothing.

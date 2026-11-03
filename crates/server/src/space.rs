@@ -84,10 +84,10 @@ pub struct SpaceModel {
     pointing: BTreeMap<String, PointedWorker>,
 }
 
-/// A worker a participant pointed at while speaking, as the space knew it when their words were queued: never as
-/// their client described it.
+/// A worker a participant pointed at while speaking, as the space knew it when they stopped speaking: never as their
+/// client described it. Made only by [`SpaceModel::pointed_worker`].
 #[derive(Clone, Debug, PartialEq)]
-struct PointedWorker {
+pub struct PointedWorker {
     id: String,
     title: String,
 }
@@ -881,23 +881,28 @@ impl SpaceModel {
         self.enqueue_pointing(key, source, speaker, text, None)
     }
 
-    /// Queue input as [`Self::enqueue`] does, from a speaker who pointed at the worker identified by `worker` while
-    /// speaking. A worker the space does not have is ignored. The queue shows only the words; the agent is told about
-    /// the worker with them, as it is when they are delivered.
+    /// The worker identified by `id`, as the space knows it now, for telling the agent that a participant pointed at
+    /// it; `None` if the space does not have it, whatever a client claims.
+    pub fn pointed_worker(&self, id: &str) -> Option<PointedWorker> {
+        self.workers
+            .iter()
+            .find(|known| known.id == id)
+            .map(|known| PointedWorker {
+                id: known.id.clone(),
+                title: known.title.clone(),
+            })
+    }
+
+    /// Queue input as [`Self::enqueue`] does, from a speaker who pointed at `pointed` while speaking. The queue shows
+    /// only the words; the agent is told about the worker with them, as it is when they are delivered.
     pub fn enqueue_pointing(
         &mut self,
         key: String,
         source: u32,
         speaker: String,
         text: String,
-        worker: Option<&str>,
+        pointed: Option<PointedWorker>,
     ) -> bool {
-        let pointed = worker
-            .and_then(|id| self.workers.iter().find(|known| known.id == id))
-            .map(|known| PointedWorker {
-                id: known.id.clone(),
-                title: known.title.clone(),
-            });
         if !self.queue.push(key.clone(), source, speaker, text) {
             return false;
         }
@@ -2068,7 +2073,7 @@ mod tests {
             1,
             "Ada".into(),
             "how is this one doing?".into(),
-            Some("ses_review"),
+            space.pointed_worker("ses_review"),
         ));
         // The queue shows only the words.
         assert_eq!(
@@ -2096,24 +2101,15 @@ mod tests {
         space.apply(Event::WorkersChanged {
             workers: vec![backend_worker("ses_1", backend::WorkerState::Running)],
         });
-        // A worker the space never had is dropped silently, whatever the client claims.
-        space.enqueue_pointing(
-            "a".into(),
-            1,
-            "Ada".into(),
-            "what about this?".into(),
-            Some("ses_forged"),
-        );
-        assert_eq!(space.next_prompt().unwrap().text, "Ada: what about this?");
-        space.apply(Event::Delivered { key: "a".into() });
-        space.apply(Event::Idle);
+        // A worker the space never had resolves to nothing, whatever the client claims.
+        assert_eq!(space.pointed_worker("ses_forged"), None);
         // One that leaves after the words were queued is named as the space knew it, and said to be gone.
         space.enqueue_pointing(
             "b".into(),
             1,
             "Ada".into(),
             "and this?".into(),
-            Some("ses_1"),
+            space.pointed_worker("ses_1"),
         );
         space.apply(Event::WorkersChanged { workers: vec![] });
         assert_eq!(
@@ -2126,7 +2122,13 @@ mod tests {
         space.apply(Event::WorkersChanged {
             workers: vec![backend_worker("ses_1", backend::WorkerState::Running)],
         });
-        space.enqueue_pointing("c".into(), 1, "Ada".into(), "x".into(), Some("ses_1"));
+        space.enqueue_pointing(
+            "c".into(),
+            1,
+            "Ada".into(),
+            "x".into(),
+            space.pointed_worker("ses_1"),
+        );
         space.cancel("c").unwrap();
         assert!(space.pointing.is_empty());
         space.set_attribution(false);

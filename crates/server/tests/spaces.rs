@@ -610,15 +610,31 @@ fn pointing_at_a_worker_while_speaking_tells_the_agent_which() {
             .any(|entry| entry.state == QueueState::Delivered)
     });
     assert_eq!(state.queue[0].text, "how is this one doing");
-    session.reply("done");
-    // A worker the space does not have, as a client might claim, is not described to the agent.
-    ada.say_pointing("u2", "and this one", worker("ses_forged"));
+    // While the agent is busy, words about the worker wait in the queue, and the worker leaves meanwhile.
+    ada.say_pointing("u2", "is it finished", worker("ses_child"));
     ada.space(|state| {
         state
             .queue
             .iter()
-            .any(|entry| entry.text == "and this one" && entry.state == QueueState::Delivered)
+            .any(|entry| entry.text == "is it finished")
     });
+    session.emit(Event::WorkersChanged { workers: vec![] });
+    ada.space(|state| state.workers.is_empty());
+    // A worker the space does not have, as a client might claim, an oversized identifier and a kind this server does
+    // not know are all ignored, and the words are still queued.
+    ada.say_pointing("u3", "and this one", worker("ses_forged"));
+    // Longer than the 256 bytes a session identifier may have.
+    ada.say_pointing("u4", "or this one", worker(&"x".repeat(257)));
+    ada.say_pointing("u5", "or that", Some(protocol::Pointed::Unknown));
+    for text in ["is it finished", "and this one", "or this one", "or that"] {
+        session.reply("done");
+        ada.space(|state| {
+            state
+                .queue
+                .iter()
+                .any(|entry| entry.text == text && entry.state == QueueState::Delivered)
+        });
+    }
     let prompts: Vec<String> = session
         .log()
         .prompts
@@ -629,7 +645,10 @@ fn pointing_at_a_worker_while_speaking_tells_the_agent_which() {
         prompts,
         [
             "Ada: how is this one doing\n\n[Pointing at worker \"Review commit 2657a52\" (fake session ses_child, running)]",
+            "Ada: is it finished\n\n[Pointing at worker \"Review commit 2657a52\" (fake session ses_child), which is no longer present]",
             "Ada: and this one",
+            "Ada: or this one",
+            "Ada: or that",
         ]
     );
 }

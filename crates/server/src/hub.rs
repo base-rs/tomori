@@ -453,9 +453,9 @@ struct UtteranceRecord {
     space: String,
     /// The question and field the transcript answers, rather than being queued.
     answer: Option<protocol::AnswerTarget>,
-    /// The worker the participant pointed at while speaking, as their client named it on ending the utterance: an
-    /// identity only, resolved against the space's workers when the transcript is queued. See `design/interaction.md`.
-    pointed: Option<String>,
+    /// The worker the participant pointed at while speaking, as the space knew it when the utterance ended. Their
+    /// client names only its identity. See `design/interaction.md`.
+    pointed: Option<crate::space::PointedWorker>,
 }
 
 /// A transcriber call to make once the lock is released.
@@ -2000,13 +2000,23 @@ impl Hub {
                     .get_mut(&connection)
                     .and_then(|record| record.utterance.take())
                     .expect("checked by the previous arm");
-                // Only an identity is taken from the client, and only a worker's; an oversized one, or a kind this
+                // Only an identity is taken from the client, and only a worker's, which the space resolves now, as the
+                // participant stops speaking. An oversized one, a worker the space does not have, or a kind this
                 // server does not know, is ignored rather than failing the words spoken with it.
-                if let Some(protocol::Pointed::Worker { worker }) = pointed
-                    && worker.len() <= limits::SESSION_BYTES
-                    && let Some(record) = state.utterances.get_mut(&open.id)
-                {
-                    record.pointed = Some(worker);
+                let resolved = match pointed {
+                    Some(protocol::Pointed::Worker { worker })
+                        if worker.len() <= limits::SESSION_BYTES =>
+                    {
+                        state
+                            .utterances
+                            .get(&open.id)
+                            .and_then(|record| state.space(&record.space))
+                            .and_then(|space| space.model.pointed_worker(&worker))
+                    }
+                    _ => None,
+                };
+                if let Some(record) = state.utterances.get_mut(&open.id) {
+                    record.pointed = resolved;
                 }
                 deferred.push(Deferred::End(open.id));
             }
@@ -2650,7 +2660,7 @@ impl Hub {
                 record.source,
                 speaker,
                 text.to_owned(),
-                record.pointed.as_deref(),
+                record.pointed,
             );
             debug_assert!(queued, "repeats are acknowledged above");
         }

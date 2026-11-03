@@ -1775,11 +1775,15 @@ impl Conversation {
                 utterance,
                 heard,
                 pointed,
+                answering,
                 ..
             }) = self.talk.take()
             {
+                // An answer goes to the question presented, so it is about nothing pointed at.
                 self.actions.push(Action::EndUtterance(
-                    pointed.map(|worker| protocol::Pointed::Worker { worker }),
+                    pointed
+                        .filter(|_| !answering)
+                        .map(|worker| protocol::Pointed::Worker { worker }),
                 ));
                 self.talk = Some(Talk::Sending { utterance, heard });
             }
@@ -4733,6 +4737,12 @@ mod tests {
             state.speech = SpeechSetting::Brief;
             state.voice_answers = true;
             state.question = Some(question());
+            state.workers = vec![protocol::Worker {
+                id: "worker-1".into(),
+                parent: None,
+                title: "Run the tests".into(),
+                state: protocol::WorkerState::Running,
+            }];
         });
         let text = conversation.text();
         assert!(!text.contains("on the PC"), "{text}");
@@ -4748,6 +4758,10 @@ mod tests {
             "{actions:?}"
         );
         assert!(conversation.text().contains("MIC ANSWER"));
+        // An answer is about the question, so a worker pointed at meanwhile is not sent with it.
+        conversation.point_at(Some("worker-1"));
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
 
         // A question Tomori cannot answer, or a server that cannot route answers, is answered on the PC, and X talks to the agent.
         for change in [
