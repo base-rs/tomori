@@ -70,7 +70,7 @@ pub struct AttentionCounts {
 }
 
 impl Server {
-    /// The most preferred address as `host:port`, suitable for `client::Options::address`.
+    /// The most preferred address as `host:port`, suitable for `tomori_client::Options::address`.
     pub fn address(&self) -> Option<String> {
         self.addresses.first().map(SocketAddr::to_string)
     }

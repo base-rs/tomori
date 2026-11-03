@@ -4,7 +4,7 @@ This describes how Tomori's workspace crates are named, versioned and published.
 
 ## Requirement
 
-Every workspace crate except the private `bake/` package is named `tomori-` followed by its role, such as `tomori-protocol`, and lives in a folder under `crates/` named without the prefix, such as `crates/protocol`. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
+Every workspace crate except the private `bake/` package is named `tomori-` followed by its role, such as `tomori-protocol`, and lives in a folder under `crates/` named without the prefix, such as `crates/protocol`. Clients are the exception: their folders are `crates/client-<target>`, as `clients.md` requires, so `tomori-quest` lives in `crates/client-quest`. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
 
 Names visible to people running Tomori do not change with package names: the server executable is `tomori-server`, and its command-line interface is unchanged by packaging; the headset's library and executable are `tomori`, its Android application ID is `io.github.ioquatix.tomori`, and its APK is `tomori.apk`.
 
@@ -31,7 +31,7 @@ These stay unpublished, with `publish = false`:
 | `tomori-environment-sky` | Only `tomori-quest` uses it, and its interface will change when environments get a shared interface. |
 | `tomori-bake` | Development tasks only. |
 
-A published crate depends only on published crates and on crates.io packages, never on an unpublished crate, a path outside its folder or a Git repository. Each published crate has a description, license, repository, readme, keywords and categories.
+A published crate depends only on published crates and on crates.io packages, never on an unpublished crate, a path outside its folder or a Git repository. Each published crate has a description, license, repository, readme, keywords and categories, and ships `license.md`, linked from the repository root.
 
 ## Rationale
 
@@ -47,5 +47,5 @@ Workspace members, their manifests, and the Rust paths, scripts, workflows and d
 
 - `cargo bake cargo:packages` lists exactly the published crates above, each at the workspace version.
 - `cargo publish --workspace --dry-run --locked` packages and builds every published crate from its packaged sources.
-- Inspect the manifests: each crate inherits `version.workspace = true`, each dependency on another workspace crate carries `version` and `path`, and each published crate has the metadata above.
+- Inspect the manifests: each crate except `bake/` inherits `version.workspace = true`, each dependency on another workspace crate carries `version` and `path`, and each published crate has the metadata above.
 - `target/debug/tomori-server` and `target/debug/apk/tomori.apk` are still what `cargo build -p tomori-server` and `bash scripts/android.sh build` produce.
