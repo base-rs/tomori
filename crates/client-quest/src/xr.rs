@@ -57,6 +57,12 @@ pub fn run(
         "OpenXR user presence extension: {}",
         supported.ext_user_presence
     );
+    // Vibrations use the core haptic action; these richer waveforms are reported for later stages. See `design/client-logging.md`.
+    log::info!(
+        "OpenXR haptic extensions: amplitude envelope={}, PCM={}",
+        supported.fb_haptic_amplitude_envelope,
+        supported.fb_haptic_pcm
+    );
     ensure!(
         supported.khr_vulkan_enable2,
         "Runtime does not support XR_KHR_vulkan_enable2"
@@ -216,6 +222,9 @@ pub fn run(
     // Whether the headset is worn and Tomori has input, reported to the server; see `design/spaces.md`.
     let mut engagement = client::engagement::Tracker::new();
     conversation.set_engagement(engagement.engagement());
+    // The controllers vibrate as things change, and the ray ticks as it enters a target; see `design/interaction.md`.
+    connection.feedback().set_haptics(true);
+    let mut hover = crate::feedback::Hover::default();
     log::info!(
         "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose.",
         images.len()
@@ -355,13 +364,28 @@ pub fn run(
         let right = controls.presentation_navigation;
         // B lets go of a menu pinned with Y first.
         let unpinned = controls.back && hand_menu.unpin();
-        let back_taken = wrist.input(
+        let wrist_input = wrist.input(
             &mut conversation,
             glam::Vec2::new(right.x, right.y),
             controls.reset && !menu_was_shown,
             controls.back && !unpinned,
             now,
-        ) || unpinned;
+        );
+        // Moving the transcript's focus onto a turn, a request's button or a queued entry ticks as hover does, and A choosing taps; see `design/feedback.md`.
+        if wrist_input.moved {
+            connection
+                .feedback()
+                .emit(crate::feedback::Event::Hover, now);
+        }
+        if wrist_input.on_request {
+            connection.feedback().request_opened();
+        }
+        if wrist_input.chose {
+            connection
+                .feedback()
+                .emit(crate::feedback::Event::Choose, now);
+        }
+        let back_taken = wrist_input.back || unpinned;
         if controls.back && !back_taken {
             conversation.back();
         }
@@ -372,13 +396,24 @@ pub fn run(
         match back_since {
             // A hold ends with the space it began in, so that it never leaves the next one.
             Some(since) if controls.back_held && conversation.joined_space().is_some() => {
-                conversation.hold_back(Some(now.duration_since(since)));
+                let held = now.duration_since(since);
+                connection.feedback().hold_to_leave(Some(
+                    held.as_secs_f32() / crate::conversation::LEAVE_HOLD.as_secs_f32(),
+                ));
+                if conversation.hold_back(Some(held)) {
+                    connection
+                        .feedback()
+                        .emit(crate::feedback::Event::Left, now);
+                }
             }
             Some(_) => {
                 back_since = None;
                 conversation.hold_back(None);
             }
             None => {}
+        }
+        if back_since.is_none() {
+            connection.feedback().hold_to_leave(None);
         }
         conversation.tick_space(now);
         // Y in a space pins the hand menu open at its Space section, until Y or B; elsewhere it browses or lists again. See `design/hand-menu.md`.
@@ -388,6 +423,12 @@ pub fn run(
         if controls.refresh {
             if conversation.joined_space().is_some() {
                 hand_menu.toggle_pin();
+                if hand_menu.pinned() {
+                    connection.feedback().emit(
+                        crate::feedback::Event::Shown(crate::feedback::Hand::Left),
+                        now,
+                    );
+                }
             } else {
                 conversation.refresh();
             }
@@ -397,6 +438,11 @@ pub fn run(
         // never resets the swarm; see `design/interaction.md`.
         match &highlighted {
             Some(arrival::Key::Menu(key)) if controls.reset => {
+                if hand_menu::choosable(key) {
+                    connection
+                        .feedback()
+                        .emit(crate::feedback::Event::Choose, now);
+                }
                 if let Some(choice) = hand_menu.choose(key) {
                     conversation.choose_menu(choice);
                 }
@@ -404,7 +450,13 @@ pub fn run(
             // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval; and while the transcript shows, only in that.
             _ if menu_was_shown || wrist_active => {}
             _ if controls.reset => {
-                conversation.press_a(highlighted.as_ref());
+                let chose =
+                    !conversation.press_a(highlighted.as_ref()) && !conversation.a_refused();
+                if chose {
+                    connection
+                        .feedback()
+                        .emit(crate::feedback::Event::Choose, now);
+                }
             }
             _ => {}
         }
@@ -564,7 +616,7 @@ pub fn run(
             );
         menu_was_shown = menu_shown;
         let in_space = conversation.joined_space().is_some();
-        wrist.update(
+        let wrist_opened = wrist.update(
             &gpu.queue,
             &mut conversation,
             crate::controller_ui::WristFrame {
@@ -585,6 +637,14 @@ pub fn run(
                 time: arrival_time,
             },
         );
+        // The transcript appearing on the wrist ticks very lightly, and counts as looking at a request it shows.
+        if wrist_opened {
+            connection.feedback().request_opened();
+            connection.feedback().emit(
+                crate::feedback::Event::Shown(crate::feedback::Hand::Right),
+                now,
+            );
+        }
         let wrist_shown = wrist.state().on_hand();
         let wrist_active = wrist.state().active();
         // What the ray pointed at last frame, so that a mode's description shows beneath it.
@@ -622,6 +682,9 @@ pub fn run(
         let pointing = pointer.update(ray, controls.trigger, &targets);
         highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
         if let Some(key) = &pointing.chosen {
+            connection
+                .feedback()
+                .emit(crate::feedback::Event::Choose, now);
             match key {
                 arrival::Key::Menu(key) => {
                     if let Some(choice) = hand_menu.choose(key) {
@@ -659,7 +722,18 @@ pub fn run(
             && !menu_shown
             && !wrist_active
             && conversation.joined_space().is_some();
-        conversation.point_at(delegation_scene.point(ray.filter(|_| in_space)));
+        let pointed = delegation_scene.point(ray.filter(|_| in_space));
+        // Entering a new target, an arrival object, a hand menu row or a worker, ticks very lightly, but not while the trigger pulls the swarm.
+        let target = highlighted
+            .as_ref()
+            .map(crate::feedback::key)
+            .or_else(|| pointed.map(crate::feedback::key));
+        if hover.update(target, attracting) {
+            connection
+                .feedback()
+                .emit(crate::feedback::Event::Hover, now);
+        }
+        conversation.point_at(pointed);
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {
             renderer.set_presentation_page(presentation_navigation.card);
@@ -711,6 +785,12 @@ pub fn run(
             );
         }
         renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
+        // The runtime ignores vibrations while another application has focus, so they are dropped rather than felt late.
+        for (hand, haptic) in connection.feedback().haptics(now) {
+            if focused {
+                input.haptics.apply(&session, hand, haptic);
+            }
+        }
         // Report this participant's head, controllers and hands to the server, in
         // the space's scene coordinates, so the others in the space can render them.
         // Visitors send no presence; see `design/security.md`.
@@ -1075,6 +1155,7 @@ struct Input {
     audience_grip: xr::Action<f32>,
     /// The right grip, which detaches the right wrist's transcript into the world and reattaches it.
     transcript_grip: xr::Action<f32>,
+    haptics: crate::haptics::Haptics,
     set: xr::ActionSet,
     hand_paths: [xr::Path; 2],
     location_errors: [Option<xr::sys::Result>; 2],
@@ -1247,6 +1328,8 @@ impl Input {
             set.create_action::<f32>("audience_mic", "Toggle live audience microphone", &[])?;
         let transcript_grip =
             set.create_action::<f32>("transcript_grip", "Detach or reattach the transcript", &[])?;
+        let haptics = crate::haptics::Haptics::new(instance, &set)?;
+        let [left_haptic, right_haptic] = haptics.bindings(instance)?;
         instance.suggest_interaction_profile_bindings(
             instance.string_to_path("/interaction_profiles/oculus/touch_controller")?,
             &[
@@ -1306,6 +1389,8 @@ impl Input {
                     &transcript_grip,
                     instance.string_to_path("/user/hand/right/input/squeeze/value")?,
                 ),
+                left_haptic,
+                right_haptic,
             ],
         )?;
         session.attach_action_sets(&[&set])?;
@@ -1331,6 +1416,7 @@ impl Input {
             replay,
             audience_grip,
             transcript_grip,
+            haptics,
             set,
             hand_paths: [
                 instance.string_to_path("/user/hand/left")?,

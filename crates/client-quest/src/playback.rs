@@ -113,6 +113,10 @@ mod desktop {
                 .default_output_config()
                 .map_err(|error| format!("Cannot use the speaker: {error}"))?;
             let config: StreamConfig = supported.config();
+            // The cues are synthesized for the device's rate here, before the stream starts, rather than in its first callback.
+            if let Ok(mut player) = player.lock() {
+                player.prepare(config.sample_rate);
+            }
             let stream = match supported.sample_format() {
                 SampleFormat::F32 => build::<f32>(&device, &config, player, failed),
                 SampleFormat::I16 => build::<i16>(&device, &config, player, failed),
@@ -189,6 +193,7 @@ mod android {
         fn open(&self, player: Shared, failed: Failed) -> Result<Output, String> {
             // Mono 16-bit at the device's rate, rendered straight into AAudio's buffer when it accepts mono.
             let mut spread = Vec::new();
+            let player_for_prepare = player.clone();
             let stream = AudioStreamBuilder::new()
                 .map_err(|error| format!("Cannot open the speaker: {error}"))?
                 .direction(AudioDirection::Output)
@@ -224,6 +229,10 @@ mod android {
                 .map_err(|error| format!("Cannot open the speaker: {error}"))?;
             if stream.format() != AudioFormat::PCM_I16 {
                 return Err("The speaker opened in an unexpected format.".into());
+            }
+            // The cues are synthesized for the device's rate here, before the stream starts, rather than in its first callback.
+            if let Ok(mut player) = player_for_prepare.lock() {
+                player.prepare(stream.sample_rate().max(0) as u32);
             }
             stream
                 .request_start()

@@ -173,6 +173,8 @@ pub enum Section {
     Agent,
     /// One layer of the agent's instructions, opened from [`Section::Agent`].
     Layer(Layer),
+    /// This device's Feedback setting: which sounds and vibrations play. See `design/feedback.md`.
+    Sound,
 }
 
 /// A layer of the instructions Tomori gives a space's agent. See `design/spaces.md`.
@@ -226,12 +228,20 @@ pub enum MenuKey {
     Leave,
     /// Leave the space, once asked.
     ConfirmLeave,
+    /// Step the Feedback setting's sounds or vibration to the next level.
+    Sounds,
+    Vibration,
     /// A row that is only read, by its place.
     Text(usize),
     /// The cue on the wrist.
     Cue,
     /// The cue on the right wrist, that something waits on the transcript.
     WristCue,
+}
+
+/// Whether choosing `key` does something: not a row that is only read, nor the wrist's cue.
+pub fn choosable(key: &MenuKey) -> bool {
+    !matches!(key, MenuKey::Text(_) | MenuKey::Cue | MenuKey::WristCue)
 }
 
 /// How an item of the hand menu looks.
@@ -276,6 +286,8 @@ pub struct Model {
     pub pill: bool,
     /// The item the ray points at, so that a mode's description shows beneath it.
     pub pointed: Option<MenuKey>,
+    /// This device's Feedback setting.
+    pub feedback: crate::feedback::Settings,
 }
 
 /// The joined space, as the menu shows it.
@@ -330,6 +342,9 @@ pub enum Choice {
     Pill,
     /// Leave the space.
     Leave,
+    /// Step the sounds, or the vibration, to the next level.
+    Sounds,
+    Vibration,
 }
 
 /// One row of the menu.
@@ -352,9 +367,10 @@ fn role_label(role: ConnectionRole) -> &'static str {
 
 /// The rows of `section`, or of the top level, for `model`.
 pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
-    // The Space and Agent sections apply only inside a space, so leaving one returns to the top level.
-    let section =
-        section.filter(|section| model.in_space || *section == Section::PeopleAndSecurity);
+    // The Space and Agent sections apply only inside a space, so leaving one returns to the top level; this device's Sound section applies everywhere.
+    let section = section.filter(|section| {
+        model.in_space || matches!(section, Section::PeopleAndSecurity | Section::Sound)
+    });
     let space = model.space.as_ref().filter(|_| model.in_space);
     let mut items = Vec::new();
     let text = |items: &mut Vec<Item>, kind: MenuKind, text: String| {
@@ -399,6 +415,26 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 Section::PeopleAndSecurity,
                 model.waiting(),
                 "People & security",
+            );
+            section_item(&mut items, Section::Sound, false, "Sound");
+        }
+        Some(Section::Sound) => {
+            button(&mut items, MenuKey::Back, "< Back".into());
+            text(&mut items, MenuKind::Heading, "On this headset".into());
+            button(
+                &mut items,
+                MenuKey::Sounds,
+                format!("Sounds: {}", model.feedback.sounds.label()),
+            );
+            button(
+                &mut items,
+                MenuKey::Vibration,
+                format!("Vibration: {}", model.feedback.vibration.label()),
+            );
+            text(
+                &mut items,
+                MenuKind::Text,
+                "Reduced: requests, failures, knocks".into(),
             );
         }
         Some(Section::Space) => {
@@ -746,6 +782,8 @@ impl HandMenu {
                 None
             }
             MenuKey::ClearInstructions => Some(Choice::ClearInstructions),
+            MenuKey::Sounds => Some(Choice::Sounds),
+            MenuKey::Vibration => Some(Choice::Vibration),
             MenuKey::Knock => Some(Choice::Knock),
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
@@ -937,7 +975,7 @@ mod tests {
     fn the_top_level_flashes_people_and_security_while_someone_knocks() {
         let mut model = Model::default();
         let top = items(None, &model);
-        assert_eq!(texts(&top), ["People & security"]);
+        assert_eq!(texts(&top), ["People & security", "Sound"]);
         assert_eq!(top[0].kind, MenuKind::Section { flashing: false });
         model.knocks.push(KnockRequest {
             id: "knock-1".into(),
@@ -947,6 +985,38 @@ mod tests {
             items(None, &model)[0].kind,
             MenuKind::Section { flashing: true }
         );
+    }
+
+    #[test]
+    fn the_sound_section_steps_the_feedback_setting_in_and_out_of_a_space() {
+        use crate::feedback::{Level, Settings};
+        let mut model = Model {
+            feedback: Settings {
+                sounds: Level::Reduced,
+                vibration: Level::Full,
+            },
+            ..Default::default()
+        };
+        for in_space in [false, true] {
+            model.in_space = in_space;
+            assert_eq!(
+                texts(&items(Some(Section::Sound), &model)),
+                [
+                    "< Back",
+                    "On this headset",
+                    "Sounds: reduced",
+                    "Vibration: full",
+                    "Reduced: requests, failures, knocks",
+                ]
+            );
+        }
+        let mut menu = HandMenu::default();
+        assert_eq!(menu.choose(&MenuKey::Section(Section::Sound)), None);
+        assert_eq!(menu.section, Some(Section::Sound));
+        assert_eq!(menu.choose(&MenuKey::Sounds), Some(Choice::Sounds));
+        assert_eq!(menu.choose(&MenuKey::Vibration), Some(Choice::Vibration));
+        assert_eq!(menu.choose(&MenuKey::Back), None);
+        assert_eq!(menu.section, None);
     }
 
     #[test]
@@ -1030,15 +1100,15 @@ mod tests {
             ..Default::default()
         };
         // Only inside a space, where it applies.
-        assert_eq!(texts(&items(None, &model)), ["People & security"]);
+        assert_eq!(texts(&items(None, &model)), ["People & security", "Sound"]);
         assert_eq!(
             texts(&items(Some(Section::Agent), &model)),
-            ["People & security"]
+            ["People & security", "Sound"]
         );
         model.in_space = true;
         assert_eq!(
             texts(&items(None, &model)),
-            ["Space", "Agent", "People & security"]
+            ["Space", "Agent", "People & security", "Sound"]
         );
         assert_eq!(
             texts(&items(Some(Section::Agent), &model)),
@@ -1164,6 +1234,7 @@ mod tests {
                 "Space",
                 "Agent",
                 "People & security",
+                "Sound",
             ]
         );
         assert_eq!(rows[0].kind, MenuKind::Heading);
@@ -1174,7 +1245,7 @@ mod tests {
         // Outside a space there is none.
         assert_eq!(
             texts(&items(None, &Model::default())),
-            ["People & security"]
+            ["People & security", "Sound"]
         );
     }
 

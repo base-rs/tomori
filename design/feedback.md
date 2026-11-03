@@ -1,0 +1,49 @@
+# Feedback: Sound Cues and Vibration
+
+This describes how a client tells the participant, by sound and by controller vibration, that something changed. Speech and the scene are described elsewhere: `speech.md`, `live-audio.md` and `interaction.md`.
+
+## Requirement
+
+**One vocabulary, heard and felt.** Each event below pairs a short sound cue with a vibration of the same rhythm, or is only felt where the table says so, one tap, two or three, felt on the controller of the hand that acted. Pointing, choosing, requests and leaving are felt on the **right** controller; recording, the live microphone and knocks on the **left**, where the hand menu and the voice are. Nothing else makes a sound or a vibration.
+
+| Event | When | Sound | Vibration | Hand |
+| --- | --- | --- | --- | --- |
+| Hover | the ray enters a new target: an arrival object, a hand menu row or a worker; or the right stick moves the right wrist's focus to another row: a turn or a row within one, a request's title or button, or a queued entry (see `wrist-transcript.md`); not on leaving one, and not while the trigger pulls the swarm | none | one very light tick, the shortest the controller allows at 0.15, at most one per 80 ms | right |
+| Choose | the trigger chooses, or A chooses or confirms, in the world, the hand menu or the right wrist's transcript: expanding a turn, confirming a request's button, or removing a queued entry or keeping it; not when A is refused, as just after a request appears or when a request is to be decided on the wrist | a soft click | 20 ms at 0.5 | right |
+| Recording starts | X opens the microphone for push-to-talk | a short rising tick, only when the live microphone is off | 25 ms at 0.6 | left |
+| Recording stops | X is released and the words are on their way | none | 15 ms at 0.35 | left |
+| Sent | the server finishes transcribing this participant's words, queued or answered | two rising notes | none | — |
+| Not sent | the microphone fails, or fails to turn live; this participant's words fail to record, end or transcribe, or are lost as the connection drops while they are recorded; or a request cannot be sent | two falling low notes | two taps of 30 ms at 0.7, 80 ms apart | left for the microphone and words, right otherwise |
+| Request waiting | an approval or question appears in the space, once for those arriving together, including on joining | a three-note chime | three taps of 25 ms at 0.6 | right |
+| Request reminder | a request still waits after 60 seconds and the participant has not looked at it, by opening the right wrist's transcript or focusing the request there; once | the chime, quieter | one tap | right |
+| Catching up | speech played again starts that the participant did not ask for, on joining or returning (see `speech.md`) | a soft falling swell | none | — |
+| Knock | a knock appears on the space (see `hand-menu.md`) | two soft knocks | two taps | left |
+| Live on, off | the live microphone turns on, or turns off having been on (see `live-audio.md`) | a rising tick, or a falling one | one tap, or two light taps | left |
+| Holding to leave | B is held in a space | none until it leaves, then a low click | from 0.1 rising to 0.6 over the second, then a tap when it leaves | right |
+| A panel appears | the right wrist's transcript opens on the hand, or Y pins the hand menu open; not when either closes | none | one very light tick, as hover | right for the transcript, left for the menu |
+| Nearing the limit | a recording reaches 30 seconds, and then 10, before the server's utterance limit, as the recording card turns amber and then red (see `hand-menu.md`); only the nearer when both are passed at once | none | one tap of 25 ms at 0.5, then two at 0.6 | left |
+
+Visitors, who cannot decide requests or let anyone in, are not cued for requests or knocks.
+
+**Cues mark changes, never states.** Nothing hums or repeats while a state lasts, except the hold-to-leave ramp while B is held. Every cue duplicates something already shown, such as the panel, a highlight or the wrist's glow, so turning them off loses nothing but the cue. Agent speech, streaming messages, tool calls, worker changes, brief reconnections and presence changes have no cue; speech is its own signal.
+
+**Sound cues are quiet, short and related.** Each is synthesized when the speaker opens, before it starts playing and never in its audio callback, from a few sine partials per note with a quick attack and an exponential decay; there are no sound files. Each lasts at most a quarter of a second, peaks at no more than 15% of full scale, well below speech, and starts and ends without a step. Their notes come from one pentatonic set, so they never clash, and they differ by rhythm and by rising or falling pitch, not only by timbre. Cues are local: never sent, never a source of their own, never counted as someone speaking, and never muted with agent speech. They are mixed before push-to-talk's silencing, which silences them too, except the tick as recording starts, which plays through it as X is pressed, before the microphone has opened; while the live microphone is already open, recording starting is felt and not heard, so on a desktop, which has no controllers, it has no cue then (see `live-audio.md`). Leaving a space or reconnecting discards received audio but not a cue already playing. Cues play only while connected with the speaker open; one due while the speaker is not open is dropped rather than played late. An open live microphone picks up cues from the speakers as it picks up any playback, so the others may hear them; echo cancellation, where it works, removes them with the rest.
+
+**The Feedback setting.** Each device keeps a Feedback setting, with **Sounds** and **Vibration** each **full**, **reduced** (requests, their reminder, failures and knocks only) or **off**; both are full by default, hover vibration included. It is kept on the device, not in the space. The hand menu's **Sound** section shows both and steps each to the next level when chosen, in or out of a space; the console's `feedback` shows them, and `feedback sounds LEVEL` and `feedback vibration LEVEL` change them.
+
+**Clients.** The headset vibrates through one OpenXR haptic output action, `haptic`, bound to both controllers' haptic outputs in the Touch controller profile, with the core vibration; a pattern of several taps is applied one tap per frame at or after each tap's time. The desktop window has no controllers, so its cues are heard only. The spectator plays no cues, since its audience sees no interface (see `spectator.md`). The console plays them through its speaker.
+
+## Rationale
+
+In November 2026 the user, speaking from the headset, asked for the audio to be designed, with cues such as recording starting and stopping, and asked whether pointing could vibrate as it passes over something. The audio and haptics proposal (`docs/proposals/audio-and-haptics.md`) answered with one vocabulary of about a dozen events, each sound paired with a vibration, and the user accepted its first stage. The user chose hover vibration on by default but very light. A request had no cue at all, so an approval could wait unnoticed while the participant looked away. Pairing each sound with a vibration of the same rhythm lets a participant learn it once, through either sense. Synthesized cues need no assets to license or package. Haptics without force feedback can only say that something happened, which is what the vocabulary asks of them.
+
+## Scope
+
+`crates/client-quest`'s feedback model (`feedback.rs`), the haptic action (`haptics.rs`, `xr.rs`), where events are reported (`connection.rs`, `xr.rs`, `desktop_participant.rs`) and the Sound section and console; and the sound cues in `crates/client`'s player.
+
+## Validation
+
+- Unit tests cover each event's hand, sound and rhythm, including a panel appearing and nearing the limit; that hover is the lightest, at most once per 80 ms, only on entering a new target and not while pulling; the reduced level keeping requests, reminders, failures and knocks; sounds and vibration filtered separately; patterns handed out at frame boundaries; the hold-to-leave ramp, its single tap and its stop; a request cued once and reminded once unless looked at; a new knock cued; and the setting kept on the device.
+- Unit tests in `crates/client` cover each cue's length, peak level, silent ends, determinism and distinctness, that cues are not sources, are not muted with agent speech and are not stopped by clearing, that silencing silences every cue but the recording tick, and that a mixer prepared while silenced starts silent.
+- Connection tests cover the participant's own words cued as sent or failed; a recording lost as the connection drops cued as not sent, while words already released are not; cancelling forgetting only the recording; a catch-up cued once, a replay asked for not cued, and one that never starts no longer counting after 15 seconds; the recording tick felt but not heard while the live microphone is open; the live microphone cued only as it turns on or off; and a request that cannot be sent cued on the right hand. A conversation test covers holding B reporting once when it leaves, and the wrist's A reporting a choice only when it acts. A connection test covers the limit taps at 30 and 10 seconds left.
+- On the headset, confirm that the recording tap and tick come as the recording card rises, and the stop tap as it says "Sending…", that the wrist's tick on opening is barely noticeable, that hover ticks feel light and do not chatter when sweeping across several workers, that a request's chime and taps are noticed while looking away, that the recording tick does not reach the transcript, and that the startup log reports the haptic extensions.

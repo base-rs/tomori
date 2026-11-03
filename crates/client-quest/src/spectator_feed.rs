@@ -132,6 +132,8 @@ impl Feed {
             Box::new(playback::Desktop),
             &mut conversation,
         );
+        // The spectator's audience sees no interface, so it hears no cues; see `design/spectator.md`.
+        connection.feedback().mute_sounds();
 
         // If a space is given, join it directly, as the lobby's accept would.
         if let Some(space) = &options.space {

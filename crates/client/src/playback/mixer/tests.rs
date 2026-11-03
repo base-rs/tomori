@@ -270,3 +270,116 @@ fn clearing_forgets_levels() {
     assert_eq!(mixer.source_level(2), 0.0);
     assert!(!mixer.is_source_playing(2));
 }
+
+#[test]
+fn plays_sound_cues_locally_without_making_them_sources() {
+    let mut mixer = mixer();
+    mixer.set_agent_muted(true);
+    mixer.play(Earcon::Sent);
+    assert_eq!(mixer.playing_cues(), 1);
+    let expected: Vec<i16> = Bank::new(RATE)
+        .samples(Earcon::Sent)
+        .iter()
+        .map(|sample| sample.round() as i16)
+        .collect();
+    let output = mix(&mut mixer, expected.len() + 10);
+    // Muting agent speech never mutes a cue, and the cue is never a speaker.
+    assert_eq!(output[..expected.len()], expected[..]);
+    assert_eq!(output[expected.len()..], [0; 10]);
+    assert_eq!(mixer.sources().count(), 0);
+    assert_eq!(mixer.playing_cues(), 0);
+}
+
+#[test]
+fn a_cue_continues_across_mixes_and_clearing_does_not_stop_it() {
+    let mut mixer = mixer();
+    mixer.play(Earcon::Request);
+    let length = Bank::new(RATE).samples(Earcon::Request).len();
+    mix(&mut mixer, length / 2);
+    assert_eq!(mixer.playing_cues(), 1);
+    mix(&mut mixer, length);
+    assert_eq!(mixer.playing_cues(), 0);
+    mixer.play(Earcon::Request);
+    mixer.clear();
+    assert_eq!(mixer.playing_cues(), 1);
+    assert!(mix(&mut mixer, length).iter().any(|sample| *sample != 0));
+}
+
+#[test]
+fn at_most_eight_cues_play_and_a_new_one_replaces_the_furthest_through() {
+    let mut mixer = mixer();
+    mixer.play(Earcon::Request);
+    mix(&mut mixer, 5);
+    for _ in 0..7 {
+        mixer.play(Earcon::Knock);
+    }
+    assert_eq!(mixer.playing_cues(), 8);
+    mixer.play(Earcon::Choose);
+    assert_eq!(mixer.playing_cues(), 8);
+    // The request chime, furthest through, was replaced: once the knocks end, nothing is left.
+    let knock = Bank::new(RATE).samples(Earcon::Knock).len();
+    mix(&mut mixer, knock);
+    assert_eq!(mixer.playing_cues(), 0);
+}
+
+#[test]
+fn silencing_fades_out_received_audio_and_cues_but_not_the_opening_tick() {
+    let mut mixer = Mixer::new(MixerOptions {
+        sample_rate: 48_000,
+        ..MixerOptions::default()
+    });
+    mixer.set_silenced(true);
+    // Fully faded after 10 ms.
+    let mut output = vec![0; 480];
+    mixer.mix(&mut output);
+    let bank = Bank::new(48_000);
+    for (earcon, heard) in [
+        (Earcon::Sent, false),
+        (Earcon::Request, false),
+        (Earcon::On, true),
+        (Earcon::Failed, false),
+    ] {
+        mixer.play(earcon);
+        let mut output = vec![0; bank.samples(earcon).len()];
+        mixer.mix(&mut output);
+        let peak = output.iter().map(|sample| sample.unsigned_abs()).max();
+        assert_eq!(peak.unwrap() > 1_000, heard, "{earcon:?}");
+    }
+    // Unsilenced, playback fades back in over 10 ms, and cues play again.
+    let mut faded = Mixer::new(MixerOptions {
+        sample_rate: 1_000,
+        jitter: JitterOptions {
+            target_latency: Duration::ZERO,
+            latency_limit: Duration::from_millis(100),
+        },
+    });
+    faded.silence_now();
+    for sequence in 0..4 {
+        faded.push(AudioFrame {
+            gate: Gate::Live,
+            source: AGENT_SOURCE,
+            sequence,
+            timestamp: 0,
+            sample_rate: 1_000,
+            samples: vec![1_000; 4],
+        });
+    }
+    assert_eq!(mix(&mut faded, 2), [0, 0]);
+    faded.set_silenced(false);
+    assert_eq!(
+        mix(&mut faded, 12)[..10],
+        [100, 200, 300, 400, 500, 600, 700, 800, 900, 1_000]
+    );
+    mixer.set_silenced(false);
+    mixer.play(Earcon::Sent);
+    let mut output = vec![0; bank.samples(Earcon::Sent).len()];
+    mixer.mix(&mut output);
+    assert!(
+        output
+            .iter()
+            .map(|sample| sample.unsigned_abs())
+            .max()
+            .unwrap()
+            > 1_000
+    );
+}

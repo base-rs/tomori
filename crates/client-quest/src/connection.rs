@@ -6,6 +6,7 @@ use crate::{
     capture::{Capture, Recording},
     controller,
     conversation::{Action, Conversation},
+    feedback::{Event as Feedback, Hand},
     hands,
     identity::{Identity, Store},
     playback::{Playback, Speaking},
@@ -50,7 +51,31 @@ pub struct Connection {
     presence: Option<PresenceHook>,
     /// The server connected to, and how, for keeping its certificate and token.
     link: Option<Link>,
+    /// What the participant hears and feels as things change; see `design/interaction.md`.
+    feedback: crate::feedback::Feedback,
+    /// This participant's utterances recorded and not yet transcribed, so that their outcome is cued.
+    utterances: Vec<String>,
+    /// The utterance being recorded now, until X is released or it ends otherwise.
+    recording: Option<String>,
+    /// Speech played again to this participant, so that a catch-up nobody asked for is cued once.
+    replay: Replay,
+    /// How close to the server's limit the recording in progress has been cued: 0, 1 at [`crate::recording::WARNING`], 2 at [`crate::recording::CRITICAL`].
+    limit_cued: u8,
 }
+
+/// Speech played again to this participant: a replay they asked for, or a catch-up on joining or returning.
+#[derive(Debug, Default)]
+struct Replay {
+    /// When a replay was asked for, until it ends.
+    asked: Option<Instant>,
+    /// Speech played again is under way, as of its last segment.
+    since: Option<Instant>,
+}
+
+/// How long after the last segment played again, with the player quiet, a replay counts as over.
+const REPLAY_OVER: Duration = Duration::from_secs(3);
+/// How long a replay asked for may take to start, as the server synthesizes it again, before it counts as never coming.
+const REPLAY_START: Duration = Duration::from_secs(15);
 
 /// How this device is connected to a server, so that what it learns can be kept for that server. See `design/security.md`.
 struct Link {
@@ -518,6 +543,8 @@ impl Connection {
             );
         }
         let remembered = store.server();
+        let feedback = store.feedback();
+        conversation.set_feedback(feedback);
         Self {
             identity,
             store,
@@ -538,7 +565,17 @@ impl Connection {
             speaker: Speaker::new(playback),
             presence: None,
             link: None,
+            feedback: crate::feedback::Feedback::new(feedback),
+            utterances: Vec::new(),
+            recording: None,
+            replay: Replay::default(),
+            limit_cued: 0,
         }
+    }
+
+    /// What the participant hears and feels as things change, for the frame loop to report pointing and choosing to, and to take vibrations from.
+    pub fn feedback(&mut self) -> &mut crate::feedback::Feedback {
+        &mut self.feedback
     }
 
     /// Ask for microphone access once the headset can show the request.
@@ -599,6 +636,8 @@ impl Connection {
             self.voice.recording = None;
         }
         if let Some(error) = self.voice.failure() {
+            self.feedback
+                .emit(Feedback::NotSent(Hand::Left), Instant::now());
             conversation.microphone_failed(error);
         }
         let browsing = focused && conversation.is_browsing();
@@ -640,6 +679,7 @@ impl Connection {
                     _ => {}
                 }
             }
+            self.observe(&event);
             // The spectator renders presence, which the conversation ignores.
             if let Event::Message(message @ ServerMessage::Presence { .. }) = &event
                 && let Some(presence) = self.presence.as_deref_mut()
@@ -656,6 +696,8 @@ impl Connection {
             }
         }
         if let Some(error) = self.voice.failure() {
+            self.feedback
+                .emit(Feedback::NotSent(Hand::Left), Instant::now());
             conversation.microphone_failed(error);
         }
         if let Some(reopen) = reopen {
@@ -675,6 +717,142 @@ impl Connection {
             control.set_silenced(self.voice.talking());
         }
         conversation.set_replaying(self.speaker.is_replaying());
+        self.cue(conversation);
+    }
+
+    /// Cue what the server said about this participant's words and speech played again.
+    fn observe(&mut self, event: &Event) {
+        let now = Instant::now();
+        match event {
+            Event::Message(ServerMessage::Transcript {
+                utterance,
+                finished: true,
+                ..
+            }) => {
+                if self.forget_utterance(utterance) {
+                    self.feedback.emit(Feedback::Sent, now);
+                }
+            }
+            Event::Message(ServerMessage::TranscriptFailed { utterance, .. }) => {
+                if self.forget_utterance(utterance) {
+                    self.feedback.emit(Feedback::NotSent(Hand::Left), now);
+                }
+            }
+            Event::Message(ServerMessage::Speech { replay: true, .. }) => {
+                if self.replay.since.replace(now).is_none() && self.replay.asked.is_none() {
+                    self.feedback.emit(Feedback::CatchingUp, now);
+                }
+            }
+            // Words being recorded when the connection drops are lost. Words already released may still be queued by the server, but their transcript cannot reach this client, so they are forgotten without a cue, as the conversation shows no failure for them.
+            Event::State(ConnectionState::Disconnected { .. }) => {
+                self.replay = Replay::default();
+                let lost = self.end_recording().is_some();
+                self.utterances.clear();
+                if lost {
+                    self.feedback.emit(Feedback::NotSent(Hand::Left), now);
+                }
+            }
+            // Live speech stops a replay.
+            Event::Message(ServerMessage::Speech { replay: false, .. } | ServerMessage::Left)
+            | Event::State(_) => self.replay = Replay::default(),
+            _ => {}
+        }
+    }
+
+    /// The utterance being recorded ended without being sent: forget it.
+    fn end_recording(&mut self) -> Option<String> {
+        let utterance = self.recording.take()?;
+        self.utterances.retain(|id| *id != utterance);
+        Some(utterance)
+    }
+
+    fn forget_utterance(&mut self, utterance: &str) -> bool {
+        if self.recording.as_deref() == Some(utterance) {
+            self.recording = None;
+        }
+        let known = self.utterances.iter().position(|id| id == utterance);
+        known.map(|index| self.utterances.remove(index)).is_some()
+    }
+
+    /// Cue the requests and knocks waiting, and the recording nearing the limit, and play the cues due.
+    fn cue(&mut self, conversation: &Conversation) {
+        let now = Instant::now();
+        self.cue_limit(
+            conversation.recording(),
+            conversation.utterance_limit(),
+            now,
+        );
+        let over = match self.replay.since {
+            Some(since) => now.saturating_duration_since(since) >= REPLAY_OVER,
+            None => self
+                .replay
+                .asked
+                .is_some_and(|asked| now.saturating_duration_since(asked) >= REPLAY_START),
+        };
+        if over && !self.speaker.is_replaying() {
+            self.replay = Replay::default();
+        }
+        // Visitors cannot decide requests or let anyone in, so nothing waits for them.
+        let space = conversation
+            .joined_space()
+            .map(|(space, _)| space)
+            .filter(|_| conversation.role().participates());
+        let requests = space.into_iter().flat_map(|space| {
+            let approval = space.approval.as_ref().map(|approval| approval.id.as_str());
+            let question = space.question.as_ref().map(|question| question.id.as_str());
+            approval.into_iter().chain(question)
+        });
+        self.feedback.observe_requests(requests, now);
+        let knocks = space
+            .into_iter()
+            .flat_map(|_| conversation.knocks().iter().map(|knock| knock.id.as_str()));
+        self.feedback.observe_knocks(knocks, now);
+        self.play_cues();
+    }
+
+    /// Cue a recording that has been going for `elapsed` reaching 30 and then 10 seconds before `limit`, as the recording card turns amber and then red; only the nearer when both are passed at once. See `design/feedback.md`.
+    fn cue_limit(&mut self, elapsed: Option<Duration>, limit: Option<Duration>, now: Instant) {
+        let Some(elapsed) = elapsed else {
+            self.limit_cued = 0;
+            return;
+        };
+        let Some(left) = limit.map(|limit| limit.saturating_sub(elapsed)) else {
+            return;
+        };
+        let stage = if left <= crate::recording::CRITICAL {
+            2
+        } else if left <= crate::recording::WARNING {
+            1
+        } else {
+            0
+        };
+        if stage > self.limit_cued {
+            self.limit_cued = stage;
+            self.feedback.emit(
+                if stage == 2 {
+                    Feedback::LimitCritical
+                } else {
+                    Feedback::LimitWarning
+                },
+                now,
+            );
+        }
+    }
+
+    /// Play the cues due. Nothing plays without a connection and an open speaker, and a cue played late would mislead, so they are dropped then.
+    fn play_cues(&mut self) {
+        match self
+            .speaker
+            .control()
+            .filter(|_| self.speaker.output.is_some())
+        {
+            Some(control) => {
+                for earcon in self.feedback.take_earcons() {
+                    control.play(earcon);
+                }
+            }
+            None => self.feedback.take_earcons().for_each(drop),
+        }
     }
 
     fn perform(&mut self, conversation: &mut Conversation) {
@@ -731,45 +909,80 @@ impl Connection {
                     self.changed = true;
                     self.failed = false;
                 }
-                Action::Send(message) => match &self.client {
-                    Some(client) => {
-                        if let Err(error) = client.send(message) {
-                            conversation.fail(format!("Cannot send: {error}"));
+                Action::Send(message) => {
+                    match &message {
+                        ClientMessage::Replay { .. } => self.replay.asked = Some(Instant::now()),
+                        ClientMessage::StopReplay => self.replay = Replay::default(),
+                        _ => {}
+                    }
+                    match &self.client {
+                        Some(client) => {
+                            if let Err(error) = client.send(message) {
+                                self.feedback
+                                    .emit(Feedback::NotSent(Hand::Right), Instant::now());
+                                conversation.fail(format!("Cannot send: {error}"));
+                            }
+                        }
+                        None => {
+                            self.feedback
+                                .emit(Feedback::NotSent(Hand::Right), Instant::now());
+                            conversation.fail("Not connected.");
                         }
                     }
-                    None => conversation.fail("Not connected."),
-                },
+                }
                 Action::BeginUtterance(utterance, generation, answer) => {
+                    // The opening tick plays through the silencing, as X is pressed and before the microphone has opened; see `design/live-audio.md`. A live microphone is already open and would hear it, so then it is only felt.
+                    self.feedback.emit_heard(
+                        Feedback::RecordingStarts,
+                        !self.voice.live,
+                        Instant::now(),
+                    );
+                    self.play_cues();
                     // Silence the speaker before the microphone opens.
                     if let Some(control) = self.speaker.control() {
                         control.set_silenced(true);
                     }
+                    self.utterances.retain(|id| *id != utterance);
+                    self.utterances.push(utterance.clone());
+                    self.recording = Some(utterance.clone());
                     let begun = match &self.client {
                         Some(client) => self.voice.begin(client, utterance, generation, answer),
                         None => Err("Not connected.".into()),
                     };
                     if let Err(error) = begun {
                         log::warn!("Cannot record: {error}");
+                        self.end_recording();
+                        self.feedback
+                            .emit(Feedback::NotSent(Hand::Left), Instant::now());
                         self.voice.recording = None;
                         conversation.microphone_failed(error);
                     }
                 }
                 Action::EndUtterance(pointed) => {
+                    self.feedback.emit(Feedback::RecordingStops, Instant::now());
+                    let released = self.recording.take();
                     match self
                         .voice
                         .finish_pointing(self.client.as_ref(), true, pointed)
                     {
                         Ok(()) => {}
-                        Err(Finish::Utterance(error)) => conversation.utterance_not_sent(error),
+                        Err(Finish::Utterance(error)) => {
+                            self.utterances.retain(|id| Some(id) != released.as_ref());
+                            self.feedback
+                                .emit(Feedback::NotSent(Hand::Left), Instant::now());
+                            conversation.utterance_not_sent(error)
+                        }
                         Err(Finish::Live(error)) => conversation.microphone_failed(error),
                     }
                 }
                 Action::CancelUtterance => {
+                    self.end_recording();
                     if let Err(error) = self.voice.finish(self.client.as_ref(), false) {
                         conversation.fail(String::from(error));
                     }
                 }
                 Action::AbandonUtterance => {
+                    self.end_recording();
                     if let Err(error) = self.voice.abandon() {
                         conversation.fail(error);
                     }
@@ -779,18 +992,31 @@ impl Connection {
                         Some(client) => self.voice.start_live(client, generation),
                         None => Err("Not connected.".into()),
                     };
-                    if let Err(error) = result {
-                        self.voice.recording = None;
-                        conversation.microphone_failed(error);
+                    match result {
+                        Ok(()) => self.feedback.emit(Feedback::LiveOn, Instant::now()),
+                        Err(error) => {
+                            self.voice.recording = None;
+                            self.feedback
+                                .emit(Feedback::NotSent(Hand::Left), Instant::now());
+                            conversation.microphone_failed(error);
+                        }
                     }
                 }
                 Action::StopLive => {
+                    // Only a microphone that was live turns off; one that failed to start never turned on.
+                    if self.voice.live {
+                        self.feedback.emit(Feedback::LiveOff, Instant::now());
+                    }
                     if let Err(error) = self.voice.stop_live() {
                         self.voice.recording = None;
                         conversation.microphone_failed(error);
                     }
                 }
                 Action::SetAgentMuted(muted) => self.speaker.set_muted(muted),
+                Action::SetFeedback(settings) => {
+                    self.feedback.set_settings(settings);
+                    self.store.remember_feedback(settings);
+                }
             }
         }
     }
@@ -941,6 +1167,8 @@ impl Connection {
 
     fn disconnect(&mut self) {
         self.link = None;
+        self.utterances.clear();
+        self.recording = None;
         self.voice.reset();
         self.speaker.detach();
         if let Some(client) = self.client.take() {
@@ -1590,6 +1818,259 @@ mod tests {
             assert!(Instant::now() < deadline, "no failure reported");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    fn feedback_connection() -> (Connection, Conversation) {
+        let mut conversation = Conversation::new("Ada");
+        let store = Store::new(None);
+        let identity = Identity::new(&store, None, Default::default());
+        let (voice, _) = kind_voice();
+        let connection = Connection::new(
+            identity,
+            store,
+            Box::new(()),
+            voice.capture,
+            Box::new(FakeSpeaker::default()),
+            &mut conversation,
+        );
+        (connection, conversation)
+    }
+
+    fn cues(connection: &mut Connection) -> Vec<client::playback::Earcon> {
+        connection.feedback.take_earcons().collect()
+    }
+
+    fn message(message: ServerMessage) -> Event {
+        Event::Message(message)
+    }
+
+    #[test]
+    fn a_recording_nearing_the_limit_is_felt_at_30_and_10_seconds_left() {
+        let (mut connection, _conversation) = feedback_connection();
+        connection.feedback.set_haptics(true);
+        let now = Instant::now();
+        let limit = Some(Duration::from_secs(60));
+        let felt = |connection: &mut Connection| {
+            connection
+                .feedback
+                .haptics(now + Duration::from_secs(1))
+                .len()
+        };
+        connection.cue_limit(Some(Duration::from_secs(20)), limit, now);
+        assert_eq!(felt(&mut connection), 0);
+        connection.cue_limit(Some(Duration::from_secs(30)), limit, now);
+        assert_eq!(felt(&mut connection), 1);
+        connection.cue_limit(Some(Duration::from_secs(40)), limit, now);
+        assert_eq!(felt(&mut connection), 0);
+        connection.cue_limit(Some(Duration::from_secs(50)), limit, now);
+        assert_eq!(felt(&mut connection), 2);
+        connection.cue_limit(Some(Duration::from_secs(55)), limit, now);
+        assert_eq!(felt(&mut connection), 0);
+        // Felt, never heard; a new recording starts again; no limit, no cue.
+        assert!(cues(&mut connection).is_empty());
+        connection.cue_limit(None, limit, now);
+        connection.cue_limit(Some(Duration::from_secs(55)), limit, now);
+        assert_eq!(felt(&mut connection), 2);
+        connection.cue_limit(None, None, now);
+        connection.cue_limit(Some(Duration::from_secs(55)), None, now);
+        assert_eq!(felt(&mut connection), 0);
+    }
+
+    #[test]
+    fn this_participants_words_are_cued_when_sent_or_failed() {
+        use client::playback::Earcon;
+        let (mut connection, _conversation) = feedback_connection();
+        connection.utterances = vec!["u-1".into(), "u-2".into()];
+        let transcript = |utterance: &str, finished| {
+            message(ServerMessage::Transcript {
+                utterance: utterance.into(),
+                text: "hello".into(),
+                finished,
+            })
+        };
+        // Partial words, and another participant's, are not cued.
+        connection.observe(&transcript("u-1", false));
+        connection.observe(&transcript("someone-else", true));
+        assert!(cues(&mut connection).is_empty());
+        connection.observe(&transcript("u-1", true));
+        assert_eq!(cues(&mut connection), [Earcon::Sent]);
+        connection.observe(&transcript("u-1", true));
+        assert!(cues(&mut connection).is_empty());
+        connection.observe(&message(ServerMessage::TranscriptFailed {
+            utterance: "u-2".into(),
+            error: "Too long.".into(),
+        }));
+        assert_eq!(cues(&mut connection), [Earcon::Failed]);
+        assert!(connection.utterances.is_empty());
+    }
+
+    #[test]
+    fn a_catch_up_nobody_asked_for_is_cued_once() {
+        use client::playback::Earcon;
+        let (mut connection, mut conversation) = feedback_connection();
+        let speech = |replay| {
+            message(ServerMessage::Speech {
+                segment: 0,
+                message: "m".into(),
+                text: "Hello.".into(),
+                sample_rate: 24_000,
+                replay,
+            })
+        };
+        connection.observe(&speech(true));
+        connection.observe(&speech(true));
+        assert_eq!(cues(&mut connection), [Earcon::CatchingUp]);
+        // Live speech ends it; a replay asked for is not cued.
+        connection.observe(&speech(false));
+        conversation.push_action(Action::Send(ClientMessage::Replay { message: None }));
+        connection.perform(&mut conversation);
+        connection.observe(&speech(true));
+        assert!(!cues(&mut connection).contains(&Earcon::CatchingUp));
+        // Stopping it, or a quiet player some time after its last segment, ends it too.
+        conversation.push_action(Action::Send(ClientMessage::StopReplay));
+        connection.perform(&mut conversation);
+        connection.observe(&speech(true));
+        assert!(cues(&mut connection).contains(&Earcon::CatchingUp));
+        connection.replay.since = Some(Instant::now() - REPLAY_OVER);
+        connection.cue(&conversation);
+        assert!(connection.replay.since.is_none());
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_sent_is_cued_on_the_right_hand_and_the_setting_is_kept() {
+        use crate::feedback::{Level, Settings};
+        use client::playback::Earcon;
+        let (mut connection, mut conversation) = feedback_connection();
+        connection.feedback.set_haptics(true);
+        conversation.push_action(Action::Send(ClientMessage::Leave));
+        connection.perform(&mut conversation);
+        assert_eq!(cues(&mut connection), [Earcon::Failed]);
+        let felt = connection.feedback.haptics(Instant::now());
+        assert_eq!(felt[0].0, Hand::Right);
+        let quiet = Settings {
+            sounds: Level::Off,
+            vibration: Level::Reduced,
+        };
+        conversation.push_action(Action::SetFeedback(quiet));
+        connection.perform(&mut conversation);
+        assert_eq!(connection.feedback.settings(), quiet);
+        // Without a connection, cues have nowhere to play and are dropped.
+        connection.feedback.set_settings(Settings::default());
+        connection.feedback.emit(Feedback::Choose, Instant::now());
+        connection.cue(&conversation);
+        assert!(cues(&mut connection).is_empty());
+    }
+
+    #[test]
+    fn the_recording_tick_is_heard_only_while_the_live_microphone_is_off() {
+        let (mut connection, mut conversation) = feedback_connection();
+        let (_audio, received) = std::sync::mpsc::sync_channel(1);
+        let (player, control) = Player::new(received, MixerOptions::default());
+        let player = Arc::new(Mutex::new(player));
+        connection.speaker.player = Some((player.clone(), control));
+        assert_eq!(connection.speaker.open(), None);
+        until(|| {
+            connection
+                .speaker
+                .output
+                .as_ref()
+                .is_some_and(Speaking::is_open)
+        });
+        let heard = |player: &crate::playback::Shared| {
+            let mut output = vec![0; 4_800];
+            player.lock().unwrap().render(48_000, &mut output);
+            output.iter().any(|sample| *sample != 0)
+        };
+        // Without a connection recording fails at once; the tick still plays through the silencing, and the failure does not.
+        conversation.push_action(Action::BeginUtterance("u-1".into(), 0, None));
+        connection.perform(&mut conversation);
+        assert!(heard(&player));
+        assert!(connection.utterances.is_empty());
+        assert!(connection.recording.is_none());
+        connection.voice.live = true;
+        conversation.push_action(Action::BeginUtterance("u-2".into(), 0, None));
+        connection.perform(&mut conversation);
+        assert!(!heard(&player));
+    }
+
+    #[test]
+    fn the_live_microphone_is_cued_only_when_it_turns_on_or_off() {
+        use client::playback::Earcon;
+        let (mut connection, mut conversation) = feedback_connection();
+        // Failing to start is a failure, and stopping what never started is silent.
+        conversation.push_action(Action::StartLive(0));
+        connection.perform(&mut conversation);
+        assert_eq!(cues(&mut connection), [Earcon::Failed]);
+        conversation.push_action(Action::StopLive);
+        connection.perform(&mut conversation);
+        assert!(cues(&mut connection).is_empty());
+        connection.voice.live = true;
+        conversation.push_action(Action::StopLive);
+        connection.perform(&mut conversation);
+        assert_eq!(cues(&mut connection), [Earcon::Off]);
+    }
+
+    #[test]
+    fn words_on_their_way_are_lost_when_the_connection_drops() {
+        use client::playback::Earcon;
+        let (mut connection, mut conversation) = feedback_connection();
+        let dropped = || {
+            Event::State(ConnectionState::Disconnected {
+                reason: Disconnect::Timeout,
+                retry_in: Duration::from_secs(1),
+            })
+        };
+        connection.observe(&dropped());
+        assert!(cues(&mut connection).is_empty());
+        connection.utterances = vec!["u-1".into()];
+        connection.recording = Some("u-1".into());
+        connection.observe(&dropped());
+        assert_eq!(cues(&mut connection), [Earcon::Failed]);
+        assert!(connection.utterances.is_empty());
+        // Words already released may still be queued, so only a recording is cued as lost; the others are forgotten.
+        connection.utterances = vec!["u-2".into()];
+        connection.observe(&dropped());
+        assert!(cues(&mut connection).is_empty());
+        assert!(connection.utterances.is_empty());
+        // Cancelling or abandoning forgets only the utterance being recorded, not one still being transcribed.
+        connection.utterances = vec!["u-2".into(), "u-3".into()];
+        connection.recording = Some("u-3".into());
+        conversation.push_action(Action::CancelUtterance);
+        connection.perform(&mut conversation);
+        assert_eq!(connection.utterances, ["u-2"]);
+        connection.utterances.push("u-4".into());
+        connection.recording = Some("u-4".into());
+        connection.observe(&message(ServerMessage::TranscriptFailed {
+            utterance: "u-4".into(),
+            error: "Too long.".into(),
+        }));
+        conversation.push_action(Action::AbandonUtterance);
+        connection.perform(&mut conversation);
+        assert_eq!(connection.utterances, ["u-2"]);
+    }
+
+    #[test]
+    fn a_replay_asked_for_that_never_comes_stops_counting_after_a_while() {
+        use client::playback::Earcon;
+        let (mut connection, mut conversation) = feedback_connection();
+        conversation.push_action(Action::Send(ClientMessage::Replay { message: None }));
+        connection.perform(&mut conversation);
+        cues(&mut connection);
+        assert!(connection.replay.asked.is_some());
+        connection.replay.asked = Some(Instant::now() - REPLAY_OVER);
+        connection.cue(&conversation);
+        assert!(connection.replay.asked.is_some());
+        connection.replay.asked = Some(Instant::now() - REPLAY_START);
+        connection.cue(&conversation);
+        assert!(connection.replay.asked.is_none());
+        connection.observe(&message(ServerMessage::Speech {
+            segment: 0,
+            message: "m".into(),
+            text: "Hello.".into(),
+            sample_rate: 24_000,
+            replay: true,
+        }));
+        assert_eq!(cues(&mut connection), [Earcon::CatchingUp]);
     }
 
     #[test]

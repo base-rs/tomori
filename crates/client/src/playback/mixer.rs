@@ -6,12 +6,16 @@ use std::time::Duration;
 
 use protocol::{AGENT_SOURCE, AudioFrame, Gate, REPLAY_SOURCE};
 
-use super::{JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
+use super::{Bank, Earcon, JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
 
 /// How long a source may go without frames before its buffer is released.
 const IDLE_LIMIT: Duration = Duration::from_secs(10);
 /// How quickly a source's level falls once it plays more quietly: it drops to about a third over this time.
 const LEVEL_RELEASE: Duration = Duration::from_millis(150);
+/// How long playback takes to fade out when silenced, and back in afterwards, so that it does not click.
+const FADE: Duration = Duration::from_millis(10);
+/// The most sound cues that play at once; another replaces the one furthest through.
+const VOICES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixerOptions {
@@ -45,9 +49,18 @@ impl Source {
     }
 }
 
-/// Mixes every remote participant and the agent speech stream into one mono `i16` stream at the device rate.
+/// A sound cue playing, and how far through it is.
+#[derive(Clone, Copy, Debug)]
+struct Voice {
+    earcon: Earcon,
+    position: usize,
+}
+
+/// Mixes every remote participant and the agent speech stream into one mono `i16` stream at the device rate, with this client's own sound cues.
 ///
 /// Feed it every received [`AudioFrame`] with [`Self::push`] and pull output from the audio callback with [`Self::mix`]. Each source has its own [`JitterBuffer`], so one late or bursty participant does not delay the others. Agent volume and mute are local to this mixer, and apply to agent speech played again from [`REPLAY_SOURCE`] as to live agent speech; muting still consumes agent audio in real time, so unmuting resumes live speech rather than replaying what was missed.
+///
+/// Sound cues ([`Self::play`]) are local: never sent, never a source, never muted with agent speech. They are rendered once when the mixer is created, so playing one allocates nothing. Silencing ([`Self::set_silenced`]) fades out everything but the cues that bypass it, then the limiter comes last.
 pub struct Mixer {
     options: MixerOptions,
     sources: HashMap<u32, Source>,
@@ -60,6 +73,13 @@ pub struct Mixer {
     /// One source's contribution to the current [`Self::mix`] call, so its level can be measured.
     scratch: Vec<f32>,
     statistics: PlaybackStatistics,
+    bank: Bank,
+    voices: [Option<Voice>; VOICES],
+    /// The cues that play through silencing, for the current [`Self::mix`] call.
+    bypass: Vec<f32>,
+    silenced: bool,
+    /// How far playback has faded out, in samples: 0 is full volume, and the fade length is silent.
+    faded: u32,
 }
 
 impl Mixer {
@@ -78,7 +98,45 @@ impl Mixer {
             accumulator: Vec::new(),
             scratch: Vec::new(),
             statistics: PlaybackStatistics::default(),
+            bank: Bank::new(options.sample_rate),
+            voices: [None; VOICES],
+            bypass: Vec::new(),
+            silenced: false,
+            faded: 0,
         }
+    }
+
+    /// Play a sound cue from its start. When [`VOICES`] already play, it replaces the one furthest through.
+    pub fn play(&mut self, earcon: Earcon) {
+        let voice = Some(Voice {
+            earcon,
+            position: 0,
+        });
+        let slot = match self.voices.iter().position(Option::is_none) {
+            Some(free) => free,
+            None => (0..VOICES)
+                .max_by_key(|&index| self.voices[index].map_or(0, |voice| voice.position))
+                .expect("there are voices"),
+        };
+        self.voices[slot] = voice;
+    }
+
+    /// How many sound cues are playing.
+    pub fn playing_cues(&self) -> usize {
+        self.voices.iter().flatten().count()
+    }
+
+    /// Silence playback, fading out over [`FADE`], while still consuming what arrives in real time; cues that [`Earcon::bypasses_silence`] still play. Used while the microphone records push-to-talk; see `design/live-audio.md`.
+    pub fn set_silenced(&mut self, silenced: bool) {
+        self.silenced = silenced;
+    }
+
+    /// Silence playback at once, without fading out, as for a mixer made while playback is already silenced.
+    pub fn silence_now(&mut self) {
+        self.silenced = true;
+        self.faded = (FADE.as_secs_f64() * f64::from(self.options.sample_rate))
+            .ceil()
+            .max(1.0) as u32;
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -119,7 +177,7 @@ impl Mixer {
         self.sources.keys().copied()
     }
 
-    /// Discard all buffered audio. The application owns the mixer, so it calls this when the audio it hears changes context: on [`protocol::ServerMessage::Left`], before joining a different space, and after reconnecting.
+    /// Discard all buffered audio. The application owns the mixer, so it calls this when the audio it hears changes context: on [`protocol::ServerMessage::Left`], before joining a different space, and after reconnecting. Sound cues keep playing: they are this client's own, such as the click as it leaves a space.
     pub fn clear(&mut self) {
         self.sources.clear();
     }
@@ -205,6 +263,40 @@ impl Mixer {
                 || source.buffer.buffered_samples() > 0
                 || source.buffer.idle_samples() < idle_limit
         });
+        self.bypass.clear();
+        self.bypass.resize(output.len(), 0.0);
+        for slot in &mut self.voices {
+            let Some(voice) = slot else {
+                continue;
+            };
+            let samples = &self.bank.samples(voice.earcon)[voice.position..];
+            let target = if voice.earcon.bypasses_silence() {
+                &mut self.bypass
+            } else {
+                &mut self.accumulator
+            };
+            for (total, sample) in target.iter_mut().zip(samples) {
+                *total += sample;
+            }
+            voice.position += samples.len().min(output.len());
+            if voice.position >= self.bank.samples(voice.earcon).len() {
+                *slot = None;
+            }
+        }
+        let length = (FADE.as_secs_f64() * f64::from(rate)).ceil().max(1.0) as u32;
+        if self.silenced || self.faded > 0 {
+            for sample in self.accumulator.iter_mut() {
+                self.faded = if self.silenced {
+                    (self.faded + 1).min(length)
+                } else {
+                    self.faded.saturating_sub(1)
+                };
+                *sample *= 1.0 - self.faded as f32 / length as f32;
+            }
+        }
+        for (total, sample) in self.accumulator.iter_mut().zip(&self.bypass) {
+            *total += sample;
+        }
         self.limiter.process(&self.accumulator, output);
     }
 }

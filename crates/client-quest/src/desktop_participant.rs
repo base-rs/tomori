@@ -547,13 +547,23 @@ impl State {
         let right = Input::stick(input.right);
         // B lets go of a menu pinned with Tab (Y) first.
         let unpinned = back && self.hand_menu.unpin();
-        let back_taken = self.wrist.input(
+        let wrist_input = self.wrist.input(
             conversation,
             right,
             a && !p.menu_was_shown,
             back && !unpinned,
             now,
-        ) || unpinned;
+        );
+        // Without controllers, only choosing on the transcript is heard; see `design/feedback.md`.
+        if wrist_input.chose {
+            p.connection
+                .feedback()
+                .emit(crate::feedback::Event::Choose, now);
+        }
+        if wrist_input.on_request {
+            p.connection.feedback().request_opened();
+        }
+        let back_taken = wrist_input.back || unpinned;
         if back && !back_taken {
             conversation.back();
         }
@@ -563,7 +573,12 @@ impl State {
         }
         match p.back_since {
             Some(since) if input.back_held && conversation.joined_space().is_some() => {
-                conversation.hold_back(Some(now.duration_since(since)));
+                // Without controllers to ramp, only leaving is cued, by its sound.
+                if conversation.hold_back(Some(now.duration_since(since))) {
+                    p.connection
+                        .feedback()
+                        .emit(crate::feedback::Event::Left, now);
+                }
             }
             Some(_) => {
                 p.back_since = None;
@@ -585,13 +600,24 @@ impl State {
         // A chooses what was pointed at last frame, and only in the hand menu while it shows; see `xr::run`.
         match &p.highlighted {
             Some(arrival::Key::Menu(key)) if a => {
+                if crate::hand_menu::choosable(key) {
+                    p.connection
+                        .feedback()
+                        .emit(crate::feedback::Event::Choose, now);
+                }
                 if let Some(choice) = self.hand_menu.choose(key) {
                     conversation.choose_menu(choice);
                 }
             }
             _ if p.menu_was_shown || wrist_active => {}
             _ if a => {
-                conversation.press_a(p.highlighted.as_ref());
+                let chose =
+                    !conversation.press_a(p.highlighted.as_ref()) && !conversation.a_refused();
+                if chose {
+                    p.connection
+                        .feedback()
+                        .emit(crate::feedback::Event::Choose, now);
+                }
             }
             _ => {}
         }
@@ -667,7 +693,7 @@ impl State {
             );
         p.menu_was_shown = menu_shown;
         let in_space = conversation.joined_space().is_some();
-        self.wrist.update(
+        let wrist_opened = self.wrist.update(
             queue,
             conversation,
             crate::controller_ui::WristFrame {
@@ -690,6 +716,9 @@ impl State {
                 time: self.arrival_time,
             },
         );
+        if wrist_opened {
+            p.connection.feedback().request_opened();
+        }
         let wrist_shown = self.wrist.state().on_hand();
         // What the mouse pointed at last frame, so that a mode's description shows beneath it.
         let pointed = match &p.highlighted {
@@ -715,6 +744,9 @@ impl State {
         let pointing = self.pointer.update(ray, trigger, &targets);
         p.highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
         if let Some(key) = &pointing.chosen {
+            p.connection
+                .feedback()
+                .emit(crate::feedback::Event::Choose, now);
             match key {
                 arrival::Key::Menu(key) => {
                     if let Some(choice) = self.hand_menu.choose(key) {

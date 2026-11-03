@@ -169,3 +169,23 @@ fn an_unknown_device_rate_renders_silence() {
     player.render(0, &mut output);
     assert_eq!(output, [0; FRAME]);
 }
+
+#[test]
+fn plays_a_sound_cue_once_and_clearing_keeps_it() {
+    let (_sender, mut player, control) = player();
+    let cue = super::super::Bank::new(RATE).samples(Earcon::Choose).len();
+    control.play(Earcon::Choose);
+    assert!(render(&mut player, cue).iter().any(|sample| *sample != 0));
+    assert_eq!(render(&mut player, FRAME), [0; FRAME]);
+    control.play(Earcon::Choose);
+    control.clear();
+    assert!(render(&mut player, cue).iter().any(|sample| *sample != 0));
+    // A mixer prepared while silenced starts silent.
+    control.set_silenced(true);
+    player.prepare(RATE * 3);
+    player.prepare(RATE * 3);
+    player.prepare(0);
+    let mut output = vec![1; FRAME];
+    player.render(RATE * 3, &mut output);
+    assert_eq!(output, [0; FRAME]);
+}
