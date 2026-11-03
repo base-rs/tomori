@@ -42,7 +42,6 @@ impl Style {
         }
     }
 
-    #[cfg(test)]
     pub const fn on(self, background: Rgba) -> Self {
         Self {
             background: Some(background),
@@ -96,14 +95,17 @@ impl Row {
     }
 
     /// The characters shown, as the console prints them.
-    #[cfg(test)]
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn plain(&self) -> String {
         self.cells.iter().map(|(ch, _)| *ch).collect()
     }
 
-    #[cfg(test)]
     pub fn with_bar(self, bar: Option<Rgba>) -> Self {
         Self { bar, ..self }
+    }
+
+    pub fn with_background(self, background: Option<Rgba>) -> Self {
+        Self { background, ..self }
     }
 }
 
@@ -251,7 +253,7 @@ pub fn cut(spans: &[Span], width: usize) -> Vec<Cell> {
 }
 
 /// Glyphs the `font8x8` tables lack, as 8 rows of 8 pixels, the lowest bit leftmost.
-const EXTRA: [(char, [u8; 8]); 13] = [
+const EXTRA: [(char, [u8; 8]); 14] = [
     ('•', [0x00, 0x00, 0x18, 0x3C, 0x3C, 0x18, 0x00, 0x00]),
     ('✓', [0x00, 0xC0, 0x60, 0x31, 0x1B, 0x0E, 0x04, 0x00]),
     ('●', [0x00, 0x3C, 0x7E, 0x7E, 0x7E, 0x7E, 0x3C, 0x00]),
@@ -265,6 +267,7 @@ const EXTRA: [(char, [u8; 8]); 13] = [
     ('▾', [0x00, 0x00, 0x7F, 0x3E, 0x1C, 0x08, 0x00, 0x00]),
     ('…', [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x00]),
     ('✕', [0x00, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00]),
+    ('▸', [0x00, 0x04, 0x0C, 0x1C, 0x0C, 0x04, 0x00, 0x00]),
 ];
 
 /// The character drawn for `ch`: itself where a table has it, a close equivalent for typographic quotes and dashes, and `?` otherwise.
@@ -362,7 +365,9 @@ mod tests {
 
     #[test]
     fn glyphs_come_from_the_wider_tables_and_fall_back_to_a_question_mark() {
-        for ch in ['a', 'é', '│', '█', 'λ', '•', '✓', '↵', '→', '…'] {
+        for ch in [
+            'a', 'é', '│', '█', 'λ', '•', '✓', '↵', '→', '…', '▸', '○', '◐', '●', '✕', '▾',
+        ] {
             assert_eq!(shown(ch), ch, "{ch}");
             assert_ne!(glyph(ch), [0; 8], "{ch}");
         }

@@ -37,7 +37,7 @@ pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left b
 Enter: A. Backspace: B (hold for a second to leave the space). Space (hold): X, push-to-talk. Tab: Y.\n\
 Arrow keys: left stick. [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
 V: mute spoken replies (left stick click). R: play the latest reply again, or stop it (right stick click).\n\
-M: open or close the hand menu. K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
+M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
 Esc: close the hand menu, or quit.";
 
 /// How far the stick must move before it counts, as on the headset.
@@ -199,6 +199,8 @@ struct Input {
     replay: bool,
     left: [bool; 4],
     right: [bool; 4],
+    /// G, held: the right grip.
+    grip: bool,
 }
 
 impl Input {
@@ -261,6 +263,15 @@ impl Head {
         Ray::new(near, far - near)
     }
 
+    /// A right palm held up in front of the participant, facing them, where the transcript shows while it is open.
+    fn right_palm(&self) -> Palm {
+        let wrist = arrival::HOME + self.rotation() * Vec3::new(0.05, -0.2, -0.42);
+        Palm {
+            wrist,
+            normal: (arrival::HOME - wrist).normalize(),
+        }
+    }
+
     /// A left palm held up in front of the participant, facing them, where the hand menu shows while it is open.
     fn palm(&self) -> Palm {
         let wrist = arrival::HOME + self.rotation() * Vec3::new(-0.06, -0.14, -0.45);
@@ -282,9 +293,9 @@ struct Participant {
     engagement: client::engagement::Tracker,
     microphone_requested: bool,
     menu_open: bool,
+    /// Whether the right wrist's transcript is turned up, with T.
+    wrist_open: bool,
     stick_latched: bool,
-    choice_latched: bool,
-    queue_latched: bool,
     back_since: Option<Instant>,
     was_talking: bool,
     talk_blocked: bool,
@@ -307,9 +318,8 @@ impl Participant {
             engagement,
             microphone_requested: false,
             menu_open: false,
+            wrist_open: false,
             stick_latched: false,
-            choice_latched: false,
-            queue_latched: false,
             back_since: None,
             was_talking: false,
             talk_blocked: false,
@@ -324,8 +334,6 @@ impl Participant {
             // As the headset does on losing focus: nothing held carries over.
             self.input.release();
             self.stick_latched = false;
-            self.choice_latched = false;
-            self.queue_latched = false;
             self.back_since = None;
             self.conversation.hold_back(None);
             self.was_talking = false;
@@ -387,6 +395,8 @@ impl Participant {
             KeyCode::BracketLeft => input.right[2] = pressed,
             KeyCode::BracketRight => input.right[3] = pressed,
             KeyCode::KeyM if press => self.menu_open = !self.menu_open,
+            KeyCode::KeyT if press => self.wrist_open = !self.wrist_open,
+            KeyCode::KeyG => input.grip = pressed,
             KeyCode::KeyK if press => self.conversation.knock(),
             KeyCode::KeyP if press => self.conversation.pair(),
             KeyCode::Equal | KeyCode::NumpadAdd | KeyCode::Minus | KeyCode::NumpadSubtract
@@ -421,6 +431,7 @@ struct State {
     renderer: Renderer,
     caption: Caption,
     indicator: crate::controller_ui::Indicator,
+    wrist: crate::controller_ui::Wrist,
     size: PhysicalSize<u32>,
     occluded: bool,
     participant: Participant,
@@ -454,6 +465,7 @@ impl State {
         );
         let caption = Caption::new(&gpu.device, &renderer);
         let indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
+        let wrist = crate::controller_ui::Wrist::new(&gpu.device, &renderer);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,
@@ -466,6 +478,7 @@ impl State {
             renderer,
             caption,
             indicator,
+            wrist,
             size,
             occluded: false,
             participant,
@@ -517,6 +530,8 @@ impl State {
             std::mem::take(&mut input.mute),
             std::mem::take(&mut input.replay),
         );
+        // As on the headset, approvals are decided and queued entries removed on the right wrist.
+        conversation.decide_on_wrist();
         let stick = Input::stick(input.left);
         let moving = stick.x.abs() > STICK || stick.y.abs() > STICK;
         if moving && !p.stick_latched {
@@ -527,7 +542,13 @@ impl State {
             }
         }
         p.stick_latched = moving;
-        if back {
+        // While the right wrist's transcript shows, the right stick, A and B act on it; see `xr::run`.
+        let wrist_active = self.wrist.state().active();
+        let right = Input::stick(input.right);
+        let back_taken = self
+            .wrist
+            .input(conversation, right, a && !p.menu_was_shown, back, now);
+        if back && !back_taken {
             conversation.back();
         }
         // Only a hold whose press is in a space can leave it, as on the headset.
@@ -548,19 +569,6 @@ impl State {
         if y {
             conversation.refresh();
         }
-        let choosing = conversation.is_choosing();
-        let right = Input::stick(input.right);
-        let choice_moving = choosing && right.x.abs() > STICK;
-        if choice_moving && !p.choice_latched {
-            conversation.choose(if right.x > 0.0 { 1 } else { -1 });
-        }
-        p.choice_latched = choice_moving;
-        let selecting = conversation.selects_queue();
-        let queue_moving = selecting && right.y.abs() > STICK && right.y.abs() > right.x.abs();
-        if queue_moving && !p.queue_latched {
-            conversation.select_queued(if right.y > 0.0 { -1 } else { 1 });
-        }
-        p.queue_latched = queue_moving;
         // A chooses what was pointed at last frame, and only in the hand menu while it shows; see `xr::run`.
         match &p.highlighted {
             Some(arrival::Key::Menu(key)) if a => {
@@ -568,7 +576,7 @@ impl State {
                     conversation.choose_menu(choice);
                 }
             }
-            _ if p.menu_was_shown => {}
+            _ if p.menu_was_shown || wrist_active => {}
             _ if a => {
                 conversation.press_a(p.highlighted.as_ref());
             }
@@ -591,8 +599,8 @@ impl State {
         self.presentation_navigation.update(
             None,
             &crate::delegation::Workspace::default(),
-            if choosing { 0.0 } else { right.x },
-            if choosing || selecting { 0.0 } else { right.y },
+            if wrist_active { 0.0 } else { right.x },
+            if wrist_active { 0.0 } else { right.y },
         );
         // Knocks are announced in the title as well, since there is no wrist to cue while the menu is closed.
         let knocks = conversation.knocks().len();
@@ -639,8 +647,36 @@ impl State {
         let mut scene = self.motion.scene(self.arrival_time);
         let palm = p.menu_open.then(|| p.head.palm());
         let eye = arrival::HOME;
-        let menu_shown = focused && self.hand_menu.update(palm, Some(eye), Instant::now());
+        let menu_shown = focused
+            && self.hand_menu.update(
+                palm.filter(|_| !self.wrist.state().on_hand()),
+                Some(eye),
+                Instant::now(),
+            );
         p.menu_was_shown = menu_shown;
+        let in_space = conversation.joined_space().is_some();
+        self.wrist.update(
+            queue,
+            conversation,
+            crate::controller_ui::WristFrame {
+                palm: p
+                    .wrist_open
+                    .then(|| p.head.right_palm())
+                    .filter(|_| focused),
+                hands_only: false,
+                head: Some(head),
+                in_space,
+                menu_shown,
+                pointing: p.input.trigger,
+                grip: Some(if p.input.grip { 1.0 } else { 0.0 }),
+            },
+            crate::controller_ui::Moment {
+                now,
+                dt,
+                time: self.arrival_time,
+            },
+        );
+        let wrist_shown = self.wrist.state().on_hand();
         let menu = |hand_menu: &HandMenu, conversation: &Conversation| match palm {
             Some(palm) if menu_shown => hand_menu.objects(&palm, &conversation.menu_model(), eye),
             _ => Vec::new(),
@@ -688,15 +724,18 @@ impl State {
         );
         self.renderer
             .set_scenery(self.motion.scenery(self.arrival_time));
-        let attracting = pointing.attracting && !menu_shown;
+        let attracting = pointing.attracting && !menu_shown && !self.wrist.state().active();
         // The mouse attracts the swarm to a point along its ray, at about arm's length further than a controller would be.
         let attractor = ray.map(|ray| ray.at(1.2)).filter(|_| attracting);
         self.swarm.step(dt, attractor);
         self.renderer
             .update(queue, &self.swarm, attractor, attracting);
         // The mouse points at workers in a space as the headset's ray does; see `xr::run`.
-        let in_space =
-            focused && !in_arrival && !menu_shown && conversation.joined_space().is_some();
+        let in_space = focused
+            && !in_arrival
+            && !menu_shown
+            && !self.wrist.state().active()
+            && conversation.joined_space().is_some();
         conversation.point_at(self.delegation_scene.point(ray.filter(|_| in_space)));
         let (root, current_workspace) = self.workers.update(conversation.joined_space());
         self.renderer
@@ -757,7 +796,7 @@ impl State {
             &[p.head.view_projection(size.x / size.y)],
             Mat4::IDENTITY,
             // As on the headset: arrival has no panel, and the hand menu hides it.
-            &if !in_arrival && !menu_shown {
+            &if !in_arrival && !menu_shown && !wrist_shown {
                 self.caption.panels(
                     panel_pose
                         * Mat4::from_translation(Vec3::new(
@@ -771,6 +810,7 @@ impl State {
             }
             .into_iter()
             .chain(self.indicator.panels(Mat4::IDENTITY))
+            .chain(self.wrist.panels(Mat4::IDENTITY))
             .collect::<Vec<_>>(),
         );
         self.window.pre_present_notify();

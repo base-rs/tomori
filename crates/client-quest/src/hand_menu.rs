@@ -36,7 +36,7 @@ pub const LAYER_ROWS: usize = 14;
 /// How much of a layer its button in the Agent section shows.
 const PREVIEW: usize = 24;
 
-/// Where the left palm is and which way it faces.
+/// Where a palm is and which way it faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palm {
     pub wrist: Vec3,
@@ -67,6 +67,25 @@ impl Palm {
         Some(Self {
             wrist: Vec3::from_array(pose.position),
             normal: orientation * Vec3::X,
+        })
+    }
+
+    /// The right palm of a tracked hand: for a right hand the index finger crossed with the little finger points out of the palm. See `design/wrist-transcript.md`.
+    pub fn from_right_hand(hand: &Hand) -> Option<Self> {
+        let position =
+            |index: usize| hand.joints[index].map(|joint| Vec3::from_array(joint.position));
+        let wrist = position(WRIST)?;
+        let index = position(INDEX_KNUCKLE)? - wrist;
+        let little = position(LITTLE_KNUCKLE)? - wrist;
+        let normal = index.cross(little).try_normalize()?;
+        Some(Self { wrist, normal })
+    }
+
+    /// The right palm of a controller held in the right hand: OpenXR's grip +X points into the right palm, so the palm faces along -X.
+    pub fn from_right_controller(pose: &controller::Pose) -> Option<Self> {
+        Self::from_left_controller(pose).map(|palm| Self {
+            normal: -palm.normal,
+            ..palm
         })
     }
 
@@ -179,16 +198,22 @@ pub enum MenuKey {
     Text(usize),
     /// The cue on the wrist.
     Cue,
+    /// The cue on the right wrist, that something waits on the transcript.
+    WristCue,
 }
 
 /// How an item of the hand menu looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuKind {
-    Section { flashing: bool },
+    Section {
+        flashing: bool,
+    },
     Button,
     Heading,
     Text,
     Cue,
+    /// The right wrist's cue for a problem, in red.
+    ProblemCue,
 }
 
 /// What the menu shows, from the conversation.
@@ -461,7 +486,7 @@ impl HandMenu {
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
             MenuKey::Pair => Some(Choice::Pair),
-            MenuKey::Text(_) | MenuKey::Cue => None,
+            MenuKey::Text(_) | MenuKey::Cue | MenuKey::WristCue => None,
         }
     }
 
@@ -534,6 +559,16 @@ pub fn cue(palm: &Palm) -> Object {
     }
 }
 
+/// The cue on the right wrist of `palm`, while the transcript is closed and something waits on it: amber for a request, red for a problem. See `design/wrist-transcript.md`.
+pub fn wrist_cue(palm: &Palm, problem: bool) -> Object {
+    let mut cue = cue(palm);
+    cue.key = Key::Menu(MenuKey::WristCue);
+    if problem {
+        cue.kind = Kind::Menu(MenuKind::ProblemCue);
+    }
+    cue
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +604,29 @@ mod tests {
         let mut missing = up;
         missing.joints[WRIST] = None;
         assert_eq!(Palm::from_left_hand(&missing), None);
+    }
+
+    #[test]
+    fn a_right_palm_mirrors_the_left() {
+        // Fingers forward, palm up: for a right hand the index finger is on the right.
+        let up = hand(
+            Vec3::ZERO,
+            Vec3::new(0.03, 0.0, -0.09),
+            Vec3::new(-0.03, 0.0, -0.08),
+        );
+        let palm = Palm::from_right_hand(&up).unwrap();
+        assert!(palm.normal.dot(Vec3::Y) > 0.99, "{:?}", palm.normal);
+        // A right controller rolled the other way faces up along its grip's -X axis.
+        let pose = controller::Pose {
+            position: [0.2, 1.0, -0.3],
+            orientation: Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2).to_array(),
+        };
+        let palm = Palm::from_right_controller(&pose).unwrap();
+        assert!(palm.normal.dot(Vec3::Y) > 0.99, "{:?}", palm.normal);
+        let cue = wrist_cue(&palm, true);
+        assert_eq!(cue.kind, Kind::Menu(MenuKind::ProblemCue));
+        assert_eq!(cue.key, Key::Menu(MenuKey::WristCue));
+        assert!(!cue.choosable);
     }
 
     #[test]

@@ -83,6 +83,17 @@ impl PanelAnchor {
         *self = Self::default();
     }
 
+    /// Place the panel at once so that, drawn at `offset` from the pose this gives, it stands at `position` turned `yaw` about the vertical, as a panel let go where it is; it follows lazily from there.
+    pub fn place(&mut self, position: Vec3, yaw: f32, offset: Vec3) {
+        *self = Self {
+            placed: Some(Placement {
+                position: position - Quat::from_rotation_y(yaw) * offset,
+                yaw,
+            }),
+            ..Self::default()
+        };
+    }
+
     /// The pose the panel is drawn relative to, given the head pose and the time since the last update, in seconds. The panel is drawn below and in front of this pose, as it was in front of the head.
     pub fn update(&mut self, head: Mat4, dt: f32) -> Mat4 {
         let target = Placement::of(head, self.placed.map(|placed| placed.yaw));
@@ -185,6 +196,18 @@ mod tests {
         anchor.reset();
         let placed = anchor.update(head(180.0, Vec3::ZERO), 0.0);
         assert!((yaw(placed).abs() - 180.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_placed_panel_stays_where_it_was_let_go() {
+        let mut anchor = PanelAnchor::default();
+        let offset = Vec3::new(0.0, -0.1, -0.6);
+        let at = Vec3::new(0.2, 1.3, -0.4);
+        anchor.place(at, 0.3, offset);
+        let head = head(10.0, Vec3::new(0.0, 1.6, 0.0));
+        let pose = anchor.update(head, 0.05) * Mat4::from_translation(offset);
+        assert!(pose.transform_point3(Vec3::ZERO).distance(at) < 1e-5);
+        assert!((yaw(pose) - 0.3_f32.to_degrees()).abs() < 1e-3);
     }
 
     #[test]

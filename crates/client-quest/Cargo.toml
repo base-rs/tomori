@@ -22,6 +22,7 @@ environment-sky = { path = "../environment-sky" }
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 basisu = "0.1"
+base-markdown = "0.1.4"
 client = { path = "../client" }
 security = { path = "../security" }
 discovery = { path = "../discovery" }

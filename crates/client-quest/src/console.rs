@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), i (show the agent's instructions), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), q (quit).";
 
 /// `point` lists the space's workers by number, `point N` points at the `N`th until another `point`, and `point off`
 /// points at nothing. While recording, the worker pointed at is sent with the words, as on the headset; see
@@ -104,6 +104,8 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                         "r" => conversation.navigate(1, 0),
                         "<" => conversation.choose(-1),
                         ">" => conversation.choose(1),
+                        "^" => conversation.select_queued(-1),
+                        "v" => conversation.select_queued(1),
                         "a" => {
                             if conversation.accept() {
                                 println!("(A has nothing to choose here.)");
@@ -165,6 +167,24 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                                 None => println!("(No knock is waiting.)"),
                             }
                         }
+                        // The right wrist's transcript, for a terminal without hands; see `design/wrist-transcript.md`.
+                        "t" | "tu" | "td" | "tl" | "tr" | "ta" | "tb" => {
+                            match command {
+                                "tu" => conversation.wrist_step(-1),
+                                "td" => conversation.wrist_step(1),
+                                "tl" => conversation.wrist_jump(-1),
+                                "tr" => conversation.wrist_jump(1),
+                                "ta" => conversation.wrist_accept(),
+                                "tb" => {
+                                    conversation.wrist_back();
+                                }
+                                _ => {}
+                            }
+                            print_rows(
+                                &conversation
+                                    .transcript(crate::transcript::DETACHED_COLUMNS, false),
+                            );
+                        }
                         "mute" => conversation.toggle_mute(),
                         "replay" => conversation.replay(),
                         "q" => return Ok(()),
@@ -194,4 +214,21 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
             shown = text;
         }
     }
+}
+
+/// Rows of a panel in a frame, as the console shows the hand's panels.
+fn print_rows(rows: &[crate::ui_text::Row]) {
+    if rows.is_empty() {
+        println!("(Join a space first.)");
+        return;
+    }
+    let width = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
+    let border = format!("+{}+", "-".repeat(width));
+    println!("{border}");
+    for row in rows {
+        let text = row.plain();
+        let pad = width - row.cells.len();
+        println!("|{text}{}|", " ".repeat(pad));
+    }
+    println!("{border}");
 }

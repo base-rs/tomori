@@ -1,0 +1,67 @@
+# The Right Wrist's Transcript
+
+This describes the conversation as the headset shows it on the participant's right wrist: what it shows, how it is shown and placed, and what the right controller's controls do while it shows. The left hand's menu is described in `hand-menu.md`, and the space's controls otherwise in `interaction.md`.
+
+## Requirement
+
+**Showing it.** Inside a space, turning the right hand, or the right controller, so that the palm faces the participant's head shows the transcript just above the right wrist, on a plane facing the head; turning it away hides it. It mirrors the left hand menu: it appears once the palm has faced the head within about 35° for about a fifth of a second, and hides once it has turned more than about 55° away, or the hand is no longer tracked. With a controller, the right palm faces along the grip pose's −X axis. To keep pointing across the body from showing it:
+
+- whichever of the left hand menu and the transcript shows first wins, and the other does not show until it hides;
+- it does not show while the right trigger is held, attracting the swarm or choosing, nor while the right ray highlights an item of the left hand menu.
+
+It never shows outside a space, where there is no conversation. While it shows on the wrist, the floating panel is hidden, as it is for the hand menu.
+
+**Detaching it.** Squeezing the right grip firmly, more than three quarters of the way, while the transcript shows, detaches it into the world: it stays upright where it was, facing the participant, wider at 40 columns, and then follows lazily as the floating panel does (see `interaction.md`), so that it can be read at length with the arm lowered. Squeezing the grip again, after letting it go, or B with nothing else to back out of, returns it to the wrist. Detached, turning the right wrist shows no second copy. Leaving the space forgets it. The grip does nothing while the transcript is neither on the wrist nor detached.
+
+**What it shows**, from top to bottom, on a translucent dark backing, with body text near-white and colour on bars, names, borders and chips:
+
+- **A header**: the space's title, cut to fit, what the agent is doing, with a coloured dot, and its mode.
+- **The problem line**: the newest problem, as `interaction.md` describes it, in red with its age, on up to two rows.
+- **The transcript.** Messages are grouped: a person's consecutive messages share one name and one colour bar, and the agent's turn, from its first message after a person's to the next person's, is one group. Each group shows its speaker's name in their colour and a bar of that colour down its rows. The agent is cyan. Each person's colour comes from their public handle (see `spaces.md`), so it is the same on every headset; this participant is "You", in their own colour. A user message's speaker is taken from the attribution prefix (see `spaces.md`), which is not shown, matched against the space's participants and the speakers of queue entries seen; a name that matches nobody is shown as given, in grey, and a message without a prefix is "Someone", in grey. Visitors never speak to the agent, so never appear as speakers. The agent's tool activity, from its messages that have only tool activity, is a row of chips under its name, oldest first, each with a tick when done and a dot while working, and a count of those that do not fit. Messages are styled from their Markdown: headings bright and bold, list items with bullets or numbers and a hanging indent, strong text bold, inline code and code blocks on a tinted background, code wrapped with a `↵` mark rather than cut, links by their text, tables as rows of cells separated by `│`; none of the Markdown markers shows. A group shows at most 6 rows of text, ending with how many more there are; A expands it in place, and B collapses it. The newest group shows from its start and grows downwards as it streams, rather than following its tail.
+- **The request card**, pinned below the transcript while an approval or question waits, never replacing the transcript: a title bar, "APPROVAL" or "QUESTION", in amber; the request's text on a tinted background, on up to three rows; and for an approval, a button for each choice, in order *Allow once*, each standing option with its full label wrapped over as many rows as it needs, and *Deny*. A question shows the field being answered and "Hold X to answer", or "Answer on the PC" when Tomori cannot answer it. When there is not room for the whole card, it keeps its title and the focused choice in view, and the transcript keeps at least two rows.
+- **The queue**, pinned below: entries waiting or being sent, oldest first, one row each with the speaker's bar and name, "You" for this participant's own, a hollow circle for queued or a half-filled one for sending, the start of the words, and a remove mark on those that can still be removed; at most four, keeping the focused one in view, under a title with how many there are. An entry being removed says "Removing… A undoes" with a bar draining over the undo time.
+- **A footer** saying what the stick, A and B do for what is focused.
+
+**Following live.** With nothing focused, the transcript follows live, showing the newest messages. Moving focus up into it stops following: new messages are then counted, as "N new below", rather than moving the view. Moving down past the last item, or B with nothing else to back out of, follows live again.
+
+**Controls while it shows**, on the wrist or detached; the right thumb is on them whichever way the wrist is turned, so the transcript needs no pointing:
+
+| Control | Meaning |
+|---|---|
+| Right stick up and down | Move the focus: through the groups, a row at a time within an expanded group, then the card's title and its choices, then the queue's entries; holding repeats after 0.4 seconds |
+| Right stick left and right | The previous or next group |
+| A | Expand or collapse the focused group, confirm the focused choice, or remove the focused queue entry, or undo that |
+| B | Collapse, stop focusing and follow live, dismiss the problem, then reattach a detached transcript; it never decides, cancels or leaves |
+| Hold B for a second | Leave the space, as `interaction.md` describes |
+| Right trigger | Nothing: the ray is hidden and points at no worker, and the swarm is not attracted |
+| Right grip | Detach or reattach |
+
+The left hand's controls are unchanged. While the left hand menu shows, A chooses only in it.
+
+**Nothing is decided by reflex.** The safety rules of `interaction.md` hold on the transcript: nothing is decided without A on a choice, *Deny* is a button like the others, and removing a queued entry is sent only after 3 seconds, during which A on it undoes it, and an entry that started sending meanwhile is not cancelled. When a request appears, and again when the transcript opens on the wrist while one waits, the focus moves to the card's title, not a choice, so that reaching a choice takes a deliberate move down, and A does nothing for 0.6 seconds.
+
+**Decided only here.** On the headset and the desktop window, approvals are decided and queued entries removed only on the transcript; A elsewhere in a space decides nothing, and the floating panel says to turn the right wrist. The right stick, while the transcript is closed, only pages result cards.
+
+**Visitors** see the whole transcript, the card and the queue, but no choices, which say "Waiting for a participant" instead, and no remove marks; the stick does not reach choices or queue entries, A only expands and collapses groups, and nothing a visitor may not send is sent (see `security.md`).
+
+**With hand tracking alone** it shows from the right hand's joints, as with a controller, but is read-only: there is no stick, A or B, and the card says to decide with a controller or on the PC.
+
+**The cue.** While the transcript is closed and something waits on it, a request or a problem, a small glow shows on the right wrist, amber for a request and red for a problem, as the left wrist shows one for knocks.
+
+**Without hands or controllers.** The desktop window turns the right wrist up with T and squeezes the grip with G, with the right stick on Page Up, Page Down, `[` and `]`. The console shows the transcript with `t`, moves on it with `tu`, `td`, `tl` and `tr`, and presses its A and B with `ta` and `tb`.
+
+## Rationale
+
+In November 2026 the user found the floating panel "just a wall of text", with little styling or organisation, and asked for a structured interface on the right controller, shown by rotating the right wrist like the existing left-hand menu, holding the transcript and interaction, the approvals and questions, managing the queue, and colour coding the agent and each human. The controller-anchored interface proposal (PR #89) designed this transcript, and the user accepted its recommendations: the right gesture mirrors the left; the right grip detaches the transcript for long reading, with the conflict rules against attracting the swarm; a person's colour is the same on every headset, from their public handle; and hand tracking is read-only at first. Holding the arm up tires it within a minute, so the wrist is for glancing and deciding, groups are collapsed, and detaching lets the participant read with the arm lowered. Focus replaces pointing, since the right hand is the one that would point. The sizes, a font pixel of 1.0 mm on the wrist and 1.3 mm detached, about 0.7 m away, and the angles are to be tuned on the headset.
+
+## Scope
+
+The headset and desktop client (`crates/client-quest`): showing and placing the transcript from the right hand and controller, its layout, its controls and the cue; and the console's text form of it.
+
+## Validation
+
+- Test the visibility rule as a function of pose and time, as for the hand menu: it shows after the hold within the inner angle, stays until the outer angle, does not show for a hand passing through the pose, and never shows outside a space; it does not show while the left menu shows, the trigger is held or the ray highlights a menu item, but stays if it already showed. Test the right palm from hand joints and from the grip's −X axis.
+- Test detaching: the grip detaches it where it stood, facing the participant, a firm squeeze counts once until it is let go, the grip again or B reattaches it, and leaving the space forgets it.
+- Test the layout with table-driven spaces: speakers from the attribution prefix with their colours, "You", grey for an unknown name and "Someone" without a prefix; grouping, with tool-only messages as chips; Markdown without its markers; collapsing at 6 rows and expanding with A; the newest group shown from its start; the card and queue pinned, the card keeping its title and the focused choice in view and the transcript at least two rows; every row fitting 28 and 40 columns with a problem, a long standing option and a full queue together; and "N new below" while scrolled up.
+- Test the controls: nothing is decided without A on a choice, A does nothing just after a request appears or the transcript opens on one, focus lands on the card's title, deny is the last button, B never decides, cancels or leaves, removing an entry sends nothing until the undo time ends and A undoes it, and an entry sent meanwhile is not cancelled; A elsewhere decides nothing on the headset; visitors are shown no choices and send nothing.
+- On the headset, confirm legibility on the wrist and detached, that pointing and attracting across the body do not show it, that the arm can be lowered once it is detached, and that an approval is noticed and decided from the wrist.

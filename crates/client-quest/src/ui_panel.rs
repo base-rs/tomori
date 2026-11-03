@@ -70,13 +70,12 @@ impl Canvas {
     }
 
     /// The panel's width and height in metres.
-    #[cfg(test)]
     pub fn size(&self) -> (f32, f32) {
         let (width, height) = self.size_in_pixels();
         (width as f32 * self.pixel, height as f32 * self.pixel)
     }
 
-    /// The text, a row per line, as the console prints it.
+    /// The text, a row per line.
     #[cfg(test)]
     pub fn plain(&self) -> String {
         self.rows

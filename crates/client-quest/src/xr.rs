@@ -176,6 +176,9 @@ pub fn run(
     let mut caption = Caption::new(&gpu.device, &renderer);
     // The recording indicator and the live badge on the left controller.
     let mut indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
+    // The conversation on the right wrist, where approvals are decided and queued entries removed. See `design/wrist-transcript.md`.
+    let mut wrist = crate::controller_ui::Wrist::new(&gpu.device, &renderer);
+    conversation.decide_on_wrist();
     // Runs on every return/unwind, before imported image wrappers and the XR
     // swapchain are dropped, including if a frame fails after queue submission.
     let _gpu_idle = WaitForGpu(&gpu.device);
@@ -188,8 +191,6 @@ pub fn run(
     let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
     let mut stick_latched = false;
     let mut audience_toggle = LiveGrip::default();
-    let mut choice_latched = false;
-    let mut queue_latched = false;
     // When B was pressed, while it is held: holding it leaves a space.
     let mut back_since: Option<Instant> = None;
     let mut was_talking = false;
@@ -234,8 +235,6 @@ pub fn run(
                         // runtime also queues a refocus in this poll batch.
                         stick_latched = false;
                         audience_toggle.blur();
-                        choice_latched = false;
-                        queue_latched = false;
                         back_since = None;
                         conversation.hold_back(None);
                         was_talking = false;
@@ -308,8 +307,6 @@ pub fn run(
         if !focused || !running {
             stick_latched = false;
             audience_toggle.blur();
-            choice_latched = false;
-            queue_latched = false;
             back_since = None;
             conversation.hold_back(None);
             was_talking = false;
@@ -353,7 +350,17 @@ pub fn run(
                 conversation.navigate(if stick.x > 0.0 { 1 } else { -1 }, 0);
             }
         }
-        if controls.back {
+        // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
+        let wrist_active = wrist.state().active();
+        let right = controls.presentation_navigation;
+        let back_taken = wrist.input(
+            &mut conversation,
+            glam::Vec2::new(right.x, right.y),
+            controls.reset && !menu_was_shown,
+            controls.back,
+            now,
+        );
+        if controls.back && !back_taken {
             conversation.back();
         }
         // Only a hold whose press is in a space can leave it, so B held while joining does not.
@@ -375,22 +382,6 @@ pub fn run(
         if controls.refresh {
             conversation.refresh();
         }
-        // While an approval offers standing options, the right stick chooses
-        // among them instead of paging presentation cards.
-        let choosing = conversation.is_choosing();
-        let right = controls.presentation_navigation;
-        let choice_moving = choosing && right.x.abs() > 0.6;
-        if choice_moving && !choice_latched {
-            conversation.choose(if right.x > 0.0 { 1 } else { -1 });
-        }
-        choice_latched = choice_moving;
-        // Otherwise the right stick up or down selects a waiting entry in the queue strip, which A cancels.
-        let selecting = conversation.selects_queue();
-        let queue_moving = selecting && right.y.abs() > 0.6 && right.y.abs() > right.x.abs();
-        if queue_moving && !queue_latched {
-            conversation.select_queued(if right.y > 0.0 { -1 } else { 1 });
-        }
-        queue_latched = queue_moving;
         // A chooses the object the ray highlighted last frame, as the
         // trigger does; with nothing highlighted it accepts. Inside a space it
         // never resets the swarm; see `design/interaction.md`.
@@ -400,8 +391,8 @@ pub fn run(
                     conversation.choose_menu(choice);
                 }
             }
-            // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval.
-            _ if menu_was_shown => {}
+            // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval; and while the transcript shows, only in that.
+            _ if menu_was_shown || wrist_active => {}
             _ if controls.reset => {
                 conversation.press_a(highlighted.as_ref());
             }
@@ -423,12 +414,12 @@ pub fn run(
         if controls.replay {
             conversation.replay();
         }
+        // Otherwise the right stick pages result cards.
         presentation_navigation.update(
             None,
             &crate::delegation::Workspace::default(),
-            if choosing { 0.0 } else { right.x },
-            // The right stick up and down selects queued entries while any wait, so it does not also page a card.
-            if choosing || selecting { 0.0 } else { right.y },
+            if wrist_active { 0.0 } else { right.x },
+            if wrist_active { 0.0 } else { right.y },
         );
         caption.set_text(&gpu.queue, &conversation.text());
         if !frame.should_render {
@@ -533,17 +524,60 @@ pub fn run(
                 time: arrival_time,
             },
         );
-        let menu_shown = focused && hand_menu.update(palm, head, Instant::now());
+        // The right palm shows the transcript, from the right controller, or else hand tracking, which only reads.
+        let right_controller = controller_poses[controller::RIGHT]
+            .as_ref()
+            .and_then(Palm::from_right_controller);
+        let right_hand = tracked_hands[controller::RIGHT]
+            .as_ref()
+            .and_then(Palm::from_right_hand);
+        let right_palm = right_controller.or(right_hand);
+        // Whichever of the left menu and the right transcript shows first wins.
+        let menu_shown = focused
+            && hand_menu.update(
+                palm.filter(|_| !wrist.state().on_hand()),
+                head,
+                Instant::now(),
+            );
         menu_was_shown = menu_shown;
+        let in_space = conversation.joined_space().is_some();
+        wrist.update(
+            &gpu.queue,
+            &mut conversation,
+            crate::controller_ui::WristFrame {
+                palm: right_palm.filter(|_| focused),
+                hands_only: right_controller.is_none(),
+                head: scene_head,
+                in_space,
+                menu_shown,
+                pointing: controls.trigger.is_some_and(|trigger| trigger > 0.2)
+                    || matches!(highlighted, Some(arrival::Key::Menu(_))),
+                grip: controls.transcript_grip,
+            },
+            crate::controller_ui::Moment {
+                now,
+                dt,
+                time: arrival_time,
+            },
+        );
+        let wrist_shown = wrist.state().on_hand();
+        let wrist_active = wrist.state().active();
         let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
             let model = conversation.menu_model();
-            match palm {
+            let mut objects = match palm {
                 Some(palm) if menu_shown => {
                     hand_menu.objects(&palm, &model, head.unwrap_or(arrival::HOME))
                 }
                 Some(palm) if model.waiting() => vec![hand_menu::cue(&palm)],
                 _ => Vec::new(),
+            };
+            // A cue on the right wrist while the transcript is closed and something waits on it.
+            if let (Some(palm), Some(problem), false) =
+                (right_palm, conversation.wrist_waiting(), wrist_active)
+            {
+                objects.push(hand_menu::wrist_cue(&palm, problem));
             }
+            objects
         };
         scene.objects.extend(menu(&hand_menu, &conversation));
         // Labels and forms face the participant's head, in steps of 5 cm so that they are not rebuilt every frame as the head sways.
@@ -573,8 +607,8 @@ pub fn run(
         let in_arrival = conversation.arrival().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
         renderer.set_scenery(motion.scenery(arrival_time));
-        // A trigger pull that misses the hand menu's rows does nothing while it shows.
-        let attracting = pointing.attracting && !menu_shown;
+        // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
+        let attracting = pointing.attracting && !menu_shown && !wrist_active;
         swarm.step(dt, controller.filter(|_| attracting));
         renderer.update(
             &gpu.queue,
@@ -588,9 +622,12 @@ pub fn run(
             },
             attracting,
         );
-        // In a space, the ray points at workers too, which only highlights them: the trigger still attracts the swarm, and holding X sends the worker pointed at with the words. See `design/interaction.md`.
-        let in_space =
-            focused && !in_arrival && !menu_shown && conversation.joined_space().is_some();
+        // In a space, the ray points at workers too, which only highlights them: the trigger still attracts the swarm, and holding X sends the worker pointed at with the words. See `design/interaction.md`. While the transcript shows, the ray is hidden and points at nothing.
+        let in_space = focused
+            && !in_arrival
+            && !menu_shown
+            && !wrist_active
+            && conversation.joined_space().is_some();
         conversation.point_at(delegation_scene.point(ray.filter(|_| in_space)));
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {
@@ -671,7 +708,7 @@ pub fn run(
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
             // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
-            &if !in_arrival && !menu_shown {
+            &if !in_arrival && !menu_shown && !wrist_shown {
                 caption.panels(
                     panel_pose
                         * Mat4::from_translation(Vec3::new(0.0, renderer.caption_offset(), 0.0)),
@@ -681,6 +718,7 @@ pub fn run(
             }
             .into_iter()
             .chain(indicator.panels(scene_anchor.transform()))
+            .chain(wrist.panels(scene_anchor.transform()))
             .collect::<Vec<_>>(),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
@@ -1003,6 +1041,8 @@ struct Input {
     sound_toggle: xr::Action<bool>,
     replay: xr::Action<bool>,
     audience_grip: xr::Action<f32>,
+    /// The right grip, which detaches the right wrist's transcript into the world and reattaches it.
+    transcript_grip: xr::Action<f32>,
     set: xr::ActionSet,
     hand_paths: [xr::Path; 2],
     location_errors: [Option<xr::sys::Result>; 2],
@@ -1050,6 +1090,7 @@ struct ActionInputs {
     sound_toggle: xr::ActionState<bool>,
     replay: xr::ActionState<bool>,
     audience_grip: xr::ActionState<f32>,
+    transcript_grip: xr::ActionState<f32>,
 }
 
 #[derive(Default)]
@@ -1072,6 +1113,8 @@ struct Controls {
     replay: bool,
     audience_grip: f32,
     audience_grip_active: bool,
+    /// The right grip's value, while its action is active.
+    transcript_grip: Option<f32>,
 }
 
 impl Controls {
@@ -1104,6 +1147,10 @@ impl Controls {
             sound_toggle: pressed(actions.sound_toggle),
             replay: pressed(actions.replay),
             audience_grip_active: actions.audience_grip.is_active,
+            transcript_grip: actions
+                .transcript_grip
+                .is_active
+                .then_some(actions.transcript_grip.current_state),
             audience_grip: if actions.audience_grip.is_active {
                 actions.audience_grip.current_state
             } else {
@@ -1166,6 +1213,8 @@ impl Input {
         let replay = set.create_action::<bool>("replay", "Replay spoken reply", &[])?;
         let audience_grip =
             set.create_action::<f32>("audience_mic", "Toggle live audience microphone", &[])?;
+        let transcript_grip =
+            set.create_action::<f32>("transcript_grip", "Detach or reattach the transcript", &[])?;
         instance.suggest_interaction_profile_bindings(
             instance.string_to_path("/interaction_profiles/oculus/touch_controller")?,
             &[
@@ -1221,6 +1270,10 @@ impl Input {
                     &audience_grip,
                     instance.string_to_path("/user/hand/left/input/squeeze/value")?,
                 ),
+                xr::Binding::new(
+                    &transcript_grip,
+                    instance.string_to_path("/user/hand/right/input/squeeze/value")?,
+                ),
             ],
         )?;
         session.attach_action_sets(&[&set])?;
@@ -1245,6 +1298,7 @@ impl Input {
             sound_toggle,
             replay,
             audience_grip,
+            transcript_grip,
             set,
             hand_paths: [
                 instance.string_to_path("/user/hand/left")?,
@@ -1293,6 +1347,7 @@ impl Input {
                 sound_toggle: self.sound_toggle.state(session, xr::Path::NULL)?,
                 replay: self.replay.state(session, xr::Path::NULL)?,
                 audience_grip: self.audience_grip.state(session, xr::Path::NULL)?,
+                transcript_grip: self.transcript_grip.state(session, xr::Path::NULL)?,
             },
             focused,
         ))
@@ -1539,6 +1594,7 @@ mod tests {
             sound_toggle: action(held, active, changed),
             replay: action(held, active, changed),
             audience_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
+            transcript_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
         }
     }
 

@@ -119,6 +119,23 @@ enum Talk {
     },
 }
 
+/// What the transcript was laid out from, besides the space's revision.
+#[derive(Clone, Debug, PartialEq)]
+struct TranscriptKey {
+    revision: u64,
+    wrist: crate::transcript::State,
+    role: ConnectionRole,
+    source: Option<u32>,
+    deciding: bool,
+    /// The entry being removed, and the undo time left in sixtieths.
+    cancelling: Option<(String, u32)>,
+    problem: Option<String>,
+    answerable: bool,
+    hands_only: bool,
+    grace: bool,
+    columns: usize,
+}
+
 /// What became of the last words sent, which the recording indicator shows for a moment, or until dismissed for a failure. See `design/hand-menu.md`.
 #[derive(Clone, Debug, PartialEq)]
 enum Outcome {
@@ -277,6 +294,16 @@ pub struct Conversation {
     utterance_limit: Option<Duration>,
     /// What became of the last words sent, and when.
     outcome: Option<(Outcome, Instant)>,
+    /// What the participant has done on the right wrist's transcript. See `design/wrist-transcript.md`.
+    wrist: crate::transcript::State,
+    /// The names seen in the space with their handles, for speakers' colours.
+    known: crate::speakers::Known,
+    /// Counts changes to the joined space, so that the transcript is laid out again only when something it shows changes.
+    revision: u64,
+    /// The transcript last laid out, and what it was laid out from.
+    laid_out: Option<(TranscriptKey, Vec<crate::ui_text::Row>)>,
+    /// Approvals are decided and queued entries removed on the right wrist, so A elsewhere does neither, as on the headset and desktop window; the console decides with its own commands.
+    decide_on_wrist: bool,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
     launch: String,
     utterances: u64,
@@ -356,6 +383,11 @@ impl Conversation {
             capture_generation: 0,
             utterance_limit: None,
             outcome: None,
+            wrist: Default::default(),
+            known: Default::default(),
+            revision: 0,
+            laid_out: None,
+            decide_on_wrist: false,
             launch: format!(
                 "{:x}",
                 SystemTime::now()
@@ -792,6 +824,8 @@ impl Conversation {
             self.joining = None;
         }
         self.leaving = false;
+        self.known.learn(&state);
+        self.revision += 1;
         let request = state
             .approval
             .as_ref()
@@ -828,6 +862,13 @@ impl Conversation {
         self.space = Some(state);
         if arrived {
             self.request_at = Some(Instant::now());
+            // The transcript's focus moves to the request's title, so that an A meant for something else there decides nothing.
+            self.wrist.focus_card(
+                self.space
+                    .as_ref()
+                    .and_then(|space| space.messages.last())
+                    .map(|message| message.id.as_str()),
+            );
             // A request takes A: the list closes, a selected entry is let go, and a cancellation still in its undo time is sent now, so that an A meant for them cannot decide it.
             self.space_menu = None;
             self.queue_selected = None;
@@ -983,6 +1024,9 @@ impl Conversation {
         self.space_menu = None;
         self.queue_selected = None;
         self.cancelling = None;
+        self.wrist = Default::default();
+        self.known.clear();
+        self.revision += 1;
     }
 
     fn list(&mut self) {
@@ -1385,6 +1429,7 @@ impl Conversation {
     }
 
     /// Whether the right stick chooses among an approval's choices, rather than selecting queued entries.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn is_choosing(&self) -> bool {
         self.mode == Mode::Space && self.approval().is_some()
     }
@@ -1432,6 +1477,7 @@ impl Conversation {
     }
 
     /// Right stick left or right: choose among an approval's choices: allow once, each standing option, then deny.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn choose(&mut self, direction: i32) {
         if let Some(count) = self.approval().map(|approval| approval.options.len() + 2) {
             self.option = shift(self.option, direction, count);
@@ -1453,6 +1499,7 @@ impl Conversation {
     }
 
     /// Right stick up or down, while no approval is presented: select a waiting entry in the queue strip, which A then cancels. Moving past either end clears the selection.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn select_queued(&mut self, direction: i32) {
         if self.mode != Mode::Space || self.is_choosing() || self.space_menu.is_some() {
             return;
@@ -1512,6 +1559,7 @@ impl Conversation {
     }
 
     /// Whether the right stick up and down selects queued entries now, rather than doing anything else.
+    #[cfg(test)]
     pub fn selects_queue(&self) -> bool {
         self.mode == Mode::Space
             && self.role.participates()
@@ -1667,23 +1715,22 @@ impl Conversation {
                     self.notice = Some("Read the request before choosing.".into());
                     return false;
                 }
-                if let Some(approval) = self.approval() {
-                    let request = approval.id.clone();
-                    let (decision, option) = match self.option.checked_sub(1) {
-                        None => (Decision::AllowOnce, None),
-                        Some(index) if index < approval.options.len() => {
-                            (Decision::Grant, Some(approval.options[index].id.clone()))
-                        }
-                        Some(_) => (Decision::Deny, None),
-                    };
-                    if self.send(ClientMessage::Decide {
-                        request: request.clone(),
-                        decision,
-                        option,
-                    }) {
-                        self.decided = Some(request);
-                    }
+                if self.decide_on_wrist
+                    && self
+                        .space
+                        .as_ref()
+                        .is_some_and(|space| space.approval.is_some() || space.question.is_some())
+                {
+                    self.notice = Some("Turn your right wrist to decide.".into());
                     return false;
+                }
+                if self.approval().is_some() {
+                    self.decide();
+                    return false;
+                }
+                // Removing queued entries is on the right wrist.
+                if self.decide_on_wrist {
+                    return true;
                 }
                 // A decision on its way still owns the button.
                 if self
@@ -1713,6 +1760,235 @@ impl Conversation {
                 }
             }
         }
+    }
+
+    /// Send the decision for the chosen choice of the pending approval.
+    fn decide(&mut self) {
+        let Some(approval) = self.approval() else {
+            return;
+        };
+        let request = approval.id.clone();
+        let (decision, option) = match self.option.checked_sub(1) {
+            None => (Decision::AllowOnce, None),
+            Some(index) if index < approval.options.len() => {
+                (Decision::Grant, Some(approval.options[index].id.clone()))
+            }
+            Some(_) => (Decision::Deny, None),
+        };
+        if self.send(ClientMessage::Decide {
+            request: request.clone(),
+            decision,
+            option,
+        }) {
+            self.decided = Some(request);
+        }
+    }
+
+    /// Decide approvals and remove queued entries only on the right wrist, as the headset and desktop window do.
+    pub fn decide_on_wrist(&mut self) {
+        self.decide_on_wrist = true;
+    }
+
+    /// The right wrist's transcript, `columns` wide, read-only when shown from hand tracking alone. See `design/wrist-transcript.md`.
+    pub fn transcript(&mut self, columns: usize, hands_only: bool) -> Vec<crate::ui_text::Row> {
+        let now = Instant::now();
+        self.observe_problem(now);
+        let problem = self.problem_text(now);
+        let answerable = self.answerable().is_some();
+        let Some(space) = self.space.as_ref().filter(|_| self.mode == Mode::Space) else {
+            return Vec::new();
+        };
+        let cancelling = self.cancelling.as_ref().map(|(id, due)| {
+            let left = due.saturating_duration_since(now).as_secs_f32() / CANCEL_UNDO.as_secs_f32();
+            (id.as_str(), left)
+        });
+        let grace = self
+            .request_at
+            .is_some_and(|at| at.elapsed() < REQUEST_GRACE);
+        let deciding = self.decided.is_some() && space.approval.is_some();
+        // Laid out again only when something it shows has changed, as it is drawn every frame.
+        let key = TranscriptKey {
+            revision: self.revision,
+            wrist: self.wrist.clone(),
+            role: self.role,
+            source: self.source,
+            deciding,
+            cancelling: cancelling.map(|(id, left)| (id.to_owned(), (left * 60.0) as u32)),
+            problem: problem.clone(),
+            answerable,
+            hands_only,
+            grace,
+            columns,
+        };
+        if let Some((laid_out, rows)) = &self.laid_out
+            && *laid_out == key
+        {
+            return rows.clone();
+        }
+        let input = crate::transcript::Input {
+            you: self.source,
+            participates: self.role.participates(),
+            known: Some(&self.known),
+            deciding,
+            cancelling,
+            problem,
+            answerable,
+            hands_only,
+            grace,
+        };
+        let rows = crate::transcript::layout(space, &input, &mut self.wrist, columns);
+        // Laying out settles the focus, which is what the next frame compares.
+        self.laid_out = Some((
+            TranscriptKey {
+                wrist: self.wrist.clone(),
+                ..key
+            },
+            rows.clone(),
+        ));
+        rows
+    }
+
+    /// What the transcript's stick moves through.
+    fn wrist_items(&self) -> Vec<crate::transcript::Item> {
+        let Some(space) = self.space.as_ref().filter(|_| self.mode == Mode::Space) else {
+            return Vec::new();
+        };
+        let input = crate::transcript::Input {
+            you: self.source,
+            participates: self.role.participates(),
+            known: Some(&self.known),
+            deciding: self.decided.is_some() && space.approval.is_some(),
+            ..Default::default()
+        };
+        // The width it was last laid out at, on the wrist or detached, so that moving through it matches what is shown.
+        let columns = self
+            .laid_out
+            .as_ref()
+            .map_or(crate::transcript::WRIST_COLUMNS, |(key, _)| key.columns);
+        crate::transcript::items(space, &input, &self.wrist, columns)
+    }
+
+    /// The newest message's id, which the transcript counts newer messages from.
+    fn newest(&self) -> Option<String> {
+        self.space
+            .as_ref()
+            .and_then(|space| space.messages.last())
+            .map(|message| message.id.clone())
+    }
+
+    /// The right wrist's transcript opened: while a request waits, focus its title and give A a moment of grace again, so that a reflex press decides nothing.
+    pub fn wrist_opened(&mut self) {
+        let pending = self
+            .space
+            .as_ref()
+            .is_some_and(|space| space.approval.is_some() || space.question.is_some());
+        if pending && self.mode == Mode::Space {
+            let newest = self.newest();
+            self.wrist.focus_card(newest.as_deref());
+            self.request_at = Some(Instant::now());
+        }
+    }
+
+    /// The right stick up (`-1`) or down (`1`) on the transcript.
+    pub fn wrist_step(&mut self, direction: i32) {
+        let items = self.wrist_items();
+        let newest = self.newest();
+        self.wrist.step(&items, direction, newest.as_deref());
+    }
+
+    /// The right stick left (`-1`) or right (`1`) on the transcript: the previous or next turn.
+    pub fn wrist_jump(&mut self, direction: i32) {
+        let items = self.wrist_items();
+        let newest = self.newest();
+        self.wrist.jump(&items, direction, newest.as_deref());
+    }
+
+    /// A on the transcript: expand or collapse a turn, confirm a choice, or remove a queued entry or undo that.
+    pub fn wrist_accept(&mut self) {
+        use crate::transcript::Focus;
+        let items = self.wrist_items();
+        self.wrist.settle(&items);
+        match self.wrist.focus.clone() {
+            None | Some(Focus::Card(0)) => {}
+            Some(Focus::Group(..)) => {
+                self.wrist.toggle(&items);
+            }
+            Some(Focus::Card(choice)) => {
+                if !self.role.participates() {
+                    self.notice = Some(VISITING.into());
+                } else if self
+                    .request_at
+                    .is_some_and(|at| at.elapsed() < REQUEST_GRACE)
+                {
+                    self.notice = Some("Read the request before choosing.".into());
+                } else if self.approval().is_some() {
+                    self.option = choice - 1;
+                    self.decide();
+                }
+            }
+            Some(Focus::Queue(entry)) => {
+                if !self.role.participates() {
+                    self.notice = Some(VISITING.into());
+                    return;
+                }
+                match self.cancelling.take() {
+                    // A again within the undo time keeps it.
+                    Some((cancelling, _)) if cancelling == entry => {
+                        self.notice = Some("Not removed.".into());
+                    }
+                    other => {
+                        if let Some((other, _)) = other {
+                            self.cancel_now(other);
+                        }
+                        if self.waiting().iter().any(|waiting| waiting.id == entry) {
+                            self.cancelling = Some((entry, Instant::now() + CANCEL_UNDO));
+                            self.notice = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// B on the transcript: collapse, stop focusing and follow live, or dismiss the problem. Returns false when there was nothing to back out of, and never decides, cancels or leaves.
+    pub fn wrist_back(&mut self) -> bool {
+        if self.wrist.back() {
+            return true;
+        }
+        if self.error.take().is_some() {
+            return true;
+        }
+        if let Some(error) = self.space.as_ref().and_then(|space| space.error.clone())
+            && self.dismissed.as_ref() != Some(&error)
+        {
+            self.dismissed = Some(error);
+            return true;
+        }
+        false
+    }
+
+    /// What waits for this participant on the right wrist, for its cue: `Some(false)` for a request, `Some(true)` for a problem.
+    pub fn wrist_waiting(&self) -> Option<bool> {
+        let space = self.space.as_ref().filter(|_| self.mode == Mode::Space)?;
+        if self.approval().is_some() || space.question.is_some() {
+            Some(false)
+        } else {
+            self.problem().map(|_| true)
+        }
+    }
+
+    /// The problem with how long it has been shown, on one line, for the transcript.
+    fn problem_text(&self, now: Instant) -> Option<String> {
+        let problem = self.problem()?;
+        let since = match &self.problem_seen {
+            Some((seen, since)) if *seen == problem => *since,
+            _ => now,
+        };
+        Some(format!(
+            "! {} {}",
+            age(now.saturating_duration_since(since)),
+            problem.replace('\n', " ")
+        ))
     }
 
     /// B: in a space, close what is open, or dismiss the problem shown; it never decides an approval, cancels input or leaves, which takes holding it (see [`Self::hold_back`]). In the lobby, dismiss what is shown or return to the server list.
@@ -2919,7 +3195,9 @@ impl Conversation {
         self.space
             .as_ref()
             .and_then(|space| space.approval.as_ref())
-            .filter(|_| self.decided.is_none() && self.space_menu.is_none())
+            .filter(|_| {
+                self.decided.is_none() && self.space_menu.is_none() && !self.decide_on_wrist
+            })
             .map(|approval| {
                 let option = match self.option.checked_sub(1) {
                     None => "Allow once",
@@ -3010,6 +3288,8 @@ impl Conversation {
             "Release X to send"
         } else if self.space_menu.is_some() {
             "Stick choose | A select | B close"
+        } else if self.decide_on_wrist && (space.approval.is_some() || space.question.is_some()) {
+            "Turn your right wrist to decide"
         } else if let Some(choice) = choice {
             while lines.len() + choice.len() + queue.len() < ROWS - 1 {
                 lines.push(String::new());
@@ -6101,6 +6381,201 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1));
         let mut relaunched = joined(|_| {});
         assert_ne!(press(&mut relaunched), first);
+    }
+
+    /// Joined, deciding on the wrist as the headset does.
+    fn on_wrist(change: impl FnOnce(&mut SpaceState)) -> Conversation {
+        let mut conversation = joined(change);
+        conversation.decide_on_wrist();
+        conversation
+    }
+
+    #[test]
+    fn an_approval_is_decided_on_the_wrist_card_only_with_a_deliberate_a() {
+        let mut conversation = on_wrist(|_| {});
+        conversation.apply(space(|space| {
+            space.approval = Some(approval(&[("always", "Yes, and don't ask again")]));
+        }));
+        // A away from the wrist decides nothing, and says where to decide.
+        assert!(!conversation.accept());
+        assert!(sent(&mut conversation).is_empty());
+        assert!(
+            conversation
+                .text()
+                .contains("Turn your right wrist to decide")
+        );
+        // Opening the wrist focuses the card's title and gives A its grace again.
+        conversation.wrist_opened();
+        conversation.wrist_accept();
+        assert!(sent(&mut conversation).is_empty());
+        conversation.wrist_step(1);
+        conversation.wrist_accept();
+        assert!(sent(&mut conversation).is_empty(), "within the grace");
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Read the request before choosing.")
+        );
+        settle(&mut conversation);
+        // B backs out without deciding, and never leaves.
+        assert!(conversation.wrist_back());
+        assert!(!conversation.wrist_back());
+        assert!(sent(&mut conversation).is_empty());
+        // Down to the title, past allowing once to the standing option, then A grants it.
+        conversation.wrist_step(1);
+        conversation.wrist_step(1);
+        conversation.wrist_step(1);
+        conversation.wrist_accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Decide {
+                request: "request-1".into(),
+                decision: Decision::Grant,
+                option: Some("always".into()),
+            }]
+        );
+        // A second press sends nothing more.
+        conversation.wrist_accept();
+        assert!(sent(&mut conversation).is_empty());
+    }
+
+    #[test]
+    fn deny_is_the_last_button_on_the_card() {
+        let mut conversation = on_wrist(|space| {
+            space.approval = Some(approval(&[]));
+        });
+        conversation.wrist_opened();
+        settle(&mut conversation);
+        // Past allowing once.
+        for _ in 0..2 {
+            conversation.wrist_step(1);
+        }
+        let rows: Vec<String> = conversation
+            .transcript(crate::transcript::WRIST_COLUMNS, false)
+            .iter()
+            .map(|row| row.plain().trim_end().to_owned())
+            .collect();
+        assert!(rows.contains(&"▸ Deny".to_owned()), "{rows:#?}");
+        conversation.wrist_accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Decide {
+                request: "request-1".into(),
+                decision: Decision::Deny,
+                option: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_detached_transcript_is_moved_through_at_its_own_width() {
+        // Ten rows at the wrist's width, six once detached and wider.
+        let reply = "word ".repeat(46);
+        let mut conversation = on_wrist(|space| {
+            space.messages = vec![message("m1", Role::Assistant, &reply)];
+        });
+        conversation.transcript(crate::transcript::DETACHED_COLUMNS, false);
+        conversation.wrist_step(-1);
+        conversation.wrist_accept();
+        assert!(conversation.wrist.expanded.is_empty(), "it shows in full");
+        conversation.wrist_back();
+        conversation.transcript(crate::transcript::WRIST_COLUMNS, false);
+        conversation.wrist_step(-1);
+        conversation.wrist_accept();
+        assert!(conversation.wrist.expanded.contains("m1"));
+    }
+
+    #[test]
+    fn a_queued_entry_is_removed_on_the_wrist_after_the_undo_time() {
+        let mut conversation = on_wrist(|space| {
+            space.queue = vec![
+                entry("q-1", "Bob", QueueState::Queued),
+                entry("q-2", "Ada", QueueState::Queued),
+            ];
+        });
+        // Down from following reaches the queue.
+        conversation.wrist_step(1);
+        conversation.wrist_accept();
+        assert!(
+            sent(&mut conversation).is_empty(),
+            "not until the undo time"
+        );
+        let rows = conversation.transcript(crate::transcript::WRIST_COLUMNS, false);
+        assert!(
+            rows.iter()
+                .any(|row| row.plain().contains("Removing… A undoes"))
+        );
+        // A again undoes it.
+        conversation.wrist_accept();
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert!(sent(&mut conversation).is_empty());
+        // Removed, it is sent once the undo time is over.
+        conversation.wrist_accept();
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CancelQueued {
+                entry: "q-1".into()
+            }]
+        );
+        // An entry that started sending meanwhile is not cancelled.
+        conversation.apply(space(|space| {
+            space.queue = vec![entry("q-2", "Ada", QueueState::Queued)];
+        }));
+        conversation.wrist_step(1);
+        conversation.wrist_accept();
+        conversation.apply(space(|space| {
+            space.queue = vec![entry("q-2", "Ada", QueueState::Sending)];
+        }));
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Not cancelled: already sent or gone.")
+        );
+    }
+
+    #[test]
+    fn a_visitor_reads_the_wrist_but_acts_on_nothing() {
+        let mut conversation = on_wrist(|space| {
+            space.queue = vec![entry("q-1", "Bob", QueueState::Queued)];
+            space.approval = Some(approval(&[]));
+        });
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        conversation.take_actions();
+        conversation.wrist_opened();
+        settle(&mut conversation);
+        for _ in 0..4 {
+            conversation.wrist_step(1);
+            conversation.wrist_accept();
+        }
+        assert!(sent(&mut conversation).is_empty());
+        let rows = conversation.transcript(crate::transcript::WRIST_COLUMNS, false);
+        assert!(
+            rows.iter()
+                .any(|row| row.plain().contains("Waiting for a participant"))
+        );
+    }
+
+    #[test]
+    fn the_wrist_cue_shows_a_request_or_a_problem() {
+        let mut conversation = on_wrist(|_| {});
+        assert_eq!(conversation.wrist_waiting(), None);
+        conversation.apply(space(|space| space.error = Some("Lost the agent".into())));
+        assert_eq!(conversation.wrist_waiting(), Some(true));
+        conversation.apply(space(|space| {
+            space.error = Some("Lost the agent".into());
+            space.approval = Some(approval(&[]));
+        }));
+        assert_eq!(conversation.wrist_waiting(), Some(false));
+        // B on the wrist lets go of the card's focus, then dismisses the problem, and never decides.
+        conversation.apply(space(|space| space.error = Some("Lost the agent".into())));
+        assert!(conversation.wrist_back());
+        assert_eq!(conversation.wrist_waiting(), Some(true));
+        assert!(conversation.wrist_back());
+        assert_eq!(conversation.wrist_waiting(), None);
+        assert!(sent(&mut conversation).is_empty());
     }
 
     #[test]
