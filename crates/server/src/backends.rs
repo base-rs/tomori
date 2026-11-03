@@ -124,6 +124,10 @@ impl Backend for AnyBackend {
     async fn attach(&self, id: &str, directory: &str) -> Result<AnySession> {
         dispatch!(self, backend => backend.attach(id, directory).await.map(AnySession::from))
     }
+
+    fn shutdown(&self) {
+        dispatch!(self, backend => backend.shutdown())
+    }
 }
 
 impl Session for AnySession {
@@ -183,6 +187,13 @@ impl Backends {
 
     pub fn get(&self, name: &str) -> Option<&AnyBackend> {
         self.backends.iter().find(|backend| backend.name() == name)
+    }
+
+    /// Tell every backend that the server is shutting down; see [`Backend::shutdown`].
+    pub fn shutdown(&self) {
+        for backend in &self.backends {
+            backend.shutdown();
+        }
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {

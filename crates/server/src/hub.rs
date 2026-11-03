@@ -1209,6 +1209,8 @@ impl Hub {
                 let record = state.space_mut(&space).expect("checked above");
                 if record.model.is_closed() {
                     state.error(participant, "The agent session has stopped.");
+                } else if record.model.is_reconnecting() {
+                    state.error(participant, crate::space::RECONNECTING);
                 } else if !record.model.offers_mode(&mode) {
                     state.error(participant, "The agent does not offer that mode.");
                 } else if record
@@ -1741,6 +1743,9 @@ impl Hub {
     /// Ask every space driver to close its session, and end every connection.
     pub fn shutdown(&self) {
         self.jobs.close();
+        // Requests waiting on an agent, such as for its connection to return, fail at once rather than hold up the
+        // spaces closing.
+        self.backends.shutdown();
         let mut state = self.lock();
         // Spaces still being created are closed as soon as their session starts; see `register_space`.
         state.shutting_down = true;

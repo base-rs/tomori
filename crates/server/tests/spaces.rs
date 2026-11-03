@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backend::{
-    AnswerValue, Backend, Event, Field, FieldKind, FieldOption, Permission, Question, Session,
-    SessionSpec, Worker, WorkerState,
+    AnswerValue, Backend, Event, Field, FieldKind, FieldOption, Part, Permission, Question, Role,
+    Session, SessionSpec, Snapshot, SnapshotMessage, Worker, WorkerState,
 };
 use protocol::{
     Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState,
@@ -730,6 +730,148 @@ fn shutdown_completes_while_a_space_is_being_created() {
     stopping.join().unwrap();
     let session = backend.started()[0].clone();
     assert!(session.log().closed);
+}
+
+#[test]
+fn shutdown_does_not_wait_for_a_decision_the_agent_is_holding() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Held");
+    let session = backend.started()[0].clone();
+    session.emit(Event::PermissionRequested(Permission {
+        id: "p1".to_owned(),
+        tool: "Bash".to_owned(),
+        input: serde_json::json!({"command": "make"}),
+        description: None,
+        options: Vec::new(),
+    }));
+    ada.space(|state| state.approval.is_some());
+    // The agent holds the decision, as one waiting for its connection to return would.
+    backend.hold_commands();
+    ada.send(&ClientMessage::Decide {
+        request: "p1".to_owned(),
+        decision: Decision::AllowOnce,
+        option: None,
+    });
+    ada.space(|state| state.approval.is_none());
+
+    let started = std::time::Instant::now();
+    let (done, stopped) = std::sync::mpsc::channel();
+    let stopping = std::thread::spawn(move || {
+        drop(server);
+        done.send(()).unwrap();
+    });
+    stopped
+        .recv_timeout(TIMEOUT)
+        .expect("shutdown waited for the held decision");
+    stopping.join().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(session.log().closed);
+    assert!(session.log().decisions.is_empty());
+    backend.release_commands();
+}
+
+#[test]
+fn a_reconnecting_space_holds_input_and_decisions_until_it_is_read_again() {
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Gap");
+    let session = server.backend.started()[0].clone();
+    let permission = |id: &str| Permission {
+        id: id.to_owned(),
+        tool: "Bash".to_owned(),
+        input: serde_json::json!({"command": "make"}),
+        description: None,
+        options: Vec::new(),
+    };
+    session.emit(Event::PermissionRequested(permission("before")));
+    ada.space(|state| {
+        state
+            .approval
+            .as_ref()
+            .is_some_and(|approval| approval.id == "before")
+    });
+
+    let reason = "Lost the connection to OpenCode; reconnecting.";
+    session.emit(Event::Reconnecting {
+        reason: reason.to_owned(),
+    });
+    ada.space(|state| state.error.as_deref() == Some(reason));
+    // A decision could act on a request already resolved during the gap.
+    ada.send(&ClientMessage::Decide {
+        request: "before".to_owned(),
+        decision: Decision::AllowOnce,
+        option: None,
+    });
+    assert_eq!(
+        ada.error(),
+        "The agent is reconnecting; try again once it is back."
+    );
+    // The approval was resolved during the gap, and another was raised; queued input waits meanwhile.
+    session.emit(Event::PermissionResolved {
+        id: "before".to_owned(),
+    });
+    ada.say("u1", "carry on");
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.text == "carry on" && entry.state == QueueState::Queued)
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        session.log().prompts.is_empty(),
+        "input was released during the gap"
+    );
+
+    session.emit(Event::Resynchronized {
+        snapshot: Snapshot {
+            busy: Some(false),
+            messages: vec![SnapshotMessage {
+                id: "m1".to_owned(),
+                role: Role::Assistant,
+                parts: vec![Part::Text {
+                    text: "Finished during the gap.".to_owned(),
+                }],
+                completed: true,
+            }],
+            permissions: vec![permission("during")],
+            ..Snapshot::default()
+        },
+    });
+    let state = ada.space(|state| {
+        state.error.is_none()
+            && state
+                .approval
+                .as_ref()
+                .is_some_and(|approval| approval.id == "during")
+    });
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|message| message.text == "Finished during the gap.")
+    );
+    // Once that approval is decided, the queued input goes to the agent.
+    ada.send(&ClientMessage::Decide {
+        request: "during".to_owned(),
+        decision: Decision::AllowOnce,
+        option: None,
+    });
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while session.log().prompts.is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queued input was never released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(session.log().decisions[0].0, "during");
 }
 
 #[test]
