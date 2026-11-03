@@ -548,6 +548,7 @@ pub fn run(
                 palm: right_palm.filter(|_| focused),
                 hands_only: right_controller.is_none(),
                 head: scene_head,
+                viewer: head,
                 in_space,
                 menu_shown,
                 pointing: controls.trigger.is_some_and(|trigger| trigger > 0.2)

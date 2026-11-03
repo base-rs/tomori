@@ -200,8 +200,10 @@ pub struct WristFrame {
     pub palm: Option<Palm>,
     /// Shown from hand tracking alone, without a controller to act with, so it is read-only.
     pub hands_only: bool,
-    /// The head's transform.
+    /// The head's transform, which a detached transcript follows.
     pub head: Option<Mat4>,
+    /// The point the transcript faces, which stays put as the head turns: the middle of the head on the headset, from [`head_centre`](crate::hand_menu::head_centre), and the eye in the desktop window, whose head turns about it.
+    pub viewer: Option<Vec3>,
     /// Only a space has a conversation.
     pub in_space: bool,
     /// The left hand menu is showing: whichever shows first wins.
@@ -246,11 +248,10 @@ impl WristState {
         }
         // While the left menu shows, or the right hand points, it does not show, but it stays if it already shows.
         let blocked = !self.on_hand && (frame.menu_shown || frame.pointing);
-        let head = frame.head.map(|head| head.transform_point3(Vec3::ZERO));
         let angle = frame
             .palm
             .filter(|_| !blocked)
-            .zip(head)
+            .zip(frame.viewer)
             .and_then(|(palm, head)| palm.angle_to(head));
         let shown = self.visibility.update(angle, now);
         let was = self.on_hand;
@@ -341,11 +342,10 @@ impl Wrist {
         if self.state.show(&frame, moment.now) {
             conversation.wrist_opened();
         }
-        let head = frame.head.map(|head| head.transform_point3(Vec3::ZERO));
         // Squeezes count only while it shows.
         if self.squeeze.update(frame.grip) && self.state.active() {
             let centre = self.model.map(|model| model.transform_point3(Vec3::ZERO));
-            self.state.toggle_detached(centre, head);
+            self.state.toggle_detached(centre, frame.viewer);
         }
         if !self.state.active() {
             self.model = None;
@@ -370,8 +370,8 @@ impl Wrist {
             }
             (None, _) => frame
                 .palm
-                .zip(head)
-                .map(|(palm, head)| on_wrist(&palm, head, height)),
+                .zip(frame.viewer)
+                .map(|(palm, viewer)| on_wrist(&palm, viewer, height)),
             _ => self.model,
         };
     }
@@ -383,13 +383,15 @@ impl Wrist {
     }
 }
 
-/// The transcript's model on the wrist of `palm`, `height` tall: just above the wrist, offset towards the head along the palm, on a plane facing `head`.
-pub fn on_wrist(palm: &Palm, head: Vec3, height: f32) -> Mat4 {
+/// The transcript's model on the wrist of `palm`, `height` tall: just above the wrist, offset towards the head along the palm, on a plane facing `viewer`.
+///
+/// It is raised above the wrist along its own up, which leans with the way it faces, so `viewer` must stay put as the head turns, as the middle of the head does: facing the eyes, which swing about the neck, it would turn against the head and swing sideways the other way.
+pub fn on_wrist(palm: &Palm, viewer: Vec3, height: f32) -> Mat4 {
     let base = palm.wrist + palm.normal * 0.05;
-    let normal = (head - base).try_normalize().unwrap_or(Vec3::Z);
+    let normal = (viewer - base).try_normalize().unwrap_or(Vec3::Z);
     let right = Vec3::Y.cross(normal).try_normalize().unwrap_or(Vec3::X);
     let up = normal.cross(right);
-    recording::facing(base + up * (height / 2.0 + 0.02), head, 1.0)
+    recording::facing(base + up * (height / 2.0 + 0.02), viewer, 1.0)
 }
 
 #[cfg(test)]
@@ -406,6 +408,7 @@ mod tests {
         WristFrame {
             palm: Some(Palm { wrist, normal }),
             head: Some(Mat4::from_translation(head)),
+            viewer: Some(head),
             in_space: true,
             ..Default::default()
         }
@@ -577,5 +580,84 @@ mod tests {
         assert!(centre.y > palm.wrist.y + 0.1);
         let normal = model.transform_vector3(Vec3::Z).normalize();
         assert!(normal.dot((head - centre).normalize()) > 0.999);
+    }
+
+    /// A right palm held up below the face and turned towards it, and the neck the head turns about.
+    const PALM: Palm = Palm {
+        wrist: Vec3::new(0.05, 1.25, -0.3),
+        normal: Vec3::new(-0.095, 0.287, 0.953),
+    };
+    const NECK: Vec3 = Vec3::new(0.0, 1.5, 0.05);
+    const HEIGHT: f32 = 0.25;
+
+    /// The transcript's centre and normal on [`PALM`], facing `viewer`.
+    fn placed(viewer: Vec3) -> (Vec3, Vec3) {
+        let model = on_wrist(&PALM, viewer, HEIGHT);
+        (
+            model.transform_point3(Vec3::ZERO),
+            model.transform_vector3(Vec3::Z).normalize(),
+        )
+    }
+
+    #[test]
+    fn on_the_wrist_it_neither_moves_nor_turns_as_the_head_turns() {
+        use crate::hand_menu::{head_centre, head_turned};
+        let (centre, normal) = placed(head_centre(head_turned(NECK, 0.0, -30.0)));
+        // It stands just above the wrist.
+        let base = PALM.wrist + PALM.normal * 0.05;
+        assert!(centre.distance(base) < HEIGHT / 2.0 + 0.03);
+        assert!(centre.y > base.y);
+        for yaw in [-45.0, 0.0, 45.0] {
+            for pitch in [-30.0, 0.0] {
+                let head = head_turned(NECK, yaw, pitch);
+                let (turned, turned_normal) = placed(head_centre(head));
+                assert!(turned.distance(centre) < 1e-5, "{yaw} {pitch}: {turned}");
+                assert!(turned_normal.dot(normal) > 1.0 - 1e-6, "{yaw} {pitch}");
+                // And it faces the eyes, near enough to read.
+                let eyes = head.transform_point3(Vec3::ZERO);
+                let towards = (eyes - centre).normalize();
+                assert!(turned_normal.dot(towards) > 0.9, "{yaw} {pitch}");
+            }
+        }
+    }
+
+    #[test]
+    fn turning_the_head_left_never_moves_it_right() {
+        use crate::hand_menu::{head_centre, head_turned};
+        for direction in [1.0, -1.0] {
+            let mut previous = placed(head_centre(head_turned(NECK, 0.0, -30.0))).0;
+            for step in 1..=12 {
+                // Positive yaw turns the head left, towards -X.
+                let yaw = direction * 5.0 * step as f32;
+                let centre = placed(head_centre(head_turned(NECK, yaw, -30.0))).0;
+                let sideways = (centre.x - previous.x) * direction;
+                assert!(sideways <= 1e-5, "{yaw}: {sideways} m");
+                previous = centre;
+            }
+        }
+        // Facing the eyes, as it did, it swung several centimetres right as the head turned left.
+        let eyes = |yaw: f32| head_turned(NECK, yaw, -30.0).transform_point3(Vec3::ZERO);
+        assert!(placed(eyes(45.0)).0.x - placed(eyes(0.0)).0.x > 0.02);
+    }
+
+    #[test]
+    fn detached_it_stays_put_as_the_head_turns() {
+        use crate::hand_menu::{head_centre, head_turned};
+        let mut state = WristState::default();
+        let head = head_turned(NECK, 0.0, -10.0);
+        // Straight ahead, so that turning 40° either way stays within the turn it follows after.
+        let at = Vec3::new(0.0, 1.3, -0.45);
+        state.toggle_detached(Some(at), Some(head_centre(head)));
+        let anchor = &mut state.detached.as_mut().unwrap().0;
+        let model = |anchor: &mut PanelAnchor, head: Mat4| {
+            anchor.update(head, 0.05) * Mat4::from_translation(DETACHED_OFFSET)
+        };
+        let start = model(anchor, head);
+        assert!(start.transform_point3(Vec3::ZERO).distance(at) < 1e-5);
+        for yaw in [-40.0, 40.0, 0.0] {
+            for _ in 0..40 {
+                assert!(model(anchor, head_turned(NECK, yaw, -10.0)).abs_diff_eq(start, 1e-5));
+            }
+        }
     }
 }

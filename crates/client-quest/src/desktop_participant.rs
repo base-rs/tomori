@@ -665,6 +665,7 @@ impl State {
                     .filter(|_| focused),
                 hands_only: false,
                 head: Some(head),
+                viewer: Some(eye),
                 in_space,
                 menu_shown,
                 pointing: p.input.trigger,
