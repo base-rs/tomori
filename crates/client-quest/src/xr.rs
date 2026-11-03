@@ -28,8 +28,10 @@ const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 /// How often an applied recenter is logged at info, when the runtime repeats them.
 const RECENTER_LOG: Duration = Duration::from_secs(60);
 
+/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot.
 pub fn run(
     platform: &impl xr::PlatformInfo,
+    samples: u32,
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
@@ -161,7 +163,14 @@ pub fn run(
         mip_count: 1,
     })?;
     let images = gpu.import_images(&swapchain, format, width, height)?;
-    let mut renderer = Renderer::new(&gpu.device, &gpu.queue, format, width, height);
+    let samples = crate::graphics::supported_samples(&gpu.adapter, format, samples);
+    // Each eye's scene pass resolves its samples into the swapchain image before it ends, so the multisampled colour and depth stay in tile memory where the GPU allows, as transient attachments; see `design/desktop.md`.
+    log::info!(
+        "Drawing {samples}x multisampled; transient attachments save memory: {:?}",
+        gpu.adapter.get_info().transient_saves_memory
+    );
+    let mut renderer =
+        Renderer::with_samples(&gpu.device, &gpu.queue, format, width, height, samples);
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
     let mut caption = Caption::new(&gpu.device, format);
@@ -558,6 +567,10 @@ pub fn run(
             },
             attracting,
         );
+        // In a space, the ray points at workers too, which only highlights them: the trigger still attracts the swarm, and holding X sends the worker pointed at with the words. See `design/interaction.md`.
+        let in_space =
+            focused && !in_arrival && !menu_shown && conversation.joined_space().is_some();
+        conversation.point_at(delegation_scene.point(ray.filter(|_| in_space)));
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {
             renderer.set_presentation_page(presentation_navigation.card);
@@ -574,18 +587,36 @@ pub fn run(
                 current_workspace,
             );
         }
-        // Arrival's objects are still drawn as they leave on entering a space, but the ray only outside one.
-        if in_arrival || menu_shown || !scene.objects.is_empty() || scene.heading.is_some() {
+        // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
+        let beam = if in_arrival || menu_shown {
+            ray.zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
+                .map(|(ray, end)| arrival_graphics::Beam {
+                    origin: ray.origin,
+                    end,
+                    hit: pointing.hit.is_some(),
+                })
+        } else {
+            let hit = delegation_scene.hit_point();
+            ray.filter(|_| in_space).map(|ray| arrival_graphics::Beam {
+                origin: ray.origin,
+                end: hit.unwrap_or_else(|| ray.at(arrival_graphics::SPACE_RAY_LENGTH)),
+                hit: hit.is_some(),
+            })
+        };
+        // Arrival's objects are still drawn as they leave on entering a space.
+        if in_arrival
+            || menu_shown
+            || beam.is_some()
+            || !scene.objects.is_empty()
+            || scene.heading.is_some()
+        {
             renderer.update_arrival(
                 &gpu.device,
                 &gpu.queue,
                 &arrival_graphics::Frame {
                     scene: &scene,
                     hovered: pointing.hit.as_ref().map(|hit| &hit.key),
-                    ray: ray
-                        .zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
-                        .map(|(ray, end)| (ray.origin, end))
-                        .filter(|_| in_arrival || menu_shown),
+                    ray: beam,
                     time: arrival_time,
                 },
             );

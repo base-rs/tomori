@@ -15,7 +15,7 @@ use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
 use protocol::{
-    AudioFrame, ClientMessage, Frame, FrameDecoder, FrameKind, Gate, PROTOCOL_VERSION,
+    AudioFrame, ClientMessage, Frame, FrameDecoder, FrameKind, Gate, PROTOCOL_VERSION, Pointed,
     ServerMessage, SpaceState,
 };
 
@@ -406,6 +406,11 @@ impl TestClient {
 
     /// Speak `text` to the agent as one push-to-talk utterance.
     pub fn say(&mut self, utterance: &str, text: &str) {
+        self.say_pointing(utterance, text, None);
+    }
+
+    /// Speak `text` to the agent as [`Self::say`] does, while pointing at `pointed`.
+    pub fn say_pointing(&mut self, utterance: &str, text: &str, pointed: Option<Pointed>) {
         self.send(&ClientMessage::UtteranceBegin {
             utterance: utterance.to_owned(),
             answer: None,
@@ -413,6 +418,7 @@ impl TestClient {
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {
             utterance: utterance.to_owned(),
+            pointed,
         });
     }
 

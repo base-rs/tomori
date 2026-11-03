@@ -62,6 +62,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
 
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u".repeat(10_000),
+        pointed: None,
     });
     assert_eq!(ada.error(), "That utterance is not open.");
 

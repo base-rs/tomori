@@ -23,6 +23,17 @@ const MAX_VERTICES: usize = 1 << 19;
 const INITIAL_VERTICES: usize = 1 << 14;
 /// How far the ray reaches when it meets nothing.
 pub const RAY_LENGTH: f32 = 3.0;
+/// How far the ray reaches in a space when it meets no worker: far enough to show where it points, but short of the workers, so that an idle ray does not streak through the space. It reaches a worker once it meets one.
+pub const SPACE_RAY_LENGTH: f32 = 1.0;
+
+/// The pointing ray, from the controller to where it ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Beam {
+    pub origin: Vec3,
+    pub end: Vec3,
+    /// Whether it ends on something it points at, which draws it highlighted.
+    pub hit: bool,
+}
 
 /// The colour of the participant cubes around a space, distinct from the swarm's blues so that people read differently from the agent.
 const PARTICIPANT: [f32; 3] = [1.0, 0.55, 0.75];
@@ -37,8 +48,8 @@ pub struct Frame<'a> {
     pub scene: &'a Scene,
     /// The object the ray meets.
     pub hovered: Option<&'a Key>,
-    /// The ray, from the controller to where it ends.
-    pub ray: Option<(Vec3, Vec3)>,
+    /// The ray, drawn in arrival and, from the headset, in a space.
+    pub ray: Option<Beam>,
     /// Seconds, for slow motion such as turning.
     pub time: f32,
 }
@@ -326,15 +337,11 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
             ));
         }
     }
-    if let Some((origin, end)) = frame.ray {
-        let color = if frame.hovered.is_some() {
-            HOVER
-        } else {
-            [0.55, 0.6, 0.75]
-        };
-        out.extend(bar(origin, end, 0.003, color));
+    if let Some(beam) = frame.ray {
+        let color = if beam.hit { HOVER } else { [0.55, 0.6, 0.75] };
+        out.extend(bar(beam.origin, beam.end, 0.003, color));
         out.push(cube(
-            end,
+            beam.end,
             Vec3::splat(0.012),
             brighten(color, 0.4),
             Quat::IDENTITY,
@@ -724,14 +731,37 @@ mod tests {
         let cubes = cubes(&Frame {
             scene: &scene,
             hovered: None,
-            ray: Some((origin, end)),
+            ray: Some(Beam {
+                origin,
+                end,
+                hit: false,
+            }),
             time: 0.0,
         });
         assert_eq!(cubes.len(), 2);
+        assert_ne!(cubes[0].color, HOVER);
         let beam = &cubes[0];
         assert!(Vec3::from_array(beam.position).distance((origin + end) * 0.5) < 1e-5);
         assert!((beam.scale[2] - origin.distance(end)).abs() < 1e-5);
         assert!(Vec3::from_array(cubes[1].position).distance(end) < 1e-5);
+    }
+
+    #[test]
+    fn a_ray_that_meets_something_is_highlighted_without_an_arrival_object() {
+        // In a space, the ray meets a worker rather than an arrival object.
+        let scene = Scene::default();
+        let cubes = cubes(&Frame {
+            scene: &scene,
+            hovered: None,
+            ray: Some(Beam {
+                origin: Vec3::new(0.2, 1.2, -0.3),
+                end: Vec3::new(0.0, 1.3, -2.6),
+                hit: true,
+            }),
+            time: 0.0,
+        });
+        assert_eq!(cubes.len(), 2);
+        assert_eq!(cubes[0].color, HOVER);
     }
 
     #[test]

@@ -292,6 +292,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
     speak(&mut ada, &["tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     let text = ada.wait_for(|message| match message {
         ServerMessage::Transcript {
@@ -475,6 +476,7 @@ fn a_recognizer_failure_fails_the_utterance() {
     speak(&mut ada, &["please", "fail"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     let error = ada.wait_for(|message| match message {
         ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {
@@ -515,6 +517,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     // An end already on its way when the failure was reported is ignored, not refused.
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     // The client forgets it without cancelling, as the server has closed it; the next utterance neither fails it again nor is refused.
     ada.send(&ClientMessage::UtteranceBegin {
@@ -524,6 +527,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u2".into(),
+        pointed: None,
     });
     let text = ada.wait_for(|message| match message {
         ServerMessage::TranscriptFailed { utterance, error } => {
@@ -552,6 +556,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     speak(&mut ada, &["crash"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     let error = ada.wait_for(|message| match message {
         ServerMessage::TranscriptFailed { utterance, error } if utterance == "u1" => {
@@ -573,6 +578,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     speak(&mut ada, &["run"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u2".into(),
+        pointed: None,
     });
     let error = failure(&mut ada, "u2");
     assert!(
@@ -593,6 +599,7 @@ fn an_utterance_that_cannot_start_fails_visibly() {
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     let error = failure(&mut ada, "u1");
     assert!(error.contains("no stream is available"), "{error}");
@@ -620,6 +627,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
     speak(&mut bob, &["tests"]);
     bob.send(&ClientMessage::UtteranceEnd {
         utterance: "b1".into(),
+        pointed: None,
     });
     assert_eq!(transcript(&mut bob, "b1"), "run the tests");
     let state = ada.space(|state| !state.queue.is_empty());
@@ -657,6 +665,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u2".into(),
+        pointed: None,
     });
     let text = ada.wait_for(|message| match message {
         ServerMessage::Transcript {
@@ -692,6 +701,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     speak(&mut ada, &["the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     let error = failure(&mut ada, "u1");
     assert!(error.contains("lost"), "{error}");
@@ -703,6 +713,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u2".into(),
+        pointed: None,
     });
     assert_eq!(transcript(&mut ada, "u2"), "run the tests");
     ada.space(|state| !state.queue.is_empty());
@@ -1056,6 +1067,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
     speak_steadily(&mut ada, 65);
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     assert_eq!(
         transcript(&mut ada, "u1"),
@@ -1091,6 +1103,7 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
     // An end already on its way is ignored, and nothing is decoded or queued.
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
+        pointed: None,
     });
     while let Some(message) = ada.next_message(Duration::from_millis(200)) {
         match message {

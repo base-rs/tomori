@@ -453,6 +453,9 @@ struct UtteranceRecord {
     space: String,
     /// The question and field the transcript answers, rather than being queued.
     answer: Option<protocol::AnswerTarget>,
+    /// The worker the participant pointed at while speaking, as the space knew it when the utterance ended. Their
+    /// client names only its identity. See `design/interaction.md`.
+    pointed: Option<crate::space::PointedWorker>,
 }
 
 /// A transcriber call to make once the lock is released.
@@ -1957,6 +1960,7 @@ impl Hub {
                         client: utterance.clone(),
                         space,
                         answer,
+                        pointed: None,
                     },
                 );
                 let record = state
@@ -1972,7 +1976,7 @@ impl Hub {
                 });
                 deferred.push(Deferred::Begin(id));
             }
-            ClientMessage::UtteranceEnd { utterance }
+            ClientMessage::UtteranceEnd { utterance, .. }
             | ClientMessage::UtteranceCancel { utterance }
                 if state.connections[&connection].failed.as_ref() == Some(&utterance) =>
             {
@@ -1981,7 +1985,7 @@ impl Hub {
                     record.failed = None;
                 }
             }
-            ClientMessage::UtteranceEnd { utterance }
+            ClientMessage::UtteranceEnd { utterance, .. }
             | ClientMessage::UtteranceCancel { utterance }
                 if !state.connections[&connection]
                     .utterance
@@ -1990,12 +1994,30 @@ impl Hub {
             {
                 state.error(participant, "That utterance is not open.");
             }
-            ClientMessage::UtteranceEnd { .. } => {
+            ClientMessage::UtteranceEnd { pointed, .. } => {
                 let open = state
                     .connections
                     .get_mut(&connection)
                     .and_then(|record| record.utterance.take())
                     .expect("checked by the previous arm");
+                // Only an identity is taken from the client, and only a worker's, which the space resolves now, as the
+                // participant stops speaking. An oversized one, a worker the space does not have, or a kind this
+                // server does not know, is ignored rather than failing the words spoken with it.
+                let resolved = match pointed {
+                    Some(protocol::Pointed::Worker { worker })
+                        if worker.len() <= limits::SESSION_BYTES =>
+                    {
+                        state
+                            .utterances
+                            .get(&open.id)
+                            .and_then(|record| state.space(&record.space))
+                            .and_then(|space| space.model.pointed_worker(&worker))
+                    }
+                    _ => None,
+                };
+                if let Some(record) = state.utterances.get_mut(&open.id) {
+                    record.pointed = resolved;
+                }
                 deferred.push(Deferred::End(open.id));
             }
             ClientMessage::UtteranceCancel { .. } => {
@@ -2633,9 +2655,13 @@ impl Hub {
         }
         let speaker = state.participants[&record.participant].name.clone();
         if let Some(space) = state.space_mut(&record.space) {
-            let queued = space
-                .model
-                .enqueue(key, record.source, speaker, text.to_owned());
+            let queued = space.model.enqueue_pointing(
+                key,
+                record.source,
+                speaker,
+                text.to_owned(),
+                record.pointed,
+            );
             debug_assert!(queued, "repeats are acknowledged above");
         }
         state.send(

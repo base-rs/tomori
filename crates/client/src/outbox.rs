@@ -355,7 +355,7 @@ impl Outbox {
                     });
                 }
             }
-            ClientMessage::UtteranceEnd { utterance }
+            ClientMessage::UtteranceEnd { utterance, .. }
             | ClientMessage::UtteranceCancel { utterance } => {
                 // The ended utterance's queued frames stay protected, so the end follows all of them.
                 let open = state.utterance.take_if(|open| open.utterance == *utterance);
@@ -541,7 +541,7 @@ impl Outbox {
             match item {
                 Ordered::Audio { .. } => state.dropped_audio += 1,
                 Ordered::Utterance {
-                    message: ClientMessage::UtteranceEnd { utterance },
+                    message: ClientMessage::UtteranceEnd { utterance, .. },
                     ..
                 } => failed.push(utterance),
                 Ordered::Utterance { .. } => {}

@@ -48,6 +48,9 @@ const MAX_INSTANCES: usize = AGENT_COUNT
     } else {
         crate::arrival_graphics::MAX_CUBES
     };
+/// The usage of attachments that live only within one eye's scene pass, cleared at its start and discarded at its end; see [`Renderer::multisampled_views`].
+const TRANSIENT: wgpu::TextureUsages =
+    wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TRANSIENT_ATTACHMENT);
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 6 => Float32x3, 7 => Float32x3];
@@ -60,6 +63,48 @@ fn oriented_shader() -> String {
         .replace("    var out: VertexOutput;", "    let rotation = mat3x3<f32>(basis_x, basis_y, basis_z);\n    var out: VertexOutput;")
         .replace("position + vertex * scale", "position + rotation * (vertex * scale)")
         .replace("out.normal = normal;", "out.normal = rotation * normal;")
+}
+
+/// The samples per pixel the headset and desktop window draw with unless told otherwise: 4, for multisample anti-aliasing.
+pub const SAMPLES: u32 = 4;
+
+/// `requested` samples per pixel if `adapter` can draw both `format` and the scene's depth with them, or else 1, which draws without multisampling.
+///
+/// Only 1 and 4 are offered: they are the counts wgpu allows without adapter-specific format features, which the headset's device does not enable.
+pub fn supported_samples(
+    adapter: &wgpu::Adapter,
+    format: wgpu::TextureFormat,
+    requested: u32,
+) -> u32 {
+    let supported = |format: wgpu::TextureFormat| {
+        adapter
+            .get_texture_format_features(format)
+            .flags
+            .sample_count_supported(SAMPLES)
+    };
+    if requested >= SAMPLES && supported(format) && supported(wgpu::TextureFormat::Depth32Float) {
+        SAMPLES
+    } else {
+        1
+    }
+}
+
+/// The samples per pixel asked for by `value`, such as the headset's `tomori.msaa` intent extra: `4` or `on` for multisample anti-aliasing, `1`, `0` or `off` for none, and [`SAMPLES`] when absent or not understood.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn requested_samples(value: Option<&str>) -> u32 {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return SAMPLES;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "0" | "1" | "off" => 1,
+        "4" | "on" => SAMPLES,
+        _ => {
+            log::warn!(
+                "Multisampling {value:?} is not 1, 4, on or off; using {SAMPLES} samples per pixel."
+            );
+            SAMPLES
+        }
+    }
 }
 
 pub struct Renderer {
@@ -89,6 +134,8 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// The headset draws with [`Renderer::with_samples`].
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -244,6 +291,8 @@ impl Renderer {
     }
 
     /// Each eye's multisampled color target, which its scene pass resolves into the eye's own target; none for a single sample.
+    ///
+    /// Like the depth views, these are cleared at the start of the pass and discarded at its end, so they are transient: a tiling GPU, such as the Quest's, keeps their samples in tile memory and need never back them with memory of their own.
     fn multisampled_views(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
@@ -265,7 +314,7 @@ impl Renderer {
                         sample_count: samples,
                         dimension: wgpu::TextureDimension::D2,
                         format,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage: TRANSIENT,
                         view_formats: &[],
                     })
                     .create_view(&Default::default())
@@ -292,7 +341,7 @@ impl Renderer {
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage: TRANSIENT,
                     view_formats: &[],
                 })
                 .create_view(&Default::default())
@@ -1703,7 +1752,11 @@ mod tests {
                     &crate::arrival_graphics::Frame {
                         scene: &scene,
                         hovered: Some(&hovered),
-                        ray: Some((origin, target)),
+                        ray: Some(crate::arrival_graphics::Beam {
+                            origin,
+                            end: target,
+                            hit: true,
+                        }),
                         time: 1.0,
                     },
                 );
@@ -1797,7 +1850,11 @@ mod tests {
                     &crate::arrival_graphics::Frame {
                         scene: &scene,
                         hovered: Some(&Key::Create),
-                        ray: Some((glam::Vec3::new(0.2, 1.1, -0.3), crate::arrival::CREATE)),
+                        ray: Some(crate::arrival_graphics::Beam {
+                            origin: glam::Vec3::new(0.2, 1.1, -0.3),
+                            end: crate::arrival::CREATE,
+                            hit: true,
+                        }),
                         time: 1.0,
                     },
                 );
@@ -1864,6 +1921,246 @@ mod tests {
                 image::imageops::replace(&mut sheet, &multi, WIDTH.into(), y);
             }
             if let Ok(path) = std::env::var("TOMORI_MULTISAMPLE_PREVIEW") {
+                sheet.save(path).unwrap();
+            }
+            assert!(scope.pop().await.is_none());
+        });
+    }
+
+    #[test]
+    fn multisampling_is_asked_for_by_count_or_switch() {
+        assert_eq!(requested_samples(None), SAMPLES);
+        assert_eq!(requested_samples(Some("")), SAMPLES);
+        for on in ["4", "on", " ON "] {
+            assert_eq!(requested_samples(Some(on)), 4, "{on:?}");
+        }
+        for off in ["0", "1", "off", "Off"] {
+            assert_eq!(requested_samples(Some(off)), 1, "{off:?}");
+        }
+        // Counts wgpu doesn't allow without adapter-specific features, and nonsense, keep the default.
+        for other in ["2", "8", "lots"] {
+            assert_eq!(requested_samples(Some(other)), SAMPLES, "{other:?}");
+        }
+    }
+
+    /// Draws as the headset does, into the two layers of one swapchain-like image, with every pass the headset draws in the scene pass, and the caption after it.
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    fn headset_layers_multisample_every_pass() {
+        use crate::arrival::{Item, Key, Kind, Scene, View};
+        // Rows of whole multiples of 256 bytes, as copying to a buffer needs.
+        const WIDTH: u32 = 256;
+        const HEIGHT: u32 = 256;
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::VULKAN,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            assert_eq!(supported_samples(&adapter, format, SAMPLES), 4);
+            assert_eq!(supported_samples(&adapter, format, 1), 1);
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("headset test swapchain image"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 2,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let views: [_; 2] = std::array::from_fn(|eye| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: eye as u32,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            });
+            let projection = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let matrices = [-0.032, 0.032].map(|x| {
+                let eye = glam::Vec3::new(x, 1.6, 0.0);
+                projection * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y)
+            });
+            let arrival = Scene::layout(&View {
+                heading: "Spaces on studio.local".into(),
+                items: vec![Item {
+                    key: Key::Create,
+                    kind: Kind::Create { open: false },
+                    label: "New space".into(),
+                    detail: None,
+                    selected: false,
+                }],
+                ..Default::default()
+            });
+            let workspace = crate::delegation::Workspace {
+                nodes: vec![crate::delegation::Node {
+                    id: "worker".into(),
+                    parent_id: Some("root".into()),
+                    title: "Synthetic task".into(),
+                    state: crate::delegation::State::Running,
+                }],
+                presentations: vec![crate::delegation::Presentation {
+                    id: "card".into(),
+                    title: "Synthetic result".into(),
+                    source_id: "worker".into(),
+                    source_message_id: "message".into(),
+                    text: "Example content".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut workers = crate::delegation::Scene::new();
+            for _ in 0..30 {
+                workers.update(Some("root"), &workspace, 0.05);
+            }
+            let mut caption = crate::caption::Caption::new(&device, format);
+            caption.set_text(&queue, "Hello from the headset.");
+            caption.set_recording_progress(
+                &queue,
+                Some(std::time::Duration::from_secs(15)),
+                std::time::Duration::from_secs(60),
+            );
+            let mut swarm = Swarm::new();
+            for _ in 0..120 {
+                swarm.step(1.0 / 72.0, None);
+            }
+            let hand = {
+                let mut hand = crate::hands::Hand {
+                    joints: [None; crate::hands::JOINT_COUNT],
+                };
+                for (joint, y) in [(1, 1.2), (2, 1.3)] {
+                    hand.joints[joint] = Some(crate::hands::Joint {
+                        position: [0.2, y, -0.6],
+                        radius: 0.01,
+                    });
+                }
+                hand
+            };
+            let render = |samples: u32, environment: Environment| {
+                let mut renderer =
+                    Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, samples);
+                renderer.set_environment(environment);
+                renderer.update(&queue, &swarm, None, false);
+                renderer.update_controllers(
+                    &queue,
+                    [
+                        Some(crate::controller::Pose {
+                            position: [-0.2, 1.3, -0.6],
+                            orientation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                        None,
+                    ],
+                    [None, Some(hand)],
+                );
+                renderer.update_workspace(
+                    &device,
+                    &queue,
+                    workers.cubes(),
+                    workers.stations(),
+                    &workspace,
+                );
+                renderer.update_arrival(
+                    &device,
+                    &queue,
+                    &crate::arrival_graphics::Frame {
+                        scene: &arrival,
+                        hovered: Some(&Key::Create),
+                        ray: Some(crate::arrival_graphics::Beam {
+                            origin: glam::Vec3::new(0.2, 1.1, -0.3),
+                            end: crate::arrival::CREATE,
+                            hit: true,
+                        }),
+                        time: 1.0,
+                    },
+                );
+                renderer.render(
+                    &device,
+                    &queue,
+                    &views,
+                    &matrices,
+                    Mat4::IDENTITY,
+                    Some((
+                        &caption,
+                        Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)),
+                    )),
+                );
+                let layer = u64::from(WIDTH * HEIGHT * 4);
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("headset test readback"),
+                    size: layer * 2,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(WIDTH * 4),
+                            rows_per_image: Some(HEIGHT),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                let (left, right) = data.split_at(layer as usize);
+                [left, right]
+                    .map(|eye| image::RgbaImage::from_raw(WIDTH, HEIGHT, eye.to_vec()).unwrap())
+            };
+            let colours = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .map(|pixel| pixel.0)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            };
+            let mut sheet = image::RgbaImage::new(WIDTH * 4, HEIGHT * 2);
+            for (row, environment) in [Environment::Minimal, Environment::Sky]
+                .into_iter()
+                .enumerate()
+            {
+                let single = render(1, environment);
+                let multi = render(4, environment);
+                assert_ne!(
+                    multi[0], multi[1],
+                    "{environment:?}: each eye has its own layer"
+                );
+                for eye in 0..2 {
+                    assert!(
+                        colours(&multi[eye]) > colours(&single[eye]),
+                        "{environment:?}, eye {eye}: {} colours multisampled, {} without",
+                        colours(&multi[eye]),
+                        colours(&single[eye])
+                    );
+                }
+                let y = (row as u32 * HEIGHT).into();
+                for (column, image) in single.iter().chain(&multi).enumerate() {
+                    image::imageops::replace(
+                        &mut sheet,
+                        image,
+                        column as i64 * i64::from(WIDTH),
+                        y,
+                    );
+                }
+            }
+            if let Ok(path) = std::env::var("TOMORI_HEADSET_MULTISAMPLE_PREVIEW") {
                 sheet.save(path).unwrap();
             }
             assert!(scope.pop().await.is_none());
