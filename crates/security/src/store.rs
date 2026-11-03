@@ -220,9 +220,14 @@ fn write(path: &Path, entries: &[Entry]) -> io::Result<()> {
         tokens: entries.to_vec(),
     })
     .expect("entries serialize");
+    write_private(path, text.as_bytes())
+}
+
+/// Write `contents` to `path` through a temporary file readable only by its user, so that the file is never partly written or readable by others.
+pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("tmp");
     let mut file = private(&temporary)?;
-    file.write_all(text.as_bytes())?;
+    file.write_all(contents)?;
     file.sync_all()?;
     fs::rename(&temporary, path)
 }
@@ -237,7 +242,7 @@ pub(crate) fn private(path: &Path) -> io::Result<File> {
 }
 
 /// Create a directory, and its parents, readable only by its user.
-pub(crate) fn create_private_directory(directory: &Path) -> io::Result<()> {
+pub fn create_private_directory(directory: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
