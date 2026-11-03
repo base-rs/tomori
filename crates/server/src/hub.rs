@@ -732,11 +732,7 @@ impl HubState {
             members.push(participant.to_owned());
         }
         // A participant who missed part of the latest reply hears it from its start. Visitors follow live speech; see `design/speech.md`.
-        if participates
-            && record
-                .speech
-                .joined(participant, engagement, Instant::now())
-        {
+        if participates && record.speech.joined(participant, engagement) {
             record.wake();
         }
         if let Some(record) = self.participants.get_mut(participant) {
@@ -2268,10 +2264,7 @@ impl Hub {
                     return;
                 };
                 let record = state.space_mut(&space).expect("checked above");
-                match record
-                    .speech
-                    .replay(participant, message.as_deref(), Instant::now())
-                {
+                match record.speech.replay(participant, message.as_deref()) {
                     Ok(()) => record.wake(),
                     Err(error) => state.error(participant, error),
                 }
@@ -2298,10 +2291,7 @@ impl Hub {
                 if let Some(space) = space
                     && let Some(record) = state.space_mut(space)
                 {
-                    if record
-                        .speech
-                        .engagement(participant, engagement, Instant::now())
-                    {
+                    if record.speech.engagement(participant, engagement) {
                         record.wake();
                     }
                     state.touch_space(space);
@@ -2928,6 +2918,9 @@ impl Hub {
         if !record.model.is_closed() {
             record.model.apply(Event::Closed { reason: error });
         }
+        // A closed space keeps no speech, so that up to [`CLOSED_SPACES`] closed spaces hold no audio, and its pacer stops once what is still queued has been spoken.
+        record.speech.clear();
+        record.waker = None;
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
         state.touch_space(space);

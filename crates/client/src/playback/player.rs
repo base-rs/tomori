@@ -13,6 +13,9 @@ use super::{Mixer, MixerOptions, PlaybackStatistics};
 /// How long playback takes to fade out when silenced, and back in afterwards, so that it does not click.
 const FADE: Duration = Duration::from_millis(10);
 
+/// How long after its last audio agent speech played again still counts as playing: longer than the breath between spoken segments, so that a replay counts as playing throughout.
+const REPLAY_PAUSE: Duration = Duration::from_millis(700);
+
 enum Command {
     LocalSource(Option<u32>),
     Clear,
@@ -109,9 +112,10 @@ impl Player {
         }
         // Silenced audio is still mixed, so that it is consumed in real time and resumes live rather than replaying what was missed.
         mixer.mix(output);
-        self.shared
-            .replaying
-            .store(mixer.is_source_playing(REPLAY_SOURCE), Ordering::Relaxed);
+        self.shared.replaying.store(
+            mixer.is_source_recent(REPLAY_SOURCE, REPLAY_PAUSE),
+            Ordering::Relaxed,
+        );
         let length = (FADE.as_secs_f64() * f64::from(sample_rate))
             .ceil()
             .max(1.0) as u32;
@@ -152,7 +156,7 @@ impl PlayerControl {
         let _ = self.commands.send(Command::AgentMuted(muted));
     }
 
-    /// Whether agent speech played again for this participant, a replay or catch-up, was playing at the last render.
+    /// Whether agent speech played again for this participant, a replay or catch-up, was playing at the last render, including the breaths between its segments.
     pub fn is_replaying(&self) -> bool {
         self.shared.replaying.load(Ordering::Relaxed)
     }

@@ -136,6 +136,16 @@ impl Mixer {
             .is_some_and(|source| source.buffer.is_playing())
     }
 
+    /// Whether `source` has played or buffered audio within `within`: true through the short silences of a stream, such as the breath between spoken segments, when [`Self::is_source_playing`] is false.
+    pub fn is_source_recent(&self, source: u32, within: Duration) -> bool {
+        let within = (within.as_secs_f64() * f64::from(self.options.sample_rate)) as u64;
+        self.sources.get(&source).is_some_and(|source| {
+            source.buffer.is_playing()
+                || source.buffer.buffered_samples() > 0
+                || source.buffer.idle_samples() < within
+        })
+    }
+
     /// The recent loudness of what [`Self::mix`] played from `source`, before its gain, so that muted agent speech still has a level, from 0 (silent or absent) to 1 (full scale), for visuals such as a speaking indicator. It follows a louder signal at once and falls over about [`LEVEL_RELEASE`] when the source goes quiet.
     pub fn source_level(&self, source: u32) -> f32 {
         self.sources.get(&source).map_or(0.0, |source| source.level)

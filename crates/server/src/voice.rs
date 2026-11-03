@@ -9,9 +9,9 @@
 //!
 //! The hub keeps what is sent, numbered by reply, one reply per agent turn, so that a participant who missed it hears it from its start; see [`crate::retention`]. The same pacer thread paces those catch-ups and replays, woken when one starts.
 //!
-//! With the space's speech setting `brief`, each assistant message speaks its first blocks, up to about [`BRIEF_CHARACTERS`], and then says "More on the panel." instead of the rest.
+//! With the space's speech setting `brief`, each assistant message speaks its first blocks, up to about [`BRIEF_CHARACTERS`], and leaves out the rest; the first message of a reply cut short says "More on the panel." instead, once per reply.
 
-/// About 20 seconds of speech: Kokoro's `af_heart` voice speaks about 15 characters of English a second. A brief reply speaks whole blocks while they fit, then stops at the next block boundary; a first block longer than this is cut at a sentence boundary instead, after at least one sentence.
+/// About 20 seconds of speech: Kokoro's `af_heart` voice speaks about 15 characters of English a second. A brief message speaks whole blocks while they fit, then stops at the next block boundary; a block that starts within the first half of this, such as the paragraph after a short heading or lead-in, is cut at a sentence boundary instead, and the first block always speaks at least one sentence.
 #[cfg_attr(not(feature = "speech"), allow(dead_code))]
 pub const BRIEF_CHARACTERS: usize = 300;
 
@@ -19,25 +19,27 @@ pub const BRIEF_CHARACTERS: usize = 300;
 #[cfg_attr(not(feature = "speech"), allow(dead_code))]
 pub const MORE_ON_THE_PANEL: &str = "More on the panel.";
 
-/// Which sentences of `blocks` a brief reply speaks, given the characters `spent` on its earlier blocks, and whether it is cut there. Each block's sentences are returned, empty for those not spoken.
+/// Which sentences of `blocks` a brief message speaks, given the characters `spent` on its earlier blocks, and whether it is cut there. Each block's sentences are returned, empty for those not spoken.
 #[cfg_attr(not(feature = "speech"), allow(dead_code))]
 fn brief(blocks: &[Vec<String>], spent: &mut usize, cut: &mut bool) -> Vec<Vec<String>> {
+    let characters = |text: &String| text.chars().count();
     let mut spoken = Vec::new();
     for sentences in blocks {
-        let length: usize = sentences.iter().map(String::len).sum();
+        let length: usize = sentences.iter().map(characters).sum();
         if *cut || sentences.is_empty() {
             spoken.push(Vec::new());
         } else if *spent + length <= BRIEF_CHARACTERS {
             *spent += length;
             spoken.push(sentences.clone());
-        } else if *spent == 0 {
-            // A first block too long on its own is cut at a sentence, after at least one.
+        } else if *spent < BRIEF_CHARACTERS / 2 {
+            // A block too long to fit that starts early, as after a heading or lead-in, is cut at a sentence; the first block speaks at least one.
             let mut taken = Vec::new();
             for sentence in sentences {
-                if !taken.is_empty() && *spent + sentence.len() > BRIEF_CHARACTERS {
+                let first = taken.is_empty() && *spent == 0;
+                if !first && *spent + characters(sentence) > BRIEF_CHARACTERS {
                     break;
                 }
-                *spent += sentence.len();
+                *spent += characters(sentence);
                 taken.push(sentence.clone());
             }
             *cut = taken.len() < sentences.len();
@@ -233,7 +235,8 @@ mod enabled {
                 hub: Arc::downgrade(hub),
                 space: space.to_owned(),
                 reply: 0,
-                busy: false,
+                idle: true,
+                more: None,
             })
         }
     }
@@ -277,23 +280,25 @@ mod enabled {
         /// The hub and space, for the space's speech setting.
         hub: Weak<Hub>,
         space: String,
-        /// The current reply's number, counting agent turns: one turn's speech is one reply.
+        /// The current reply's number, counting agent turns: one turn's speech is one reply, from its first assistant message after the agent was idle.
         reply: u64,
-        busy: bool,
+        /// Whether the agent has been idle since the current reply started, so the next assistant message starts a reply. A busy state the backend repeats, as when it reads the session again, does not.
+        idle: bool,
+        /// The reply that has said "More on the panel.", so that it is said once per reply.
+        more: Option<u64>,
     }
 
     impl Voice {
         pub fn observe(&mut self, event: &Event) {
             match event {
-                Event::Busy if !self.busy => {
-                    self.busy = true;
-                    self.reply += 1;
-                }
-                Event::Idle => self.busy = false,
+                Event::Idle => self.idle = true,
                 Event::MessageStarted {
                     message,
                     role: Role::Assistant,
                 } => {
+                    if std::mem::take(&mut self.idle) {
+                        self.reply += 1;
+                    }
                     if !self.speaking.contains_key(message) {
                         let brief = self.hub.upgrade().is_some_and(|hub| {
                             hub.speech_setting(&self.space) == SpeechSetting::Brief
@@ -342,7 +347,8 @@ mod enabled {
                 more = *cut && !was_cut;
             }
             let mut segments = self.segments(&sentences);
-            if more {
+            if more && self.more != Some(self.reply) {
+                self.more = Some(self.reply);
                 segments.push(MORE_ON_THE_PANEL.to_owned());
             }
             // Holding the labels across `speak` means the pacer finds each segment's label once synthesis starts it.
@@ -725,6 +731,26 @@ mod tests {
         let spoken = brief(std::slice::from_ref(&huge), &mut spent, &mut cut);
         assert_eq!(spoken, [huge[..1].to_vec()]);
         assert!(cut);
+    }
+
+    #[test]
+    fn a_long_paragraph_after_a_short_lead_in_is_cut_at_a_sentence() {
+        let (mut spent, mut cut) = (0, false);
+        let lead = block(&["Here is what I found:"]);
+        let paragraph = vec![sentence(150), sentence(100), sentence(100)];
+        let spoken = brief(&[lead.clone(), paragraph.clone()], &mut spent, &mut cut);
+        assert_eq!(spoken, [lead, paragraph[..2].to_vec()]);
+        assert!(cut);
+    }
+
+    #[test]
+    fn the_limit_counts_characters_not_bytes() {
+        let (mut spent, mut cut) = (0, false);
+        // 120 characters of three bytes each.
+        let wide = vec!["\u{3042}".repeat(120)];
+        let spoken = brief(&[wide.clone(), wide.clone()], &mut spent, &mut cut);
+        assert_eq!(spoken, [wide.clone(), wide]);
+        assert!(!cut);
     }
 
     #[test]

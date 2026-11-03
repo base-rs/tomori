@@ -1159,6 +1159,10 @@ fn a_reply_spoken_while_nobody_listened_is_heard_from_its_start_on_joining_or_re
         space: ada.space(|_| true).id,
     });
     assert!(bob.next_audio(Duration::from_millis(300)).is_none());
+    // The reply is still kept, for him to hear again if he asks.
+    bob.send(&ClientMessage::Replay { message: None });
+    let (heard, _) = listen(&bob, Duration::from_millis(400));
+    assert_eq!(from(&heard, REPLAY_SOURCE), frames);
 }
 
 #[test]
@@ -1180,7 +1184,8 @@ fn taking_the_headset_off_mid_reply_replays_that_reply_from_its_start_on_return(
     session.stream(&[sentence]);
     let frames = words(&[sentence]) * FRAMES_PER_WORD;
 
-    ada.next_audio(Duration::from_secs(5))
+    let first = ada
+        .next_audio(Duration::from_secs(5))
         .expect("speech starts");
     report(&mut ada, Engagement::Away);
     std::thread::sleep(Duration::from_millis(300));
@@ -1198,6 +1203,10 @@ fn taking_the_headset_off_mid_reply_replays_that_reply_from_its_start_on_return(
             .iter()
             .all(|frame| frame.source == REPLAY_SOURCE)
     );
+    // What she heard live is one unbroken run from the start, which stopped when she went away.
+    for (index, frame) in heard[..replayed].iter().enumerate() {
+        assert_eq!(frame.sequence, first.sequence + 1 + index as u32);
+    }
     assert!(
         announcements
             .iter()
@@ -1338,4 +1347,75 @@ fn a_visitor_hears_replies_live_but_is_never_caught_up_and_cannot_replay() {
     let (heard, _) = listen(&vic, Duration::from_millis(600));
     assert!(from(&heard, AGENT_SOURCE) > 0);
     assert_eq!(from(&heard, REPLAY_SOURCE), 0);
+}
+
+#[test]
+fn a_later_reply_stops_a_replay_and_is_heard_live_from_its_start() {
+    let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
+    let (mut ada, mut bob) = pair(&server);
+    report(&mut ada, Engagement::Engaged);
+    report(&mut bob, Engagement::Engaged);
+    ada.say("u1", "first");
+    ada.space(|state| state.activity == protocol::Activity::Running);
+    let session = server.backend.started()[0].clone();
+    let first = "This first reply goes on for long enough that a second reply can start while it is being played again to Ada.";
+    session.stream(&[first]);
+    let first_frames = words(&[first]) * FRAMES_PER_WORD;
+    for client in [&ada, &bob] {
+        let (heard, _) = listen(client, Duration::from_millis(300));
+        assert_eq!(from(&heard, AGENT_SOURCE), first_frames);
+    }
+
+    ada.send(&ClientMessage::Replay { message: None });
+    let replayed = ada
+        .next_audio(Duration::from_secs(5))
+        .expect("the replay starts");
+    assert_eq!(replayed.source, REPLAY_SOURCE);
+    bob.say("u2", "second");
+    bob.space(|state| state.activity == protocol::Activity::Running);
+    let second = "A short second reply.";
+    session.stream(&[second]);
+    let second_frames = words(&[second]) * FRAMES_PER_WORD;
+
+    let (heard, _) = listen(&ada, Duration::from_millis(400));
+    // The replay stopped part way, and the new reply played live, whole.
+    assert!(from(&heard, REPLAY_SOURCE) + 1 < first_frames);
+    assert_eq!(from(&heard, AGENT_SOURCE), second_frames);
+    let live = heard
+        .iter()
+        .position(|frame| frame.source == AGENT_SOURCE)
+        .unwrap();
+    assert!(
+        heard[live..]
+            .iter()
+            .all(|frame| frame.source == AGENT_SOURCE)
+    );
+    let (heard, _) = listen(&bob, Duration::from_millis(200));
+    assert_eq!(from(&heard, AGENT_SOURCE), second_frames);
+    assert_eq!(from(&heard, REPLAY_SOURCE), 0);
+}
+
+#[test]
+fn engagement_is_shared_and_forgotten_with_the_connection_and_the_speech_setting_is_shared() {
+    let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
+    let (mut ada, mut bob) = pair(&server);
+    let source = ada.source;
+    let engagement = |state: &protocol::SpaceState| {
+        state
+            .participants
+            .iter()
+            .find(|participant| participant.source == source)
+            .and_then(|participant| participant.engagement)
+    };
+    report(&mut ada, Engagement::Away);
+    bob.space(|state| engagement(state) == Some(Engagement::Away));
+    // Ada's headset reconnects: until it reports again, she counts as listening, reporting nothing.
+    let ada = server.connect("ada", "Ada");
+    bob.space(|state| state.participants.len() == 2 && engagement(state).is_none());
+    ada.space(|state| engagement(state).is_none());
+
+    bob.send(&ClientMessage::SetSpeech {
+        speech: SpeechSetting::Full,
+    });
+    ada.space(|state| state.speech == SpeechSetting::Full);
 }

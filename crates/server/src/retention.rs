@@ -95,7 +95,6 @@ struct Stream {
     cursor: u64,
     /// When the next frame should start playing, once one has been sent.
     clock: Option<Instant>,
-    epoch: Instant,
     /// For a replay, the newest reply when it started: live speech of a later reply stops it. A catch-up continues through later replies.
     until: Option<u64>,
 }
@@ -104,6 +103,8 @@ struct Listener {
     state: State,
     /// The next sequence number of this listener's [`REPLAY_SOURCE`] frames, continued across streams so that its client's jitter buffer sees one source.
     sequence: u32,
+    /// What this listener's [`REPLAY_SOURCE`] frame timestamps count from, kept across streams like the sequence.
+    epoch: Instant,
 }
 
 /// The retained speech of one space, and where each of its listeners is in it.
@@ -225,20 +226,20 @@ impl Retention {
     fn set(&mut self, participant: &str, state: State) {
         self.listeners
             .entry(participant.to_owned())
-            .or_insert(Listener {
+            .or_insert_with(|| Listener {
                 state: State::Live,
                 sequence: 0,
+                epoch: Instant::now(),
             })
             .state = state;
     }
 
     /// The state of a listener who missed what was recorded from `heard` up to `until`: streaming from the start of the latest reply if they missed any of it, and live otherwise.
-    fn resume(&self, heard: u64, until: u64, now: Instant) -> State {
+    fn resume(&self, heard: u64, until: u64) -> State {
         match self.latest_start() {
             Some(start) if heard < until && until > start => State::Streaming(Stream {
                 cursor: start,
                 clock: None,
-                epoch: now,
                 until: None,
             }),
             _ => State::Live,
@@ -246,12 +247,7 @@ impl Retention {
     }
 
     /// `participant` joined the space, having last reported `engagement` on their connection, if anything. Returns whether they now stream, so that the pacer must be woken.
-    pub fn joined(
-        &mut self,
-        participant: &str,
-        engagement: Option<Engagement>,
-        now: Instant,
-    ) -> bool {
+    pub fn joined(&mut self, participant: &str, engagement: Option<Engagement>) -> bool {
         let heard = self.heard(participant);
         let state = match engagement {
             None => State::Unreported {
@@ -259,7 +255,7 @@ impl Retention {
                 since: self.end(),
             },
             Some(engagement) if !engagement.is_listening() => State::Away { heard },
-            Some(_) => self.resume(heard, self.end(), now),
+            Some(_) => self.resume(heard, self.end()),
         };
         let streaming = matches!(state, State::Streaming(_));
         self.set(participant, state);
@@ -283,18 +279,18 @@ impl Retention {
     }
 
     /// `participant`, who is in the space, reported `engagement`. Returns whether they now stream.
-    pub fn engagement(&mut self, participant: &str, engagement: Engagement, now: Instant) -> bool {
+    pub fn engagement(&mut self, participant: &str, engagement: Engagement) -> bool {
         let current = self
             .listeners
             .get(participant)
             .map(|listener| listener.state.clone());
         let state = if engagement.is_listening() {
             match current {
-                Some(State::Unreported { heard, since }) => self.resume(heard, since, now),
+                Some(State::Unreported { heard, since }) => self.resume(heard, since),
                 Some(State::Away { heard } | State::Absent { heard }) => {
-                    self.resume(heard, self.end(), now)
+                    self.resume(heard, self.end())
                 }
-                None => self.resume(0, self.end(), now),
+                None => self.resume(0, self.end()),
                 Some(State::Live | State::Streaming(_)) => return false,
             }
         } else {
@@ -316,13 +312,13 @@ impl Retention {
         streaming
     }
 
-    /// Play the reply with an announcement for `message`, or the latest reply, again to `participant` from its start.
-    pub fn replay(
-        &mut self,
-        participant: &str,
-        message: Option<&str>,
-        now: Instant,
-    ) -> Result<(), &'static str> {
+    /// Play the reply with an announcement for `message`, or the latest reply, again to `participant` from its start. Refused while they are away, as nothing is played to them then.
+    pub fn replay(&mut self, participant: &str, message: Option<&str>) -> Result<(), &'static str> {
+        if self.listeners.get(participant).is_some_and(|listener| {
+            matches!(listener.state, State::Away { .. } | State::Absent { .. })
+        }) {
+            return Err("Nothing is played to you while you are away.");
+        }
         let start = match message {
             None => self
                 .latest_start()
@@ -342,7 +338,6 @@ impl Retention {
             State::Streaming(Stream {
                 cursor: start,
                 clock: None,
-                epoch: now,
                 until: newest,
             }),
         );
@@ -358,6 +353,15 @@ impl Retention {
         {
             self.set(participant, State::Live);
         }
+    }
+
+    /// Forget everything kept and every listener, as when the space closes: its speech is no longer kept. Listeners hear what is still spoken live.
+    pub fn clear(&mut self) {
+        let end = self.end();
+        *self = Self {
+            first: end,
+            ..Self::default()
+        };
     }
 
     /// Collect what each streaming listener should be sent by `now`, in order. Returns when the next is due, if any listener is still streaming. A listener whose cursor reaches the live edge becomes live.
@@ -408,7 +412,9 @@ impl Retention {
                                 gate: Gate::Live,
                                 source: REPLAY_SOURCE,
                                 sequence: listener.sequence,
-                                timestamp: clock.duration_since(stream.epoch).as_micros() as u64,
+                                timestamp: clock
+                                    .saturating_duration_since(listener.epoch)
+                                    .as_micros() as u64,
                                 sample_rate: *sample_rate,
                                 samples: samples.to_vec(),
                             }),
@@ -494,7 +500,7 @@ mod tests {
         let now = Instant::now();
         let mut retention = Retention::default();
         speak(&mut retention, 1, "m1", 1, 5);
-        assert!(retention.joined("ada", Some(Engagement::Engaged), now));
+        assert!(retention.joined("ada", Some(Engagement::Engaged)));
         assert!(!retention.hears_live("ada"));
         let (texts, values, _) = drain(&mut retention, "ada", now);
         assert_eq!(texts, ["Segment 1."]);
@@ -502,7 +508,7 @@ mod tests {
         // Caught up, she follows live speech again, and does not hear the reply twice.
         assert!(retention.hears_live("ada"));
         retention.left("ada");
-        assert!(!retention.joined("ada", Some(Engagement::Engaged), now));
+        assert!(!retention.joined("ada", Some(Engagement::Engaged)));
     }
 
     #[test]
@@ -510,7 +516,7 @@ mod tests {
         let start = Instant::now();
         let mut retention = Retention::default();
         speak(&mut retention, 1, "m1", 1, 50);
-        retention.joined("ada", Some(Engagement::Engaged), start);
+        retention.joined("ada", Some(Engagement::Engaged));
         let (_, values, end) = drain(&mut retention, "ada", start);
         assert_eq!(values.len(), 50);
         // A second of audio is sent over about a second, only slightly ahead.
@@ -521,16 +527,15 @@ mod tests {
 
     #[test]
     fn someone_who_heard_the_reply_live_is_not_played_it_again() {
-        let now = Instant::now();
         let mut retention = Retention::default();
-        retention.joined("ada", Some(Engagement::Engaged), now);
+        retention.joined("ada", Some(Engagement::Engaged));
         speak(&mut retention, 1, "m1", 1, 5);
         assert!(retention.hears_live("ada"));
         // She takes the headset off and puts it back on, and leaves and comes back.
-        assert!(!retention.engagement("ada", Engagement::Away, now));
-        assert!(!retention.engagement("ada", Engagement::Engaged, now));
+        assert!(!retention.engagement("ada", Engagement::Away));
+        assert!(!retention.engagement("ada", Engagement::Engaged));
         retention.left("ada");
-        assert!(!retention.joined("ada", Some(Engagement::Engaged), now));
+        assert!(!retention.joined("ada", Some(Engagement::Engaged)));
         assert!(retention.hears_live("ada"));
     }
 
@@ -538,19 +543,19 @@ mod tests {
     fn returning_mid_reply_starts_from_the_reply_and_follows_it_without_overlap() {
         let now = Instant::now();
         let mut retention = Retention::default();
-        retention.joined("ada", Some(Engagement::Engaged), now);
-        retention.joined("bob", Some(Engagement::Engaged), now);
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.joined("bob", Some(Engagement::Engaged));
         speak(&mut retention, 1, "m1", 1, 3);
         // Ada takes the headset off part way through the second reply.
         retention.record(2, announce(2, "m2"));
         retention.record(2, frame(2));
-        assert!(!retention.engagement("ada", Engagement::Away, now));
+        assert!(!retention.engagement("ada", Engagement::Away));
         assert!(!retention.hears_live("ada"));
         for _ in 0..20 {
             retention.record(2, frame(3));
         }
         // She puts it back on while the reply is still being spoken.
-        assert!(retention.engagement("ada", Engagement::Engaged, now));
+        assert!(retention.engagement("ada", Engagement::Engaged));
         assert!(!retention.hears_live("ada"));
         assert!(retention.hears_live("bob"));
         let mut deliveries = Vec::new();
@@ -581,7 +586,7 @@ mod tests {
         let mut retention = Retention::default();
         speak(&mut retention, 1, "m1", 1, 3);
         // The spectator, or an older client, joins and never reports engagement.
-        assert!(!retention.joined("spectator", None, now));
+        assert!(!retention.joined("spectator", None));
         assert!(retention.hears_live("spectator"));
         let mut deliveries = Vec::new();
         assert_eq!(retention.pace(now, &mut deliveries), None);
@@ -596,9 +601,9 @@ mod tests {
         retention.record(2, announce(2, "m2"));
         retention.record(2, frame(2));
         // The headset joins mid-reply, and reports that it is worn a moment later.
-        assert!(!retention.joined("ada", None, now));
+        assert!(!retention.joined("ada", None));
         retention.record(2, frame(3));
-        assert!(retention.engagement("ada", Engagement::Engaged, now));
+        assert!(retention.engagement("ada", Engagement::Engaged));
         // She missed the start of the latest reply, so she hears it from its start.
         let (texts, values, _) = drain(&mut retention, "ada", now);
         assert_eq!(texts, ["Segment 2."]);
@@ -606,19 +611,19 @@ mod tests {
 
         // Carol joins between replies and hears the next one live from its start, so her report changes nothing,
         // although she missed earlier replies.
-        assert!(!retention.joined("carol", None, now));
+        assert!(!retention.joined("carol", None));
         retention.record(3, announce(3, "m3"));
         retention.record(3, frame(4));
-        assert!(!retention.engagement("carol", Engagement::Engaged, now));
+        assert!(!retention.engagement("carol", Engagement::Engaged));
         assert!(retention.hears_live("carol"));
 
         // Bob reconnects having heard everything, and his report changes nothing.
-        retention.joined("bob", Some(Engagement::Engaged), now);
+        retention.joined("bob", Some(Engagement::Engaged));
         let mut deliveries = Vec::new();
         retention.pace(now, &mut deliveries);
         retention.left("bob");
-        assert!(!retention.joined("bob", None, now));
-        assert!(!retention.engagement("bob", Engagement::Engaged, now));
+        assert!(!retention.joined("bob", None));
+        assert!(!retention.engagement("bob", Engagement::Engaged));
         assert!(retention.hears_live("bob"));
     }
 
@@ -626,13 +631,13 @@ mod tests {
     fn a_listener_away_before_anything_was_said_stays_away_while_speech_is_kept() {
         let now = Instant::now();
         let mut retention = Retention::default();
-        retention.joined("ada", None, now);
-        retention.engagement("ada", Engagement::Away, now);
+        retention.joined("ada", None);
+        retention.engagement("ada", Engagement::Away);
         speak(&mut retention, 1, "m1", 1, 3);
         speak(&mut retention, 2, "m2", 2, 3);
         speak(&mut retention, 3, "m3", 3, 3);
         assert!(!retention.hears_live("ada"));
-        assert!(retention.engagement("ada", Engagement::Engaged, now));
+        assert!(retention.engagement("ada", Engagement::Engaged));
         let (texts, _, _) = drain(&mut retention, "ada", now);
         assert_eq!(texts, ["Segment 3."]);
     }
@@ -642,10 +647,10 @@ mod tests {
         let now = Instant::now();
         let mut retention = Retention::default();
         speak(&mut retention, 1, "m1", 1, 2);
-        assert!(!retention.joined("ada", Some(Engagement::Away), now));
+        assert!(!retention.joined("ada", Some(Engagement::Away)));
         assert!(!retention.hears_live("ada"));
         // A system menu over the space still counts as listening.
-        assert!(retention.engagement("ada", Engagement::Distracted, now));
+        assert!(retention.engagement("ada", Engagement::Distracted));
         let (_, values, _) = drain(&mut retention, "ada", now);
         assert_eq!(values, [1, 1]);
     }
@@ -654,15 +659,15 @@ mod tests {
     fn a_replay_plays_the_latest_reply_to_one_listener_and_live_speech_stops_it() {
         let now = Instant::now();
         let mut retention = Retention::default();
-        retention.joined("ada", Some(Engagement::Engaged), now);
-        retention.joined("bob", Some(Engagement::Engaged), now);
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.joined("bob", Some(Engagement::Engaged));
         assert_eq!(
-            retention.replay("ada", None, now),
+            retention.replay("ada", None),
             Err("There is no spoken reply to play again yet.")
         );
         speak(&mut retention, 1, "m1", 1, 2);
         speak(&mut retention, 2, "m2", 2, 50);
-        retention.replay("ada", None, now).unwrap();
+        retention.replay("ada", None).unwrap();
         assert!(!retention.hears_live("ada"));
         assert!(retention.hears_live("bob"));
         let mut deliveries = Vec::new();
@@ -675,24 +680,52 @@ mod tests {
         retention.record(3, announce(3, "m3"));
         assert!(retention.hears_live("ada"));
         // An earlier reply can be asked for by its message, while it is kept.
-        retention.replay("bob", Some("m2"), now).unwrap();
+        retention.replay("bob", Some("m2")).unwrap();
         assert!(retention.is_streaming("bob"));
         retention.stop("bob");
         assert!(retention.hears_live("bob"));
         assert_eq!(
-            retention.replay("bob", Some("m1"), now),
+            retention.replay("bob", Some("m1")),
             Err("That reply is no longer kept, so it cannot be played again.")
         );
+    }
+
+    #[test]
+    fn a_replay_is_refused_while_away_and_the_return_still_catches_up() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Away));
+        speak(&mut retention, 1, "m1", 1, 2);
+        assert_eq!(
+            retention.replay("ada", None),
+            Err("Nothing is played to you while you are away.")
+        );
+        assert!(!retention.hears_live("ada"));
+        assert!(retention.engagement("ada", Engagement::Engaged));
+        let (_, values, _) = drain(&mut retention, "ada", now);
+        assert_eq!(values, [1, 1]);
+    }
+
+    #[test]
+    fn clearing_forgets_what_was_kept_and_who_heard_it() {
+        let mut retention = Retention::default();
+        retention.joined("ada", Some(Engagement::Away));
+        speak(&mut retention, 1, "m1", 1, 2);
+        retention.clear();
+        assert_eq!(retention.retained(), (Duration::ZERO, 0));
+        assert!(retention.hears_live("ada"));
+        assert!(retention.replay("ada", None).is_err());
+        assert!(!retention.joined("bob", Some(Engagement::Engaged)));
     }
 
     #[test]
     fn a_replay_while_the_reply_is_still_spoken_follows_it_to_its_end() {
         let now = Instant::now();
         let mut retention = Retention::default();
-        retention.joined("ada", Some(Engagement::Engaged), now);
+        retention.joined("ada", Some(Engagement::Engaged));
         retention.record(1, announce(1, "m1"));
         retention.record(1, frame(1));
-        retention.replay("ada", None, now).unwrap();
+        retention.replay("ada", None).unwrap();
         // More of the same reply is not a later reply, so the replay continues and Ada is not sent it live.
         retention.record(1, frame(2));
         assert!(!retention.hears_live("ada"));
@@ -708,8 +741,8 @@ mod tests {
         speak(&mut retention, 2, "m2", 2, 10);
         speak(&mut retention, 3, "m3", 3, 10);
         assert_eq!(retention.retained(), (Duration::from_millis(400), 2));
-        assert!(retention.replay("ada", Some("m1"), now).is_err());
-        assert!(retention.replay("ada", Some("m2"), now).is_ok());
+        assert!(retention.replay("ada", Some("m1")).is_err());
+        assert!(retention.replay("ada", Some("m2")).is_ok());
 
         // A single reply longer than the bound keeps only its latest five minutes.
         let frames = (RETAINED_AUDIO.as_millis() / 20) as usize + 100;
@@ -718,7 +751,7 @@ mod tests {
         assert_eq!(audio, RETAINED_AUDIO);
         assert_eq!(replies, 1);
         // Catching up starts from the oldest audio still kept.
-        retention.joined("bob", Some(Engagement::Engaged), now);
+        retention.joined("bob", Some(Engagement::Engaged));
         let (texts, values, _) = drain(&mut retention, "bob", now);
         assert!(texts.is_empty(), "the reply's announcement was dropped");
         assert_eq!(values.len(), frames - 100);
@@ -729,7 +762,7 @@ mod tests {
         let now = Instant::now();
         let mut retention = Retention::default();
         speak(&mut retention, 1, "m1", 1, 2);
-        retention.joined("ada", Some(Engagement::Engaged), now);
+        retention.joined("ada", Some(Engagement::Engaged));
         // Two more replies start before she has heard any of the first.
         speak(&mut retention, 2, "m2", 2, 2);
         speak(&mut retention, 3, "m3", 3, 2);
@@ -742,11 +775,11 @@ mod tests {
     fn replayed_frames_continue_one_sequence() {
         let now = Instant::now();
         let mut retention = Retention::default();
-        retention.joined("ada", Some(Engagement::Engaged), now);
+        retention.joined("ada", Some(Engagement::Engaged));
         speak(&mut retention, 1, "m1", 1, 3);
         let mut sequences = Vec::new();
         for _ in 0..2 {
-            retention.replay("ada", None, now).unwrap();
+            retention.replay("ada", None).unwrap();
             let mut clock = now;
             loop {
                 let mut deliveries = Vec::new();
