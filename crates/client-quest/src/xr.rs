@@ -351,7 +351,8 @@ pub fn run(
             back_since = Some(now);
         }
         match back_since {
-            Some(since) if controls.back_held => {
+            // A hold ends with the space it began in, so that it never leaves the next one.
+            Some(since) if controls.back_held && conversation.joined_space().is_some() => {
                 conversation.hold_back(Some(now.duration_since(since)));
             }
             Some(_) => {
