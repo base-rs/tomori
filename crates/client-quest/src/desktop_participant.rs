@@ -263,12 +263,12 @@ impl Head {
         Ray::new(near, far - near)
     }
 
-    /// A right palm held up in front of the participant, facing them, where the transcript shows while it is open.
+    /// A right palm turned up in front of the participant, where the transcript shows while it is open.
     fn right_palm(&self) -> Palm {
         let wrist = arrival::HOME + self.rotation() * Vec3::new(0.05, -0.2, -0.42);
         Palm {
             wrist,
-            normal: (arrival::HOME - wrist).normalize(),
+            normal: Vec3::Y,
         }
     }
 
