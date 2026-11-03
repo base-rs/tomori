@@ -321,6 +321,12 @@ pub enum Event {
     Error {
         message: String,
     },
+    /// The backend's connection to the agent was lost, so events are being missed. The session's state is uncertain
+    /// until [`Event::Resynchronized`] follows, or [`Event::Closed`] if the session cannot be read again. `reason` says
+    /// what happened, for participants.
+    Reconnecting {
+        reason: String,
+    },
     /// The backend lost events, such as when its connection to the agent dropped, and has read the session again.
     /// The snapshot replaces the conversation, running state, modes and pending requests, as when the session was
     /// first opened; requests the snapshot does not list are no longer pending. Events reported after this one follow

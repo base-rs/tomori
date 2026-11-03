@@ -52,6 +52,9 @@ pub struct SpaceModel {
     error: Option<String>,
     /// Worker observation failures are separate from unrelated space errors.
     worker_error: Option<String>,
+    /// The backend reported a lost connection and has not yet read the session again, with the reason it gave. The
+    /// space's state may be stale meanwhile, so no input is released.
+    reconnecting: Option<String>,
 }
 
 #[derive(Debug)]
@@ -186,6 +189,7 @@ impl SpaceModel {
             modes: snapshot.modes,
             error: None,
             worker_error: None,
+            reconnecting: None,
         };
         model.load_messages(snapshot.messages);
         model
@@ -225,7 +229,8 @@ impl SpaceModel {
     /// are replaced. Pending requests the snapshot no longer lists are withdrawn, including any whose decision or
     /// answers are being delivered, since the agent no longer waits for them; those it lists and the space already
     /// holds keep their place and any partial answers, and new ones are queued after them. Workers are left to their
-    /// own events. The error the backend reported for the gap no longer applies, so it is cleared.
+    /// own events. The error the backend reported for the gap no longer applies, so it is cleared, and input is released
+    /// again.
     fn resynchronize(&mut self, snapshot: Snapshot) {
         let Snapshot {
             busy,
@@ -262,7 +267,11 @@ impl SpaceModel {
         for question in questions {
             self.apply(Event::QuestionAsked(question));
         }
-        self.error = None;
+        if let Some(reason) = self.reconnecting.take()
+            && self.error.as_deref() == Some(reason.as_str())
+        {
+            self.error = None;
+        }
     }
 
     pub fn activity(&self) -> Activity {
@@ -458,6 +467,12 @@ impl SpaceModel {
             Event::Error { message } => {
                 self.error = Some(message);
             }
+            Event::Reconnecting { reason } => {
+                if !self.closed {
+                    self.error = Some(reason.clone());
+                    self.reconnecting = Some(reason);
+                }
+            }
             Event::Resynchronized { snapshot } => {
                 if !self.closed {
                     self.resynchronize(snapshot);
@@ -465,6 +480,7 @@ impl SpaceModel {
             }
             Event::Closed { reason } => {
                 self.closed = true;
+                self.reconnecting = None;
                 self.workers_authoritative = false;
                 self.worker_error = None;
                 self.busy = None;
@@ -520,7 +536,11 @@ impl SpaceModel {
 
     /// The next prompt to deliver, if the agent is idle, nothing is pending and input is queued. Marks the entry as sending.
     pub fn next_prompt(&mut self) -> Option<Prompt> {
-        if self.closed || self.activity() != Activity::Idle || self.in_flight.is_some() {
+        if self.closed
+            || self.reconnecting.is_some()
+            || self.activity() != Activity::Idle
+            || self.in_flight.is_some()
+        {
             return None;
         }
         let attribution = self.attribution;
@@ -903,9 +923,13 @@ mod tests {
         space.questions[0]
             .answers
             .push(("field".into(), AnswerValue::Text("partly".into())));
-        space.apply(Event::Error {
-            message: "Lost the connection to OpenCode; reconnecting.".into(),
+        space.apply(Event::Reconnecting {
+            reason: "Lost the connection to OpenCode; reconnecting.".into(),
         });
+        assert_eq!(
+            space.state(Vec::new()).error.as_deref(),
+            Some("Lost the connection to OpenCode; reconnecting.")
+        );
 
         space.apply(Event::Resynchronized {
             snapshot: Snapshot {
@@ -963,6 +987,30 @@ mod tests {
         assert!(space.questions.is_empty());
         assert_eq!(space.activity(), Activity::Idle);
         assert!(space.state(Vec::new()).messages.is_empty());
+
+        // While reconnecting, the state may be stale, so queued input waits
+        // for the session to be read again. An error that is not the gap's
+        // stays visible.
+        assert!(space.enqueue("u1".into(), "ada".into(), "Ada".into(), "hello".into()));
+        space.apply(Event::Reconnecting {
+            reason: "Lost the connection.".into(),
+        });
+        space.apply(Event::Error {
+            message: "The agent execution failed.".into(),
+        });
+        assert!(space.next_prompt().is_none());
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                busy: Some(false),
+                ..Snapshot::default()
+            },
+        });
+        assert_eq!(
+            space.state(Vec::new()).error.as_deref(),
+            Some("The agent execution failed.")
+        );
+        assert_eq!(space.next_prompt().unwrap().key, "u1");
+        space.sent("u1", Ok(()));
 
         // A tool start repeated after the state it was read with is not added twice.
         space.apply(Event::Resynchronized {

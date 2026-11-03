@@ -124,8 +124,19 @@ pub fn resolve_from(
             return resolved;
         }
     }
-    if let Some(resolved) = service_file.and_then(read_service_file_at) {
-        return resolved;
+    if let Some(path) = service_file {
+        if let Some(resolved) = read_service_file_at(path) {
+            return resolved;
+        }
+        // A file that exists but cannot be read may be mid-rewrite by a
+        // restarting service; read it once more before falling back to the
+        // default, where another service may be listening.
+        if path.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Some(resolved) = read_service_file_at(path) {
+                return resolved;
+            }
+        }
     }
     resolve_url(DEFAULT_URL).expect("the default URL is well-formed")
 }
