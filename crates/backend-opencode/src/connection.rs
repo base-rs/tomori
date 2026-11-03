@@ -455,6 +455,14 @@ pub struct Registration {
     listings: u8,
     /// Set from a lost event stream until the session has been read again.
     resync: Option<Resync>,
+    /// Messages a read after reconnecting listed while they were still being
+    /// written: text streamed while the stream was down is in no event, so
+    /// each is read again once it ends, when OpenCode records its text.
+    restoring: HashSet<String>,
+    /// Messages that have ended and wait to be read again, and whether that
+    /// read is running.
+    restore_due: Vec<String>,
+    restore_in_flight: bool,
 }
 
 impl Resync {
@@ -559,6 +567,9 @@ impl Registration {
                 directory: String::new(),
                 listings: LISTINGS,
                 resync: None,
+                restoring: HashSet::new(),
+                restore_due: Vec::new(),
+                restore_in_flight: false,
             },
             rx,
         )
@@ -649,6 +660,17 @@ impl Registration {
             }
         }
         self.children.remove(id).is_some()
+    }
+
+    /// Deliver an ordinary event, noting when a message whose text was partly
+    /// missed while reconnecting has ended, so that it is read again.
+    fn deliver_content(&mut self, event: Event) {
+        if let Event::MessageCompleted { message } = &event
+            && self.restoring.remove(message)
+        {
+            self.restore_due.push(message.clone());
+        }
+        self.events.deliver(event);
     }
 
     fn publish_modes(&mut self) {
@@ -901,6 +923,13 @@ impl SnapshotReply {
     }
 }
 
+/// Messages read again once they ended, as OpenCode recorded them.
+struct RestoreResult {
+    id: String,
+    registration: Arc<AtomicU64>,
+    messages: Vec<backend::SnapshotMessage>,
+}
+
 struct ResyncResult {
     id: String,
     registration: Arc<AtomicU64>,
@@ -933,6 +962,10 @@ impl CommandReceiver {
             return Ok(Command::Shutdown);
         }
         self.rx.recv().await
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
     }
 
     /// Finishes once the backend is shutting down, so that a command being
@@ -1496,6 +1529,7 @@ impl<F: Future> futures_core::FusedFuture for Fused<F> {
 
 type SnapshotFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = SnapshotResult> + 'a>>>;
 type ResyncFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = ResyncResult> + 'a>>>;
+type RestoreFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = RestoreResult> + 'a>>>;
 
 /// Open the server's global event stream, then serve it and the commands,
 /// alternating reads over the stream, command channel reads and a periodic
@@ -1548,6 +1582,7 @@ async fn connected<S: Timers>(
     let mut reconcile_offset = 0usize;
     let mut snapshots: SnapshotFutures<'_> = FuturesUnordered::new();
     let mut resyncs: ResyncFutures<'_> = FuturesUnordered::new();
+    let mut restores: RestoreFutures<'_> = FuturesUnordered::new();
     let mut reconciliations: FuturesUnordered<Pin<Box<dyn Future<Output = ReconcileResult> + '_>>> =
         FuturesUnordered::new();
     // The stream is open, so whatever happens from now on is observed: read
@@ -1563,6 +1598,10 @@ async fn connected<S: Timers>(
     );
 
     let outcome = loop {
+        // Once shutting down, no further command is started, held or not.
+        if commands.is_stopping() {
+            break Outcome::Shutdown;
+        }
         retry_worker_delivery(registrations);
         // Commands that waited for this connection are performed first, in
         // order.
@@ -1614,6 +1653,20 @@ async fn connected<S: Timers>(
                         }
                         // A slot is free: start the next waiting session at once.
                         start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                        start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                        continue;
+                    }
+                    completed = Fused::new(async {
+                        if restores.is_empty() {
+                            std::future::pending::<Option<RestoreResult>>().await
+                        } else {
+                            restores.next().await
+                        }
+                    }) => {
+                        if let Some(completed) = completed {
+                            finish_restore(registrations, completed);
+                        }
+                        start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
                         continue;
                     }
                     completed = Fused::new(async {
@@ -1660,6 +1713,7 @@ async fn connected<S: Timers>(
                                 dispatch_events_at(&payload, registrations, number);
                                 }
                             }
+                            start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
                         }
                         if end {
                             break Outcome::Lost("ended".to_owned());
@@ -1742,13 +1796,15 @@ async fn connected<S: Timers>(
             cancellation,
             timers,
         ) {
+            // The stop is polled first, so a request is not even started once
+            // shutting down.
             let stopped = commands.stopped();
-            match futures_util::future::select(request, std::pin::pin!(stopped)).await {
-                futures_util::future::Either::Left((Some(completion), _)) => {
+            match futures_util::future::select(std::pin::pin!(stopped), request).await {
+                futures_util::future::Either::Left(_) => break Outcome::Shutdown,
+                futures_util::future::Either::Right((Some(completion), _)) => {
                     complete(completion, registrations);
                 }
-                futures_util::future::Either::Left((None, _)) => {}
-                futures_util::future::Either::Right(_) => break Outcome::Shutdown,
+                futures_util::future::Either::Right((None, _)) => {}
             }
         }
     };
@@ -2024,11 +2080,20 @@ fn finish_resync(
             registration.running = running;
             registration.event_revision = registration.event_revision.wrapping_add(1);
             registration.modes_dirty = false;
+            registration.restoring.extend(
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.completed && message.role == backend::Role::Assistant
+                    })
+                    .map(|message| message.id.clone()),
+            );
             registration
                 .events
                 .deliver(Event::Resynchronized { snapshot });
             for event in held {
-                registration.events.deliver(event);
+                registration.deliver_content(event);
             }
             registration.publish_workers();
             return;
@@ -2053,6 +2118,85 @@ fn finish_resync(
         }
     };
     end_registration(registrations, &completed.id, Some(reason));
+}
+
+/// Read again, once each, the messages that ended after a read listed them
+/// still being written, at most [`MAX_RESYNCS`] sessions at once. OpenCode
+/// records a message's text when it ends, so this recovers what was streamed
+/// while the event stream was down. Each read is isolated and bounded like a
+/// snapshot; one that fails leaves the text the space already has.
+fn start_restores<'a, S: Timers>(
+    registrations: &mut HashMap<String, Registration>,
+    restores: &mut RestoreFutures<'a>,
+    client: &'a Client<'_>,
+    resolved: &'a Resolved,
+    cancellation: &'a Cancellation,
+    timers: &'a S,
+) {
+    for (id, registration) in registrations.iter_mut() {
+        if restores.len() >= MAX_RESYNCS {
+            break;
+        }
+        if registration.restore_in_flight || registration.restore_due.is_empty() {
+            continue;
+        }
+        registration.restore_in_flight = true;
+        let wanted = std::mem::take(&mut registration.restore_due);
+        let identity = registration.events.worker_epoch.clone();
+        let id = id.clone();
+        let local = cancellation.child();
+        restores.push(Box::pin(async move {
+            let listed = futures_lite::future::race(
+                async {
+                    api::session_messages(client, resolved, &id, &local)
+                        .await
+                        .ok()
+                        .map(|value| snapshot_messages(&value))
+                },
+                async {
+                    let _ = timers.sleep(SNAPSHOT_TIMEOUT, &local).await;
+                    None
+                },
+            )
+            .await;
+            local.cancel();
+            let messages = listed
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|message| message.completed && wanted.contains(&message.id))
+                .collect();
+            RestoreResult {
+                id,
+                registration: identity,
+                messages,
+            }
+        }));
+    }
+}
+
+/// Deliver the messages read again once they ended, after any events already
+/// delivered for them, or hold them if the stream has been lost meanwhile.
+fn finish_restore(registrations: &mut HashMap<String, Registration>, completed: RestoreResult) {
+    let Some(registration) = registrations.get_mut(&completed.id).filter(|registration| {
+        Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
+    }) else {
+        return;
+    };
+    registration.restore_in_flight = false;
+    for message in completed.messages {
+        let event = Event::MessageRestored { message };
+        match registration.resync.as_mut() {
+            // A read after the next connection lists the message completed,
+            // with its text, so the restore is not needed then; holding it
+            // keeps it if that read fails to.
+            Some(resync) => {
+                let _ = resync.hold(u64::MAX, event);
+            }
+            None => {
+                registration.events.deliver(event);
+            }
+        }
+    }
 }
 
 /// Whether the conversation `snapshot` lists already shows `event`. OpenCode
@@ -2198,14 +2342,13 @@ fn dispatch_events_at(
                     overflowed = Some(session_id.clone());
                 }
             }
-        } else if let Some(event) = wire::event_for(
-            &value,
-            &session_id,
-            &mut registration
+        } else if let Some(event) = {
+            let mut seen = registration
                 .seen
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        ) {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            wire::event_for(&value, &session_id, &mut seen)
+        } {
             let running = match &event {
                 Event::Busy => Some(RunningState::Running),
                 Event::Idle => Some(RunningState::Idle),
@@ -2216,7 +2359,7 @@ fn dispatch_events_at(
                     registration.running = running;
                 }
             } else {
-                registration.events.deliver(event);
+                registration.deliver_content(event);
             }
         }
     }
@@ -5859,6 +6002,45 @@ mod tests {
             .collect();
         assert_eq!(streamed, "Streamed so far", "{seen:?}");
         assert!(!listed("p").completed);
+
+        // When "p" ends, OpenCode records its whole text, including what was
+        // streamed while the event stream was down, and the space gets it.
+        let recorded = "Before the gap. During it. Streamed so far.";
+        shared.update(|state| {
+            state.messages.insert(
+                "s1".into(),
+                json!([
+                    {"id":"m","type":"assistant","content":[{"type":"text","text":"Hello"}],"time":{"completed":2}},
+                    {"id":"p","type":"assistant","content":[{"type":"text","text":recorded}],"time":{"completed":3}},
+                ]),
+            );
+        });
+        second.send(text("p", "session.text.ended", None));
+        let seen = until(&watched, "the restored message", |event| {
+            matches!(event, Event::MessageRestored { .. })
+        });
+        let Some(Event::MessageRestored { message }) = seen.last() else {
+            unreachable!()
+        };
+        assert_eq!(message.id, "p");
+        assert!(message.completed);
+        assert_eq!(
+            message.parts,
+            [backend::Part::Text {
+                text: recorded.into()
+            }]
+        );
+        // Only messages the read listed unfinished are read again.
+        second.send(text("n", "session.text.ended", None));
+        until(
+            &watched,
+            "the other message's end",
+            |event| matches!(event, Event::MessageCompleted { message } if message == "n"),
+        );
+        assert!(
+            watched.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a message the read did not list unfinished was restored"
+        );
         drop(commands);
         join_within(connection, Duration::from_secs(5));
         drop(second);
@@ -6470,6 +6652,51 @@ mod tests {
         );
         assert_eq!(delivered.len(), 5, "{delivered:?}");
     }
+    #[test]
+    fn a_restore_after_another_loss_is_held_until_the_session_is_read() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.restoring.insert("p".into());
+        // "p" ends live, so it is due to be read again.
+        dispatch_events(
+            &json!({"type":"session.text.ended","data":{"sessionID":"s","assistantMessageID":"p"}})
+                .to_string(),
+            &mut registrations,
+        );
+        assert_eq!(registrations["s"].restore_due, ["p"]);
+        assert!(registrations["s"].restoring.is_empty());
+        while events.try_recv().is_ok() {}
+        // The stream is lost before the read returns.
+        connection_lost(&mut registrations);
+        while events.try_recv().is_ok() {}
+        let identity = registrations["s"].events.worker_epoch.clone();
+        registrations.get_mut("s").unwrap().restore_in_flight = true;
+        let restored = backend::SnapshotMessage {
+            id: "p".into(),
+            role: backend::Role::Assistant,
+            parts: vec![backend::Part::Text {
+                text: "All of it".into(),
+            }],
+            completed: true,
+        };
+        finish_restore(
+            &mut registrations,
+            RestoreResult {
+                id: "s".into(),
+                registration: identity,
+                messages: vec![restored.clone()],
+            },
+        );
+        assert!(events.try_recv().is_err(), "delivered ahead of the read");
+        assert!(!registrations["s"].restore_in_flight);
+        assert!(matches!(
+            registrations["s"].resync.as_ref().unwrap().events.last(),
+            Some((_, Event::MessageRestored { message })) if *message == restored
+        ));
+    }
+
     #[test]
     fn closing_during_a_read_cancels_it_and_ignores_its_result() {
         let mut registrations = HashMap::new();

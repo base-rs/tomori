@@ -335,6 +335,11 @@ pub enum Event {
     Resynchronized {
         snapshot: Snapshot,
     },
+    /// A message whose streamed text was partly missed while the backend reconnected, as the agent recorded it once
+    /// it ended. It replaces that message's text and tools; a message the space does not hold is ignored.
+    MessageRestored {
+        message: SnapshotMessage,
+    },
     /// The session ended and produces no more events.
     Closed {
         reason: Option<String>,

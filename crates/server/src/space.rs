@@ -120,6 +120,32 @@ fn role(role: backend::Role) -> protocol::Role {
     }
 }
 
+/// A snapshot message as the space shows it: its text parts joined, and its tool calls.
+fn message_model(message: backend::SnapshotMessage) -> MessageModel {
+    let mut text = Vec::new();
+    let mut tools = Vec::new();
+    for part in message.parts {
+        match part {
+            Part::Text { text: part } => text.push(part),
+            Part::Reasoning { .. } => {}
+            Part::Tool {
+                id, tool, finished, ..
+            } => tools.push(ToolModel {
+                id,
+                name: tool,
+                state: if finished { "done" } else { "working" },
+            }),
+        }
+    }
+    MessageModel {
+        id: message.id,
+        role: role(message.role),
+        text: text.join("\n\n"),
+        tools,
+        completed: message.completed,
+    }
+}
+
 /// Project a backend worker. A worker whose parent is the space's own session is reported without a parent, so clients need not know the backend's session identifier.
 fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
     use backend::WorkerState as From;
@@ -207,28 +233,7 @@ impl SpaceModel {
         self.messages.clear();
         self.user_messages.clear();
         for message in messages {
-            let mut text = Vec::new();
-            let mut tools = Vec::new();
-            for part in message.parts {
-                match part {
-                    Part::Text { text: part } => text.push(part),
-                    Part::Reasoning { .. } => {}
-                    Part::Tool {
-                        id, tool, finished, ..
-                    } => tools.push(ToolModel {
-                        id,
-                        name: tool,
-                        state: if finished { "done" } else { "working" },
-                    }),
-                }
-            }
-            self.push_message(MessageModel {
-                id: message.id,
-                role: role(message.role),
-                text: text.join("\n\n"),
-                tools,
-                completed: message.completed,
-            });
+            self.push_message(message_model(message));
         }
     }
 
@@ -247,7 +252,26 @@ impl SpaceModel {
             workers: _,
             modes,
         } = snapshot;
+        // The agent keeps a message's text in its records only once the message ends, so a message read again while
+        // it is still being written may list less text than the space already shows. Keep what the space has; the
+        // text it missed while disconnected is restored when the message ends.
+        let shown: Vec<(String, String)> = self
+            .messages
+            .iter()
+            .map(|message| (message.id.clone(), message.text.clone()))
+            .collect();
         self.load_messages(messages);
+        for message in self
+            .messages
+            .iter_mut()
+            .filter(|message| !message.completed)
+        {
+            if let Some((_, text)) = shown.iter().find(|(id, _)| *id == message.id)
+                && text.starts_with(message.text.as_str())
+            {
+                message.text.clone_from(text);
+            }
+        }
         if busy.is_some() {
             self.busy = busy;
         }
@@ -505,6 +529,15 @@ impl SpaceModel {
                     self.error = Some(reason.clone());
                     self.reconnecting = Some(reason);
                     self.settled.clear();
+                }
+            }
+            Event::MessageRestored { message } => {
+                if let Some(index) = self
+                    .messages
+                    .iter()
+                    .rposition(|shown| shown.id == message.id)
+                {
+                    self.messages[index] = message_model(message);
                 }
             }
             Event::Resynchronized { snapshot } => {
@@ -1144,6 +1177,68 @@ mod tests {
             },
         });
         assert_eq!(space.approvals.len(), 1);
+    }
+
+    #[test]
+    fn text_shown_before_a_reconnect_is_kept_until_the_message_is_restored() {
+        let mut space = model();
+        space.apply(Event::MessageStarted {
+            message: "p".into(),
+            role: backend::Role::Assistant,
+        });
+        space.apply(Event::TextDelta {
+            message: "p".into(),
+            text: "Before the gap. ".into(),
+        });
+        space.apply(Event::Reconnecting {
+            reason: "Lost the connection.".into(),
+        });
+        // Read again while "p" is still being written: the agent keeps no text
+        // for it yet, so the listing has an empty text part.
+        let listed = |text: &str, completed: bool| backend::SnapshotMessage {
+            id: "p".into(),
+            role: backend::Role::Assistant,
+            parts: vec![Part::Text { text: text.into() }],
+            completed,
+        };
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                messages: vec![listed("", false)],
+                ..Snapshot::default()
+            },
+        });
+        assert_eq!(space.messages[0].text, "Before the gap. ");
+        // Text streamed after reconnecting follows it; what was streamed while
+        // disconnected is missing until the message ends and is restored.
+        space.apply(Event::TextDelta {
+            message: "p".into(),
+            text: "After.".into(),
+        });
+        space.apply(Event::MessageCompleted {
+            message: "p".into(),
+        });
+        space.apply(Event::MessageRestored {
+            message: listed("Before the gap. During it. After.", true),
+        });
+        assert_eq!(space.messages.len(), 1);
+        assert_eq!(space.messages[0].text, "Before the gap. During it. After.");
+        assert!(space.messages[0].completed);
+        // Listed text that differs from what is shown replaces it.
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                messages: vec![listed("Other", false)],
+                ..Snapshot::default()
+            },
+        });
+        assert_eq!(space.messages[0].text, "Other");
+        // A restored message the space does not hold is ignored.
+        space.apply(Event::MessageRestored {
+            message: backend::SnapshotMessage {
+                id: "unknown".into(),
+                ..listed("x", true)
+            },
+        });
+        assert_eq!(space.messages.len(), 1);
     }
 
     #[test]
