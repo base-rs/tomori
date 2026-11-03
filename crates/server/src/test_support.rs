@@ -393,6 +393,7 @@ impl TestClient {
     pub fn say(&mut self, utterance: &str, text: &str) {
         self.send(&ClientMessage::UtteranceBegin {
             utterance: utterance.to_owned(),
+            answer: None,
         });
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {

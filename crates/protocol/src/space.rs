@@ -161,6 +161,9 @@ pub struct SpaceState {
     /// [`crate::ClientMessage::SetSpeech`]; a client sends those only to such a server. See `design/speech.md`.
     #[serde(default)]
     pub speech: SpeechSetting,
+    /// Whether the server applies an utterance marked with [`crate::AnswerTarget`] as the answer to the presented question, rather than queueing it. False from older servers, which would queue it; a client marks an utterance as an answer only when this is set. See `design/spaces.md`.
+    #[serde(default)]
+    pub voice_answers: bool,
 }
 
 /// How much of each reply a space speaks. See `design/speech.md`.

@@ -379,7 +379,12 @@ struct SpaceRecord {
     speech: Retention,
     /// Wakes the space's speech pacer, so that it paces a replay or catch-up that just started.
     waker: Option<Box<dyn Fn() + Send>>,
+    /// The keys and texts of the latest spoken answers applied, so that a repeated finalization of one is acknowledged rather than answered again; see [`ANSWERED`].
+    answered: std::collections::VecDeque<(String, String)>,
 }
+
+/// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
+const ANSWERED: usize = 16;
 
 impl SpaceRecord {
     /// Note when the space's attention changed level, at `now`.
@@ -418,6 +423,8 @@ struct UtteranceRecord {
     source: u32,
     client: String,
     space: String,
+    /// The question and field the transcript answers, rather than being queued.
+    answer: Option<protocol::AnswerTarget>,
 }
 
 /// A transcriber call to make once the lock is released.
@@ -885,6 +892,35 @@ impl HubState {
         for (_, key) in departed.into_iter().take(excess) {
             self.participants.remove(&key);
         }
+    }
+
+    /// Answer the current field of `space`'s presented question as `participant`, sending the answers to the agent once the question is complete.
+    fn answer(
+        &mut self,
+        participant: &str,
+        space: &str,
+        question: &str,
+        field: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        let record = self.space_mut(space).ok_or("Join a space first.")?;
+        match record.model.answer(question, field, text)? {
+            AnswerOutcome::Recorded => {}
+            AnswerOutcome::Complete(answers) => {
+                let sent = record.commands.try_send(SpaceCommand::Answer {
+                    question: question.to_owned(),
+                    answers,
+                    participant: participant.to_owned(),
+                });
+                if sent.is_err() {
+                    record.model.restore_question(question);
+                    self.touch_space(space);
+                    return Err("The agent session has stopped.".to_owned());
+                }
+            }
+        }
+        self.touch_space(space);
+        Ok(())
     }
 
     /// The greeted participant of a connection and their current space.
@@ -1819,10 +1855,21 @@ impl Hub {
             ClientMessage::Gate { .. } => {
                 // Each audio frame carries its own gate; the announcement needs no state yet.
             }
-            ClientMessage::UtteranceBegin { utterance } => {
-                if let Err(error) =
+            ClientMessage::UtteranceBegin { utterance, answer } => {
+                let checked =
                     limits::check(&utterance, limits::UTTERANCE_BYTES, "utterance identifier")
-                {
+                        .and_then(|()| match &answer {
+                            Some(target) => limits::check(
+                                &target.question,
+                                limits::IDENTIFIER_BYTES,
+                                "question",
+                            )
+                            .and_then(|()| {
+                                limits::check(&target.field, limits::IDENTIFIER_BYTES, "field")
+                            }),
+                            None => Ok(()),
+                        });
+                if let Err(error) = checked {
                     state.error(participant, error);
                     return;
                 }
@@ -1850,6 +1897,7 @@ impl Hub {
                         source: state.participants[participant].source,
                         client: utterance.clone(),
                         space,
+                        answer,
                     },
                 );
                 let record = state
@@ -1972,22 +2020,8 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
-                let record = state.space_mut(&space).expect("checked above");
-                match record.model.answer(&question, &field, &text) {
-                    Ok(AnswerOutcome::Recorded) => state.touch_space(&space),
-                    Ok(AnswerOutcome::Complete(answers)) => {
-                        let sent = record.commands.try_send(SpaceCommand::Answer {
-                            question: question.clone(),
-                            answers,
-                            participant: participant.to_owned(),
-                        });
-                        if sent.is_err() {
-                            record.model.restore_question(&question);
-                            state.error(participant, "The agent session has stopped.");
-                        }
-                        state.touch_space(&space);
-                    }
-                    Err(error) => state.error(participant, error),
+                if let Err(error) = state.answer(participant, &space, &question, &field, &text) {
+                    state.error(participant, error);
                 }
             }
             ClientMessage::Presence {
@@ -2419,9 +2453,20 @@ impl Hub {
         let text = text.trim();
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
+        // A repeated finalization of an answer already applied is acknowledged in the same way.
+        let answered = record.answer.as_ref().and_then(|_| {
+            state.space(&record.space).and_then(|space| {
+                space
+                    .answered
+                    .iter()
+                    .find(|(answered, _)| *answered == key)
+                    .map(|(_, text)| text.as_str())
+            })
+        });
         if let Some(queued) = state
             .space(&record.space)
             .and_then(|space| space.model.queued_text(&key))
+            .or(answered)
         {
             let text = queued.to_owned();
             state.send(
@@ -2441,7 +2486,13 @@ impl Hub {
             Some("The agent session has ended, so nothing was sent.")
         } else if text.is_empty() {
             Some("Nothing was heard, so nothing was sent.")
-        } else if text.len() > limits::QUEUED_TEXT_BYTES {
+        } else if text.len()
+            > if record.answer.is_some() {
+                limits::ANSWER_BYTES
+            } else {
+                limits::QUEUED_TEXT_BYTES
+            }
+        {
             Some("The recording was too long, so nothing was sent. Please say it in shorter parts.")
         } else if state
             .participants
@@ -2449,9 +2500,10 @@ impl Hub {
             .is_none_or(|participant| participant.space.as_deref() != Some(&record.space))
         {
             Some("You left the space before the transcript was ready, so nothing was sent.")
-        } else if state
-            .space(&record.space)
-            .is_some_and(|space| space.model.waiting() >= limits::QUEUED_ENTRIES)
+        } else if record.answer.is_none()
+            && state
+                .space(&record.space)
+                .is_some_and(|space| space.model.waiting() >= limits::QUEUED_ENTRIES)
         {
             Some("The queue is full, so nothing was sent. Please wait for the agent to catch up.")
         } else {
@@ -2465,6 +2517,36 @@ impl Hub {
                     error: error.to_owned(),
                 },
             );
+            return;
+        }
+        // A spoken answer goes to the presented question, never into the queue, where it would wait behind the question it answers. See `design/spaces.md`.
+        if let Some(target) = &record.answer {
+            let message = match state.answer(
+                &record.participant,
+                &record.space,
+                &target.question,
+                &target.field,
+                text,
+            ) {
+                Ok(()) => {
+                    if let Some(space) = state.space_mut(&record.space) {
+                        if space.answered.len() == ANSWERED {
+                            space.answered.pop_front();
+                        }
+                        space.answered.push_back((key.clone(), text.to_owned()));
+                    }
+                    ServerMessage::Transcript {
+                        utterance: record.client,
+                        text: text.to_owned(),
+                        finished: true,
+                    }
+                }
+                Err(error) => ServerMessage::TranscriptFailed {
+                    utterance: record.client,
+                    error: limits::truncate(&error, limits::ERROR_BYTES),
+                },
+            };
+            state.send(&record.participant, message);
             return;
         }
         let speaker = state.participants[&record.participant].name.clone();
@@ -2551,6 +2633,7 @@ impl Hub {
             attention: Cell::new(None),
             speech: Retention::default(),
             waker: None,
+            answered: std::collections::VecDeque::new(),
         });
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
@@ -2650,6 +2733,7 @@ impl Hub {
                     attention: Cell::new(None),
                     speech: Retention::default(),
                     waker: None,
+                    answered: std::collections::VecDeque::new(),
                 });
             }
             for id in closed {

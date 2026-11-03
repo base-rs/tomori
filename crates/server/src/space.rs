@@ -958,6 +958,7 @@ impl SpaceModel {
             visitors: self.visitors.len(),
             attribution: self.attribution,
             speech: self.speech,
+            voice_answers: true,
             error: match (&self.error, &self.worker_error) {
                 (Some(error), Some(worker_error)) => Some(format!("{error} {worker_error}")),
                 (Some(error), None) => Some(error.clone()),

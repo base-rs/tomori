@@ -273,6 +273,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
 
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["run", "the"]);
     let partial = ada.wait_for(|message| match message {
@@ -467,6 +468,7 @@ fn a_recognizer_failure_fails_the_utterance() {
     ada.create_space("Failure");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["please", "fail"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -500,6 +502,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     ada.create_space("Failure");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["please", "fail", "please", "please"]);
     // Still recording: the failure arrives before any end.
@@ -514,6 +517,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     // The client forgets it without cancelling, as the server has closed it; the next utterance neither fails it again nor is refused.
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
+        answer: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -541,6 +545,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     ada.create_space("Crash");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["crash"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -561,6 +566,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     // Later utterances fail visibly too, saying the same, rather than waiting forever.
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
+        answer: None,
     });
     speak(&mut ada, &["run"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -580,6 +586,7 @@ fn an_utterance_that_cannot_start_fails_visibly() {
     ada.create_space("Refused");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -597,9 +604,11 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
     let (mut ada, mut bob) = pair(&server);
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "a1".into(),
+        answer: None,
     });
     bob.send(&ClientMessage::UtteranceBegin {
         utterance: "b1".into(),
+        answer: None,
     });
     speak(&mut bob, &["run", "the"]);
     speak(&mut ada, &["please", "fail"]);
@@ -623,6 +632,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
     ada.create_space("Cancel");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["please", "please"]);
     // Recognition is under way: a partial has arrived.
@@ -640,6 +650,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
     });
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
+        answer: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -670,6 +681,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     ada.create_space("Gap");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak(&mut ada, &["run"]);
     ada.skip_sequence(2);
@@ -682,6 +694,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     // The next utterance is transcribed, and only it reaches the agent.
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
+        answer: None,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -770,6 +783,7 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
     });
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u3".into(),
+        answer: None,
     });
     ada.send_audio(Gate::Agent, vec![0; 320]);
     ada.send(&ClientMessage::UtteranceCancel {
@@ -1030,6 +1044,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
     ada.create_space("Long");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     speak_steadily(&mut ada, 65);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -1057,6 +1072,7 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
     ada.create_space("Too long");
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
+        answer: None,
     });
     // One second more than the limit; the failure arrives before the utterance ends.
     speak_steadily(&mut ada, speech::stt::MAX_UTTERANCE / RATE as usize + 1);

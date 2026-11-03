@@ -66,12 +66,13 @@ Before you join a space, servers, spaces and the **New space** object stand in t
 - **Servers:** point and pull, or flick the left stick up/down and press **A**, to connect; **Y** searches again. A server with an incompatible protocol is shown, grey, with its version, but can't be chosen.
 - **Spaces:** the spaces and the **New space** object are shown together; with no spaces, only **New space** is. Choose a space to join it. Choose the connected server, on the left, or press **B**, to return to the servers; **B** first dismisses an error or a note that a space has ended. **Y** lists again.
 - **New space:** choosing it opens rings of choices around it, one at a time: the backend, then the folder, then, for a backend that can attach, a new session or one of its existing sessions in that folder. **B**, or choosing the centre object again, steps back to the previous ring. **Y** lists the sessions again.
-- **In a space:** flick the left stick up/down to page through text and left/right to move between messages; the queue follows the last message. **Y** steps to the agent's next mode, or fetches the space again when it offers none.
+- **In a space:** the panel stands in front of you and stays put while you look around; turn or walk away for a second and it glides back in front of you. Flick the left stick up/down to page through text and left/right to move between messages. Problems have their own line, marked **!** with how long ago they happened, and stay until **B** dismisses them or a newer one replaces them. The queue has its own strip at the bottom: flick the right stick up/down to select an entry, anyone's, and press **A** to cancel it; **A** again within 3 seconds undoes that.
+- **Y:** open the list of the agent's modes, with their descriptions, and the space's speech setting (brief or full); choose one with the left stick and **A**. **Y** or **B** closes it. A space with neither fetches its state again.
 - **Right stick click:** play the latest spoken reply again from its start, to you only; click again to stop it and follow live speech. A reply that starts meanwhile stops it, and plays live.
 - **Left stick click:** mute or unmute spoken replies for you only; the status line shows **Muted**. Other participants still play.
-- **Pending approval:** flick the right stick left/right to choose *allow once* or a standing option, then press **A**; **B** denies. Nothing is decided without a press.
-- **Pending question:** answer it on the PC for now.
-- **B:** deny a pending approval, otherwise cancel your newest queued entry, otherwise leave the space.
+- **Pending approval:** flick the right stick left/right to choose *allow once*, a standing option or *deny*, then press **A**. Nothing is decided without a press, and **B** never decides.
+- **Pending question:** hold **X** and say your answer, or its number; it goes to the question rather than the queue. A question Tomori can't present says to answer it on the PC.
+- **B:** close the list, deselect a queue entry, or dismiss the problem shown. It never denies, cancels or leaves. **Hold B** for a second to leave the space.
 - **Hold X:** talk to the agent; release to send. See [Voice](#voice).
 
 The server keeps the conversation: after a dropped connection the headset reconnects and rejoins the space by itself. If the space is gone, as after the server restarts, the headset returns to the space list.

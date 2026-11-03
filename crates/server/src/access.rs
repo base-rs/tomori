@@ -145,6 +145,7 @@ mod tests {
             ClientMessage::Gate { gate: Gate::Live },
             ClientMessage::UtteranceBegin {
                 utterance: "u".into(),
+                answer: None,
             },
             ClientMessage::UtteranceEnd {
                 utterance: "u".into(),

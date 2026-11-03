@@ -121,6 +121,7 @@ fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() 
     outbox
         .send(ClientMessage::UtteranceBegin {
             utterance: "new".into(),
+            answer: None,
         })
         .unwrap();
     let mut agent = audio(5);
@@ -485,6 +486,7 @@ fn agent(sequence: u32) -> AudioFrame {
 fn begin(utterance: &str) -> ClientMessage {
     ClientMessage::UtteranceBegin {
         utterance: utterance.into(),
+        answer: None,
     }
 }
 

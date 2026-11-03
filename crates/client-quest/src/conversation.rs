@@ -27,6 +27,19 @@ const BODY_ROWS: usize = ROWS - 4;
 /// Said when a visitor tries to talk or act in the space they are watching. See `design/security.md`.
 const VISITING: &str = "Visitors can watch and listen, but not talk or act here.";
 
+/// How long B must be held to leave a space, so that a press meant for something else never leaves. See `design/interaction.md`.
+pub const LEAVE_HOLD: Duration = Duration::from_secs(1);
+
+/// How long a queued entry's cancellation can be undone before it is sent.
+pub const CANCEL_UNDO: Duration = Duration::from_secs(3);
+
+/// How long A does nothing after an approval or question appears, so that a press meant for what was shown before it, such as undoing a cancellation, never decides it.
+pub const REQUEST_GRACE: Duration = Duration::from_millis(600);
+
+/// The most panel rows the problem line and the queue strip each take.
+const PROBLEM_ROWS: usize = 2;
+const QUEUE_ROWS: usize = 2;
+
 const LOST: &str = "Connection lost; your words were not sent.";
 
 /// How long after the remembered server is found the headset waits before connecting to it automatically, so that other servers browsing finds at about the same time are known, and one that needs attention can hold the connection back. See `design/arrival.md`.
@@ -42,8 +55,8 @@ pub enum Action {
     /// Forget the servers found so far and browse again.
     Rescan,
     Send(ClientMessage),
-    /// Open the microphone and send what it hears to the agent as this utterance.
-    BeginUtterance(String, u64),
+    /// Open the microphone and send what it hears to the agent as this utterance, or as the answer to the presented question's field, when given.
+    BeginUtterance(String, u64, Option<protocol::AnswerTarget>),
     /// Close the microphone and finish the utterance, for the server to transcribe.
     EndUtterance,
     /// Close the microphone and abandon the utterance.
@@ -88,6 +101,8 @@ enum Talk {
         started: Instant,
         /// The partial transcript so far.
         heard: String,
+        /// Whether the words answer the presented question rather than being queued.
+        answering: bool,
     },
     /// X was released; waiting for the server's final transcript.
     Sending { utterance: String, heard: String },
@@ -219,6 +234,20 @@ pub struct Conversation {
     muted: bool,
     /// Whether a replay or catch-up was playing at the last frame.
     replaying: bool,
+    /// The problem shown and when it first appeared, so that its age can be shown.
+    problem_seen: Option<(String, Instant)>,
+    /// The space's ongoing problem, as dismissed on this headset; it shows again if it changes.
+    dismissed: Option<String>,
+    /// The open list of the space's modes and speech setting, and the selected item.
+    space_menu: Option<usize>,
+    /// The queued entry selected with the right stick, by id.
+    queue_selected: Option<String>,
+    /// A queued entry whose cancellation can still be undone, and when it is sent.
+    cancelling: Option<(String, Instant)>,
+    /// How long B has been held in a space, while it is, and whether that hold has already left.
+    leave_hold: Option<(Duration, bool)>,
+    /// When the approval or question shown appeared, until [`REQUEST_GRACE`] has passed.
+    request_at: Option<Instant>,
     capture_generation: u64,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
     launch: String,
@@ -287,6 +316,13 @@ impl Conversation {
             reports_engagement: true,
             muted: false,
             replaying: false,
+            problem_seen: None,
+            dismissed: None,
+            space_menu: None,
+            queue_selected: None,
+            cancelling: None,
+            leave_hold: None,
+            request_at: None,
             capture_generation: 0,
             launch: format!(
                 "{:x}",
@@ -495,7 +531,10 @@ impl Conversation {
             self.source = Some(*source);
             self.role = *role;
             self.certificate = *certificate;
-            self.error = None;
+            // In a space a problem, such as words lost as the connection dropped, stays until it is dismissed.
+            if self.mode != Mode::Space {
+                self.error = None;
+            }
             // A new connection starts with nothing reported.
             self.reported = None;
             self.backends = backends.clone();
@@ -720,6 +759,7 @@ impl Conversation {
             .as_ref()
             .map(|approval| approval.id.clone())
             .or_else(|| state.question.as_ref().map(|question| question.id.clone()));
+        let arrived = request.is_some() && request != self.request;
         if request != self.request {
             self.page = 0;
             self.option = 0;
@@ -727,7 +767,8 @@ impl Conversation {
             self.request = request;
         }
         if let Some(approval) = &state.approval {
-            self.option = self.option.min(approval.options.len());
+            // Allow once, each standing option, then deny.
+            self.option = self.option.min(approval.options.len() + 1);
         }
         if unasked {
             self.join(state.id.clone());
@@ -739,13 +780,6 @@ impl Conversation {
             .map(|message| message.id.clone());
         if self.follow {
             self.message = state.messages.len().saturating_sub(1);
-            if self.request.is_none() {
-                self.page = state
-                    .messages
-                    .last()
-                    .map(|message| pages(&message.text).len() - 1)
-                    .unwrap_or(0);
-            }
         } else if let Some(index) =
             previous.and_then(|id| state.messages.iter().position(|message| message.id == id))
         {
@@ -754,7 +788,29 @@ impl Conversation {
             self.message = self.message.min(items(&state).saturating_sub(1));
         }
         self.space = Some(state);
+        if arrived {
+            self.request_at = Some(Instant::now());
+            // A request takes A: the list closes, a selected entry is let go, and a cancellation still in its undo time is sent now, so that an A meant for them cannot decide it.
+            self.space_menu = None;
+            self.queue_selected = None;
+            if let Some((entry, _)) = self.cancelling.take() {
+                self.cancel_now(entry);
+            }
+        }
+        if let Some(selected) = self.space_menu {
+            let count = self.menu_items().len();
+            self.space_menu = (count > 0).then(|| selected.min(count - 1));
+        }
         self.report();
+    }
+
+    /// Send the cancellation of `entry` if it is still waiting, or say that it was not cancelled.
+    fn cancel_now(&mut self, entry: String) {
+        if self.waiting().iter().any(|waiting| waiting.id == entry) {
+            self.send(ClientMessage::CancelQueued { entry });
+        } else {
+            self.notice = Some("Not cancelled: already sent or gone.".into());
+        }
     }
 
     /// Report the engagement to a server that accepts it, once per change on each connection. Sent without clearing a shown error, as it is not something the participant did.
@@ -885,6 +941,10 @@ impl Conversation {
         self.option = 0;
         self.decided = None;
         self.notice = None;
+        self.dismissed = None;
+        self.space_menu = None;
+        self.queue_selected = None;
+        self.cancelling = None;
     }
 
     fn list(&mut self) {
@@ -1005,7 +1065,10 @@ impl Conversation {
             commitment: device.commitment(),
         }));
         self.pairing = Some(Pairing::Committed(device, Instant::now()));
-        self.error = None;
+        // In a space a problem stays until it is dismissed or replaced by a newer one, so that it is not wiped before it is read; elsewhere the next attempt replaces it.
+        if self.mode != Mode::Space {
+            self.error = None;
+        }
         self.notice = Some("Pairing...".into());
     }
 
@@ -1059,7 +1122,10 @@ impl Conversation {
             self.notice = Some(VISITING.into());
             return false;
         }
-        self.error = None;
+        // In a space a problem stays until it is dismissed or replaced by a newer one, so that it is not wiped before it is read; elsewhere the next attempt replaces it.
+        if self.mode != Mode::Space {
+            self.error = None;
+        }
         self.actions.push(Action::Send(message));
         true
     }
@@ -1234,12 +1300,9 @@ impl Conversation {
             .filter(|approval| self.decided.as_ref() != Some(&approval.id))
     }
 
-    /// Whether the right stick chooses approval options rather than presentation cards.
+    /// Whether the right stick chooses among an approval's choices, rather than selecting queued entries.
     pub fn is_choosing(&self) -> bool {
-        self.mode == Mode::Space
-            && self
-                .approval()
-                .is_some_and(|approval| !approval.options.is_empty())
+        self.mode == Mode::Space && self.approval().is_some()
     }
 
     /// Left stick: choose a server or space, or page through messages.
@@ -1262,6 +1325,10 @@ impl Conversation {
                 let Some(space) = &self.space else {
                     return;
                 };
+                if let Some(selected) = self.space_menu {
+                    self.space_menu = Some(shift(selected, vertical, self.menu_items().len()));
+                    return;
+                }
                 let (count, messages) = (items(space), space.messages.len());
                 if self.request.is_none() && horizontal != 0 {
                     self.message = shift(self.message, horizontal, count);
@@ -1270,7 +1337,7 @@ impl Conversation {
                 if vertical != 0 {
                     self.page = self.page.saturating_add_signed(vertical as isize);
                 }
-                let last_page = pages(&self.body().1).len() - 1;
+                let last_page = paginate(&self.body().1, self.body_rows()).len() - 1;
                 self.page = self.page.min(last_page);
                 // Back at the newest page, follow new messages again.
                 self.follow = self.request.is_none()
@@ -1280,17 +1347,127 @@ impl Conversation {
         }
     }
 
-    /// Right stick left or right: choose among an approval's options.
+    /// Right stick left or right: choose among an approval's choices: allow once, each standing option, then deny.
     pub fn choose(&mut self, direction: i32) {
-        if let Some(count) = self.approval().map(|approval| approval.options.len() + 1) {
+        if let Some(count) = self.approval().map(|approval| approval.options.len() + 2) {
             self.option = shift(self.option, direction, count);
         }
+    }
+
+    /// The entries still waiting in the queue, oldest first, which any participant may cancel.
+    fn waiting(&self) -> Vec<&protocol::QueueEntry> {
+        self.space
+            .as_ref()
+            .map(|space| {
+                space
+                    .queue
+                    .iter()
+                    .filter(|entry| entry.state == QueueState::Queued)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Right stick up or down, while no approval is presented: select a waiting entry in the queue strip, which A then cancels. Moving past either end clears the selection.
+    pub fn select_queued(&mut self, direction: i32) {
+        if self.mode != Mode::Space || self.is_choosing() || self.space_menu.is_some() {
+            return;
+        }
+        if !self.role.participates() {
+            self.notice = Some(VISITING.into());
+            return;
+        }
+        let waiting: Vec<String> = self
+            .waiting()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let current = self
+            .queue_selected
+            .as_ref()
+            .and_then(|id| waiting.iter().position(|entry| entry == id));
+        let next = match current {
+            None if direction > 0 => Some(0),
+            None => waiting.len().checked_sub(1),
+            Some(index) => index
+                .checked_add_signed(direction as isize)
+                .filter(|index| *index < waiting.len()),
+        };
+        self.queue_selected = next.map(|index| waiting[index].clone());
+    }
+
+    /// Advance what waits on time in a space at `now`: a queued entry's cancellation whose undo time has run out is sent. Call every frame.
+    pub fn tick_space(&mut self, now: Instant) {
+        if let Some((entry, due)) = &self.cancelling
+            && now >= *due
+        {
+            let entry = entry.clone();
+            self.cancelling = None;
+            self.cancel_now(entry);
+        }
+        // A selected entry that has been sent or cancelled is no longer selected.
+        if let Some(selected) = &self.queue_selected
+            && !self.waiting().iter().any(|entry| &entry.id == selected)
+        {
+            self.queue_selected = None;
+        }
+    }
+
+    /// B held in a space for `held`, or released (`None`). Holding it for [`LEAVE_HOLD`] leaves the space, once per hold.
+    pub fn hold_back(&mut self, held: Option<Duration>) {
+        let Some(held) = held.filter(|_| self.mode == Mode::Space) else {
+            self.leave_hold = None;
+            return;
+        };
+        let left = self.leave_hold.is_some_and(|(_, left)| left);
+        self.leave_hold = Some((held, left));
+        if held >= LEAVE_HOLD && !left {
+            self.leave_hold = Some((held, true));
+            self.leave();
+        }
+    }
+
+    /// Whether the right stick up and down selects queued entries now, rather than doing anything else.
+    pub fn selects_queue(&self) -> bool {
+        self.mode == Mode::Space
+            && self.role.participates()
+            && !self.is_choosing()
+            && self.space_menu.is_none()
+            && !self.waiting().is_empty()
+    }
+
+    /// Leave the space for the lobby. A cancellation still in its undo time is sent first, as it was asked for.
+    fn leave(&mut self) {
+        if let Some((entry, _)) = self.cancelling.take() {
+            self.cancel_now(entry);
+        }
+        self.leaving = true;
+        self.close_space();
+        self.listed = false;
+        self.mode = Mode::Lobby;
+        self.send(ClientMessage::Leave);
+    }
+
+    /// The entries of the space's list: its modes, then its speech setting where the server has one.
+    fn menu_items(&self) -> Vec<MenuItem> {
+        let Some(space) = &self.space else {
+            return Vec::new();
+        };
+        let mut items: Vec<MenuItem> = space
+            .modes
+            .iter()
+            .map(|mode| MenuItem::Mode(mode.clone()))
+            .collect();
+        if space.speech != SpeechSetting::Unknown {
+            items.push(MenuItem::Speech(space.speech));
+        }
+        items
     }
 
     /// A while the ray highlights an arrival object chooses that object, as
     /// the trigger does, so that A never acts on a different item from the one
     /// pointed at. Otherwise A accepts as [`Self::accept`] does. Returns true
-    /// when A has nothing to do here, so it can keep its swarm-reset meaning.
+    /// when A has nothing to do here.
     pub fn press_a(&mut self, highlighted: Option<&arrival::Key>) -> bool {
         match highlighted {
             Some(key) if self.arrival().is_some() => {
@@ -1301,7 +1478,7 @@ impl Conversation {
         }
     }
 
-    /// A: connect, join, or confirm the chosen approval option. Returns true when A has nothing to do here, so it can keep its swarm-reset meaning.
+    /// A: connect, join, confirm the chosen approval choice, choose from the space's list, or cancel the selected queued entry or undo that. Returns true when A has nothing to do here. A never resets the swarm in a space, where it would hide what A does; see `design/interaction.md`.
     pub fn accept(&mut self) -> bool {
         // Choosing anything takes over from a jump still waiting for the listing.
         self.jumping = false;
@@ -1377,31 +1554,84 @@ impl Conversation {
                 false
             }
             Mode::Space => {
-                let Some(approval) = self.approval() else {
-                    // A decision on its way still owns the button.
-                    return self
-                        .space
-                        .as_ref()
-                        .is_none_or(|space| space.approval.is_none());
-                };
-                let request = approval.id.clone();
-                let (decision, option) = match self.option.checked_sub(1) {
-                    None => (Decision::AllowOnce, None),
-                    Some(index) => (Decision::Grant, Some(approval.options[index].id.clone())),
-                };
-                if self.send(ClientMessage::Decide {
-                    request: request.clone(),
-                    decision,
-                    option,
-                }) {
-                    self.decided = Some(request);
+                if let Some(selected) = self.space_menu {
+                    match self.menu_items().get(selected) {
+                        Some(MenuItem::Mode(mode)) => {
+                            let mode = mode.id.clone();
+                            self.send(ClientMessage::SetMode { mode });
+                        }
+                        Some(MenuItem::Speech(speech)) => {
+                            let speech = match speech {
+                                SpeechSetting::Brief => SpeechSetting::Full,
+                                _ => SpeechSetting::Brief,
+                            };
+                            self.send(ClientMessage::SetSpeech { speech });
+                        }
+                        None => {}
+                    }
+                    self.space_menu = None;
+                    return false;
                 }
-                false
+                if self
+                    .space
+                    .as_ref()
+                    .is_some_and(|space| space.approval.is_some() || space.question.is_some())
+                    && self
+                        .request_at
+                        .is_some_and(|at| at.elapsed() < REQUEST_GRACE)
+                {
+                    self.notice = Some("Read the request before choosing.".into());
+                    return false;
+                }
+                if let Some(approval) = self.approval() {
+                    let request = approval.id.clone();
+                    let (decision, option) = match self.option.checked_sub(1) {
+                        None => (Decision::AllowOnce, None),
+                        Some(index) if index < approval.options.len() => {
+                            (Decision::Grant, Some(approval.options[index].id.clone()))
+                        }
+                        Some(_) => (Decision::Deny, None),
+                    };
+                    if self.send(ClientMessage::Decide {
+                        request: request.clone(),
+                        decision,
+                        option,
+                    }) {
+                        self.decided = Some(request);
+                    }
+                    return false;
+                }
+                // A decision on its way still owns the button.
+                if self
+                    .space
+                    .as_ref()
+                    .is_some_and(|space| space.approval.is_some())
+                {
+                    return false;
+                }
+                // A undoes a cancellation still in its undo time, or cancels the selected entry after it.
+                if (self.cancelling.is_some() || self.queue_selected.is_some())
+                    && !self.role.participates()
+                {
+                    self.notice = Some(VISITING.into());
+                    return false;
+                }
+                if let Some((entry, _)) = self.cancelling.take() {
+                    self.queue_selected = Some(entry);
+                    self.notice = Some("Not cancelled.".into());
+                    false
+                } else if let Some(entry) = self.queue_selected.take() {
+                    self.cancelling = Some((entry, Instant::now() + CANCEL_UNDO));
+                    self.notice = None;
+                    false
+                } else {
+                    true
+                }
             }
         }
     }
 
-    /// B: deny the pending approval, cancel your newest queued input, or leave the space; in the lobby, dismiss what is shown or return to the server list.
+    /// B: in a space, close what is open, or dismiss the problem shown; it never decides an approval, cancels input or leaves, which takes holding it (see [`Self::hold_back`]). In the lobby, dismiss what is shown or return to the server list.
     pub fn back(&mut self) {
         self.jumping = false;
         match self.mode {
@@ -1414,30 +1644,19 @@ impl Conversation {
             Mode::Lobby if self.step == LobbyStep::Spaces => self.leave_server(),
             Mode::Lobby => self.back_ring(),
             Mode::Space => {
-                let pending = self
-                    .space
-                    .as_ref()
-                    .is_some_and(|space| space.approval.is_some());
-                if let Some(approval) = self.approval() {
-                    let request = approval.id.clone();
-                    if self.send(ClientMessage::Decide {
-                        request: request.clone(),
-                        decision: Decision::Deny,
-                        option: None,
-                    }) {
-                        self.decided = Some(request);
-                    }
-                } else if pending {
-                    // Wait for the decision already sent.
-                } else if let Some(entry) = self.own_queued().map(|entry| entry.id.clone()) {
-                    self.send(ClientMessage::CancelQueued { entry });
-                } else {
-                    self.leaving = true;
-                    self.close_space();
-                    self.listed = false;
-                    self.mode = Mode::Lobby;
-                    self.send(ClientMessage::Leave);
+                if self.space_menu.take().is_some() || self.queue_selected.take().is_some() {
+                    return;
                 }
+                if self.error.take().is_some() {
+                    return;
+                }
+                if let Some(error) = self.space.as_ref().and_then(|space| space.error.clone())
+                    && self.dismissed.as_ref() != Some(&error)
+                {
+                    self.dismissed = Some(error);
+                    return;
+                }
+                self.notice = Some("Hold B to leave the space.".into());
             }
         }
     }
@@ -1451,9 +1670,12 @@ impl Conversation {
         }
     }
 
-    /// Y: browse again, refresh the spaces or the sessions being shown, or in a space step to the agent's next mode, as its terminal key does. A space whose agent offers no modes fetches its state again instead.
+    /// Y: browse again, refresh the spaces or the sessions being shown, or in a space open or close the list of the agent's modes, with their descriptions, and the speech setting. A space with neither fetches its state again instead.
     pub fn refresh(&mut self) {
-        self.error = None;
+        // In a space a problem stays until it is dismissed; see `design/interaction.md`.
+        if self.mode != Mode::Space {
+            self.error = None;
+        }
         match self.mode {
             Mode::Servers => self.actions.push(Action::Rescan),
             Mode::Lobby => match self.step {
@@ -1464,22 +1686,30 @@ impl Conversation {
                 | LobbyStep::Environment => self.list(),
             },
             Mode::Space => {
+                if self.space_menu.take().is_some() {
+                    return;
+                }
                 let Some(space) = &self.space else {
                     return;
                 };
-                // Stepped from the mode the agent last confirmed, so a second press before it confirms asks again rather than skipping a mode.
-                if let Some(mode) = space.next_mode().map(|mode| mode.id.clone()) {
-                    self.send(ClientMessage::SetMode { mode });
-                } else {
+                let items = self.menu_items();
+                if items.is_empty() {
                     let space = space.id.clone();
                     self.joining = Some(space.clone());
                     self.send(ClientMessage::Join { space });
+                    return;
                 }
+                // The list opens on the current mode, so A alone keeps it.
+                let current = items
+                    .iter()
+                    .position(|item| matches!(item, MenuItem::Mode(mode) if Some(&mode.id) == space.mode.as_ref()))
+                    .unwrap_or(0);
+                self.space_menu = Some(current);
             }
         }
     }
 
-    /// X pressed or released: push-to-talk. While held, the microphone sends `agent` audio, heard by the other participants and transcribed for the agent; releasing sends it to be queued.
+    /// X pressed or released: push-to-talk. While held, the microphone sends `agent` audio, heard by the other participants and transcribed for the agent; releasing sends it to be queued, or, while a question Tomori can answer is presented, as the answer to its current field.
     pub fn talk(&mut self, pressed: bool) {
         if !pressed {
             if let Some(Talk::Recording {
@@ -1508,17 +1738,33 @@ impl Conversation {
         }
         self.utterances += 1;
         let utterance = format!("{}-{}", self.launch, self.utterances);
-        self.error = None;
+        // A problem shown stays until it is dismissed or replaced; see `design/interaction.md`.
         self.notice = None;
+        let answer = self.answerable().map(|question| protocol::AnswerTarget {
+            question: question.id.clone(),
+            field: question.field.clone(),
+        });
+        let answering = answer.is_some();
         self.actions.push(Action::BeginUtterance(
             utterance.clone(),
             self.capture_generation,
+            answer,
         ));
         self.talk = Some(Talk::Recording {
             utterance,
             started: Instant::now(),
             heard: String::new(),
+            answering,
         });
+    }
+
+    /// The presented question, when this participant can answer it by voice: Tomori supports it, and the server says it routes spoken answers. See `design/spaces.md`.
+    fn answerable(&self) -> Option<&protocol::Question> {
+        let space = self.space.as_ref().filter(|_| self.role.participates())?;
+        space
+            .question
+            .as_ref()
+            .filter(|question| question.supported && space.voice_answers)
     }
 
     /// Toggle an explicitly enabled microphone for the space, not the agent.
@@ -1543,7 +1789,6 @@ impl Conversation {
             self.error = Some("Offline; cannot use live audio.".into());
             return;
         }
-        self.error = None;
         self.notice = None;
         self.live = true;
         self.actions
@@ -1579,9 +1824,9 @@ impl Conversation {
             let pending = self
                 .actions
                 .iter()
-                .any(|action| matches!(action, Action::BeginUtterance(id, _) if id == utterance));
+                .any(|action| matches!(action, Action::BeginUtterance(id, ..) if id == utterance));
             self.actions.retain(
-                |action| !matches!(action, Action::BeginUtterance(id, _) if id == utterance),
+                |action| !matches!(action, Action::BeginUtterance(id, ..) if id == utterance),
             );
             if !pending {
                 self.actions.push(Action::CancelUtterance);
@@ -1609,10 +1854,10 @@ impl Conversation {
             let pending = self
                 .actions
                 .iter()
-                .any(|action| matches!(action, Action::BeginUtterance(id, _) if id == utterance));
+                .any(|action| matches!(action, Action::BeginUtterance(id, ..) if id == utterance));
             self.actions.retain(|action| {
                 !matches!(action, Action::EndUtterance)
-                    && !matches!(action, Action::BeginUtterance(id, _) if id == utterance)
+                    && !matches!(action, Action::BeginUtterance(id, ..) if id == utterance)
             });
             if !pending {
                 self.actions.push(Action::CancelUtterance);
@@ -1642,17 +1887,6 @@ impl Conversation {
             Some(Talk::Recording { started, .. }) => Some(started.elapsed()),
             _ => None,
         }
-    }
-
-    /// Your newest entry still waiting in the queue. Entries are matched by participant number, since display names need not be unique.
-    fn own_queued(&self) -> Option<&protocol::QueueEntry> {
-        let source = self.source?;
-        self.space
-            .as_ref()?
-            .queue
-            .iter()
-            .rev()
-            .find(|entry| entry.state == QueueState::Queued && entry.source == source)
     }
 
     /// The joined space, and whether its state is current: not while the connection is down, when the server may have moved on without us.
@@ -2156,11 +2390,70 @@ impl Conversation {
         }
     }
 
-    /// The label and text of the selected item: the pending request, a message or the queue.
+    /// The space's list on `rows` rows: a window of its entries that keeps the selected one in view, then the selected entry's description, so that both always show.
+    fn menu_body(&self, selected: usize, rows: usize) -> (String, String) {
+        let items = self.menu_items();
+        let current = self.space.as_ref().and_then(|space| space.mode.as_ref());
+        let description = match items.get(selected) {
+            Some(MenuItem::Mode(mode)) => mode
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("Switch the agent to {}.", mode.name)),
+            Some(MenuItem::Speech(SpeechSetting::Brief)) => {
+                "Replies speak their first paragraphs, then the rest is on the panel. A switches everyone to full replies.".into()
+            }
+            Some(MenuItem::Speech(_)) => {
+                "Replies are spoken in full. A switches everyone to brief replies.".into()
+            }
+            None => String::new(),
+        };
+        // The description gets the rows the entries leave, but at most half, and the entries at least one.
+        let mut description = wrapped_lines(&description);
+        let room = rows.saturating_sub(items.len().min(rows) + 1);
+        let room = room.max(rows.saturating_sub(1) / 2);
+        if description.len() > room {
+            description.truncate(room);
+            if let Some(last) = description.last_mut() {
+                *last = short(&format!("{last}..."));
+            }
+        }
+        let shown = rows
+            .saturating_sub(description.len() + usize::from(!description.is_empty()))
+            .max(1);
+        let first = window(selected, items.len(), shown);
+        let mut lines: Vec<String> = items
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(shown)
+            .map(|(index, item)| {
+                let marker = if index == selected { ">" } else { " " };
+                let now = match item {
+                    MenuItem::Mode(mode) if Some(&mode.id) == current => " (now)",
+                    _ => "",
+                };
+                short(&format!("{marker} {}{now}", menu_label(item)))
+            })
+            .collect();
+        if !description.is_empty() && lines.len() < rows {
+            lines.push(String::new());
+            lines.extend(description);
+        }
+        lines.truncate(rows);
+        (
+            format!("MODE AND SPEECH {}/{}", selected + 1, items.len()),
+            lines.join("\n"),
+        )
+    }
+
+    /// The label and text of what the body shows: the space's list, the pending request, or the selected message.
     fn body(&self) -> (String, String) {
         let Some(space) = &self.space else {
             return ("Loading".into(), String::new());
         };
+        if let Some(selected) = self.space_menu {
+            return self.menu_body(selected, self.body_rows());
+        }
         if let Some(approval) = &space.approval {
             return (
                 format!("APPROVAL: {}", approval.title),
@@ -2169,7 +2462,9 @@ impl Conversation {
         }
         if let Some(question) = &space.question {
             let mut text = question.text.clone();
-            text.push_str("\n\nAnswer this question on the PC.");
+            if self.answerable().is_none() {
+                text.push_str("\n\nAnswer this question on the PC.");
+            }
             return (format!("QUESTION: {}", question.title), text);
         }
         if let Some(message) = space.messages.get(self.message) {
@@ -2182,52 +2477,251 @@ impl Conversation {
                 message.text.clone(),
             );
         }
-        if self.message == space.messages.len() && !space.queue.is_empty() {
-            let text = space
-                .queue
-                .iter()
-                .map(|entry| {
-                    format!(
-                        "{} [{}]: {}",
-                        entry.speaker,
-                        queue_label(entry.state),
-                        entry.text
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return (format!("QUEUE {}", space.queue.len()), text);
-        }
         ("No messages yet".into(), String::new())
     }
 
-    fn space_text(&mut self) -> Vec<String> {
-        let (label, body) = self.body();
-        // The chosen option is shown in full, since a standing option's label is the whole of what it grants.
-        let choice = self
+    /// The problem to show: this participant's newest error, else the space's ongoing problem unless dismissed here.
+    fn problem(&self) -> Option<String> {
+        self.error.clone().or_else(|| {
+            self.space
+                .as_ref()
+                .and_then(|space| space.error.clone())
+                .filter(|error| self.dismissed.as_ref() != Some(error))
+        })
+    }
+
+    /// The problem line: the problem and how long it has been shown, on up to [`PROBLEM_ROWS`] rows. Neither the status nor anything else displaces it.
+    fn problem_lines(&self, now: Instant) -> Vec<String> {
+        let Some(problem) = self.problem() else {
+            return Vec::new();
+        };
+        let since = match &self.problem_seen {
+            Some((seen, since)) if *seen == problem => *since,
+            _ => now,
+        };
+        let mut lines = wrapped_lines(&format!(
+            "! {} {}",
+            age(now.saturating_duration_since(since)),
+            problem.replace('\n', " ")
+        ));
+        if lines.len() > PROBLEM_ROWS {
+            lines.truncate(PROBLEM_ROWS);
+            if let Some(last) = lines.last_mut() {
+                *last = format!("{}...", &last[..last.len().min(COLUMNS - 3)]);
+            }
+        }
+        lines
+    }
+
+    /// The queue strip: entries waiting or being sent, oldest first, on up to [`QUEUE_ROWS`] rows, keeping the selected entry in view.
+    fn queue_lines(&self) -> Vec<String> {
+        let Some(space) = &self.space else {
+            return Vec::new();
+        };
+        let entries: Vec<&protocol::QueueEntry> = space
+            .queue
+            .iter()
+            .filter(|entry| matches!(entry.state, QueueState::Queued | QueueState::Sending))
+            .collect();
+        let line = |entry: &protocol::QueueEntry| {
+            let cancelling = self
+                .cancelling
+                .as_ref()
+                .is_some_and(|(id, _)| *id == entry.id);
+            let selected = self.queue_selected.as_ref() == Some(&entry.id);
+            let (marker, state) = match (cancelling, selected) {
+                (true, _) => ("x", "cancelling, A undoes"),
+                (false, true) => (">", queue_label(entry.state)),
+                (false, false) => ("-", queue_label(entry.state)),
+            };
+            // Entries are matched by participant number, since display names need not be unique.
+            let speaker = if Some(entry.source) == self.source {
+                "You"
+            } else {
+                entry.speaker.as_str()
+            };
+            short(&format!("{marker} {speaker} {state}: {}", entry.text))
+        };
+        if entries.len() <= QUEUE_ROWS {
+            return entries.into_iter().map(line).collect();
+        }
+        let selected = entries
+            .iter()
+            .position(|entry| {
+                self.queue_selected.as_ref() == Some(&entry.id)
+                    || self
+                        .cancelling
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id == entry.id)
+            })
+            .unwrap_or(0);
+        let shown = &entries[window(selected, entries.len(), QUEUE_ROWS - 1)..][..QUEUE_ROWS - 1];
+        let mut lines: Vec<String> = shown.iter().map(|entry| line(entry)).collect();
+        lines.push(format!("  {} in the queue; R-stick selects", entries.len()));
+        lines
+    }
+
+    /// The status line in a space: what the microphone is doing, the connection, a notice, a replay, or the counts. Problems have their own line.
+    fn space_status(&self, space: &SpaceState) -> String {
+        let talking = match &self.talk {
+            Some(Talk::Recording {
+                heard, answering, ..
+            }) if heard.is_empty() => Some(
+                if *answering {
+                    "MIC ANSWER: listening..."
+                } else {
+                    "MIC AGENT: listening..."
+                }
+                .to_owned(),
+            ),
+            Some(Talk::Recording {
+                heard, answering, ..
+            }) => Some(format!(
+                "{}: {}",
+                if *answering {
+                    "MIC ANSWER"
+                } else {
+                    "MIC AGENT"
+                },
+                tail(heard, COLUMNS - 12)
+            )),
+            Some(Talk::Sending { heard, .. }) => {
+                Some(format!("Sending: {}...", tail(heard, COLUMNS - 12)))
+            }
+            None => None,
+        };
+        let connection = match &self.state {
+            None | Some(ConnectionState::Connecting { attempt: 1 }) => Some("Connecting...".into()),
+            Some(ConnectionState::Connecting { attempt }) => {
+                Some(format!("Connecting (attempt {attempt})..."))
+            }
+            Some(ConnectionState::Disconnected { reason, retry_in }) => Some(format!(
+                "Offline, retry in {}s: {reason}",
+                retry_in.as_secs_f32().ceil()
+            )),
+            Some(ConnectionState::Closed) => Some("Disconnected.".into()),
+            Some(ConnectionState::Connected { .. }) => None,
+        };
+        let leaving = self
+            .leave_hold
+            .filter(|(held, left)| !left && *held >= Duration::from_millis(150))
+            .map(|_| "Leaving: keep holding B...".to_owned());
+        let status = talking
+            .or(leaving)
+            .or(connection)
+            .or_else(|| self.notice.clone())
+            .unwrap_or_else(|| {
+                if self.replaying {
+                    "Replaying... R-stick click stops".into()
+                } else if let Some(missing) = self.missing_environment() {
+                    // The grid is shown instead, never another environment.
+                    match missing {
+                        "" => "The server named no environment.".into(),
+                        missing => format!("Unknown environment: {missing}"),
+                    }
+                } else {
+                    let mut parts = Vec::new();
+                    if !self.live {
+                        parts.push("Mic off".to_owned());
+                    }
+                    if self.muted {
+                        parts.push("Muted".to_owned());
+                    }
+                    if space.speech == SpeechSetting::Brief {
+                        parts.push("Brief".to_owned());
+                    }
+                    parts.push(here(space));
+                    parts.join(" | ")
+                }
+            });
+        if self.live && !matches!(self.talk, Some(Talk::Recording { .. })) {
+            format!("MIC LIVE | {status}")
+        } else {
+            status
+        }
+    }
+
+    /// Note when the problem shown first appeared, so that its age can be shown.
+    fn observe_problem(&mut self, now: Instant) {
+        match self.problem() {
+            None => self.problem_seen = None,
+            Some(problem) => {
+                if self
+                    .problem_seen
+                    .as_ref()
+                    .is_none_or(|(seen, _)| *seen != problem)
+                {
+                    self.problem_seen = Some((problem, now));
+                }
+            }
+        }
+    }
+
+    /// The queue strip's lines, unless an approval's choices need the room.
+    fn strip_lines(&self) -> Vec<String> {
+        let choosing = self
             .space
             .as_ref()
             .and_then(|space| space.approval.as_ref())
-            .filter(|_| self.decided.is_none())
+            .is_some_and(|_| self.decided.is_none());
+        if choosing {
+            Vec::new()
+        } else {
+            self.queue_lines()
+        }
+    }
+
+    /// The rows the body has, after the problem line, the queue strip and an approval's choice; paging, following and drawing all use it.
+    fn body_rows(&self) -> usize {
+        let problem = self.problem_lines(Instant::now()).len();
+        let queue = self.strip_lines().len();
+        let choice = self
+            .choice_lines(BODY_ROWS - problem - queue - 1)
+            .map_or(0, |lines| lines.len());
+        BODY_ROWS - problem - queue - choice
+    }
+
+    /// The approval's chosen choice, on at most `budget` rows.
+    fn choice_lines(&self, budget: usize) -> Option<Vec<String>> {
+        self.space
+            .as_ref()
+            .and_then(|space| space.approval.as_ref())
+            .filter(|_| self.decided.is_none() && self.space_menu.is_none())
             .map(|approval| {
                 let option = match self.option.checked_sub(1) {
                     None => "Allow once",
-                    Some(index) => approval.options[index].label.as_str(),
+                    Some(index) if index < approval.options.len() => {
+                        approval.options[index].label.as_str()
+                    }
+                    Some(_) => "Deny",
                 };
                 let mut lines = wrapped_lines(&format!(
                     "{}/{}: {option}",
                     self.option + 1,
-                    approval.options.len() + 1
+                    approval.options.len() + 2
                 ));
-                if lines.len() >= BODY_ROWS {
-                    lines.truncate(BODY_ROWS - 1);
+                if lines.len() > budget {
+                    lines.truncate(budget);
                     if let Some(last) = lines.last_mut() {
                         *last = short(&format!("{last} more"));
                     }
                 }
                 lines
-            });
-        let rows = BODY_ROWS - choice.as_ref().map_or(0, Vec::len);
+            })
+    }
+
+    fn space_text(&mut self) -> Vec<String> {
+        let now = Instant::now();
+        self.observe_problem(now);
+        let problem = self.problem_lines(now);
+        let queue = self.strip_lines();
+        // The chosen choice is shown in full where it fits, since a standing option's label is the whole of what it grants.
+        let choice = self.choice_lines(BODY_ROWS - problem.len() - queue.len() - 1);
+        let rows = BODY_ROWS - problem.len() - queue.len() - choice.as_ref().map_or(0, Vec::len);
+        let (label, body) = match self.space_menu {
+            Some(selected) => self.menu_body(selected, rows),
+            None => self.body(),
+        };
         let pages = match &self.paged {
             Some(paged) if paged.text == body && paged.rows == rows => paged.pages.clone(),
             _ => {
@@ -2240,72 +2734,31 @@ impl Conversation {
                 pages
             }
         };
-        self.page = self.page.min(pages.len() - 1);
+        // The list fits its rows, and leaves the reader's page as it was for when it closes.
+        let page = if self.space_menu.is_some() {
+            0
+        } else {
+            // Following, the newest page is shown at the rows there are now, which a problem or the strip can change without the space changing.
+            if self.follow && self.request.is_none() {
+                self.page = pages.len() - 1;
+            }
+            self.page = self.page.min(pages.len() - 1);
+            self.page
+        };
         let Some(space) = &self.space else {
             return vec![
                 "SPACE".into(),
                 "Loading...".into(),
                 String::new(),
-                "B leave".into(),
+                "Hold B to leave".into(),
             ];
         };
-        let choosing = space.approval.as_ref().zip(choice);
-        // The open microphone, and words on their way, are always shown.
-        let talking = match &self.talk {
-            Some(Talk::Recording { heard, .. }) if heard.is_empty() => {
-                Some("MIC AGENT: listening...".to_owned())
-            }
-            Some(Talk::Recording { heard, .. }) => {
-                Some(format!("MIC AGENT: {}", tail(heard, COLUMNS - 11)))
-            }
-            Some(Talk::Sending { heard, .. }) => {
-                Some(format!("Sending: {}...", tail(heard, COLUMNS - 12)))
-            }
-            None => None,
-        };
-        let status = talking.or_else(|| self.status()).unwrap_or_else(|| {
-            if let Some(error) = &space.error {
-                format!("ERROR: {error}")
-            } else if let Some(missing) = self.missing_environment() {
-                // The grid is shown instead, never another environment.
-                match missing {
-                    "" => "The server named no environment.".into(),
-                    missing => format!("Unknown environment: {missing}"),
-                }
-            } else if self.replaying {
-                "Replaying... R-stick click stops".into()
-            } else if let Some(entry) = self.own_queued() {
-                format!("Queued: {}", entry.text)
-            } else {
-                let waiting = space
-                    .queue
-                    .iter()
-                    .filter(|entry| entry.state == QueueState::Queued)
-                    .count();
-                let mut parts = Vec::new();
-                if !self.live {
-                    parts.push("Mic off".to_owned());
-                }
-                if self.muted {
-                    parts.push("Muted".to_owned());
-                }
-                if waiting > 0 {
-                    parts.push(format!("{waiting} queued"));
-                }
-                parts.push(here(space));
-                parts.join(" | ")
-            }
-        });
+        let status = self.space_status(space);
         // The current mode is shown by the name the agent's interface gives it, even when it is not one Tomori can step to.
         let mode = space
             .current_mode()
             .map(|mode| mode.name.as_str())
             .or(space.mode.as_deref().filter(|_| !space.modes.is_empty()));
-        let status = if self.live && !matches!(self.talk, Some(Talk::Recording { .. })) {
-            format!("MIC LIVE | {status}")
-        } else {
-            status
-        };
         let mut lines = vec![
             short(&match mode {
                 Some(mode) => format!(
@@ -2316,35 +2769,60 @@ impl Conversation {
                 None => format!("[{}] {}", activity_label(space.activity), space.title),
             }),
             short(&status),
-            short(&format!("p{}/{} {label}", self.page + 1, pages.len())),
         ];
-        lines.extend(pages[self.page].iter().cloned());
+        lines.extend(problem.iter().cloned());
+        lines.push(short(&format!("p{}/{} {label}", page + 1, pages.len())));
+        lines.extend(pages[page].iter().cloned());
         let footer = if matches!(self.talk, Some(Talk::Recording { .. })) {
             "Release X to send"
-        } else if let Some((approval, choice)) = choosing {
-            while lines.len() + choice.len() < ROWS - 1 {
+        } else if self.space_menu.is_some() {
+            "Stick choose | A select | B close"
+        } else if let Some(choice) = choice {
+            while lines.len() + choice.len() + queue.len() < ROWS - 1 {
                 lines.push(String::new());
             }
             lines.extend(choice);
-            if approval.options.is_empty() {
-                "A allow once | B deny | stick page"
-            } else {
-                "R-stick choose | A confirm | B deny"
-            }
+            "R-stick choose | A confirm"
         } else if space.approval.is_some() {
             "Sending decision..."
-        } else if self.own_queued().is_some() {
-            "B cancel queued | stick pages"
-        } else if space.modes.is_empty() {
-            "X talk | B leave | Y refresh"
+        } else if self.answerable().is_some() {
+            "Hold X to answer | hold B leave"
+        } else if self.cancelling.is_some() {
+            "A undo cancel"
+        } else if self.queue_selected.is_some() {
+            "A cancel entry | B deselect"
+        } else if !problem.is_empty() {
+            "B dismiss | X talk | hold B leave"
+        } else if self.menu_items().is_empty() {
+            "X talk | Y refresh | hold B leave"
         } else {
-            "X talk | B leave | Y mode"
+            "X talk | Y modes | hold B leave"
         };
-        while lines.len() < ROWS - 1 {
+        while lines.len() + queue.len() < ROWS - 1 {
             lines.push(String::new());
         }
+        lines.extend(queue);
         lines.push(footer.into());
         lines
+    }
+}
+
+/// What an entry of the space's list is called.
+fn menu_label(item: &MenuItem) -> String {
+    match item {
+        MenuItem::Mode(mode) => format!("Mode: {}", mode.name),
+        MenuItem::Speech(SpeechSetting::Brief) => "Speech: brief".into(),
+        MenuItem::Speech(_) => "Speech: full".into(),
+    }
+}
+
+/// How long ago something happened, briefly.
+fn age(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        _ => format!("{}h", seconds / 3600),
     }
 }
 
@@ -2356,9 +2834,16 @@ fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> Client
     create
 }
 
-/// Messages, then the queue when it has entries.
+/// An entry of the space's list, opened with Y.
+#[derive(Clone, Debug, PartialEq)]
+enum MenuItem {
+    Mode(protocol::Mode),
+    Speech(SpeechSetting),
+}
+
+/// The messages, each of which the stick can select.
 fn items(space: &SpaceState) -> usize {
-    space.messages.len() + usize::from(!space.queue.is_empty())
+    space.messages.len()
 }
 
 /// How many participants are in the space, and how many of them are away.
@@ -2425,6 +2910,8 @@ fn shift(index: usize, delta: i32, count: usize) -> usize {
         .min(count.saturating_sub(1))
 }
 
+/// `text` paged at the body's full height, for tests.
+#[cfg(test)]
 fn pages(text: &str) -> Vec<Vec<String>> {
     paginate(text, BODY_ROWS)
 }
@@ -2578,14 +3065,33 @@ mod tests {
         })
     }
 
-    /// A conversation connected to a server and joined to [`SPACE`].
+    /// A conversation connected to a server and joined to [`SPACE`], with any request it shows there long enough to be chosen.
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
         let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(space(change));
         conversation.take_actions();
+        settle(&mut conversation);
         conversation
+    }
+
+    /// Let the request shown have been there for longer than [`REQUEST_GRACE`].
+    fn settle(conversation: &mut Conversation) {
+        conversation.request_at = None;
+    }
+
+    /// Hold B long enough to leave a space, then release it.
+    fn hold_b(conversation: &mut Conversation) {
+        conversation.hold_back(Some(Duration::ZERO));
+        conversation.hold_back(Some(LEAVE_HOLD));
+        conversation.hold_back(None);
+    }
+
+    /// Hold B for less than it takes to leave, then release it.
+    fn hold_b_briefly(conversation: &mut Conversation) {
+        conversation.hold_back(Some(LEAVE_HOLD / 2));
+        conversation.hold_back(None);
     }
 
     fn assert_fits(conversation: &mut Conversation) {
@@ -3756,7 +4262,7 @@ mod tests {
         conversation.apply(space(|_| {}));
         assert_eq!(conversation.environment(), Environment::Sky);
         // Leaving returns to the grid at once, before the server confirms.
-        conversation.back();
+        hold_b(&mut conversation);
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert_eq!(conversation.environment(), Environment::Minimal);
         conversation.apply(Event::Message(ServerMessage::Left));
@@ -3827,11 +4333,14 @@ mod tests {
             ]));
         });
         assert!(conversation.is_choosing());
-        assert!(conversation.text().contains("1/3: Allow once"));
+        assert!(conversation.text().contains("1/4: Allow once"));
         conversation.choose(1);
         conversation.choose(1);
+        assert!(conversation.text().contains("3/4: Allow for this session"));
         conversation.choose(1);
-        assert!(conversation.text().contains("3/3: Allow for this session"));
+        conversation.choose(1);
+        assert!(conversation.text().contains("4/4: Deny"));
+        conversation.choose(-1);
         conversation.choose(-1);
         assert_fits(&mut conversation);
         assert!(!conversation.accept());
@@ -3846,16 +4355,34 @@ mod tests {
         // Further presses neither decide again nor leave while the decision is on its way.
         assert!(!conversation.accept());
         conversation.back();
-        assert!(conversation.take_actions().is_empty());
+        assert!(sent(&mut conversation).is_empty());
         assert_eq!(conversation.mode(), Mode::Space);
         assert!(conversation.text().contains("Sending decision..."));
     }
 
     #[test]
-    fn approval_without_a_choice_allows_once_and_b_denies() {
+    fn deny_is_an_explicit_choice_and_b_never_decides() {
         let mut conversation = joined(|state| state.approval = Some(approval(&[])));
-        assert!(!conversation.is_choosing());
+        assert!(conversation.is_choosing());
+        assert!(conversation.text().contains("1/2: Allow once"));
+        // B, pressed or held, neither denies nor leaves while an approval waits.
+        conversation.back();
+        hold_b_briefly(&mut conversation);
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(conversation.mode(), Mode::Space);
         conversation.choose(1);
+        assert!(conversation.text().contains("2/2: Deny"));
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Decide {
+                request: "request-1".into(),
+                decision: Decision::Deny,
+                option: None,
+            }]
+        );
+
+        let mut conversation = joined(|state| state.approval = Some(approval(&[])));
         conversation.accept();
         assert_eq!(
             sent(&mut conversation),
@@ -3865,18 +4392,6 @@ mod tests {
                 option: None,
             }]
         );
-
-        let mut conversation = joined(|state| state.approval = Some(approval(&[("a", "A")])));
-        conversation.back();
-        assert_eq!(
-            sent(&mut conversation),
-            [ClientMessage::Decide {
-                request: "request-1".into(),
-                decision: Decision::Deny,
-                option: None,
-            }]
-        );
-        assert_eq!(conversation.mode(), Mode::Space);
     }
 
     #[test]
@@ -3910,14 +4425,19 @@ mod tests {
             space: None,
         }));
         assert!(conversation.is_choosing());
-        assert!(conversation.text().contains("ERROR: That request"));
+        assert!(conversation.text().contains("That request"));
 
         conversation.apply(space(|state| {
             let mut next = approval(&[("b", "B")]);
             next.id = "request-2".into();
             state.approval = Some(next);
         }));
-        assert!(conversation.text().contains("1/2: Allow once"));
+        assert!(conversation.text().contains("1/3: Allow once"));
+        // A pressed as it appears does nothing, then decides once it has been shown for a moment.
+        conversation.accept();
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("Read the request"));
+        settle(&mut conversation);
         conversation.accept();
         assert_eq!(
             sent(&mut conversation),
@@ -3939,7 +4459,18 @@ mod tests {
         let text = conversation.text();
         assert_eq!(text.lines().count(), ROWS);
         let shown = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(shown.contains(&format!("2/2: {label}")), "{text}");
+        assert!(shown.contains(&format!("2/3: {label}")), "{text}");
+        // Even with a problem shown above it.
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error:
+                "The mode was not changed: the agent refused it, for a reason long enough to wrap."
+                    .into(),
+            space: None,
+        }));
+        let text = conversation.text();
+        let shown = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(shown.contains(&format!("2/3: {label}")), "{text}");
+        assert_fits(&mut conversation);
     }
 
     #[test]
@@ -3999,7 +4530,7 @@ mod tests {
         assert!(!conversation.joined_space().unwrap().1);
         conversation.apply(connected());
         assert!(conversation.joined_space().unwrap().1);
-        conversation.back();
+        hold_b(&mut conversation);
         assert!(conversation.joined_space().is_none());
     }
 
@@ -4027,6 +4558,238 @@ mod tests {
             field: "test".into(),
             supported: true,
         }
+    }
+
+    #[test]
+    fn holding_x_while_a_question_is_shown_answers_it() {
+        let mut conversation = joined(|state| {
+            state.speech = SpeechSetting::Brief;
+            state.voice_answers = true;
+            state.question = Some(question());
+        });
+        let text = conversation.text();
+        assert!(!text.contains("on the PC"), "{text}");
+        assert!(text.ends_with("Hold X to answer | hold B leave"), "{text}");
+        conversation.talk(true);
+        let actions = conversation.take_actions();
+        assert!(
+            matches!(
+                &actions[..],
+                [Action::BeginUtterance(_, _, Some(target))]
+                    if target.question == "question-1" && target.field == "test"
+            ),
+            "{actions:?}"
+        );
+        assert!(conversation.text().contains("MIC ANSWER"));
+
+        // A question Tomori cannot answer, or a server that cannot route answers, is answered on the PC, and X talks to the agent.
+        for change in [
+            (|state: &mut SpaceState| {
+                state.voice_answers = true;
+                state.question = Some(Question {
+                    supported: false,
+                    ..question()
+                });
+            }) as fn(&mut SpaceState),
+            // A server that reports a speech setting but does not say it routes answers would queue them.
+            |state: &mut SpaceState| {
+                state.speech = SpeechSetting::Brief;
+                state.question = Some(question());
+            },
+        ] {
+            let mut conversation = joined(change);
+            assert!(conversation.text().contains("on the PC"));
+            conversation.talk(true);
+            assert!(matches!(
+                &conversation.take_actions()[..],
+                [Action::BeginUtterance(_, _, None)]
+            ));
+            assert!(conversation.text().contains("MIC AGENT"));
+        }
+    }
+
+    #[test]
+    fn a_chosen_deny_survives_updates_to_the_space() {
+        let mut conversation = joined(|state| state.approval = Some(approval(&[])));
+        conversation.choose(1);
+        // Streaming text, presence and queue changes all resend the space.
+        conversation.apply(space(|state| {
+            state.approval = Some(approval(&[]));
+            state.messages = vec![message("m1", Role::Assistant, "Working")];
+        }));
+        assert!(conversation.text().contains("2/2: Deny"));
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Decide {
+                request: "request-1".into(),
+                decision: Decision::Deny,
+                option: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_approval_arriving_during_an_undo_sends_the_cancel_and_takes_a_for_itself() {
+        let queue = || vec![entry("1", "Ada", QueueState::Queued)];
+        let mut conversation = joined(|state| {
+            state.queue = queue();
+            state.speech = SpeechSetting::Brief;
+        });
+        conversation.select_queued(1);
+        conversation.accept();
+        assert!(sent(&mut conversation).is_empty());
+        conversation.refresh();
+        conversation.apply(space(|state| {
+            state.queue = queue();
+            state.modes = vec![protocol::Mode {
+                id: "plan".into(),
+                name: "Plan".into(),
+                description: None,
+            }];
+            state.approval = Some(approval(&[]));
+        }));
+        // The cancel goes now, and the list is closed, so the next A decides what is shown.
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CancelQueued { entry: "1".into() }]
+        );
+        assert!(conversation.text().contains("APPROVAL"));
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert!(sent(&mut conversation).is_empty());
+    }
+
+    #[test]
+    fn leaving_sends_a_cancel_still_in_its_undo_time() {
+        let mut conversation =
+            joined(|state| state.queue = vec![entry("1", "Ada", QueueState::Queued)]);
+        conversation.select_queued(1);
+        conversation.accept();
+        hold_b(&mut conversation);
+        assert_eq!(
+            sent(&mut conversation),
+            [
+                ClientMessage::CancelQueued { entry: "1".into() },
+                ClientMessage::Leave
+            ]
+        );
+    }
+
+    #[test]
+    fn paging_and_following_use_the_rows_left_by_the_strip_and_problem() {
+        let long: String = (0..30).map(|line| format!("line {line}\n")).collect();
+        let mut conversation = joined(|state| {
+            state.messages = vec![message("m1", Role::Assistant, &long)];
+            state.queue = vec![
+                entry("1", "Bea", QueueState::Queued),
+                entry("2", "Bea", QueueState::Queued),
+            ];
+        });
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "Something went wrong.".into(),
+            space: None,
+        }));
+        // Following the newest message lands on its last page, as drawn.
+        conversation.apply(space(|state| {
+            state.messages = vec![message("m1", Role::Assistant, &long)];
+            state.queue = vec![
+                entry("1", "Bea", QueueState::Queued),
+                entry("2", "Bea", QueueState::Queued),
+            ];
+        }));
+        let text = conversation.text();
+        assert!(text.contains("line 29"), "{text}");
+        assert_fits(&mut conversation);
+        // And paging back up and down again reaches it.
+        for _ in 0..20 {
+            conversation.navigate(0, -1);
+        }
+        assert!(conversation.text().contains("line 0"));
+        for _ in 0..20 {
+            conversation.navigate(0, 1);
+        }
+        assert!(conversation.text().contains("line 29"));
+    }
+
+    #[test]
+    fn the_list_keeps_its_selection_and_description_in_view() {
+        let mut conversation = joined(|state| {
+            state.speech = SpeechSetting::Brief;
+            state.modes = (1..=6)
+                .map(|index| protocol::Mode {
+                    id: format!("m{index}"),
+                    name: format!("Mode {index}"),
+                    description: Some(format!(
+                        "The description of mode {index}, long enough that it has to wrap onto a second row."
+                    )),
+                })
+                .collect();
+            state.queue = vec![entry("1", "Bea", QueueState::Queued)];
+        });
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "A problem long enough to take both of its rows on the panel, so the list has less room.".into(),
+            space: None,
+        }));
+        conversation.refresh();
+        for _ in 0..5 {
+            conversation.navigate(0, 1);
+        }
+        let text = conversation.text();
+        assert!(text.contains("> Mode: Mode 6"), "{text}");
+        assert!(text.contains("The description of mode 6"), "{text}");
+        assert_fits(&mut conversation);
+        conversation.navigate(0, 1);
+        let text = conversation.text();
+        assert!(text.contains("> Speech: brief"), "{text}");
+        assert!(text.contains("Replies speak"), "{text}");
+        assert_fits(&mut conversation);
+    }
+
+    #[test]
+    fn a_problem_in_a_space_survives_y_and_a_reconnect() {
+        let mut conversation = joined(|_| {});
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: client::Disconnect::Timeout,
+            retry_in: Duration::from_secs(1),
+        }));
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "The mode was not changed.".into(),
+            space: None,
+        }));
+        conversation.apply(connected());
+        conversation.refresh();
+        assert!(conversation.text().contains("The mode was not changed."));
+    }
+
+    #[test]
+    fn following_shows_the_newest_lines_when_a_problem_takes_rows() {
+        let long: String = (0..30).map(|line| format!("line {line}\n")).collect();
+        let mut conversation =
+            joined(|state| state.messages = vec![message("m1", Role::Assistant, &long)]);
+        assert!(conversation.text().contains("line 29"));
+        // A problem arrives without the space changing.
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "Something went wrong.".into(),
+            space: None,
+        }));
+        assert!(conversation.text().contains("line 29"));
+        conversation.back();
+        assert!(conversation.text().contains("line 29"));
+    }
+
+    #[test]
+    fn a_visitor_cannot_select_or_cancel_queued_entries() {
+        let mut conversation =
+            joined(|state| state.queue = vec![entry("1", "Bea", QueueState::Queued)]);
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        assert!(!conversation.selects_queue());
+        conversation.select_queued(1);
+        conversation.accept();
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("Visitors can watch"));
     }
 
     #[test]
@@ -4188,7 +4951,13 @@ mod tests {
     #[test]
     fn updates_sent_before_a_leave_was_handled_are_ignored() {
         let mut conversation = joined(|_| {});
+        // Pressing B, or holding it briefly, does not leave.
         conversation.back();
+        hold_b_briefly(&mut conversation);
+        assert_eq!(conversation.mode(), Mode::Space);
+        assert!(conversation.text().contains("Hold B to leave"));
+        assert!(sent(&mut conversation).is_empty());
+        hold_b(&mut conversation);
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
         assert_eq!(conversation.mode(), Mode::Lobby);
         conversation.apply(space(|_| {}));
@@ -4209,31 +4978,62 @@ mod tests {
     }
 
     #[test]
-    fn b_cancels_your_newest_queued_entry_before_leaving() {
+    fn a_selected_queued_entry_is_cancelled_with_a_after_an_undo_time() {
         let mut conversation = joined(|state| {
             state.queue = vec![
                 entry("1", "Ada", QueueState::Queued),
                 entry("2", "Bea", QueueState::Queued),
-                entry("3", "Ada", QueueState::Queued),
                 entry("4", "Ada", QueueState::Sending),
             ];
         });
-        assert!(conversation.text().contains("Queued: text of 3"));
-        assert!(conversation.text().contains("B cancel queued"));
+        // B never cancels.
         conversation.back();
+        assert!(sent(&mut conversation).is_empty());
+        // The right stick selects among the waiting entries, anyone's.
+        conversation.select_queued(1);
+        conversation.select_queued(1);
+        assert!(conversation.text().contains("> Bea queued: text of 2"));
+        assert!(conversation.text().ends_with("A cancel entry | B deselect"));
+        assert!(!conversation.accept());
+        assert!(conversation.text().contains("x Bea cancelling, A undoes"));
+        // Nothing is sent until the undo time is up.
+        conversation.tick_space(Instant::now());
+        assert!(sent(&mut conversation).is_empty());
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
         assert_eq!(
             sent(&mut conversation),
-            [ClientMessage::CancelQueued { entry: "3".into() }]
+            [ClientMessage::CancelQueued { entry: "2".into() }]
         );
+
         conversation.apply(space(|state| {
             state.queue = vec![
-                entry("2", "Bea", QueueState::Queued),
+                entry("1", "Ada", QueueState::Queued),
                 entry("4", "Ada", QueueState::Sending),
             ];
         }));
-        // Others' entries and those already sending are not yours to cancel here.
+        // A again within the undo time keeps the entry.
+        conversation.select_queued(-1);
+        assert!(conversation.text().contains("> You queued: text of 1"));
+        conversation.accept();
+        conversation.accept();
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("> You queued: text of 1"));
+        // B deselects, and an entry sent meanwhile is no longer cancelled.
         conversation.back();
-        assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+        assert!(!conversation.text().contains("> You"));
+        conversation.select_queued(1);
+        conversation.accept();
+        conversation.apply(space(|state| {
+            state.queue = vec![entry("1", "Ada", QueueState::Sending)];
+        }));
+        conversation.tick_space(Instant::now() + CANCEL_UNDO);
+        assert!(sent(&mut conversation).is_empty());
+        assert!(
+            conversation
+                .text()
+                .contains("Not cancelled: already sent or gone.")
+        );
     }
 
     #[test]
@@ -4241,11 +5041,11 @@ mod tests {
         let mut conversation = joined(|state| {
             let mut namesake = entry("1", "Ada", QueueState::Queued);
             namesake.source = 2;
-            state.queue = vec![namesake];
+            state.queue = vec![namesake, entry("2", "Ada", QueueState::Queued)];
         });
-        assert!(!conversation.text().contains("B cancel queued"));
-        conversation.back();
-        assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
+        let text = conversation.text();
+        assert!(text.contains("- Ada queued: text of 1"), "{text}");
+        assert!(text.contains("- You queued: text of 2"), "{text}");
     }
 
     #[test]
@@ -4253,10 +5053,10 @@ mod tests {
         let mut conversation = joined(|state| {
             state.queue = vec![entry("1", "Ada", QueueState::Queued)];
         });
-        assert!(conversation.text().contains("B cancel queued"));
+        assert!(conversation.text().contains("- You queued"));
         // Still yours while the connection is down, since a reconnect keeps the number.
         conversation.apply(Event::State(ConnectionState::Connecting { attempt: 1 }));
-        assert!(conversation.text().contains("B cancel queued"));
+        assert!(conversation.text().contains("- You queued"));
         // A server that numbers you differently, such as after it restarts, does not see the entry as yours.
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 2,
@@ -4267,27 +5067,43 @@ mod tests {
             roots: vec![],
             environments: sky(),
         }));
-        assert!(!conversation.text().contains("B cancel queued"));
+        assert!(conversation.text().contains("- Ada queued"));
         // Choosing another server forgets the number until it welcomes you.
         conversation.connect(Choice::new("Other", "10.0.0.2:8765", Source::Discovered));
         assert_eq!(conversation.source, None);
     }
 
     #[test]
-    fn the_queue_is_shown_after_the_messages() {
+    fn the_queue_is_always_shown_as_its_own_strip() {
         let mut conversation = joined(|state| {
             state.messages = vec![message("m1", Role::User, "Hi")];
             state.queue = vec![
                 entry("1", "Bea", QueueState::Sending),
                 entry("2", "Ada", QueueState::Queued),
+                entry("3", "Cy", QueueState::Delivered),
             ];
         });
-        assert!(conversation.text().contains("USER 1/1"));
-        conversation.navigate(1, 0);
         let text = conversation.text();
-        assert!(text.contains("QUEUE 2"), "{text}");
-        assert!(text.contains("Bea [sending]: text of 1"), "{text}");
-        assert!(text.contains("Ada [queued]: text of 2"), "{text}");
+        assert!(text.contains("USER 1/1"), "{text}");
+        assert!(text.contains("- Bea sending: text of 1"), "{text}");
+        assert!(text.contains("- You queued: text of 2"), "{text}");
+        assert!(!text.contains("text of 3"), "{text}");
+        // It is not an item after the last message.
+        conversation.navigate(1, 0);
+        assert!(conversation.text().contains("USER 1/1"));
+        // A longer queue keeps the selected entry in view.
+        conversation.apply(space(|state| {
+            state.queue = (1..=5)
+                .map(|id| entry(&id.to_string(), "Bea", QueueState::Queued))
+                .collect();
+        }));
+        for _ in 0..4 {
+            conversation.select_queued(1);
+        }
+        let text = conversation.text();
+        assert!(text.contains("> Bea queued: text of 4"), "{text}");
+        assert!(text.contains("5 in the queue"), "{text}");
+        assert_fits(&mut conversation);
     }
 
     #[test]
@@ -4424,14 +5240,14 @@ mod tests {
             .map(|(id, name)| protocol::Mode {
                 id: id.into(),
                 name: name.into(),
-                description: None,
+                description: (id == "auto").then(|| "Decides for itself.".into()),
             })
             .into();
         }
     }
 
     #[test]
-    fn y_steps_through_the_agents_modes_in_its_order() {
+    fn y_opens_a_list_of_the_agents_modes_and_a_chooses_one() {
         let mut conversation = joined(modes("auto"));
         assert!(
             conversation
@@ -4441,46 +5257,69 @@ mod tests {
                 .unwrap()
                 .starts_with("[idle | Auto] Tomori")
         );
-        assert!(conversation.text().ends_with("Y mode"));
+        assert!(conversation.text().ends_with("Y modes | hold B leave"));
         assert_fits(&mut conversation);
-        let mut stepped = Vec::new();
-        for confirmed in ["auto", "default", "acceptEdits", "plan"] {
-            conversation.apply(space(modes(confirmed)));
-            conversation.refresh();
-            stepped.extend(sent(&mut conversation));
-        }
-        let mode = |mode: &str| ClientMessage::SetMode { mode: mode.into() };
+        // The list opens on the current mode, with each mode's description.
+        conversation.refresh();
+        let text = conversation.text();
+        assert!(text.contains("> Mode: Auto (now)"), "{text}");
+        assert!(text.contains("Decides for itself."), "{text}");
+        assert_fits(&mut conversation);
+        // Choosing a mode directly sends it, without stepping through the others.
+        conversation.navigate(0, -1);
+        conversation.navigate(0, -1);
+        assert!(conversation.text().contains("> Mode: Accept edits"));
+        conversation.accept();
         assert_eq!(
-            stepped,
-            [
-                mode("default"),
-                mode("acceptEdits"),
-                mode("plan"),
-                mode("auto")
-            ]
+            sent(&mut conversation),
+            [ClientMessage::SetMode {
+                mode: "acceptEdits".into()
+            }]
         );
-
-        // Until the agent confirms, another press asks for the same mode again.
+        assert!(!conversation.text().contains("Mode: Plan"));
+        // Y or B closes it without choosing.
         conversation.refresh();
-        assert_eq!(sent(&mut conversation), [mode("auto")]);
-
-        // A mode the agent is in but Tomori cannot step to is still shown, and steps to the first.
-        conversation.apply(space(modes("dontAsk")));
-        assert!(conversation.text().starts_with("[idle | dontAsk]"));
         conversation.refresh();
-        assert_eq!(sent(&mut conversation), [mode("default")]);
+        conversation.refresh();
+        conversation.back();
+        assert!(sent(&mut conversation).is_empty());
+        assert!(!conversation.text().contains("Mode: Plan"));
     }
 
     #[test]
-    fn y_fetches_the_space_again_when_the_agent_offers_no_modes() {
+    fn y_fetches_the_space_again_when_there_is_nothing_to_choose() {
         let mut conversation = joined(|_| {});
         assert!(conversation.text().starts_with("[idle] Tomori"));
-        assert!(conversation.text().ends_with("Y refresh"));
+        assert!(conversation.text().ends_with("Y refresh | hold B leave"));
         conversation.refresh();
         assert_eq!(
             sent(&mut conversation),
             [ClientMessage::Join {
                 space: SPACE.into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_list_switches_the_spaces_speech_between_brief_and_full() {
+        let mut conversation = joined(|state| state.speech = SpeechSetting::Brief);
+        assert!(conversation.text().contains("| Brief |"));
+        conversation.refresh();
+        assert!(conversation.text().contains("> Speech: brief"));
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::SetSpeech {
+                speech: SpeechSetting::Full
+            }]
+        );
+        conversation.apply(space(|state| state.speech = SpeechSetting::Full));
+        conversation.refresh();
+        conversation.accept();
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::SetSpeech {
+                speech: SpeechSetting::Brief
             }]
         );
     }
@@ -4510,7 +5349,7 @@ mod tests {
     fn press(conversation: &mut Conversation) -> String {
         conversation.talk(true);
         match conversation.take_actions().as_slice() {
-            [Action::BeginUtterance(utterance, _)] => utterance.clone(),
+            [Action::BeginUtterance(utterance, ..)] => utterance.clone(),
             actions => panic!("{actions:?}"),
         }
     }
@@ -4795,7 +5634,7 @@ mod tests {
         conversation.set_capture_generation(9);
         assert!(matches!(
             conversation.next_action(),
-            Some(Action::BeginUtterance(_, 8))
+            Some(Action::BeginUtterance(_, 8, _))
         ));
     }
 
@@ -4907,7 +5746,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_transcript_is_shown() {
+    fn a_failed_transcript_is_shown_on_its_own_line_until_dismissed() {
         let mut conversation = joined(|_| {});
         let utterance = press(&mut conversation);
         conversation.talk(false);
@@ -4916,10 +5755,18 @@ mod tests {
             utterance,
             error: "Nothing was heard, so nothing was sent.".into(),
         }));
-        assert!(conversation.text().contains("ERROR: Nothing was heard"));
-        // The next press clears it.
+        assert!(conversation.text().contains("! 0s Nothing was heard"));
+        // Talking again does not wipe it before it is read.
         press(&mut conversation);
-        assert!(conversation.text().contains("MIC AGENT"));
+        let text = conversation.text();
+        assert!(text.contains("MIC AGENT"), "{text}");
+        assert!(text.contains("! 0s Nothing was heard"), "{text}");
+        conversation.talk(false);
+        conversation.take_actions();
+        // B dismisses it.
+        conversation.back();
+        assert!(!conversation.text().contains("Nothing was heard"));
+        assert!(conversation.take_actions().is_empty());
     }
 
     #[test]
@@ -4983,7 +5830,7 @@ mod tests {
         conversation.apply(connected());
         conversation.take_actions();
         press(&mut conversation);
-        conversation.back();
+        hold_b(&mut conversation);
         assert_eq!(
             conversation.take_actions(),
             [Action::CancelUtterance, Action::Send(ClientMessage::Leave)]
@@ -5029,7 +5876,7 @@ mod tests {
     }
 
     #[test]
-    fn a_late_failure_of_an_earlier_utterance_is_shown_after_the_current_one() {
+    fn a_failure_is_not_hidden_behind_sending_or_recording() {
         let mut conversation = joined(|_| {});
         let first = press(&mut conversation);
         conversation.talk(false);
@@ -5039,12 +5886,16 @@ mod tests {
             utterance: first,
             error: "Nothing was heard, so nothing was sent.".into(),
         }));
-        assert!(conversation.text().contains("MIC AGENT"));
+        let text = conversation.text();
+        assert!(text.contains("MIC AGENT"), "{text}");
+        assert!(text.contains("Nothing was heard"), "{text}");
         conversation.talk(false);
-        assert!(conversation.text().contains("Sending: "));
-        // Once the current words are sent, the earlier failure is shown.
+        let text = conversation.text();
+        assert!(text.contains("Sending: "), "{text}");
+        assert!(text.contains("Nothing was heard"), "{text}");
+        assert_fits(&mut conversation);
         conversation.apply(transcript(&second, "Run the tests.", true));
-        assert!(conversation.text().contains("ERROR: Nothing was heard"));
+        assert!(conversation.text().contains("Nothing was heard"));
     }
 
     #[test]
@@ -5061,7 +5912,7 @@ mod tests {
         conversation.talk(false);
         conversation.take_actions();
         // Leave the space, then the server.
-        conversation.back();
+        hold_b(&mut conversation);
         conversation.back();
         assert_eq!(conversation.mode, Mode::Servers);
         assert_eq!(conversation.talk, None);

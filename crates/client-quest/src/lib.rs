@@ -30,6 +30,7 @@ mod headless_spectator;
 mod identity;
 mod interaction;
 mod log_cadence;
+mod panel_anchor;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
 mod playback;

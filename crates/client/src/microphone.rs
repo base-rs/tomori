@@ -109,6 +109,15 @@ impl Microphone {
 
     /// Start push-to-talk as the utterance `utterance`, which must be unique for this participant, such as a random or time-based identifier. An utterance already open is cancelled first.
     pub fn begin(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
+        self.begin_answer(utterance, None)
+    }
+
+    /// Start push-to-talk as [`Self::begin`] does, answering the presented question's field `answer` with its transcript instead of queueing it, when given.
+    pub fn begin_answer(
+        &mut self,
+        utterance: impl Into<String>,
+        answer: Option<protocol::AnswerTarget>,
+    ) -> Result<(), SendError> {
         if self.utterance.is_some() {
             self.cancel()?;
         }
@@ -118,6 +127,7 @@ impl Microphone {
             .send(ClientMessage::Gate { gate: Gate::Agent })?;
         self.sender.send(ClientMessage::UtteranceBegin {
             utterance: utterance.clone(),
+            answer,
         })?;
         self.utterance = Some(utterance);
         Ok(())
@@ -333,7 +343,8 @@ mod tests {
             [
                 ClientMessage::Gate { gate: Gate::Agent },
                 ClientMessage::UtteranceBegin {
-                    utterance: "u1".into()
+                    utterance: "u1".into(),
+                    answer: None,
                 },
                 ClientMessage::UtteranceEnd {
                     utterance: "u1".into()
@@ -411,7 +422,8 @@ mod tests {
             [
                 ClientMessage::Gate { gate: Gate::Agent },
                 ClientMessage::UtteranceBegin {
-                    utterance: "u1".into()
+                    utterance: "u1".into(),
+                    answer: None,
                 },
                 ClientMessage::UtteranceCancel {
                     utterance: "u1".into()
@@ -436,7 +448,8 @@ mod tests {
             [
                 ClientMessage::Gate { gate: Gate::Agent },
                 ClientMessage::UtteranceBegin {
-                    utterance: "u1".into()
+                    utterance: "u1".into(),
+                    answer: None,
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]
@@ -463,7 +476,8 @@ mod tests {
         assert_eq!(
             controls.last(),
             Some(&ClientMessage::UtteranceBegin {
-                utterance: "u2".into()
+                utterance: "u2".into(),
+                answer: None,
             })
         );
     }
