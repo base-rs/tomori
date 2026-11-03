@@ -217,5 +217,4 @@ impl Shadows {
 }
 
 #[cfg(test)]
-#[path = "shadow_tests.rs"]
 mod tests;

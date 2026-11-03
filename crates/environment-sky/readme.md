@@ -116,7 +116,7 @@ central work volume, periodic noise and render-target size bounds. A Vulkan
 cloud regression checks partial alpha, premultiplication, per-eye parallax,
 repeatability, foreground depth occlusion and resize. Tomori additionally renders stereo,
 switches Sky/Minimal without changing the swarm, and checks recenter compensation
-and translation-invariant sky rendering; see the root README.
+and translation-invariant sky rendering; see the [root readme](../../readme.md).
 Shadow tests additionally check caster/frustum coverage, light-depth direction,
 actual localized cast-shadow darkening, unchanged lantern emission and stable
 results after camera movement/resize, plus visible lantern illumination and AO

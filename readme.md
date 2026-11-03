@@ -2,7 +2,7 @@
 
 A conversational spatial workspace for people and agents, currently a native **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**. 128 agents inhabit a moonlit Sky environment or a minimal floor grid. Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest renders the interactive scene and joins conversations through a Tomori server on the PC, which runs the agent sessions.
 
-Tomori is the name of both the system and its conversational coordinator; see [naming.md](naming.md). The Rust package and executable are named `tomori`. The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
+Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The Rust package and executable are named `tomori`. The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
 
 - **Right trigger:** outside a space, choose what the right controller's ray points at; a pull that starts away from every object, or any pull inside a space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
@@ -10,7 +10,7 @@ Tomori is the name of both the system and its conversational coordinator; see [n
 
 ## Environments
 
-Each space is bound to one environment, chosen when it is created and the same for everyone in it (see [design/environments.md](design/environments.md)). The server offers only **Sky** for now: a fixed moonlit night, sparse stars, static cloud banks, a stable platform and an open shrine blockout with warm lanterns. The concrete renderer lives in [`crates/environment-sky`](crates/environment-sky/README.md), separate from sessions, worker simulation and application input. **Minimal**, the plain floor grid, is the waiting area outside any space.
+Each space is bound to one environment, chosen when it is created and the same for everyone in it (see [design/environments.md](design/environments.md)). The server offers only **Sky** for now: a fixed moonlit night, sparse stars, static cloud banks, a stable platform and an open shrine blockout with warm lanterns. The concrete renderer lives in [`crates/environment-sky`](crates/environment-sky/readme.md), separate from sessions, worker simulation and application input. **Minimal**, the plain floor grid, is the waiting area outside any space.
 
 - **Quest / desktop XR:** choosing a server and a space happens on the grid; joining a space switches to its environment, and leaving returns to the grid. Nothing switches the environment inside a space. A space whose environment this build doesn't know shows the grid, and its panel names the environment.
 - **Desktop window:** it has no server, so press **E** to switch between Sky and the grid; or launch with `TOMORI_ENVIRONMENT=minimal cargo run -p client-quest` to start on the grid.
