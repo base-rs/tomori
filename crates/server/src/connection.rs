@@ -21,8 +21,11 @@ const CHUNK_TARGET: usize = 64 * 1024;
 /// The most request reads applied before each outgoing chunk when both directions are busy.
 const INPUT_READS_PER_OUTPUT: usize = 8;
 
-/// The most request reads applied before the connection yields once. Every connection, the keepalive sweep and the space drivers are polled by one task, and a request read completes without waiting while the peer's data is buffered, as does writing output while the socket has room. Without this, a peer that keeps sending faster than its input is applied, whether or not it reads what it is sent, would keep the rest of the server from running.
+/// The most request reads applied before the connection yields. Every connection, the keepalive sweep and the space drivers are polled by one task, and a request read completes without waiting while the peer's data is buffered, as does writing output while the socket has room. Without this, a peer that keeps sending faster than its input is applied, whether or not it reads what it is sent, would keep the rest of the server from running.
 const INPUT_READS_PER_YIELD: usize = 64;
+
+/// How many times in a row the connection returns pending when it yields. The HTTP server polls each read once and, if it is pending, flushes and then awaits the same read: when nothing is waiting to be written, that second poll comes at once, in the same poll of the task, and would complete a single yield without the task having yielded. The second yield reaches the task. See `base_http1`'s `Output::write_body`.
+const YIELDS: usize = 2;
 
 /// The response body of `POST /connect`: server frames out, while reading client frames from the request body it owns.
 ///
@@ -40,6 +43,8 @@ pub struct ConnectionBody<B: ReadableBody> {
     decoder: FrameDecoder,
     /// Request reads applied since the connection last yielded; see [`INPUT_READS_PER_YIELD`].
     reads: usize,
+    /// Pending returns still to make before reading again; see [`YIELDS`]. Kept here so that a read dropped while yielding leaves the rest for the next.
+    yields: usize,
     input_ended: bool,
     finished: bool,
 }
@@ -62,6 +67,7 @@ impl<B: ReadableBody> ConnectionBody<B> {
             request,
             decoder: FrameDecoder::new(),
             reads: 0,
+            yields: 0,
             input_ended: false,
             finished: false,
         })
@@ -163,6 +169,10 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
             }
             if self.reads >= INPUT_READS_PER_YIELD {
                 self.reads = 0;
+                self.yields = YIELDS;
+            }
+            while self.yields > 0 {
+                self.yields -= 1;
                 // Nothing has been read since the last input was applied, so dropping this read while it yields loses nothing.
                 futures_lite::future::yield_now().await;
             }
@@ -267,11 +277,15 @@ mod tests {
         (body, reads)
     }
 
-    /// Poll one read of `body` once, as the HTTP server would.
+    /// Poll one read of `body` as `base_http1`'s `Output::write_body` does when nothing is waiting to be written: once, and if that is pending, at once again, in the same poll of its task. Returns pending only if the read would make the task yield.
     fn poll_read(body: &mut ConnectionBody<Flood>) -> Poll<Result<BodyFrame<Vec<u8>>, BodyError>> {
         let cancellation = Cancellation::new();
         let mut read = pin!(body.read(&cancellation));
-        read.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+        let mut context = Context::from_waker(Waker::noop());
+        match read.as_mut().poll(&mut context) {
+            Poll::Pending => read.as_mut().poll(&mut context),
+            ready => ready,
+        }
     }
 
     #[test]
