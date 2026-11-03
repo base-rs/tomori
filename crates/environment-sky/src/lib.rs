@@ -51,6 +51,18 @@ impl Sky {
         width: u32,
         height: u32,
     ) -> Self {
+        Self::with_samples(device, queue, format, width, height, 1)
+    }
+
+    /// As [`Sky::new`], for a scene pass with `samples` samples per pixel, such as 4 for multisample anti-aliasing.
+    pub fn with_samples(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
+    ) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -154,7 +166,10 @@ impl Sky {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState {
+                    count: samples,
+                    ..Default::default()
+                },
                 multiview_mask: None,
                 cache: None,
             })
@@ -168,7 +183,7 @@ impl Sky {
             bindings,
             vertices,
             vertex_count: mesh.len() as u32,
-            clouds: clouds::Clouds::new(device, queue, format, &layout, width, height),
+            clouds: clouds::Clouds::new(device, queue, format, &layout, width, height, samples),
             shadows,
             lightmap,
         }

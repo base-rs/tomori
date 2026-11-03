@@ -39,6 +39,7 @@ impl Clouds {
         camera_layout: &wgpu::BindGroupLayout,
         width: u32,
         height: u32,
+        samples: u32,
     ) -> Self {
         let texture_layout = |dimension| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -159,7 +160,11 @@ impl Clouds {
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
-                    multisample: Default::default(),
+                    // Only the composite is drawn in the scene's pass; the integration has its own single-sampled target.
+                    multisample: wgpu::MultisampleState {
+                        count: if composite { samples } else { 1 },
+                        ..Default::default()
+                    },
                     multiview_mask: None,
                     cache: None,
                 })

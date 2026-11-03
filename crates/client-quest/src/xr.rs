@@ -1402,7 +1402,8 @@ fn initial_scene_transform(views: &[xr::View]) -> Option<Mat4> {
 }
 
 /// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
-fn arrival_target(conversation: &crate::conversation::Conversation) -> arrival::Scene {
+/// Where arrival's objects are heading for the conversation's current step, which the desktop window shares.
+pub(crate) fn arrival_target(conversation: &crate::conversation::Conversation) -> arrival::Scene {
     match conversation.arrival() {
         Some(view) => arrival::Scene::layout(&view),
         None => arrival::Scene::entered(conversation.entered(), conversation.environment()),
