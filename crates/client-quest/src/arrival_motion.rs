@@ -591,6 +591,7 @@ mod tests {
             Kind::Server {
                 source: Source::Discovered,
                 available: true,
+                attention: None,
             },
         )
     }
@@ -610,6 +611,7 @@ mod tests {
                 activity: protocol::Activity::Idle,
                 participants: 0,
                 hue: crate::arrival::hue(id),
+                attention: None,
             },
         )
     }

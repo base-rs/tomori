@@ -60,6 +60,8 @@ pub struct Server {
     tls: Option<Arc<rustls::ServerConfig>>,
     /// Spaces listed again from the record of kept spaces, for the supervisor to bind to their sessions once it runs; see [`Self::with_kept_spaces`].
     restoring: std::sync::Mutex<Vec<Restore>>,
+    /// Whether the counts include how many spaces need attention; see [`Self::with_attention_advertised`].
+    advertise_attention: bool,
 }
 
 /// Confirms or declines the pairing waiting, from outside the server, such as its console. See `design/security.md`.
@@ -156,6 +158,7 @@ impl Server {
             counts_interval: COUNTS_INTERVAL,
             tls: None,
             restoring: std::sync::Mutex::new(Vec::new()),
+            advertise_attention: true,
         }
     }
 
@@ -176,9 +179,19 @@ impl Server {
         self
     }
 
-    /// How many spaces are listed and participants connected now, for advertising before [`run`](Self::run) starts.
+    /// How many spaces are listed, participants connected and, unless turned off, spaces need attention now, for advertising before [`run`](Self::run) starts.
     pub fn counts(&self) -> Counts {
-        self.hub.counts()
+        let mut counts = self.hub.counts();
+        if !self.advertise_attention {
+            counts.attention = None;
+        }
+        counts
+    }
+
+    /// Whether the counts advertised include how many spaces need attention, which is the default. Turned off, they are left out of the counts, so they are never published and changes to them publish nothing. See `design/server.md`.
+    pub fn with_attention_advertised(mut self, advertise: bool) -> Self {
+        self.advertise_attention = advertise;
+        self
     }
 
     /// While running, call `publish` with the counts whenever they change, at most once per [`COUNTS_INTERVAL`], so that they can be advertised. The first call reports a change from the counts when [`run`](Self::run) started.
@@ -357,11 +370,11 @@ impl Server {
             return;
         };
         let mut timer = scheduler.timer();
-        let mut published = self.hub.counts();
+        let mut published = self.counts();
         let mut due = scheduler.now() + self.counts_interval;
         loop {
             let listener = self.hub.listen_counts();
-            if self.hub.counts() == published {
+            if self.counts() == published {
                 if let Either::Right(_) =
                     select(pin!(listener), pin!(cancellation.cancelled())).await
                 {
@@ -378,7 +391,7 @@ impl Server {
                 }
                 return;
             }
-            let counts = self.hub.counts();
+            let counts = self.counts();
             if counts != published {
                 publish(counts);
                 published = counts;

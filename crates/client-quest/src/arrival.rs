@@ -10,7 +10,7 @@ use crate::{
     server_choice::Source,
 };
 use glam::Vec3;
-use protocol::Activity;
+use protocol::{Activity, Attention, SpaceSummary};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 /// Where the participant stands when arrival begins, in scene coordinates; labels turn to face it.
@@ -46,12 +46,16 @@ const HEADING_ABOVE: f32 = 0.3;
 const TARGET_MARGIN: f32 = 1.5;
 /// Labels are clipped to this many characters; the full text of the object pointed at is shown in the heading.
 pub const LABEL_COLUMNS: usize = 22;
+/// How far above its server a jump object stands: clear of the server and of a row above it.
+const JUMP_ABOVE: f32 = 0.18;
 
 /// What an arrival object stands for, and so what choosing it does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     /// A server in the list, by address.
     Server(String),
+    /// The object beside a server, by its address, that connects to it and joins its most urgent space in one choice.
+    Jump(String),
     /// The server connected to, by address, shown as chosen; choosing it returns to the servers.
     Connected(String),
     /// A space on the server, by identifier.
@@ -79,7 +83,11 @@ pub enum Kind {
         source: Source,
         /// Whether it can be joined; an incompatible server is shown but can't be chosen.
         available: bool,
+        /// The most urgent attention it advertises any of its spaces as needing.
+        attention: Option<Attention>,
     },
+    /// The jump object above a server whose spaces need attention, showing the most urgent.
+    Jump { attention: Attention },
     /// The server connected to.
     Connected,
     Space {
@@ -87,6 +95,8 @@ pub enum Kind {
         participants: usize,
         /// A hue in `0..1` derived from the space's identifier alone, so the space looks the same to everyone and on every visit.
         hue: f32,
+        /// What about the space needs a participant, as the server lists it.
+        attention: Option<Attention>,
     },
     /// The create object, `open` while its rings are shown.
     Create { open: bool },
@@ -251,9 +261,14 @@ impl Scene {
             let top = places.iter().map(|place| place.y).fold(CENTRE.y, f32::max);
             HEADING.with_y(top + HEADING_ABOVE)
         } else {
+            // Jump objects stand above their servers rather than in the row.
+            let (jumps, servers): (Vec<&Item>, Vec<&Item>) = view
+                .items
+                .iter()
+                .partition(|item| matches!(item.key, Key::Jump(_)));
             // More than a row holds continue on rows above.
-            let rows = view.items.len().div_ceil(ROW_CAPACITY).max(1);
-            for (number, row) in view.items.chunks(ROW_CAPACITY).enumerate() {
+            let rows = servers.len().div_ceil(ROW_CAPACITY).max(1);
+            for (number, row) in servers.chunks(ROW_CAPACITY).enumerate() {
                 let step = if row.len() > 1 {
                     ROW_STEP.min(2.0 * ROW_HALF_ANGLE / (row.len() - 1) as f32)
                 } else {
@@ -264,6 +279,18 @@ impl Scene {
                 for (index, item) in row.iter().enumerate() {
                     let position = on_arc(start + step * index as f32, ROW_DISTANCE, height);
                     objects.push(row_object(item, position, false));
+                }
+            }
+            for jump in jumps {
+                let Key::Jump(address) = &jump.key else {
+                    continue;
+                };
+                let server = objects
+                    .iter()
+                    .find(|object| matches!(&object.key, Key::Server(found) if found == address))
+                    .map(|object| object.position);
+                if let Some(server) = server {
+                    objects.push(jump_object(jump, server + Vec3::Y * JUMP_ABOVE));
                 }
             }
             HEADING + Vec3::Y * (rows - 1) as f32 * ROW_RISE
@@ -419,6 +446,7 @@ fn fit_labels(objects: &mut [Object]) {
 fn size(kind: Kind) -> f32 {
     match kind {
         Kind::Server { .. } => 0.07,
+        Kind::Jump { .. } => 0.04,
         Kind::Connected => 0.07,
         Kind::Space { .. } => 0.08,
         Kind::Create { .. } => 0.08,
@@ -460,6 +488,30 @@ fn row_object(item: &Item, position: Vec3, dimmed: bool) -> Object {
         description: description(item),
         selected: item.selected,
         dim: if dimmed { 1.0 } else { 0.0 },
+        presence: 1.0,
+        choosable: true,
+    }
+}
+
+/// A jump object at `position`, with its short label above it, clear of its server beneath.
+fn jump_object(item: &Item, position: Vec3) -> Object {
+    let size = size(item.kind);
+    Object {
+        key: item.key.clone(),
+        kind: item.kind,
+        position,
+        size,
+        label: Label {
+            anchor: position + Vec3::Y * (size * 1.4 + 0.035),
+            lines: vec![clip(&item.label, LABEL_COLUMNS)],
+            align: Align::Centre,
+            pixel: 0.0022,
+            alpha: 1.0,
+            tilt: false,
+        },
+        description: description(item),
+        selected: item.selected,
+        dim: 0.0,
         presence: 1.0,
         choosable: true,
     }
@@ -524,6 +576,52 @@ pub fn facing_from(point: Vec3, viewer: Option<Vec3>, tilt: bool) -> Vec3 {
     towards.try_normalize().unwrap_or(Vec3::Z)
 }
 
+/// How urgent `attention` is, most urgent first: input, then a problem, then a reply, then a level this build does not know. `None` needs nothing.
+pub fn urgency(attention: Option<Attention>) -> Option<u8> {
+    attention.map(|attention| match attention {
+        Attention::Input => 0,
+        Attention::Problem => 1,
+        Attention::Reply => 2,
+        Attention::Unknown => 3,
+    })
+}
+
+/// The space that most needs attention, by its index in `spaces`: the most urgent level, then the one that has needed it longest, then the first listed. `None` when none needs any. Spaces keep their places; this only chooses among them. See `design/arrival.md`.
+pub fn most_urgent(spaces: &[SpaceSummary]) -> Option<usize> {
+    spaces
+        .iter()
+        .enumerate()
+        .filter_map(|(index, space)| {
+            let urgency = urgency(space.attention)?;
+            Some((
+                urgency,
+                std::cmp::Reverse(space.attention_age.unwrap_or(0)),
+                index,
+            ))
+        })
+        .min()
+        .map(|(_, _, index)| index)
+}
+
+/// A few words for what a space needs, for its label.
+pub fn attention_label(attention: Attention) -> &'static str {
+    match attention {
+        Attention::Input => "needs you",
+        Attention::Problem => "problem",
+        Attention::Reply => "new reply",
+        Attention::Unknown => "needs attention",
+    }
+}
+
+/// The colour that marks `attention`, the same on servers, jump objects and spaces: amber for input, red for a problem, a soft white for a reply.
+pub fn attention_colour(attention: Attention) -> [f32; 3] {
+    match attention {
+        Attention::Input => [1.0, 0.7, 0.15],
+        Attention::Problem => [1.0, 0.25, 0.2],
+        Attention::Reply | Attention::Unknown => [0.9, 0.93, 1.0],
+    }
+}
+
 /// A hue in `0..1` from `id` alone, using FNV-1a so it is the same on every build and device.
 pub fn hue(id: &str) -> f32 {
     let mut hash: u32 = 0x811c_9dc5;
@@ -566,6 +664,7 @@ mod tests {
                 activity: Activity::Idle,
                 participants: 0,
                 hue: hue(id),
+                attention: None,
             },
             id,
         )
@@ -902,6 +1001,7 @@ mod tests {
                         Kind::Server {
                             source: Source::Discovered,
                             available: true,
+                            attention: None,
                         },
                         "Studio",
                     )
@@ -963,5 +1063,119 @@ mod tests {
         assert_eq!(clip("a much longer label", 10), "a much ...");
         assert_eq!(clip("two\nlines", 20), "two lines");
         assert!(clip(&"🦀".repeat(40), 10).len() <= 10);
+    }
+
+    fn summary(id: &str, attention: Option<Attention>, age: Option<u32>) -> SpaceSummary {
+        SpaceSummary {
+            id: id.into(),
+            title: id.into(),
+            backend: "fake".into(),
+            directory: "/tmp".into(),
+            environment: "sky".into(),
+            activity: Activity::Idle,
+            participants: 0,
+            attention,
+            attention_age: age,
+        }
+    }
+
+    #[test]
+    fn the_most_urgent_space_is_the_highest_level_then_the_longest_waiting() {
+        assert_eq!(most_urgent(&[]), None);
+        assert_eq!(most_urgent(&[summary("a", None, None)]), None);
+        let spaces = [
+            summary("idle", None, None),
+            summary("reply", Some(Attention::Reply), Some(900)),
+            summary("problem", Some(Attention::Problem), Some(5)),
+            summary("new input", Some(Attention::Input), Some(10)),
+            summary("old input", Some(Attention::Input), Some(60)),
+            summary("unknown", Some(Attention::Unknown), Some(1000)),
+        ];
+        assert_eq!(most_urgent(&spaces), Some(4));
+        assert_eq!(most_urgent(&spaces[..4]), Some(3));
+        assert_eq!(most_urgent(&spaces[..3]), Some(2));
+        assert_eq!(most_urgent(&spaces[..2]), Some(1));
+        // A level this build does not know still counts, after the ones it knows.
+        assert_eq!(
+            most_urgent(&[spaces[0].clone(), spaces[5].clone()]),
+            Some(1)
+        );
+        // Equal and unknown ages keep the listing's order.
+        let tied = [
+            summary("first", Some(Attention::Reply), None),
+            summary("second", Some(Attention::Reply), Some(0)),
+        ];
+        assert_eq!(most_urgent(&tied), Some(0));
+    }
+
+    fn servers_needing(attention: &[Option<Attention>]) -> View {
+        let mut items = Vec::new();
+        for (n, attention) in attention.iter().enumerate() {
+            let address = format!("10.0.0.{n}:8765");
+            items.push(item(
+                Key::Server(address.clone()),
+                Kind::Server {
+                    source: Source::Discovered,
+                    available: true,
+                    attention: *attention,
+                },
+                "Studio",
+            ));
+            if let Some(attention) = attention {
+                items.push(item(
+                    Key::Jump(address),
+                    Kind::Jump {
+                        attention: *attention,
+                    },
+                    "Jump",
+                ));
+            }
+        }
+        View {
+            heading: "Servers".into(),
+            items,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_jump_stands_above_its_server_and_both_can_be_pointed_at() {
+        let view = servers_needing(&[None, Some(Attention::Input), None]);
+        let scene = Scene::layout(&view);
+        // The servers keep the places they would have without it.
+        let plain = Scene::layout(&servers_needing(&[None, None, None]));
+        for n in 0..3 {
+            let key = Key::Server(format!("10.0.0.{n}:8765"));
+            assert_eq!(
+                scene.object(&key).unwrap().position,
+                plain.object(&key).unwrap().position
+            );
+        }
+        let server = scene.object(&Key::Server("10.0.0.1:8765".into())).unwrap();
+        let jump = scene.object(&Key::Jump("10.0.0.1:8765".into())).unwrap();
+        assert!((jump.position - server.position - Vec3::Y * JUMP_ABOVE).length() < 1e-5);
+        assert_eq!(jump.label.lines, ["Jump"]);
+        assert!(jump.label.anchor.y > jump.position.y);
+        for object in &scene.objects {
+            assert_eq!(choose(&scene, &object.key).as_ref(), Some(&object.key));
+        }
+        assert_separate(&scene);
+
+        // Crowded, and on several rows, they stay apart.
+        for count in [12, 13, 30] {
+            let scene = Scene::layout(&servers_needing(&vec![Some(Attention::Reply); count]));
+            assert_eq!(scene.objects.len(), count * 2);
+            assert_separate(&scene);
+        }
+        // A jump whose server is not listed is not shown.
+        let mut orphan = servers_needing(&[None]);
+        orphan.items.push(item(
+            Key::Jump("elsewhere:1".into()),
+            Kind::Jump {
+                attention: Attention::Input,
+            },
+            "Jump",
+        ));
+        assert_eq!(Scene::layout(&orphan).objects.len(), 1);
     }
 }

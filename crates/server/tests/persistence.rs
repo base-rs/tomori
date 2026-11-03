@@ -124,6 +124,15 @@ fn spaces_survive_a_restart() {
     let mut ada = server.connect("ada", "Ada");
     ada.send(&ClientMessage::ListSpaces);
     assert_eq!(listed(&ada, &studio.id).title, "Studio");
+    // Listed again with no attention: the closed space closed before the restart, and history read again is not news.
+    ada.send(&ClientMessage::ListSpaces);
+    ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces
+            .iter()
+            .all(|space| space.attention.is_none())
+            .then_some(()),
+        _ => None,
+    });
     ada.send(&ClientMessage::Join {
         space: studio.id.clone(),
     });
@@ -180,6 +189,15 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
     let backend = FakeBackend::new();
     let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
+    // Not being bound again after a restart is listed closed, but needs no attention.
+    ada.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => (spaces.len() == 2
+            && spaces
+                .iter()
+                .all(|space| space.activity == protocol::Activity::Closed))
+        .then(|| assert!(spaces.iter().all(|space| space.attention.is_none()))),
+        _ => None,
+    });
     for (id, reason) in [
         ("space-old-1", "Could not resume the fake session"),
         (

@@ -5,7 +5,7 @@
 //!
 //! [`cubes`] and [`label_mesh`] are pure, so they are tested without a GPU. Every object's form comes from [`form`] alone, so the placeholders can be replaced, for example by server constellations or environment previews, without touching the layout or the pointing.
 use crate::{
-    arrival::{Align, Key, Kind, Label, Object, Scene, clip, facing_from},
+    arrival::{Align, Key, Kind, Label, Object, Scene, attention_colour, clip, facing_from},
     delegation::Cube,
     hand_menu::MenuKind,
     server_choice::Source,
@@ -13,7 +13,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use glam::{Quat, Vec3};
-use protocol::Activity;
+use protocol::{Activity, Attention};
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 /// The most cubes arrival adds to the scene.
@@ -65,6 +65,16 @@ fn bar(a: Vec3, b: Vec3, width: f32, color: [f32; 3]) -> Option<Cube> {
     ))
 }
 
+/// The colour marking `attention` at `time`. Input and problems pulse, quickly enough to be noticed; a reply only glows gently, since it can wait.
+fn attention_pulse(attention: Attention, time: f32) -> [f32; 3] {
+    let (speed, depth) = match attention {
+        Attention::Input | Attention::Problem => (3.0, 0.3),
+        Attention::Reply | Attention::Unknown => (1.2, 0.15),
+    };
+    let pulse = 1.0 - depth + depth * (time * speed).sin();
+    attention_colour(attention).map(|value| value * pulse)
+}
+
 fn hsv(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
     let h = hue.rem_euclid(1.0) * 6.0;
     let c = value * saturation;
@@ -87,7 +97,11 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
     let s = object.size;
     let face = Quat::from_rotation_arc(Vec3::Z, facing_from(p, viewer, object.label.tilt));
     match object.kind {
-        Kind::Server { source, available } => {
+        Kind::Server {
+            source,
+            available,
+            attention,
+        } => {
             let color = match (available, source) {
                 (false, _) => [0.32, 0.33, 0.36],
                 (true, Source::Remembered | Source::Override) => [1.0, 0.72, 0.38],
@@ -104,6 +118,29 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
                     [0.14, 0.2, 0.26],
                 ));
             }
+            // A glow of points in the attention colour around a server whose spaces need it.
+            if let Some(attention) = attention {
+                let color = attention_pulse(attention, time);
+                for n in 0..10 {
+                    let angle = n as f32 * TAU / 10.0 - time * 0.6;
+                    let offset = face * Vec3::new(angle.cos(), angle.sin(), 0.0) * s * 1.55;
+                    out.push(cube(p + offset, Vec3::splat(s * 0.16), color, face));
+                }
+            }
+        }
+        Kind::Jump { attention } => {
+            // A diamond in the attention colour, turning quickly, with a stalk down towards its server.
+            let diamond = Quat::from_rotation_y(time * 1.4)
+                * Quat::from_rotation_z(FRAC_PI_4)
+                * Quat::from_rotation_x(0.6155);
+            let color = attention_pulse(attention, time);
+            out.push(cube(p, Vec3::splat(s * 1.2), color, diamond));
+            out.extend(bar(
+                p - Vec3::Y * s * 1.1,
+                p - Vec3::Y * s * 2.4,
+                0.003,
+                color.map(|value| value * 0.6),
+            ));
         }
         Kind::Connected => {
             let turn = Quat::from_rotation_y(time * 0.4) * Quat::from_rotation_x(0.5);
@@ -123,6 +160,7 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
             activity,
             participants,
             hue,
+            attention,
         } => {
             let (saturation, value) = if activity == Activity::Closed {
                 (0.2, 0.45)
@@ -144,12 +182,14 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
                 hsv(hue, saturation, value),
                 diamond,
             ));
-            if activity == Activity::Waiting {
-                let pulse = 0.7 + 0.3 * (time * 3.0).sin();
+            // The mark of what the space needs, above it; a waiting space from a server that does not list attention is
+            // marked as needing input.
+            let mark = attention.or((activity == Activity::Waiting).then_some(Attention::Input));
+            if let Some(mark) = mark {
                 out.push(cube(
                     p + Vec3::Y * s * 1.6,
                     Vec3::splat(s * 0.3),
-                    [pulse, pulse * 0.7, 0.15],
+                    attention_pulse(mark, time),
                     Quat::IDENTITY,
                 ));
             }
@@ -598,6 +638,7 @@ mod tests {
                 activity: Activity::Running,
                 participants,
                 hue: crate::arrival::hue(id),
+                attention: None,
             },
             label: id.into(),
             detail: Some("running".into()),
@@ -731,5 +772,79 @@ mod tests {
         };
         assert_eq!(colour(&a, "one"), colour(&b, "one"));
         assert_ne!(colour(&b, "one"), colour(&b, "two"));
+    }
+
+    #[test]
+    fn attention_marks_servers_jumps_and_spaces_in_its_colour() {
+        let at = |kind: Kind| Object {
+            key: Key::Create,
+            kind,
+            position: Vec3::new(0.0, 1.4, -1.6),
+            size: 0.07,
+            label: Label {
+                anchor: Vec3::new(0.0, 1.3, -1.6),
+                lines: Vec::new(),
+                align: Align::Centre,
+                pixel: 0.0026,
+                alpha: 1.0,
+                tilt: false,
+            },
+            description: String::new(),
+            selected: false,
+            dim: 0.0,
+            presence: 1.0,
+            choosable: true,
+        };
+        let drawn = |kind: Kind| {
+            let mut cubes = Vec::new();
+            form(&at(kind), 0.0, None, &mut cubes);
+            cubes
+        };
+        // At time zero the pulse is at its middle.
+        let marked = |cubes: &[Cube], attention: Attention| {
+            let colour = attention_pulse(attention, 0.0);
+            cubes.iter().filter(|cube| cube.color == colour).count()
+        };
+        let server = |attention| Kind::Server {
+            source: Source::Discovered,
+            available: true,
+            attention,
+        };
+        assert_eq!(drawn(server(None)).len(), 1);
+        let glowing = drawn(server(Some(Attention::Problem)));
+        assert_eq!(marked(&glowing, Attention::Problem), 10);
+        let jump = drawn(Kind::Jump {
+            attention: Attention::Input,
+        });
+        assert_eq!(marked(&jump, Attention::Input), 1);
+        assert!(jump.iter().all(Cube::valid));
+        let space = |activity, attention| Kind::Space {
+            activity,
+            participants: 0,
+            hue: 0.3,
+            attention,
+        };
+        assert_eq!(
+            marked(
+                &drawn(space(Activity::Idle, Some(Attention::Reply))),
+                Attention::Reply
+            ),
+            1
+        );
+        assert_eq!(drawn(space(Activity::Idle, None)).len(), 1);
+        // An older server's waiting space is still marked as needing input.
+        assert_eq!(
+            marked(&drawn(space(Activity::Waiting, None)), Attention::Input),
+            1
+        );
+        // The levels look different from each other.
+        assert_ne!(
+            attention_pulse(Attention::Input, 0.0),
+            attention_pulse(Attention::Problem, 0.0)
+        );
+        assert_ne!(
+            attention_pulse(Attention::Problem, 0.0),
+            attention_pulse(Attention::Reply, 0.0)
+        );
     }
 }

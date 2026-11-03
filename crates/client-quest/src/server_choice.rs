@@ -3,7 +3,7 @@
 
 //! The servers offered for connection, in order of preference.
 use discovery::Servers;
-use protocol::PROTOCOL_VERSION;
+use protocol::{Attention, PROTOCOL_VERSION};
 
 /// A server on the PC reached over USB, with `adb reverse tcp:8765 tcp:8765`.
 pub const USB: &str = "127.0.0.1:8765";
@@ -34,6 +34,12 @@ pub struct Choice {
     pub spaces: Option<u32>,
     /// How many participants a discovered server advertises as connected, if it does.
     pub participants: Option<u32>,
+    /// How many of a discovered server's spaces it advertises as waiting for an approval or answer, if it does.
+    pub waiting: Option<u32>,
+    /// How many it advertises as having a problem nobody has seen, if it does.
+    pub problems: Option<u32>,
+    /// How many it advertises as having a reply nobody has heard, if it does.
+    pub replies: Option<u32>,
     /// The fingerprint of the TLS certificate a discovered server advertises, if it serves TLS. See `design/security.md`.
     pub fingerprint: Option<String>,
 }
@@ -48,6 +54,9 @@ impl Choice {
             unavailable: None,
             spaces: None,
             participants: None,
+            waiting: None,
+            problems: None,
+            replies: None,
             fingerprint: None,
         }
     }
@@ -58,6 +67,9 @@ impl Choice {
             instance: Some(server.instance.clone()),
             spaces: server.spaces,
             participants: server.participants,
+            waiting: server.waiting,
+            problems: server.problems,
+            replies: server.replies,
             fingerprint: server.fingerprint.clone(),
             ..Self::new(&server.name, address, source)
         }
@@ -79,6 +91,49 @@ impl Choice {
         });
         let known: Vec<String> = spaces.into_iter().chain(participants).collect();
         (!known.is_empty()).then(|| known.join(", "))
+    }
+
+    /// The most urgent attention the server advertises any of its spaces as needing, if it can be joined. See `design/arrival.md`.
+    pub fn attention(&self) -> Option<Attention> {
+        let some = |count: Option<u32>| count.is_some_and(|count| count > 0);
+        if !self.is_available() {
+            None
+        } else if some(self.waiting) {
+            Some(Attention::Input)
+        } else if some(self.problems) {
+            Some(Attention::Problem)
+        } else if some(self.replies) {
+            Some(Attention::Reply)
+        } else {
+            None
+        }
+    }
+
+    /// What the server's spaces need, most urgent first, such as "1 needs you, 2 replies", or `None` if nothing is advertised as needing attention.
+    pub fn needs(&self) -> Option<String> {
+        let counted = |count: Option<u32>, one: &str, many: &str| match count {
+            None | Some(0) => None,
+            Some(1) => Some(format!("1 {one}")),
+            Some(count) => Some(format!("{count} {many}")),
+        };
+        let needs: Vec<String> = [
+            counted(self.waiting, "needs you", "need you"),
+            counted(self.problems, "problem", "problems"),
+            counted(self.replies, "reply", "replies"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!needs.is_empty()).then(|| needs.join(", "))
+    }
+
+    /// The line describing the server: why it can't be joined, what needs attention, its counts, or its address.
+    pub fn detail(&self) -> String {
+        self.unavailable
+            .clone()
+            .or_else(|| self.needs())
+            .or_else(|| self.counts())
+            .unwrap_or_else(|| self.address.clone())
     }
 }
 
@@ -139,7 +194,7 @@ pub fn choices(
     choices
 }
 
-/// The server to connect to without asking: the remembered server once browsing finds it again, unless an override was given, which is connected to at startup instead.
+/// The server to connect to without asking: the remembered server once browsing finds it again, unless an override was given, which is connected to at startup instead. While another server advertises that something needs attention and the remembered one doesn't, nothing is connected, so that the participant sees it on the server row; see `design/arrival.md`.
 pub fn automatic(choices: &[Choice]) -> Option<&Choice> {
     if choices
         .iter()
@@ -147,9 +202,13 @@ pub fn automatic(choices: &[Choice]) -> Option<&Choice> {
     {
         return None;
     }
-    choices
+    let remembered = choices
         .iter()
-        .find(|choice| choice.source == Source::Remembered && choice.is_available())
+        .find(|choice| choice.source == Source::Remembered && choice.is_available())?;
+    let elsewhere = choices
+        .iter()
+        .any(|choice| choice.source != Source::Remembered && choice.attention().is_some());
+    (remembered.attention().is_some() || !elsewhere).then_some(remembered)
 }
 
 #[cfg(test)]
@@ -167,6 +226,9 @@ mod tests {
             protocol,
             spaces: None,
             participants: None,
+            waiting: None,
+            problems: None,
+            replies: None,
             fingerprint: None,
         }
     }
@@ -377,6 +439,68 @@ mod tests {
         assert_eq!(
             (choices[0].spaces, choices[0].participants),
             (Some(2), Some(1))
+        );
+    }
+
+    #[test]
+    fn attention_is_the_most_urgent_level_advertised_and_described_in_order() {
+        let mut studio = server("studio", "Studio", "10.0.0.1:8765", Some(PROTOCOL_VERSION));
+        studio.spaces = Some(4);
+        studio.participants = Some(0);
+        let listed = |studio: &Server| {
+            choices(None, None, &servers(std::slice::from_ref(studio)))[0].clone()
+        };
+        assert_eq!(listed(&studio).attention(), None);
+        assert_eq!(listed(&studio).needs(), None);
+        assert_eq!(listed(&studio).detail(), "4 spaces, 0 people");
+
+        // Advertised as zero is the same as nothing needing attention.
+        studio.waiting = Some(0);
+        studio.problems = Some(0);
+        studio.replies = Some(2);
+        assert_eq!(listed(&studio).attention(), Some(Attention::Reply));
+        assert_eq!(listed(&studio).detail(), "2 replies");
+        studio.problems = Some(1);
+        assert_eq!(listed(&studio).attention(), Some(Attention::Problem));
+        studio.waiting = Some(1);
+        assert_eq!(listed(&studio).attention(), Some(Attention::Input));
+        assert_eq!(
+            listed(&studio).needs().as_deref(),
+            Some("1 needs you, 1 problem, 2 replies")
+        );
+        studio.waiting = Some(3);
+        assert!(listed(&studio).detail().starts_with("3 need you"));
+
+        // A server that cannot be joined is never offered as needing attention.
+        studio.protocol = Some(PROTOCOL_VERSION + 1);
+        let incompatible = choices(None, None, &servers(&[studio]))
+            .into_iter()
+            .find(|choice| !choice.is_available())
+            .unwrap();
+        assert_eq!(incompatible.attention(), None);
+    }
+
+    #[test]
+    fn the_remembered_server_waits_while_only_another_needs_attention() {
+        let beta = server("beta", "Beta", "10.0.0.2:8765", Some(PROTOCOL_VERSION));
+        let mut alpha = server("alpha", "Alpha", "10.0.0.1:8765", Some(PROTOCOL_VERSION));
+        alpha.waiting = Some(1);
+        let listed = choices(None, Some("beta"), &servers(&[alpha.clone(), beta.clone()]));
+        assert_eq!(automatic(&listed), None);
+
+        // Once the remembered server needs attention too, or the other no longer does, it is connected.
+        let mut needy = beta.clone();
+        needy.replies = Some(1);
+        let listed = choices(None, Some("beta"), &servers(&[alpha.clone(), needy]));
+        assert_eq!(
+            automatic(&listed).unwrap().instance.as_deref(),
+            Some("beta")
+        );
+        alpha.waiting = Some(0);
+        let listed = choices(None, Some("beta"), &servers(&[alpha, beta]));
+        assert_eq!(
+            automatic(&listed).unwrap().instance.as_deref(),
+            Some("beta")
         );
     }
 }

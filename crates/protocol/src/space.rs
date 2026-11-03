@@ -15,6 +15,32 @@ pub struct SpaceSummary {
     pub environment: String,
     pub activity: Activity,
     pub participants: usize,
+    /// What about the space needs a participant, if anything; see [`Attention`]. Absent when nothing does, and from
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Attention>,
+    /// How long, in whole seconds, the space has needed [`Self::attention`] at its current level, so the longest
+    /// waiting comes first. Absent without attention, and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_age: Option<u32>,
+}
+
+/// What about a space needs a participant, worked out by the server for anyone, not for one participant. When several
+/// apply, the first listed wins. Running, idle, queued and closed spaces need nothing by themselves. See
+/// `design/spaces.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attention {
+    /// An approval or question is waiting for an answer, or its answer is being delivered.
+    Input,
+    /// While nobody was in the space, input failed, the agent reported an error or the session closed. Cleared when
+    /// someone joins.
+    Problem,
+    /// While nobody was in the space, the agent finished a turn that completed a reply. Cleared when someone joins.
+    Reply,
+    /// A level a newer server sends that this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// An existing agent session a space can be bound to, reported by a backend that supports attaching.
@@ -445,6 +471,43 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(summary.activity, Activity::Unknown);
+    }
+
+    #[test]
+    fn attention_is_optional_and_levels_a_newer_server_adds_are_unknown() {
+        let older = serde_json::json!({
+            "id": "space-1",
+            "title": "Tomori",
+            "backend": "fake",
+            "directory": "/tmp",
+            "environment": "sky",
+            "activity": "idle",
+            "participants": 0,
+        });
+        let summary: SpaceSummary = serde_json::from_value(older.clone()).unwrap();
+        assert_eq!((summary.attention, summary.attention_age), (None, None));
+        // Without attention, nothing is added to the wire, so an older client reads exactly what it did before.
+        assert_eq!(serde_json::to_value(&summary).unwrap(), older);
+
+        let waiting = SpaceSummary {
+            attention: Some(Attention::Input),
+            attention_age: Some(42),
+            ..summary
+        };
+        let json = serde_json::to_value(&waiting).unwrap();
+        assert_eq!(json["attention"], "input");
+        assert_eq!(json["attention_age"], 42);
+        assert_eq!(
+            serde_json::from_value::<SpaceSummary>(json).unwrap(),
+            waiting
+        );
+        for (text, level) in [
+            ("\"problem\"", Attention::Problem),
+            ("\"reply\"", Attention::Reply),
+            ("\"mentioned\"", Attention::Unknown),
+        ] {
+            assert_eq!(serde_json::from_str::<Attention>(text).unwrap(), level);
+        }
     }
 
     #[test]

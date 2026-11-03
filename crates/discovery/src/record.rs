@@ -7,7 +7,10 @@ use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use protocol::PROTOCOL_VERSION;
 
-use crate::{FINGERPRINT_KEY, NAME_KEY, PARTICIPANTS_KEY, PROTOCOL_KEY, SERVICE_TYPE, SPACES_KEY};
+use crate::{
+    FINGERPRINT_KEY, NAME_KEY, PARTICIPANTS_KEY, PROBLEMS_KEY, PROTOCOL_KEY, REPLIES_KEY,
+    SERVICE_TYPE, SPACES_KEY, WAITING_KEY,
+};
 
 /// The longest DNS label, which bounds the instance name.
 pub(crate) const INSTANCE_LIMIT: usize = 63;
@@ -33,6 +36,13 @@ pub struct Server {
     pub spaces: Option<u32>,
     /// The advertised number of connected participants, or `None` if the TXT record has no valid one.
     pub participants: Option<u32>,
+    /// The advertised number of spaces waiting for an approval or an answer, or `None` if the TXT record has no valid
+    /// one, as from a server that predates it or whose operator turned the attention counts off.
+    pub waiting: Option<u32>,
+    /// The advertised number of spaces with a problem nobody has seen, or `None` if unknown.
+    pub problems: Option<u32>,
+    /// The advertised number of spaces with a reply nobody has heard, or `None` if unknown.
+    pub replies: Option<u32>,
     /// The fingerprint of the server's TLS certificate, as 64 lowercase hexadecimal digits, or `None` if it advertises none, as a server in `--auth open` mode does. Discovery is unauthenticated, so a client that has already pinned a certificate for the server keeps its pin.
     pub fingerprint: Option<String>,
 }
@@ -44,6 +54,19 @@ pub struct Counts {
     pub spaces: u32,
     /// The participants connected, whether in a space or in the lobby.
     pub participants: u32,
+    /// How many spaces need attention, at each level, or `None` to leave them out of the record.
+    pub attention: Option<AttentionCounts>,
+}
+
+/// How many spaces need attention, by the level each needs most; see `design/spaces.md`. A space is counted once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AttentionCounts {
+    /// Spaces waiting for an approval or an answer.
+    pub waiting: u32,
+    /// Spaces with a problem that happened while nobody was in them.
+    pub problems: u32,
+    /// Spaces with a reply that finished while nobody was in them.
+    pub replies: u32,
 }
 
 impl Server {
@@ -82,6 +105,13 @@ pub(crate) fn properties(
         (SPACES_KEY.to_owned(), counts.spaces.to_string()),
         (PARTICIPANTS_KEY.to_owned(), counts.participants.to_string()),
     ];
+    if let Some(attention) = counts.attention {
+        properties.extend([
+            (WAITING_KEY.to_owned(), attention.waiting.to_string()),
+            (PROBLEMS_KEY.to_owned(), attention.problems.to_string()),
+            (REPLIES_KEY.to_owned(), attention.replies.to_string()),
+        ]);
+    }
     if let Some(fingerprint) = fingerprint {
         properties.push((FINGERPRINT_KEY.to_owned(), fingerprint.to_owned()));
     }
@@ -186,6 +216,9 @@ pub(crate) fn resolved<'a>(
         protocol: number(property(PROTOCOL_KEY)),
         spaces: number(property(SPACES_KEY)),
         participants: number(property(PARTICIPANTS_KEY)),
+        waiting: number(property(WAITING_KEY)),
+        problems: number(property(PROBLEMS_KEY)),
+        replies: number(property(REPLIES_KEY)),
         fingerprint: fingerprint(property(FINGERPRINT_KEY)),
     };
     if server.is_compatible() {
@@ -224,6 +257,7 @@ mod tests {
         let counts = Counts {
             spaces: 2,
             participants: 1,
+            attention: None,
         };
         assert_eq!(
             properties("Studio", 7, counts, None),
@@ -262,10 +296,79 @@ mod tests {
     }
 
     #[test]
+    fn attention_counts_are_encoded_only_when_given() {
+        let counts = Counts {
+            spaces: 4,
+            participants: 1,
+            attention: Some(AttentionCounts {
+                waiting: 1,
+                problems: 0,
+                replies: 2,
+            }),
+        };
+        let encoded = properties("Studio", 7, counts, None);
+        assert_eq!(
+            encoded[4..],
+            [
+                ("waiting".to_owned(), "1".to_owned()),
+                ("problems".to_owned(), "0".to_owned()),
+                ("replies".to_owned(), "2".to_owned()),
+            ]
+        );
+        let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts, None)
+            .into_iter()
+            .collect();
+        let Event::Found(server) = event(&txt) else {
+            panic!("expected Found");
+        };
+        assert_eq!(
+            (server.waiting, server.problems, server.replies),
+            (Some(1), Some(0), Some(2))
+        );
+
+        // Turned off by the operator, the keys are left out rather than advertised as zero, so browsers read them as
+        // unknown rather than as nothing needing attention.
+        let hidden = Counts {
+            attention: None,
+            ..counts
+        };
+        let encoded = properties("Studio", PROTOCOL_VERSION, hidden, None);
+        assert!(
+            encoded
+                .iter()
+                .all(|(key, _)| !["waiting", "problems", "replies"].contains(&key.as_str()))
+        );
+        let Event::Found(server) = event(&encoded.into_iter().collect()) else {
+            panic!("expected Found");
+        };
+        assert_eq!(
+            (server.waiting, server.problems, server.replies),
+            (None, None, None)
+        );
+        assert_eq!(server.spaces, Some(4));
+
+        // Each is read on its own, with the same rule as the other counts.
+        let protocol = PROTOCOL_VERSION.to_string();
+        let Event::Found(server) = event(&lookup(&[
+            ("protocol", &protocol),
+            ("waiting", "-1"),
+            ("problems", " 3 "),
+            ("replies", "many"),
+        ])) else {
+            panic!("expected Found");
+        };
+        assert_eq!(
+            (server.waiting, server.problems, server.replies),
+            (None, Some(3), None)
+        );
+    }
+
+    #[test]
     fn decodes_the_counts_it_encodes() {
         let counts = Counts {
             spaces: 3,
             participants: u32::MAX,
+            attention: None,
         };
         let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts, None)
             .into_iter()

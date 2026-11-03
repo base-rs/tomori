@@ -3,12 +3,13 @@
 
 //! Bonjour discovery of Tomori servers: DNS service discovery (RFC 6763) over multicast DNS (RFC 6762).
 //!
-//! A server [`advertise`]s an instance of the service type [`SERVICE_TYPE`] (`_tomori._tcp`) with four TXT keys:
+//! A server [`advertise`]s an instance of the service type [`SERVICE_TYPE`] (`_tomori._tcp`) with these TXT keys:
 //!
 //! - `protocol=<u32>`: the [`protocol::PROTOCOL_VERSION`] the server speaks.
 //! - `name=<display name>`: the name to show in a server list. The DNS-SD instance name normally equals it, but the instance may be renamed (`Name (2)`) to resolve a conflict on the network.
 //! - `spaces=<u32>`: how many spaces the server lists, closed ones included.
 //! - `participants=<u32>`: how many participants are connected, whether in a space or in the lobby.
+//! - `waiting=<u32>`, `problems=<u32>` and `replies=<u32>`: how many spaces need attention, by the level each needs most: an approval or answer, a problem nobody has seen, or a reply nobody has heard. They reveal to the network that a computer's agent is waiting, but no titles, identifiers or directories, and the server's operator can leave them out. See `design/spaces.md`.
 //!
 //! The counts are [`Counts`]; [`Advertisement::update`] re-announces them as they change. A browser reads a missing or malformed count as unknown, so servers from before the counts were added are still listed, with no counts.
 //!
@@ -60,7 +61,7 @@ use std::fmt;
 
 pub use advertise::{Advertisement, advertise};
 pub use browse::{Browser, browse};
-pub use record::{Counts, Event, Server};
+pub use record::{AttentionCounts, Counts, Event, Server};
 pub use servers::Servers;
 pub use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 
@@ -79,6 +80,14 @@ pub const SPACES_KEY: &str = "spaces";
 /// The TXT key holding the number of connected participants as a decimal `u32`.
 pub const PARTICIPANTS_KEY: &str = "participants";
 
+/// The TXT key holding the number of spaces waiting for an approval or an answer, as a decimal `u32`.
+pub const WAITING_KEY: &str = "waiting";
+
+/// The TXT key holding the number of spaces with a problem nobody has seen, as a decimal `u32`.
+pub const PROBLEMS_KEY: &str = "problems";
+
+/// The TXT key holding the number of spaces with a reply nobody has heard, as a decimal `u32`.
+pub const REPLIES_KEY: &str = "replies";
 /// The TXT key holding the SHA-256 fingerprint of the server's TLS certificate, as 64 lowercase hexadecimal digits, for a server that serves TLS. See `design/security.md`.
 pub const FINGERPRINT_KEY: &str = "fingerprint";
 

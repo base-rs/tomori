@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 
 use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use base_scheduler::Cancellation;
-use discovery::Counts;
+use discovery::{AttentionCounts, Counts};
 use event_listener::{Event as Notify, EventListener};
 use protocol::{
-    AudioFrame, ClientMessage, ConnectionRole, EnvironmentInfo, Frame, FrameKind, Gate, Keepalive,
-    PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
+    Attention, AudioFrame, ClientMessage, ConnectionRole, EnvironmentInfo, Frame, FrameKind, Gate,
+    Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, WorkspaceRoot,
 };
 
 use crate::access::{self, Access, Grant};
@@ -368,6 +368,32 @@ struct SpaceRecord {
     closed: Option<u64>,
     /// Closed, but kept as open, and not forgotten, so that it is bound again when the server next starts: closed by shutdown, or not bound again after a restart for a reason that may pass. See `design/spaces.md`.
     kept_open: bool,
+    /// The attention the space was last listed as needing, and since when, so the listing can say how long it has
+    /// waited. Stamped after each agent event and whenever participants are told the space changed.
+    attention: Cell<Option<(Attention, Instant)>>,
+}
+
+impl SpaceRecord {
+    /// Note when the space's attention changed level, at `now`.
+    fn stamp_attention(&self, now: Instant) {
+        let level = self.model.attention();
+        if self.attention.get().map(|(stamped, _)| stamped) != level {
+            self.attention.set(level.map(|level| (level, now)));
+        }
+    }
+
+    /// The space as listed in the lobby at `now`, with how long it has needed its attention.
+    fn summary(&self, now: Instant) -> protocol::SpaceSummary {
+        let mut summary = self.model.summary();
+        summary.attention_age = summary.attention.map(|level| match self.attention.get() {
+            Some((stamped, since)) if stamped == level => {
+                u32::try_from(now.saturating_duration_since(since).as_secs()).unwrap_or(u32::MAX)
+            }
+            // Changed since it was last stamped, which happens when participants are next told.
+            _ => 0,
+        });
+        summary
+    }
 }
 
 /// An utterance whose transcript has not been reported yet.
@@ -428,6 +454,14 @@ impl HubState {
     /// The spaces listed, which includes closed spaces until they are forgotten, and the greeted owners and collaborators with a connection, whether in a space or in the lobby. Visitors are not counted. A space still being created is not listed, so it is not counted.
     fn counts(&self) -> Counts {
         let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+        let needing = |level: Attention| {
+            count(
+                self.spaces
+                    .iter()
+                    .filter(|space| space.model.attention() == Some(level))
+                    .count(),
+            )
+        };
         Counts {
             spaces: count(self.spaces.len()),
             participants: count(
@@ -436,6 +470,11 @@ impl HubState {
                     .filter(|record| record.participant.is_some() && !record.access.is_visitor())
                     .count(),
             ),
+            attention: Some(AttentionCounts {
+                waiting: needing(Attention::Input),
+                problems: needing(Attention::Problem),
+                replies: needing(Attention::Reply),
+            }),
         }
     }
 
@@ -491,8 +530,10 @@ impl HubState {
     /// Tell everyone in the space, and the lobby, that the space changed.
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
-            space.touched.set(Some(Instant::now()));
+            let now = Instant::now();
+            space.touched.set(Some(now));
             space.deferred.set(false);
+            space.stamp_attention(now);
             for member in space.model.members() {
                 if let Some(outbox) = self.outbox(member) {
                     outbox.space();
@@ -1725,6 +1766,14 @@ impl Hub {
                     );
                     return;
                 }
+                // A participant who chooses to join sees what happened while nobody was there, for everyone. A visitor
+                // watching does not, and being put back in a space on reconnecting does not count, since what happened
+                // meanwhile was not seen. See `design/spaces.md`.
+                if state.role(connection, Some(&target)).participates()
+                    && let Some(record) = state.space_mut(&target)
+                {
+                    record.model.attend();
+                }
                 state.join(participant, &target);
             }
             ClientMessage::Leave => {
@@ -2417,6 +2466,7 @@ impl Hub {
             deferred: Cell::new(false),
             closed: None,
             kept_open: false,
+            attention: Cell::new(None),
         });
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
@@ -2489,6 +2539,8 @@ impl Hub {
                         model.apply(Event::Closed {
                             reason: Some(reason),
                         });
+                        // It closed before the restart; whether anyone saw it is not known.
+                        model.attend();
                         closed.push(kept.id.clone());
                     }
                     None => {
@@ -2511,6 +2563,7 @@ impl Hub {
                     deferred: Cell::new(false),
                     closed: None,
                     kept_open: false,
+                    attention: Cell::new(None),
                 });
             }
             for id in closed {
@@ -2564,6 +2617,14 @@ impl Hub {
             record.kept_open = true;
         }
         self.space_ended(id, Some(reason));
+        // Not being bound again is the server's restart, not something that happened in the space's work, so it needs no
+        // attention; see `design/spaces.md`.
+        let mut state = self.lock();
+        if let Some(record) = state.space_mut(id) {
+            record.model.attend();
+        }
+        state.touch_space(id);
+        self.recount(&mut state);
     }
 
     /// Write the kept spaces, if there is somewhere to keep them and they changed. Spaces closed once shutdown has begun are kept as open; see `stamp_closed`.
@@ -2615,11 +2676,16 @@ impl Hub {
             return;
         };
         record.model.apply(event);
+        // Stamped now rather than when the snapshot is sent, so a level that ends and starts again within one
+        // snapshot interval starts its age again.
+        record.stamp_attention(Instant::now());
         state.stamp_closed();
         state.pump(space);
         if state.touch_space_paced(space, Instant::now()) {
             self.deferred_snapshot.notify(usize::MAX);
         }
+        // The space's attention may have changed.
+        self.recount(&mut state);
     }
 
     /// When the earliest deferred snapshot is due, if any.
@@ -2668,6 +2734,7 @@ impl Hub {
             .sent(key, result.map_err(|error| error.message));
         state.pump(space);
         state.touch_space(space);
+        self.recount(&mut state);
     }
 
     pub(crate) fn space_decided(
@@ -2684,6 +2751,7 @@ impl Hub {
             }
             state.pump(space);
             state.touch_space(space);
+            self.recount(&mut state);
             return;
         };
         if let Some(record) = state.space_mut(space) {
@@ -2700,6 +2768,7 @@ impl Hub {
             format!("The decision was not accepted: {}", error.message),
         );
         state.touch_space(space);
+        self.recount(&mut state);
     }
 
     pub(crate) fn space_answered(
@@ -2716,6 +2785,7 @@ impl Hub {
             }
             state.pump(space);
             state.touch_space(space);
+            self.recount(&mut state);
             return;
         };
         if let Some(record) = state.space_mut(space) {
@@ -2732,6 +2802,7 @@ impl Hub {
             format!("The answer was not accepted: {}", error.message),
         );
         state.touch_space(space);
+        self.recount(&mut state);
     }
 
     /// The agent answered a participant's mode switch. A switch it accepted is shared when it confirms the mode.
@@ -2830,10 +2901,11 @@ impl Hub {
             }
             Outgoing::Spaces => {
                 let state = self.lock();
+                let now = Instant::now();
                 let mut spaces: Vec<_> = state
                     .spaces
                     .iter()
-                    .map(|space| space.model.summary())
+                    .map(|space| space.summary(now))
                     .collect();
                 limits::fit_spaces(&mut spaces);
                 Some(ServerMessage::Spaces { spaces })
@@ -2914,6 +2986,19 @@ mod tests {
         Counts {
             spaces,
             participants,
+            attention: Some(AttentionCounts::default()),
+        }
+    }
+
+    /// `counts` with spaces needing attention.
+    fn needing(counts: Counts, waiting: u32, problems: u32, replies: u32) -> Counts {
+        Counts {
+            attention: Some(AttentionCounts {
+                waiting,
+                problems,
+                replies,
+            }),
+            ..counts
         }
     }
 
@@ -3028,11 +3113,154 @@ mod tests {
         assert!(notifies(&hub, || hub.disconnect(again)));
         assert_eq!(hub.counts(), counts(1, 1));
 
-        // A closed space is still listed, so it still counts.
-        assert!(!notifies(&hub, || hub.space_ended(&space, None)));
-        assert_eq!(hub.counts(), counts(1, 1));
+        // A closed space is still listed, so it still counts. Nobody was in it when it closed, so it has a problem.
+        assert!(notifies(&hub, || hub.space_ended(&space, None)));
+        assert_eq!(hub.counts(), needing(counts(1, 1), 0, 1, 0));
         hub.disconnect(bob);
-        assert_eq!(hub.counts(), counts(1, 0));
+        assert_eq!(hub.counts(), needing(counts(1, 0), 0, 1, 0));
+    }
+
+    /// The lobby listing `connection` would be sent.
+    fn listing(hub: &Hub, connection: ConnectionId) -> Vec<protocol::SpaceSummary> {
+        match hub.render(connection, Outgoing::Spaces) {
+            Some(ServerMessage::Spaces { spaces }) => spaces,
+            other => panic!("expected a listing, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attention_is_listed_and_counted_until_someone_joins() {
+        let hub = hub();
+        let ada = greet(&hub, "ada");
+        let space = create(&hub, "nobody");
+        let quiet = listing(&hub, ada);
+        assert_eq!((quiet[0].attention, quiet[0].attention_age), (None, None));
+
+        // An approval while nobody is there, then the agent finishing a reply.
+        let permission = backend::Permission {
+            id: "p".into(),
+            tool: "Bash".into(),
+            input: serde_json::Value::Null,
+            description: None,
+            options: Vec::new(),
+        };
+        assert!(notifies(&hub, || hub
+            .space_event(&space, Event::PermissionRequested(permission))));
+        assert_eq!(hub.counts(), needing(counts(1, 1), 1, 0, 0));
+        let listed = listing(&hub, ada);
+        assert_eq!(listed[0].attention, Some(Attention::Input));
+        assert_eq!(listed[0].attention_age, Some(0));
+
+        // Its age counts from when it changed level, as stamped when participants are told.
+        let record = |hub: &Hub| {
+            let state = hub.lock();
+            let since = state.space(&space).unwrap().attention.get().unwrap();
+            (
+                since.0,
+                state
+                    .space(&space)
+                    .unwrap()
+                    .summary(since.1 + Duration::from_secs(90)),
+            )
+        };
+        let (level, later) = record(&hub);
+        assert_eq!(level, Attention::Input);
+        assert_eq!(later.attention_age, Some(90));
+
+        hub.space_event(&space, Event::PermissionResolved { id: "p".into() });
+        for event in [
+            Event::Busy,
+            Event::MessageStarted {
+                message: "m".into(),
+                role: backend::Role::Assistant,
+            },
+            Event::TextDelta {
+                message: "m".into(),
+                text: "Done.".into(),
+            },
+            Event::MessageCompleted {
+                message: "m".into(),
+            },
+            Event::Idle,
+        ] {
+            hub.space_event(&space, event);
+        }
+        // A deferred snapshot stamps the new level once it is sent.
+        hub.flush_snapshots(Instant::now() + SNAPSHOT_INTERVAL);
+        assert_eq!(hub.counts(), needing(counts(1, 1), 0, 0, 1));
+        assert_eq!(listing(&hub, ada)[0].attention, Some(Attention::Reply));
+        assert_eq!(record(&hub).0, Attention::Reply);
+
+        // Joining clears it for everyone.
+        assert!(notifies(&hub, || hub.handle(
+            ada,
+            ClientMessage::Join {
+                space: space.clone()
+            }
+        )));
+        assert_eq!(hub.counts(), counts(1, 1));
+        let bob = greet(&hub, "bob");
+        assert_eq!(listing(&hub, bob)[0].attention, None);
+    }
+
+    #[test]
+    fn being_put_back_in_a_space_on_reconnecting_does_not_clear_its_attention() {
+        let hub = hub();
+        let ada = greet(&hub, "ada");
+        let space = create(&hub, &participant_key(None, "ada"));
+        hub.disconnect(ada);
+        // While Ada is away, the agent replies.
+        for event in [
+            Event::Busy,
+            Event::MessageStarted {
+                message: "m".into(),
+                role: backend::Role::Assistant,
+            },
+            Event::TextDelta {
+                message: "m".into(),
+                text: "Done.".into(),
+            },
+            Event::MessageCompleted {
+                message: "m".into(),
+            },
+            Event::Idle,
+        ] {
+            hub.space_event(&space, event);
+        }
+        assert_eq!(hub.counts(), needing(counts(1, 0), 0, 0, 1));
+        // Reconnecting puts her back in the space, which she has not seen yet; a jump would move on from it.
+        let ada = greet(&hub, "ada");
+        assert_eq!(
+            hub.lock().space(&space).unwrap().model.participants.len(),
+            1
+        );
+        assert_eq!(hub.counts(), needing(counts(1, 1), 0, 0, 1));
+        // A visitor watching it does not clear it.
+        let (visitor, ..) = hub.connect(Cancellation::new(), Access::visitor()).unwrap();
+        hub.handle(
+            visitor,
+            ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                participant: "vic".to_owned(),
+                name: "Vic".to_owned(),
+            },
+        );
+        hub.handle(
+            visitor,
+            ClientMessage::Join {
+                space: space.clone(),
+            },
+        );
+        assert_eq!(hub.lock().space(&space).unwrap().model.visitors.len(), 1);
+        assert_eq!(hub.counts(), needing(counts(1, 1), 0, 0, 1));
+        // Choosing to join it, as her client does to restore its membership, clears it.
+        hub.handle(
+            ada,
+            ClientMessage::Join {
+                space: space.clone(),
+            },
+        );
+        assert_eq!(hub.counts(), counts(1, 1));
     }
 
     #[test]
@@ -3046,10 +3274,12 @@ mod tests {
         for space in &spaces[..CLOSED_SPACES] {
             hub.space_ended(space, None);
         }
-        assert_eq!(hub.counts(), counts(listed, 0));
+        // Each closed while nobody was in it.
+        let closed = u32::try_from(CLOSED_SPACES).unwrap();
+        assert_eq!(hub.counts(), needing(counts(listed, 0), 0, closed, 0));
         // Closing one more than are kept forgets the oldest.
         assert!(notifies(&hub, || hub.space_ended(&spaces[CLOSED_SPACES], None)));
-        assert_eq!(hub.counts(), counts(listed - 1, 0));
+        assert_eq!(hub.counts(), needing(counts(listed - 1, 0), 0, closed, 0));
     }
 
     #[test]

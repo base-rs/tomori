@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS] [--workspace-root PATH]... [--max-spaces COUNT]`
+//! `tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH] [--speech-provider NAME] [--name NAME] [--no-advertise] [--no-advertise-attention] [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS] [--workspace-root PATH]... [--max-spaces COUNT]`
 //!
 //! Serves Tomori clients on the local network, advertised with Bonjour as `_tomori._tcp`. Holders of the server's tokens are owners or collaborators; anyone else may watch as a visitor, unless `--no-visitors`. `tomori-server auth` manages the tokens. See `design/server.md` and `design/security.md`.
 
@@ -24,8 +24,8 @@ use protocol::Keepalive;
 use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
-                     [--speech-provider NAME] [--name NAME] [--no-advertise] [--keepalive-interval SECONDS]
-                     [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
+                     [--speech-provider NAME] [--name NAME] [--no-advertise] [--no-advertise-attention]
+                     [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
                                           [--auth MODE] [--no-visitors]
                      [--max-visitors COUNT] [--state-directory PATH]
@@ -55,6 +55,9 @@ Options:
   --name NAME          The name clients list for this server (default: the host name).
   --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
                        its address.
+  --no-advertise-attention
+                       Advertise the server without how many of its spaces need attention, which
+                       tells anyone on the network that its agent is waiting.
   --keepalive-interval SECONDS
                        Ping a connection that has been quiet this long (default 5).
   --keepalive-timeout SECONDS
@@ -92,6 +95,8 @@ struct Arguments {
     speech_segmentation: String,
     name: Option<String>,
     advertise: bool,
+    /// Whether the advertisement says how many spaces need attention.
+    advertise_attention: bool,
     keepalive: Keepalive,
     request_timeout: Option<Duration>,
     /// Empty for the default, the current directory.
@@ -135,6 +140,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         speech_segmentation: "block".to_owned(),
         name: None,
         advertise: true,
+        advertise_attention: true,
         keepalive: Keepalive::DEFAULT,
         request_timeout: None,
         workspace_roots: Vec::new(),
@@ -212,6 +218,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
             }
             "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
             "--no-advertise" => parsed.advertise = false,
+            "--no-advertise-attention" => parsed.advertise_attention = false,
             "--keepalive-interval" => {
                 parsed.keepalive.interval = seconds(&argument, arguments.next())?
             }
@@ -778,7 +785,8 @@ fn main() -> ExitCode {
     let mut server = Server::new(backends, transcriber)
         .with_keepalive(arguments.keepalive)
         .with_workspace_roots(roots)
-        .with_max_spaces(arguments.max_spaces);
+        .with_max_spaces(arguments.max_spaces)
+        .with_attention_advertised(arguments.advertise_attention);
     let fingerprint;
     (server, fingerprint) = match admission(server, &arguments) {
         Ok(admitted) => admitted,
@@ -943,6 +951,14 @@ mod tests {
         assert_eq!(parsed.keepalive.interval, Duration::from_millis(500));
         assert_eq!(parsed.keepalive.timeout, Duration::from_secs(2));
         assert_eq!(parsed.request_timeout, Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn attention_is_advertised_unless_turned_off_on_its_own() {
+        let parsed = arguments(&[]).unwrap();
+        assert!(parsed.advertise && parsed.advertise_attention);
+        let parsed = arguments(&["--no-advertise-attention"]).unwrap();
+        assert!(parsed.advertise && !parsed.advertise_attention);
     }
 
     #[test]
