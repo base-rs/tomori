@@ -679,6 +679,7 @@ impl Connection {
                 Action::Paired { token, certificate } => {
                     self.paired(token, certificate, conversation)
                 }
+                Action::Admitted { token, certificate } => self.admitted(token, certificate),
                 Action::Disconnect => self.disconnect(),
                 Action::Rescan => {
                     self.browser = None;
@@ -839,6 +840,34 @@ impl Connection {
             Reopen::WithoutToken => {}
         }
         self.open(link, conversation);
+    }
+
+    /// A knock admitted this device: keep its collaborator token for the server, with the certificate the connection presented, to present when it connects again. The connection is already a collaborator's, so it is not reopened.
+    fn admitted(&mut self, token: String, certificate: Fingerprint) {
+        let Some(link) = self.link.as_mut() else {
+            return;
+        };
+        // Never from a server whose identity changed, over a certificate other than the one kept, or in place of a token already kept: an admission may not replace what this device trusts.
+        let kept = self.store.credential(&link.key).certificate;
+        if link.distrusted
+            || link.token.is_some()
+            || kept.is_some_and(|kept| kept != certificate.to_string())
+        {
+            log::warn!(
+                "Ignored an admission that would replace what this device keeps for the server."
+            );
+            return;
+        }
+        self.store
+            .remember_certificate(&link.key, &certificate.to_string());
+        self.store.remember_token(&link.key, &token);
+        link.token = Some(token);
+        link.pending_token = false;
+        link.pinned = true;
+        link.distrusted = false;
+        link.transport = Transport::Tls {
+            pin: Some(certificate),
+        };
     }
 
     /// Pairing gave this device an owner token: keep it with the certificate the pairing connection presented, which replaces one it distrusted, and connect with both. See `design/security.md`.

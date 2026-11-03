@@ -6,6 +6,7 @@ use crate::{
     caption::Caption,
     controller,
     graphics::Renderer,
+    hand_menu::{self, HandMenu, Palm},
     hands,
     log_cadence::{self, Cadence},
     pointing::{Pointer, Ray},
@@ -182,6 +183,9 @@ pub fn run(
     let mut highlighted = None;
     let mut signals = crate::interaction::Signals::default();
     let mut pointer = Pointer::<arrival::Key>::default();
+    let mut hand_menu = HandMenu::default();
+    // Whether the hand menu showed last frame, when A is read, so that A then chooses only in it.
+    let mut menu_was_shown = false;
     let mut arrival_time = 0.0_f32;
     let mut motion = arrival_motion::Motion::default();
     let mut delegation_scene = crate::delegation::Scene::new();
@@ -315,7 +319,17 @@ pub fn run(
         choice_latched = choice_moving;
         // A chooses the object the ray highlighted last frame, as the
         // trigger does; with nothing highlighted it accepts or resets.
-        let reset = controls.reset && conversation.press_a(highlighted.as_ref());
+        let reset = match &highlighted {
+            Some(arrival::Key::Menu(key)) if controls.reset => {
+                if let Some(choice) = hand_menu.choose(key) {
+                    conversation.choose_menu(choice);
+                }
+                false
+            }
+            // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval.
+            _ if menu_was_shown => false,
+            _ => controls.reset && conversation.press_a(highlighted.as_ref()),
+        };
         // Hold X to talk to the agent; releasing it while focused sends the utterance.
         if focused && !controls.talk {
             talk_blocked = false;
@@ -407,17 +421,61 @@ pub fn run(
         arrival_time += dt;
         motion.update(&arrival_target(&conversation), arrival_time);
         let mut scene = motion.scene(arrival_time);
-        let pointing = pointer.update(ray, controls.trigger, &scene.targets());
+        // The hand menu shows above the left wrist while the left palm faces the head, from hand tracking or else the left controller. While it shows, the trigger chooses only in it. See `design/hand-menu.md`.
+        let palm = tracked_hands[controller::LEFT]
+            .as_ref()
+            .and_then(Palm::from_left_hand)
+            .or_else(|| {
+                controller_poses[controller::LEFT]
+                    .as_ref()
+                    .and_then(Palm::from_left_controller)
+            });
+        let head = scene_anchor
+            .to_scene_transform(head_pose(&views))
+            .map(|pose| Vec3::from_array(pose.position));
+        let menu_shown = focused && hand_menu.update(palm, head, Instant::now());
+        menu_was_shown = menu_shown;
+        let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
+            let model = conversation.menu_model();
+            match palm {
+                Some(palm) if menu_shown => {
+                    hand_menu.objects(&palm, &model, head.unwrap_or(arrival::HOME))
+                }
+                Some(palm) if model.waiting() => vec![hand_menu::cue(&palm)],
+                _ => Vec::new(),
+            }
+        };
+        scene.objects.extend(menu(&hand_menu, &conversation));
+        // Labels and forms face the participant's head, in steps of 5 cm so that they are not rebuilt every frame as the head sways.
+        let viewer = head.map(|head| (head * 20.0).round() / 20.0);
+        scene.viewer = viewer;
+        let targets: Vec<_> = scene
+            .targets()
+            .into_iter()
+            .filter(|target| !menu_shown || matches!(target.key, arrival::Key::Menu(_)))
+            .collect();
+        let pointing = pointer.update(ray, controls.trigger, &targets);
         highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
         if let Some(key) = &pointing.chosen {
-            conversation.choose_object(key);
+            match key {
+                arrival::Key::Menu(key) => {
+                    if let Some(choice) = hand_menu.choose(key) {
+                        conversation.choose_menu(choice);
+                    }
+                }
+                key => conversation.choose_object(key),
+            }
             motion.update(&arrival_target(&conversation), arrival_time);
             scene = motion.scene(arrival_time);
+            scene.objects.extend(menu(&hand_menu, &conversation));
+            scene.viewer = viewer;
         }
         let in_arrival = conversation.arrival().is_some();
         // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
         renderer.set_scenery(motion.scenery(arrival_time));
-        swarm.step(dt, controller.filter(|_| pointing.attracting));
+        // A trigger pull that misses the hand menu's rows does nothing while it shows.
+        let attracting = pointing.attracting && !menu_shown;
+        swarm.step(dt, controller.filter(|_| attracting));
         renderer.update(
             &gpu.queue,
             &swarm,
@@ -428,7 +486,7 @@ pub fn run(
             } else {
                 controller
             },
-            pointing.attracting,
+            attracting,
         );
         let (root, current_workspace) = workers.update(conversation.joined_space());
         {
@@ -447,7 +505,7 @@ pub fn run(
             );
         }
         // Arrival's objects are still drawn as they leave on entering a space, but the ray only outside one.
-        if in_arrival || !scene.objects.is_empty() || scene.heading.is_some() {
+        if in_arrival || menu_shown || !scene.objects.is_empty() || scene.heading.is_some() {
             renderer.update_arrival(
                 &gpu.device,
                 &gpu.queue,
@@ -457,7 +515,7 @@ pub fn run(
                     ray: ray
                         .zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
                         .map(|(ray, end)| (ray.origin, end))
-                        .filter(|_| in_arrival),
+                        .filter(|_| in_arrival || menu_shown),
                     time: arrival_time,
                 },
             );
@@ -485,7 +543,8 @@ pub fn run(
             &[view_projection(&views[0]), view_projection(&views[1])],
             scene_anchor.transform(),
             // Arrival is shown in the world, with its own labels, rather than on the panel.
-            (!in_arrival).then(|| (&caption, head_pose(&views))),
+            // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
+            (!in_arrival && !menu_shown).then(|| (&caption, head_pose(&views))),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,

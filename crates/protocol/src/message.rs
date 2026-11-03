@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BackendInfo, ConnectionRole, EnvironmentInfo, Gate, SessionSummary, SpaceState, SpaceSummary,
-    WorkspaceRoot,
+    BackendInfo, ConnectionRole, EnvironmentInfo, Gate, KnockRequest, KnockState, SessionSummary,
+    SpaceState, SpaceSummary, WorkspaceRoot,
 };
 
 /// A tracked pose in the space's coordinate system.
@@ -121,6 +121,13 @@ pub enum ClientMessage {
     },
     /// Stop pairing.
     PairCancel,
+    /// Ask to collaborate in the space this visitor is watching. See `design/security.md`.
+    Knock,
+    /// Admit or decline a knock on the space this participant is in.
+    DecideKnock {
+        knock: String,
+        admit: bool,
+    },
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,
@@ -217,6 +224,18 @@ pub enum ServerMessage {
     /// The pairing ended without a token: declined, withdrawn, or refused.
     PairFailed {
         error: String,
+    },
+    /// The knocks waiting on the space, sent to its participants whenever they change.
+    Knocks {
+        knocks: Vec<KnockRequest>,
+    },
+    /// What became of this visitor's knock.
+    KnockState {
+        state: KnockState,
+    },
+    /// This visitor was admitted to the space as a collaborator: a token to present from now on, over TLS to the certificate this connection presented. The connection is a collaborator's at once, and a [`ServerMessage::Role`] follows.
+    Admitted {
+        token: String,
     },
     /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
     Ping {

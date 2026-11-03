@@ -589,12 +589,12 @@ fn an_owner_signs_in_and_sees_the_status_page() {
 fn only_an_owner_sees_the_status_page_or_revokes_a_token() {
     let server = TestServer::with_tokens(true, |server| server);
     let (_, owner_token) = server.issue("Ada", Grant::Owner);
-    let (bob, bob_token) = server.issue(
-        "Bob",
-        Grant::Collaborator {
-            space: "studio".into(),
-        },
-    );
+    // A collaborator token for a space that exists, since one whose space is gone is revoked.
+    let studio = server
+        .connect_with_token("ada", "Ada", &owner_token)
+        .create_space("Studio")
+        .id;
+    let (bob, bob_token) = server.issue("Bob", Grant::Collaborator { space: studio });
     let bob_cookie = format!("__Host-tomori-token={bob_token}");
     let (status, _, page) = exchange(&server, "GET", "/", &[("Cookie", &bob_cookie)], "");
     assert_eq!(status, 403);

@@ -200,6 +200,7 @@ impl Server {
 
     /// Admit holders of the tokens in `store` as what each grants, and anyone without credentials as a visitor if `visitors`, or not at all. Without this, everyone is an owner, as with `tomori-server --auth open`. See `design/security.md`.
     pub fn with_tokens(mut self, store: Arc<security::TokenStore>, visitors: bool) -> Self {
+        self.hub.set_tokens(store.clone());
         self.application.set_door(Door::tokens(store, visitors));
         self
     }
@@ -223,9 +224,9 @@ impl Server {
         self
     }
 
-    /// Pair over plain HTTP, as tests' raw clients do. Pairing otherwise needs [`Self::with_tls`], so that the token it issues never crosses the network in the clear.
+    /// Issue tokens, by pairing and knocking, over plain HTTP, as tests' raw clients need. Both otherwise need [`Self::with_tls`], so that a token never crosses the network in the clear.
     #[cfg(feature = "fake")]
-    pub fn with_pairing_over_plain_http_for_tests(self) -> Self {
+    pub fn with_tokens_over_plain_http_for_tests(self) -> Self {
         self.hub.set_encrypted(true);
         self
     }
@@ -242,6 +243,12 @@ impl Server {
     /// Change how long a pairing waits to be confirmed; see [`crate::PAIRING_TIMEOUT`].
     pub fn with_pairing_timeout(self, timeout: Duration) -> Self {
         self.hub.set_pairing_timeout(timeout);
+        self
+    }
+
+    /// Change how long a knock waits for an answer; see [`crate::KNOCK_TIMEOUT`].
+    pub fn with_knock_timeout(self, timeout: Duration) -> Self {
+        self.hub.set_knock_timeout(timeout);
         self
     }
 
@@ -642,6 +649,17 @@ impl Server {
         };
         if let Err(error) = store.reload() {
             log::warn!("Could not read the token store: {error}.");
+        }
+        // A collaborator token outlives no space: one whose space is gone is revoked.
+        for entry in store.entries() {
+            if let security::Grant::Collaborator { space } = &entry.grant
+                && !self.hub.has_space(space)
+            {
+                log::info!("Revoking token {}, whose space {space} is gone.", entry.id);
+                if let Err(error) = store.revoke(&entry.id) {
+                    log::warn!("Could not revoke token {}: {error}.", entry.id);
+                }
+            }
         }
         self.hub
             .revoke(|principal| store.entry(principal).is_some());

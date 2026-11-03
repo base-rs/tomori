@@ -26,7 +26,7 @@ fn pairing_server(
         let server = configure(
             server
                 .with_pairing(fingerprint())
-                .with_pairing_over_plain_http_for_tests(),
+                .with_tokens_over_plain_http_for_tests(),
         );
         sender.send(server.pairing()).unwrap();
         server
@@ -370,12 +370,10 @@ fn get(server: &TestServer, path: &str, cookie: &str) -> String {
 fn an_owner_confirms_a_pairing_on_the_status_page() {
     let (server, pairing) = pairing_server(true, |server| server);
     let (_, owner) = server.issue("Ada", security::Grant::Owner);
-    let (_, collaborator) = server.issue(
-        "Bob",
-        security::Grant::Collaborator {
-            space: "studio".into(),
-        },
-    );
+    // A collaborator token for a space that exists, since one whose space is gone is revoked.
+    let mut ada = server.connect_with_token("ada", "Ada", &owner);
+    let studio = ada.create_space("Studio").id;
+    let (_, collaborator) = server.issue("Bob", security::Grant::Collaborator { space: studio });
     let owner = format!("__Host-tomori-token={owner}");
     let collaborator = format!("__Host-tomori-token={collaborator}");
     let mut quest = server.connect("quest", "Quest 3");
