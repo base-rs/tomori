@@ -137,7 +137,7 @@ enum Viewer {
 impl Application {
     fn viewer(&self, fields: &Fields) -> Viewer {
         let credentials = credentials(fields);
-        match self.door.admit(&credentials) {
+        match self.door.admit(&credentials, false) {
             Some(access) if access.grant == Grant::Owner => Viewer::Owner,
             Some(_) if credentials.token.is_some() => Viewer::Other,
             _ => Viewer::Nobody,
@@ -157,6 +157,7 @@ impl Application {
                     200,
                     pages::status(
                         &self.hub.status(),
+                        self.hub.pending_pairing(),
                         tokens.as_deref(),
                         Self::signed_in(fields),
                     ),
@@ -184,8 +185,31 @@ impl Application {
         match path {
             pages::SIGN_IN_PATH => self.sign_in(form.as_deref()),
             pages::SIGN_OUT_PATH => redirect(pages::SIGN_IN_PATH, Some(token_cookie(None))),
+            pages::CONFIRM_PAIRING_PATH | pages::DECLINE_PAIRING_PATH => {
+                self.decide_pairing(fields, path == pages::CONFIRM_PAIRING_PATH)
+            }
             _ => self.revoke(fields, form.as_deref()),
         }
+    }
+
+    /// Confirm or decline the pairing waiting, as an owner who compared the codes.
+    fn decide_pairing<B: ReadableBody>(
+        &self,
+        fields: &Fields,
+        confirm: bool,
+    ) -> Response<ResponseBody<B>> {
+        if !matches!(self.viewer(fields), Viewer::Owner) {
+            return html(403, pages::not_an_owner());
+        }
+        if confirm {
+            match self.hub.confirm_pairing(None) {
+                Ok(name) => log::info!("Confirmed pairing {name:?} from the status page."),
+                Err(error) => log::info!("Could not confirm a pairing: {error}"),
+            }
+        } else {
+            self.hub.decline_pairing();
+        }
+        redirect(pages::STATUS_PATH, None)
     }
 
     fn sign_in<B: ReadableBody>(&self, form: Option<&[u8]>) -> Response<ResponseBody<B>> {
@@ -195,7 +219,7 @@ impl Application {
         let credentials = Credentials {
             token: token.clone(),
         };
-        match (token, self.door.admit(&credentials)) {
+        match (token, self.door.admit(&credentials, false)) {
             (Some(token), Some(access)) if access.principal.is_some() => {
                 redirect(pages::STATUS_PATH, Some(token_cookie(Some(&token))))
             }
@@ -332,7 +356,13 @@ impl Handler for Application {
         Ok(match path {
             protocol::CONNECT_PATH if post => {
                 // Credentials are checked before the connection reaches the hub; every refusal gets the same reply. See `design/security.md`.
-                let Some(access) = self.door.admit(&credentials(&request.fields)) else {
+                // A device without credentials may ask to pair on a server that refuses visitors; see `design/security.md`.
+                let to_pair = request
+                    .fields
+                    .values("tomori-pairing")
+                    .next()
+                    .is_some_and(|value| value == b"1");
+                let Some(access) = self.door.admit(&credentials(&request.fields), to_pair) else {
                     log::debug!("Refused a connection whose credentials were not accepted.");
                     let mut refused = response(
                         Status::new(401).expect("valid status"),
@@ -368,7 +398,13 @@ impl Handler for Application {
                 Door::Open => redirect(pages::STATUS_PATH, None),
                 Door::Tokens { .. } => html(200, pages::sign_in(None)),
             },
-            pages::SIGN_IN_PATH | pages::SIGN_OUT_PATH | pages::REVOKE_PATH if post => {
+            pages::SIGN_IN_PATH
+            | pages::SIGN_OUT_PATH
+            | pages::REVOKE_PATH
+            | pages::CONFIRM_PAIRING_PATH
+            | pages::DECLINE_PAIRING_PATH
+                if post =>
+            {
                 let path = path.to_owned();
                 let fields = request.fields.clone();
                 let authority = request
@@ -392,7 +428,9 @@ impl Handler for Application {
             | pages::STATUS_PATH
             | pages::SIGN_IN_PATH
             | pages::SIGN_OUT_PATH
-            | pages::REVOKE_PATH => response(
+            | pages::REVOKE_PATH
+            | pages::CONFIRM_PAIRING_PATH
+            | pages::DECLINE_PAIRING_PATH => response(
                 Status::new(405).expect("valid status"),
                 "text/plain",
                 ResponseBody::fixed("Method not allowed.\n"),

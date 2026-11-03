@@ -61,6 +61,30 @@ pub struct SpaceStatus {
     pub visitors: usize,
 }
 
+/// How long a pairing waits to be confirmed before it is withdrawn. See `design/security.md`.
+pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A device pairing: its commitment, the server's value, and the code once the device has revealed its own value.
+struct PendingPairing {
+    connection: ConnectionId,
+    /// The device's display name, which names the token it receives.
+    name: String,
+    commitment: String,
+    server: security::pairing::Nonce,
+    code: Option<String>,
+    started: Instant,
+}
+
+/// What pairing needs from the server: its certificate's fingerprint, which the code is derived from, and the token store, which issues the token. Without them, as in `--auth open` mode, the server does not pair.
+#[derive(Clone)]
+pub struct PairingSetup {
+    pub fingerprint: security::Fingerprint,
+    pub tokens: Arc<security::TokenStore>,
+}
+
+/// Called with the device's name and the code when a pairing waits to be confirmed, so the server can show it on its console.
+pub type PairingPrompt = Box<dyn Fn(&str, &str) + Send + Sync>;
+
 /// The most disconnected visitors remembered. Anyone can connect as a visitor with a new identity, so beyond this the longest gone are forgotten, rather than kept for the whole retention. See `design/spaces.md`.
 pub const RETAINED_VISITORS: usize = 256;
 
@@ -130,6 +154,9 @@ pub struct Hub {
     counts_changed: Notify,
     /// The most visitors connected at once; see `design/security.md`.
     max_visitors: AtomicUsize,
+    pairing: RwLock<Option<PairingSetup>>,
+    pairing_prompt: RwLock<Option<PairingPrompt>>,
+    pairing_timeout: RwLock<Duration>,
     this: Weak<Hub>,
 }
 
@@ -153,6 +180,8 @@ struct HubState {
     utterances: HashMap<UtteranceId, UtteranceRecord>,
     /// Set once shutdown has begun: no further spaces are registered.
     shutting_down: bool,
+    /// The one pairing pending, if any; see `design/security.md`.
+    pairing: Option<PendingPairing>,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
 }
@@ -525,6 +554,21 @@ impl HubState {
         self.touch_space(space);
     }
 
+    /// End the pending pairing, of `connection` if given, telling its device why. Returns whether one ended.
+    fn end_pairing(&mut self, connection: Option<ConnectionId>, error: &str) -> bool {
+        let Some(pairing) = self.pairing.take_if(|pairing| {
+            connection.is_none_or(|connection| pairing.connection == connection)
+        }) else {
+            return false;
+        };
+        if let Some(record) = self.connections.get(&pairing.connection) {
+            record.outbox.message(ServerMessage::PairFailed {
+                error: error.to_owned(),
+            });
+        }
+        true
+    }
+
     /// Forget the longest gone disconnected visitors beyond [`RETAINED_VISITORS`].
     fn forget_excess_visitors(&mut self) {
         let mut departed: Vec<(u64, String)> = self
@@ -584,6 +628,9 @@ impl Hub {
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
+            pairing: RwLock::new(None),
+            pairing_prompt: RwLock::new(None),
+            pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             this: this.clone(),
         })
     }
@@ -594,6 +641,62 @@ impl Hub {
             .roots
             .write()
             .expect("workspace roots are never left poisoned") = roots;
+    }
+
+    /// Pair devices with this setup; see `design/security.md`.
+    pub(crate) fn set_pairing(&self, setup: PairingSetup) {
+        *self.pairing.write().expect("never left poisoned") = Some(setup);
+    }
+
+    pub(crate) fn set_pairing_prompt(&self, prompt: PairingPrompt) {
+        *self.pairing_prompt.write().expect("never left poisoned") = Some(prompt);
+    }
+
+    pub(crate) fn set_pairing_timeout(&self, timeout: Duration) {
+        *self.pairing_timeout.write().expect("never left poisoned") = timeout;
+    }
+
+    /// The device and code of the pairing waiting to be confirmed, if any, with the code written as the device shows it.
+    pub fn pending_pairing(&self) -> Option<(String, String)> {
+        let state = self.lock();
+        let pairing = state.pairing.as_ref()?;
+        let code = pairing.code.as_deref()?;
+        Some((pairing.name.clone(), security::pairing::display(code)))
+    }
+
+    /// Confirm the pairing waiting, issuing its device an owner token. `typed`, from the console, must be the code the device shows; an owner on the status page confirms without typing it, having compared the codes. Returns the device's name.
+    pub fn confirm_pairing(&self, typed: Option<&str>) -> Result<String, &'static str> {
+        let mut state = self.lock();
+        let pairing = state.pairing.as_ref().ok_or("No pairing is waiting.")?;
+        let code = pairing.code.as_deref().ok_or("No pairing is waiting.")?;
+        if typed.is_some_and(|typed| typed != code) {
+            return Err("That code does not match, so nothing was confirmed.");
+        }
+        let setup = self
+            .pairing
+            .read()
+            .expect("never left poisoned")
+            .clone()
+            .ok_or("This server does not pair devices.")?;
+        let pairing = state.pairing.take().expect("checked above");
+        let (entry, token) = setup
+            .tokens
+            .issue(&pairing.name, security::Grant::Owner)
+            .map_err(|error| {
+                log::error!("Could not issue a token for a pairing: {error}.");
+                "The token could not be issued."
+            })?;
+        log::info!("Paired {:?} as owner token {}.", pairing.name, entry.id);
+        if let Some(record) = state.connections.get(&pairing.connection) {
+            record.outbox.message(ServerMessage::Paired { token });
+        }
+        Ok(pairing.name)
+    }
+
+    /// Decline the pairing waiting, telling its device. Returns whether one was waiting.
+    pub fn decline_pairing(&self) -> bool {
+        let mut state = self.lock();
+        state.end_pairing(None, "The pairing was declined.")
     }
 
     /// Change the most visitors connected at once; see [`Hub::connect`].
@@ -643,7 +746,7 @@ impl Hub {
                 let role = match connection.access.grant {
                     Grant::Owner => ConnectionRole::Owner,
                     Grant::Collaborator { .. } => ConnectionRole::Collaborator,
-                    Grant::Visitor => return None,
+                    Grant::Visitor | Grant::Pairing => return None,
                 };
                 Some((record.name.clone(), role))
             })
@@ -807,6 +910,18 @@ impl Hub {
                 }
             }
         }
+        {
+            let timeout = *self.pairing_timeout.read().expect("never left poisoned");
+            let mut state = self.lock();
+            if state
+                .pairing
+                .as_ref()
+                .is_some_and(|pairing| now.saturating_duration_since(pairing.started) >= timeout)
+            {
+                log::info!("A pairing was withdrawn because nobody confirmed it in time.");
+                state.end_pairing(None, "The pairing was not confirmed in time.");
+            }
+        }
         for (id, cancellation) in expired {
             // Release the participant now; cancelling also ends the exchange, even one blocked writing to a peer that is gone.
             self.disconnect(id);
@@ -835,6 +950,14 @@ impl Hub {
         {
             let mut state = self.lock();
             state.abandon_utterance(connection, &mut deferred);
+            if state
+                .pairing
+                .as_ref()
+                .is_some_and(|pairing| pairing.connection == connection)
+            {
+                log::info!("A pairing was withdrawn because its device disconnected.");
+                state.pairing = None;
+            }
             if let Some(record) = state.connections.remove(&connection)
                 && let Some(participant) = record.participant
             {
@@ -1413,6 +1536,74 @@ impl Hub {
                     .model
                     .set_attribution(enabled);
                 state.touch_space(&space);
+            }
+            ClientMessage::PairBegin { commitment } => {
+                if security::pairing::Nonce::parse(&commitment).is_none() {
+                    state.error(
+                        participant,
+                        "A pairing commitment is 64 hexadecimal digits.",
+                    );
+                    return;
+                }
+                let failed = |error: &str| ServerMessage::PairFailed {
+                    error: error.to_owned(),
+                };
+                if self.pairing.read().expect("never left poisoned").is_none() {
+                    outbox.message(failed("This server does not pair devices."));
+                    return;
+                }
+                if state
+                    .pairing
+                    .as_ref()
+                    .is_some_and(|pairing| pairing.connection != connection)
+                {
+                    outbox.message(failed("Another device is pairing; try again shortly."));
+                    return;
+                }
+                let server = security::pairing::Nonce::generate();
+                state.pairing = Some(PendingPairing {
+                    connection,
+                    name: state.participants[participant].name.clone(),
+                    commitment,
+                    server,
+                    code: None,
+                    started: Instant::now(),
+                });
+                outbox.message(ServerMessage::PairNonce {
+                    nonce: server.to_hex(),
+                });
+            }
+            ClientMessage::PairReveal { nonce } => {
+                let Some(pairing) = state
+                    .pairing
+                    .as_mut()
+                    .filter(|pairing| pairing.connection == connection && pairing.code.is_none())
+                else {
+                    state.error(participant, "No pairing is waiting for that.");
+                    return;
+                };
+                let device = security::pairing::Nonce::parse(&nonce)
+                    .filter(|device| device.commitment() == pairing.commitment);
+                let setup = self.pairing.read().expect("never left poisoned").clone();
+                let (Some(device), Some(setup)) = (device, setup) else {
+                    state.end_pairing(
+                        Some(connection),
+                        "The pairing could not be checked; try again.",
+                    );
+                    return;
+                };
+                let code = security::pairing::code(setup.fingerprint, device, pairing.server);
+                let name = pairing.name.clone();
+                pairing.code = Some(code.clone());
+                outbox.message(ServerMessage::PairWaiting);
+                let shown = security::pairing::display(&code);
+                log::info!("Pairing request from {name:?}: code {shown}.");
+                if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned") {
+                    prompt(&name, &shown);
+                }
+            }
+            ClientMessage::PairCancel => {
+                state.end_pairing(Some(connection), "The pairing was cancelled.");
             }
             ClientMessage::SetMode { mode } => {
                 if let Err(error) = limits::check(&mode, limits::IDENTIFIER_BYTES, "mode") {

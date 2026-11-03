@@ -15,6 +15,8 @@ pub const STATUS_PATH: &str = "/";
 pub const SIGN_IN_PATH: &str = "/sign-in";
 pub const SIGN_OUT_PATH: &str = "/sign-out";
 pub const REVOKE_PATH: &str = "/tokens/revoke";
+pub const CONFIRM_PAIRING_PATH: &str = "/pairing/confirm";
+pub const DECLINE_PAIRING_PATH: &str = "/pairing/decline";
 
 /// The most bytes of a form body read.
 pub const FORM_LIMIT: usize = 4096;
@@ -108,6 +110,7 @@ fn role_label(role: ConnectionRole) -> &'static str {
         ConnectionRole::Owner => "owner",
         ConnectionRole::Collaborator => "collaborator",
         ConnectionRole::Visitor => "visitor",
+        ConnectionRole::Pairing => "pairing",
         ConnectionRole::Unknown => "unknown",
     }
 }
@@ -133,8 +136,13 @@ fn people(people: &[(String, ConnectionRole)]) -> String {
         .join(", ")
 }
 
-/// The status page: the spaces and who is in them, the issued tokens, which an owner can revoke, and whether `signed_in` with a cookie, so that signing out is offered.
-pub fn status(status: &Status, tokens: Option<&[Entry]>, signed_in: bool) -> String {
+/// The status page: the spaces and who is in them, the pairing waiting, the issued tokens, which an owner can revoke, and whether `signed_in` with a cookie, so that signing out is offered.
+pub fn status(
+    status: &Status,
+    pairing: Option<(String, String)>,
+    tokens: Option<&[Entry]>,
+    signed_in: bool,
+) -> String {
     let mut body = String::new();
     let _ = writeln!(
         body,
@@ -158,7 +166,20 @@ pub fn status(status: &Status, tokens: Option<&[Entry]>, signed_in: bool) -> Str
         body.push_str("</table>\n");
     }
     let _ = writeln!(body, "<h2>Lobby</h2>\n<p>{}</p>", people(&status.lobby));
-    body.push_str("<h2>Pairing</h2>\n<p>No pairing is pending.</p>\n");
+    body.push_str("<h2>Pairing</h2>\n");
+    match pairing {
+        Some((name, code)) => {
+            let _ = writeln!(
+                body,
+                "<p>{} asks to pair with code <strong>{}</strong>. Confirm only if the device shows the same code.</p>\n\
+<form class=\"inline\" method=\"post\" action=\"{CONFIRM_PAIRING_PATH}\"><button>Confirm</button></form> \
+<form class=\"inline\" method=\"post\" action=\"{DECLINE_PAIRING_PATH}\"><button>Decline</button></form>",
+                escape(&name),
+                escape(&code)
+            );
+        }
+        None => body.push_str("<p>No pairing is pending.</p>\n"),
+    }
     if let Some(tokens) = tokens {
         body.push_str("<h2>Tokens</h2>\n");
         if tokens.is_empty() {
@@ -249,11 +270,25 @@ mod tests {
         assert!(page.contains("No tokens are issued"));
         assert!(page.contains("Sign out"));
 
-        let empty = super::status(&Status::default(), None, false);
+        let empty = super::status(&Status::default(), None, None, false);
+        assert!(empty.contains("No pairing is pending"));
+        let pairing = super::status(
+            &Status::default(),
+            Some(("<Quest>".into(), "042 917".into())),
+            None,
+            false,
+        );
+        assert!(pairing.contains("&lt;Quest&gt; asks to pair with code <strong>042 917</strong>"));
+        assert!(pairing.contains("action=\"/pairing/confirm\""));
+        assert!(pairing.contains("action=\"/pairing/decline\""));
         assert!(empty.contains("No spaces."));
         assert!(!empty.contains("Tokens"));
         assert!(!empty.contains("Sign out"));
-        for role in [ConnectionRole::Visitor, ConnectionRole::Unknown] {
+        for role in [
+            ConnectionRole::Visitor,
+            ConnectionRole::Pairing,
+            ConnectionRole::Unknown,
+        ] {
             assert!(!role_label(role).is_empty());
         }
         for activity in [
@@ -267,6 +302,6 @@ mod tests {
     }
 
     fn status_page(status: &Status) -> String {
-        super::status(status, Some(&[]), true)
+        super::status(status, None, Some(&[]), true)
     }
 }

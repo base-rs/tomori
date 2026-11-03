@@ -33,6 +33,10 @@ name = "security"
 required-features = ["fake"]
 
 [[test]]
+name = "pairing"
+required-features = ["fake"]
+
+[[test]]
 name = "workspaces"
 required-features = ["fake"]
 

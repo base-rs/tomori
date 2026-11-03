@@ -65,6 +65,8 @@ struct Link {
     pinned: bool,
     /// The server presented a different certificate from the one kept: it is not trusted, so nothing it presents is kept.
     distrusted: bool,
+    /// Asked to be admitted only to pair, since the server refuses visitors.
+    pairing: bool,
 }
 
 /// What to do once the client reported why it disconnected.
@@ -73,6 +75,8 @@ enum Reopen {
     WithoutToken,
     /// The server's certificate changed: connect again as a visitor, sending no token, and keep nothing.
     Distrusted,
+    /// The server refuses visitors: connect again asking to pair.
+    ToPair,
 }
 
 /// How to connect to `choice`, given what is kept for it: pin the certificate kept, or else the one it advertises; with neither, try TLS and fall back to plain HTTP.
@@ -667,8 +671,12 @@ impl Connection {
                         pending_token,
                         pinned,
                         distrusted: false,
+                        pairing: false,
                     };
                     self.open(link, conversation);
+                }
+                Action::Paired { token, certificate } => {
+                    self.paired(token, certificate, conversation)
                 }
                 Action::Disconnect => self.disconnect(),
                 Action::Rescan => {
@@ -747,6 +755,7 @@ impl Connection {
         options.microphone_rearm_on_disconnect = true;
         options.transport = link.transport;
         options.token = link.token.clone();
+        options.pairing = link.pairing;
         match Client::connect(options) {
             Ok(mut client) => {
                 self.speaker.attach(&mut client);
@@ -798,6 +807,8 @@ impl Connection {
                 );
                 Some(Reopen::WithoutToken)
             }
+            // The server refuses visitors: ask to pair instead, which it admits.
+            Disconnect::Status(401) if !link.pairing => Some(Reopen::ToPair),
             Disconnect::Status(401) => {
                 conversation.security_notice("This server admits only devices with a token.");
                 None
@@ -818,10 +829,33 @@ impl Connection {
         };
         link.token = None;
         link.pending_token = false;
-        if let Reopen::Distrusted = reopen {
-            link.distrusted = true;
-            link.transport = Transport::Tls { pin: None };
+        match reopen {
+            Reopen::Distrusted => {
+                link.distrusted = true;
+                link.transport = Transport::Tls { pin: None };
+            }
+            Reopen::ToPair => link.pairing = true,
+            Reopen::WithoutToken => {}
         }
+        self.open(link, conversation);
+    }
+
+    /// Pairing gave this device an owner token: keep it with the certificate the pairing connection presented, which replaces one it distrusted, and connect with both. See `design/security.md`.
+    fn paired(&mut self, token: String, certificate: Fingerprint, conversation: &mut Conversation) {
+        let Some(mut link) = self.link.take() else {
+            return;
+        };
+        self.store
+            .remember_certificate(&link.key, &certificate.to_string());
+        self.store.remember_token(&link.key, &token);
+        link.transport = Transport::Tls {
+            pin: Some(certificate),
+        };
+        link.token = Some(token);
+        link.pending_token = false;
+        link.pinned = true;
+        link.distrusted = false;
+        link.pairing = false;
         self.open(link, conversation);
     }
 

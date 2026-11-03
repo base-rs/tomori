@@ -374,8 +374,47 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
     let server = server
         .with_tokens(std::sync::Arc::new(store), arguments.visitors)
         .with_max_visitors(arguments.max_visitors)
-        .with_tls(config);
+        .with_tls(config)
+        .with_pairing(certificate.fingerprint())
+        .with_pairing_prompt(|name, code| {
+            eprintln!(
+                "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
+            );
+        });
+    confirm_pairings_on_console(server.pairing());
     Ok((server, Some(fingerprint)))
+}
+
+/// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches. See `design/security.md`.
+fn confirm_pairings_on_console(pairing: server::Pairing) {
+    use std::io::BufRead;
+    let reading = std::thread::Builder::new()
+        .name("tomori-console".into())
+        .spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if pairing.pending().is_none() {
+                    eprintln!("No pairing is waiting.");
+                } else if line.eq_ignore_ascii_case("decline") {
+                    pairing.decline();
+                    eprintln!("Declined the pairing.");
+                } else if let Some(code) = security::pairing::typed(line) {
+                    match pairing.confirm(&code) {
+                        Ok(name) => eprintln!("Paired {name:?} as an owner."),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                } else {
+                    eprintln!("Type the 6-digit code the device shows, or \"decline\".");
+                }
+            }
+        });
+    if let Err(error) = reading {
+        eprintln!("Could not read the console for pairing ({error}); confirm on the status page.");
+    }
 }
 
 /// The default display name: the host name without its domain, such as `studio` for `studio.local`.

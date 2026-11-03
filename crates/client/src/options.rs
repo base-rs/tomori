@@ -31,6 +31,8 @@ pub struct Options {
     pub token: Option<String>,
     /// Whether to connect over TLS, and which certificate to accept.
     pub transport: Transport,
+    /// Ask to be admitted only to pair, on a server that refuses visitors. See `design/security.md`.
+    pub pairing: bool,
     pub backoff: Backoff,
     /// The limit for establishing the connection and for receiving the server's Welcome.
     pub connect_timeout: Duration,
@@ -59,6 +61,7 @@ impl std::fmt::Debug for Options {
             .field("name", &self.name)
             .field("token", &self.token.as_ref().map(|_| "[redacted]"))
             .field("transport", &self.transport)
+            .field("pairing", &self.pairing)
             .field("backoff", &self.backoff)
             .field("connect_timeout", &self.connect_timeout)
             .field("close_timeout", &self.close_timeout)
@@ -86,6 +89,7 @@ impl Options {
             name: name.into(),
             token: None,
             transport: Transport::Plain,
+            pairing: false,
             backoff: Backoff::default(),
             connect_timeout: Duration::from_secs(5),
             close_timeout: Duration::from_secs(1),

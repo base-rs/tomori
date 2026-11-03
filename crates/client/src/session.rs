@@ -258,6 +258,12 @@ async fn exchange(
         // A token that is not a valid field value is not presented, and the server admits the connection as it would without one.
         let _ = metadata.fields.set("authorization", authorization);
     }
+    if context.options.pairing {
+        metadata
+            .fields
+            .set("tomori-pairing", "1")
+            .expect("a valid field value");
+    }
     metadata.path = Some(CONNECT_PATH.into());
     metadata
         .fields

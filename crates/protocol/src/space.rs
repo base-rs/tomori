@@ -74,8 +74,10 @@ pub enum ConnectionRole {
     Owner,
     /// Acting in the space: talking to the agent, deciding approvals, answering questions and the like.
     Collaborator,
-    /// Watching: listing spaces, joining one to watch and hear it, leaving and knocking.
+    /// Watching: listing spaces, joining one to watch and hear it, leaving, pairing and knocking.
     Visitor,
+    /// Only pairing, on a server that refuses visitors.
+    Pairing,
     #[default]
     #[serde(other)]
     Unknown,
@@ -383,6 +385,7 @@ mod tests {
         assert!(ConnectionRole::Owner.participates());
         assert!(ConnectionRole::Collaborator.participates());
         assert!(!ConnectionRole::Visitor.participates());
+        assert!(!ConnectionRole::Pairing.participates());
         assert!(!ConnectionRole::Unknown.participates());
     }
 

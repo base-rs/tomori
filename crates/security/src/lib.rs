@@ -10,6 +10,7 @@ mod authenticate;
 mod certificate;
 mod fingerprint;
 mod hex;
+pub mod pairing;
 mod pin;
 #[cfg(feature = "issue")]
 mod store;

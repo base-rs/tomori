@@ -77,9 +77,15 @@ cargo run -p server --bin tomori-server -- --backend claude-code
 
 Anyone who can reach the server can watch its spaces as a visitor. Creating
 spaces, talking to the agent and approving its tools need a token (see
-[design/security.md](design/security.md)). Make the first owner token on the
-PC, and give it to the headset or the desktop client once; each keeps it for
-that server:
+[design/security.md](design/security.md)). The easiest way to get one is to
+pair: choose the gold key beside the connected server in the headset, and it
+shows a 6-digit code. If the server's console shows the same code, type it
+there to confirm, or confirm it on the status page; the headset then keeps an
+owner token for that server. A server started with `--no-visitors` still
+admits a device that asks to pair.
+
+You can also make an owner token on the PC, and give it to the headset or the
+desktop client once; each keeps it for that server:
 
 ```sh
 cargo run -p server --bin tomori-server -- auth mint --owner --name "Sam's Quest"

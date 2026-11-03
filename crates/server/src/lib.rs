@@ -40,12 +40,13 @@ pub use access::{Access, Grant};
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use hub::CLOSED_SPACES;
+pub use hub::PAIRING_TIMEOUT;
 #[cfg(feature = "speech")]
 pub use offline::OfflineTranscriber;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
 pub use server::{
-    COUNTS_INTERVAL, DEFAULT_MAX_VISITORS, DEFAULT_PARTICIPANT_RETENTION, Server, bind,
+    COUNTS_INTERVAL, DEFAULT_MAX_VISITORS, DEFAULT_PARTICIPANT_RETENTION, Pairing, Server, bind,
 };
 pub use transcriber::{NullTranscriber, Transcriber, TranscriptSink, UtteranceId};
 pub use voice::SpeechMode;

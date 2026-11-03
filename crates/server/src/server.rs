@@ -60,6 +60,27 @@ pub struct Server {
     tls: Option<Arc<rustls::ServerConfig>>,
 }
 
+/// Confirms or declines the pairing waiting, from outside the server, such as its console. See `design/security.md`.
+#[derive(Clone)]
+pub struct Pairing(Arc<Hub>);
+
+impl Pairing {
+    /// The device and code of the pairing waiting, if any.
+    pub fn pending(&self) -> Option<(String, String)> {
+        self.0.pending_pairing()
+    }
+
+    /// Confirm the pairing waiting, if `typed` is the code its device shows. Returns the device's name.
+    pub fn confirm(&self, typed: &str) -> Result<String, &'static str> {
+        self.0.confirm_pairing(Some(typed))
+    }
+
+    /// Decline the pairing waiting. Returns whether one was waiting.
+    pub fn decline(&self) -> bool {
+        self.0.decline_pairing()
+    }
+}
+
 /// How long a disconnected participant keeps their identity, audio source and space, so that a headset that slept or walked out of range for a while comes back where it was. See `design/spaces.md`.
 pub const DEFAULT_PARTICIPANT_RETENTION: Duration = Duration::from_secs(12 * 60 * 60);
 
@@ -169,6 +190,34 @@ impl Server {
     pub fn with_tokens(mut self, store: Arc<security::TokenStore>, visitors: bool) -> Self {
         self.application.set_door(Door::tokens(store, visitors));
         self
+    }
+
+    /// Pair devices, deriving the code from `fingerprint`, the certificate served with [`Self::with_tls`], and issuing tokens from the store given to [`Self::with_tokens`], which must come first. See `design/security.md`.
+    pub fn with_pairing(self, fingerprint: security::Fingerprint) -> Self {
+        if let Some(tokens) = self.application.door().store() {
+            self.hub.set_pairing(crate::hub::PairingSetup {
+                fingerprint,
+                tokens: tokens.clone(),
+            });
+        }
+        self
+    }
+
+    /// Call `prompt` with the device's name and the code whenever a pairing waits to be confirmed, so that the server shows it on its console.
+    pub fn with_pairing_prompt(self, prompt: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
+        self.hub.set_pairing_prompt(Box::new(prompt));
+        self
+    }
+
+    /// Change how long a pairing waits to be confirmed; see [`crate::PAIRING_TIMEOUT`].
+    pub fn with_pairing_timeout(self, timeout: Duration) -> Self {
+        self.hub.set_pairing_timeout(timeout);
+        self
+    }
+
+    /// A handle to confirm or decline pairings, such as from the console, while the server runs.
+    pub fn pairing(&self) -> Pairing {
+        Pairing(self.hub.clone())
     }
 
     /// Change the most visitors connected at once; see [`DEFAULT_MAX_VISITORS`].

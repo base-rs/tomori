@@ -49,6 +49,20 @@ pub enum Action {
     /// Open or close the microphone for other participants without addressing the agent.
     StartLive(u64),
     StopLive,
+    /// Pairing gave this device an owner token for the server, to keep with the certificate the pairing connection presented, and connect with. See `design/security.md`.
+    Paired {
+        token: String,
+        certificate: client::Fingerprint,
+    },
+}
+
+/// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq)]
+enum Pairing {
+    /// Committed to this value, waiting for the server's.
+    Committed(security::pairing::Nonce),
+    /// Both sides have the code, written for reading, which waits to be confirmed on the server.
+    Waiting(String),
 }
 
 /// Push-to-talk, from pressing X until the server's transcript or failure. See `design/speech.md`.
@@ -112,6 +126,9 @@ pub struct Conversation {
     source: Option<u32>,
     /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
     role: ConnectionRole,
+    /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
+    certificate: Option<client::Fingerprint>,
+    pairing: Option<Pairing>,
     name: String,
     mode: Mode,
     servers: Vec<Choice>,
@@ -189,6 +206,8 @@ impl Conversation {
         Self {
             source: None,
             role: ConnectionRole::Unknown,
+            certificate: None,
+            pairing: None,
             name: name.into(),
             mode: Mode::Servers,
             servers: Vec::new(),
@@ -312,6 +331,8 @@ impl Conversation {
         self.state = None;
         self.source = None;
         self.role = ConnectionRole::Unknown;
+        self.certificate = None;
+        self.pairing = None;
         self.spaces.clear();
         self.listed = false;
         self.selected = 0;
@@ -383,6 +404,8 @@ impl Conversation {
 
     fn connection_changed(&mut self, state: ConnectionState) {
         if !matches!(state, ConnectionState::Connected { .. }) {
+            // A pairing belongs to its connection; the server withdraws it.
+            self.pairing = None;
             self.stop_live();
             match &self.talk {
                 Some(Talk::Recording { .. }) => {
@@ -401,7 +424,7 @@ impl Conversation {
             server,
             source,
             role,
-            certificate: _,
+            certificate,
             backends,
             roots,
             environments,
@@ -410,6 +433,7 @@ impl Conversation {
             log::info!("Connected to {server} as {role:?}");
             self.source = Some(*source);
             self.role = *role;
+            self.certificate = *certificate;
             self.error = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
@@ -427,6 +451,20 @@ impl Conversation {
 
     fn receive(&mut self, message: ServerMessage) {
         match message {
+            ServerMessage::PairNonce { nonce } => self.pair_with(&nonce),
+            ServerMessage::PairWaiting => {}
+            ServerMessage::Paired { token } => {
+                self.pairing = None;
+                if let Some(certificate) = self.certificate {
+                    self.actions.push(Action::Paired { token, certificate });
+                    self.notice =
+                        Some("Paired: this device is now an owner of this server.".into());
+                }
+            }
+            ServerMessage::PairFailed { error } => {
+                self.pairing = None;
+                self.notice = Some(error);
+            }
             ServerMessage::Role { role } => {
                 log::info!("Now {role:?}");
                 self.role = role;
@@ -616,7 +654,71 @@ impl Conversation {
     }
 
     fn list(&mut self) {
+        // A connection admitted only to pair sees no spaces.
+        if self.role == ConnectionRole::Pairing {
+            return;
+        }
         self.actions.push(Action::Send(ClientMessage::ListSpaces));
+    }
+
+    /// The pairing object: its code while pairing, which is compared with the server's. See `design/arrival.md`.
+    fn pairing_item(&self) -> arrival::Item {
+        let (label, detail, pending) = match &self.pairing {
+            Some(Pairing::Waiting(code)) => (code.clone(), "Confirm on the server", true),
+            Some(Pairing::Committed(_)) => ("Pairing...".to_owned(), "Choose to cancel", true),
+            None => ("Pair".to_owned(), "Become an owner", false),
+        };
+        arrival::Item {
+            key: arrival::Key::Pair,
+            kind: arrival::Kind::Pair { pending },
+            label,
+            detail: Some(detail.into()),
+            selected: false,
+        }
+    }
+
+    /// Whether this device can pair with the server: connected over TLS, and not already an owner. See `design/security.md`.
+    pub fn pairable(&self) -> bool {
+        self.certificate.is_some()
+            && self.role != ConnectionRole::Owner
+            && matches!(self.state, Some(ConnectionState::Connected { .. }))
+    }
+
+    /// Start pairing, committing to a random value, or cancel the pairing in progress.
+    pub fn pair(&mut self) {
+        if self.pairing.take().is_some() {
+            self.actions.push(Action::Send(ClientMessage::PairCancel));
+            self.notice = None;
+            return;
+        }
+        if !self.pairable() {
+            return;
+        }
+        let device = security::pairing::Nonce::generate();
+        self.actions.push(Action::Send(ClientMessage::PairBegin {
+            commitment: device.commitment(),
+        }));
+        self.pairing = Some(Pairing::Committed(device));
+        self.error = None;
+        self.notice = Some("Pairing...".into());
+    }
+
+    /// The server sent its value: reveal ours, and derive the code from both and the certificate this connection presented.
+    fn pair_with(&mut self, nonce: &str) {
+        let (Some(Pairing::Committed(device)), Some(certificate), Some(server)) = (
+            self.pairing.clone(),
+            self.certificate,
+            security::pairing::Nonce::parse(nonce),
+        ) else {
+            return;
+        };
+        self.actions.push(Action::Send(ClientMessage::PairReveal {
+            nonce: device.to_hex(),
+        }));
+        let code =
+            security::pairing::display(&security::pairing::code(certificate, device, server));
+        self.notice = Some(format!("Pairing code {code}: confirm it on the server."));
+        self.pairing = Some(Pairing::Waiting(code));
     }
 
     /// Send `message`, unless it acts in the space and this connection only watches. Returns whether it was sent.
@@ -1365,6 +1467,8 @@ impl Conversation {
                 .unwrap_or_else(|| {
                     if self.joining.is_some() {
                         "Joining...".into()
+                    } else if self.role == ConnectionRole::Pairing {
+                        "This server admits only paired devices: pair to join.".into()
                     } else if !self.listed {
                         "Listing spaces...".into()
                     } else if self.spaces.is_empty() && self.creates() {
@@ -1575,6 +1679,8 @@ impl Conversation {
                 let status = self.status().or_else(|| self.ended.clone()).or_else(|| {
                     if self.joining.is_some() {
                         Some("Joining...".into())
+                    } else if self.role == ConnectionRole::Pairing {
+                        Some("This server admits only paired devices: pair to join.".into())
                     } else if !self.listed {
                         Some("Listing spaces...".into())
                     } else if !spaces {
@@ -1609,6 +1715,7 @@ impl Conversation {
                         detail: None,
                         selected: spaces && self.selected >= self.spaces.len(),
                     }))
+                    .chain(self.pairable().then(|| self.pairing_item()))
                     .collect();
                 Some(arrival::View {
                     heading: match ring {
@@ -1668,6 +1775,7 @@ impl Conversation {
                     self.accept();
                 }
             }
+            (Mode::Lobby, arrival::Key::Pair) => self.pair(),
             (Mode::Lobby, arrival::Key::Create) if !self.creates() => {}
             (Mode::Lobby, arrival::Key::Create) => {
                 self.error = None;
@@ -2219,6 +2327,144 @@ mod tests {
     /// Told the role `role`, as the server does whenever it changes.
     fn role(role: ConnectionRole) -> Event {
         Event::Message(ServerMessage::Role { role })
+    }
+
+    /// Connected over TLS with `certificate`, as `role`, in the lobby.
+    fn connected_securely(role: ConnectionRole, certificate: client::Fingerprint) -> Conversation {
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.take_actions();
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role,
+            certificate: Some(certificate),
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+        }));
+        conversation.take_actions();
+        conversation
+    }
+
+    fn pairing_label(conversation: &Conversation) -> Option<String> {
+        conversation
+            .arrival()?
+            .items
+            .into_iter()
+            .find(|item| item.key == arrival::Key::Pair)
+            .map(|item| item.label)
+    }
+
+    #[test]
+    fn a_visitor_pairs_with_a_code_derived_from_the_certificate() {
+        use security::pairing::{Nonce, code, display};
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+
+        conversation.choose_object(&arrival::Key::Pair);
+        let [ClientMessage::PairBegin { commitment }] = &sent(&mut conversation)[..] else {
+            panic!("expected a commitment");
+        };
+        let commitment = commitment.clone();
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pairing..."));
+
+        let server = Nonce::generate();
+        conversation.apply(Event::Message(ServerMessage::PairNonce {
+            nonce: server.to_hex(),
+        }));
+        let [ClientMessage::PairReveal { nonce }] = &sent(&mut conversation)[..] else {
+            panic!("expected the value revealed");
+        };
+        let device = Nonce::parse(nonce).unwrap();
+        // The revealed value is the one committed to, and the code is derived from it, the server's and the certificate.
+        assert_eq!(device.commitment(), commitment);
+        let expected = display(&code(certificate, device, server));
+        assert_eq!(pairing_label(&conversation), Some(expected.clone()));
+        assert!(conversation.status().unwrap().contains(&expected));
+
+        conversation.apply(Event::Message(ServerMessage::Paired {
+            token: "tomori_paired".into(),
+        }));
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Paired {
+                token: "tomori_paired".into(),
+                certificate
+            }]
+        );
+        assert!(conversation.status().unwrap().contains("now an owner"));
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_pairing_starts_over() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::PairFailed {
+            error: "The pairing was declined.".into(),
+        }));
+        assert_eq!(
+            conversation.status().as_deref(),
+            Some("The pairing was declined.")
+        );
+        assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
+
+        // Choosing it again while pairing cancels.
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.take_actions();
+        conversation.choose_object(&arrival::Key::Pair);
+        assert_eq!(sent(&mut conversation), [ClientMessage::PairCancel]);
+        // A value from a server that was not asked is ignored.
+        conversation.apply(Event::Message(ServerMessage::PairNonce {
+            nonce: security::pairing::Nonce::generate().to_hex(),
+        }));
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn pairing_is_offered_over_tls_to_anyone_but_an_owner() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        assert!(pairing_label(&connected_securely(ConnectionRole::Owner, certificate)).is_none());
+        assert!(
+            pairing_label(&connected_securely(
+                ConnectionRole::Collaborator,
+                certificate
+            ))
+            .is_some()
+        );
+        // Over plain HTTP there is no certificate to derive a code from.
+        let mut plain = in_lobby(vec![], vec![]);
+        plain.apply(role(ConnectionRole::Visitor));
+        assert!(pairing_label(&plain).is_none());
+        plain.pair();
+        assert!(plain.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_connection_admitted_only_to_pair_lists_no_spaces() {
+        let certificate = client::Fingerprint::of(b"server certificate");
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.take_actions();
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Pairing,
+            certificate: Some(certificate),
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+        }));
+        assert!(sent(&mut conversation).is_empty());
+        let view = conversation.arrival().unwrap();
+        assert_eq!(keys(&view.items), [arrival::Key::Pair]);
+        assert_eq!(
+            view.status.as_deref(),
+            Some("This server admits only paired devices: pair to join.")
+        );
     }
 
     #[test]

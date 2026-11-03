@@ -111,6 +111,16 @@ pub enum ClientMessage {
     SetMode {
         mode: String,
     },
+    /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
+    PairBegin {
+        commitment: String,
+    },
+    /// Reveal the value committed to, as 64 hexadecimal digits, once the server has sent its own. Both sides then derive the pairing code.
+    PairReveal {
+        nonce: String,
+    },
+    /// Stop pairing.
+    PairCancel,
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,
@@ -193,6 +203,20 @@ pub enum ServerMessage {
         /// The space a refused `Join` named, so that a client can tell its join was refused rather than some other request. Absent for other errors.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
+    },
+    /// The server's random value for a pairing, as 64 hexadecimal digits, sent once the device has committed to its own.
+    PairNonce {
+        nonce: String,
+    },
+    /// Both sides have derived the pairing code, which now waits for the operator or an owner to confirm it.
+    PairWaiting,
+    /// The pairing was confirmed: an owner token for this server, to present from now on, over TLS to the certificate this connection presented.
+    Paired {
+        token: String,
+    },
+    /// The pairing ended without a token: declined, withdrawn, or refused.
+    PairFailed {
+        error: String,
     },
     /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
     Ping {

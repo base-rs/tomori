@@ -40,8 +40,8 @@ impl Door {
         }
     }
 
-    /// What `credentials` admit, or `None` if they are refused: credentials that no authenticator accepts, or none where visitors are not allowed.
-    pub fn admit(&self, credentials: &Credentials) -> Option<Access> {
+    /// What `credentials` admit, or `None` if they are refused: credentials that no authenticator accepts, or none where visitors are not allowed, unless the request asks `to_pair`, which admits it only to pair.
+    pub fn admit(&self, credentials: &Credentials, to_pair: bool) -> Option<Access> {
         let Self::Tokens {
             chain,
             store,
@@ -51,7 +51,8 @@ impl Door {
             return Some(Access::open());
         };
         match chain.authenticate(credentials) {
-            Outcome::Anonymous => visitors.then(Access::visitor),
+            Outcome::Anonymous if *visitors => Some(Access::visitor()),
+            Outcome::Anonymous => to_pair.then(Access::pairing),
             Outcome::Refused => None,
             Outcome::Authenticated(principal) => {
                 // The store decides what the principal may do; a token revoked since it authenticated admits nothing.
@@ -95,7 +96,10 @@ mod tests {
 
     #[test]
     fn open_admits_everyone_as_an_owner() {
-        assert_eq!(Door::Open.admit(&token("anything")), Some(Access::open()));
+        assert_eq!(
+            Door::Open.admit(&token("anything"), false),
+            Some(Access::open())
+        );
         assert!(Door::Open.store().is_none());
     }
 
@@ -113,24 +117,36 @@ mod tests {
             .unwrap();
         let door = Door::tokens(store.clone(), true);
         assert_eq!(
-            door.admit(&token(&owner_token)),
+            door.admit(&token(&owner_token), false),
             Some(Access {
                 principal: Some(owner.principal().id),
                 grant: Grant::Owner,
             })
         );
         assert!(matches!(
-            door.admit(&token(&collaborator_token)),
+            door.admit(&token(&collaborator_token), false),
             Some(Access { grant: Grant::Collaborator { space }, .. }) if space == "studio"
         ));
-        assert_eq!(door.admit(&Credentials::default()), Some(Access::visitor()));
-        assert_eq!(door.admit(&token("unknown")), None);
-        assert_eq!(door.admit(&token(&security::generate_token())), None);
+        assert_eq!(
+            door.admit(&Credentials::default(), false),
+            Some(Access::visitor())
+        );
+        assert_eq!(door.admit(&token("unknown"), false), None);
+        assert_eq!(door.admit(&token(&security::generate_token()), false), None);
         assert!(door.store().is_some());
 
         let closed = Door::tokens(store, false);
-        assert_eq!(closed.admit(&Credentials::default()), None);
-        assert!(closed.admit(&token(&owner_token)).is_some());
+        assert_eq!(closed.admit(&Credentials::default(), false), None);
+        // Without visitors, a request to pair is admitted only to pair.
+        assert_eq!(
+            closed.admit(&Credentials::default(), true),
+            Some(Access::pairing())
+        );
+        assert_eq!(
+            door.admit(&Credentials::default(), true),
+            Some(Access::visitor())
+        );
+        assert!(closed.admit(&token(&owner_token), false).is_some());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

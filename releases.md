@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Pair the headset with a server to make it an owner, without copying a token: choose the gold key beside the connected server, and confirm the 6-digit code it shows by typing it on the server's console, or on the owners' status page. Pairing also restores trust in a server whose certificate changed. In `--console`, `p` pairs.
 - `tomori-server` admits by token: holders of its tokens are owners, who create spaces, or collaborators, and anyone else may watch and listen as a visitor, unless `--no-visitors`. Make the first owner token with `tomori-server auth mint --owner --name NAME`, and give it to the headset with `TOMORI_TOKEN` (the `tomori.token` intent extra) or to the desktop with `--token`; `auth list` and `auth revoke` manage them. `--auth open` admits everyone as an owner, as before.
 - `tomori-server` serves only TLS when it admits by token, with a self-signed certificate kept in its state directory (`~/.local/state/tomori` by default) and advertised by fingerprint; clients pin it the first time they connect and send their token to no other certificate. Owners sign in with a token at `https://<server>:8765/` to see the server's spaces, who is in them and its tokens, and to revoke one.
 - The headset offers **New space** only to owners, and a visitor watches a space without talking, live audio or presence.

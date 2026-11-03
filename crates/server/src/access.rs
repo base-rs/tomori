@@ -14,6 +14,8 @@ pub enum Grant {
     Collaborator { space: String },
     /// A visitor: admitted without credentials, to watch.
     Visitor,
+    /// Admitted without credentials only to pair, on a server that refuses visitors.
+    Pairing,
 }
 
 /// Who a connection is, as authenticated at the door, and what that admits it as.
@@ -41,6 +43,14 @@ impl Access {
         }
     }
 
+    /// Admitted without credentials only to pair.
+    pub fn pairing() -> Self {
+        Self {
+            principal: None,
+            grant: Grant::Pairing,
+        }
+    }
+
     /// The connection's role in `space`, or in the lobby.
     pub fn role(&self, space: Option<&str>) -> ConnectionRole {
         match &self.grant {
@@ -49,11 +59,13 @@ impl Access {
                 ConnectionRole::Collaborator
             }
             Grant::Collaborator { .. } | Grant::Visitor => ConnectionRole::Visitor,
+            Grant::Pairing => ConnectionRole::Pairing,
         }
     }
 
+    /// Admitted without credentials, as a visitor or only to pair: counted against the visitor limit, and not as a participant.
     pub fn is_visitor(&self) -> bool {
-        self.grant == Grant::Visitor
+        matches!(self.grant, Grant::Visitor | Grant::Pairing)
     }
 }
 
@@ -61,13 +73,15 @@ impl Access {
 pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static str> {
     let owner = role == ConnectionRole::Owner;
     let participant = role.participates();
+    let watcher = role != ConnectionRole::Pairing;
     let permitted = match message {
         ClientMessage::Hello { .. }
         | ClientMessage::Ping { .. }
         | ClientMessage::Pong { .. }
-        | ClientMessage::ListSpaces
-        | ClientMessage::Join { .. }
-        | ClientMessage::Leave => true,
+        | ClientMessage::PairBegin { .. }
+        | ClientMessage::PairReveal { .. }
+        | ClientMessage::PairCancel => true,
+        ClientMessage::ListSpaces | ClientMessage::Join { .. } | ClientMessage::Leave => watcher,
         ClientMessage::CreateSpace { .. } | ClientMessage::ListSessions { .. } => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
@@ -84,8 +98,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         None
     } else if participant {
         Some("Only owners can do that.")
-    } else {
+    } else if watcher {
         Some("Visitors can watch, but not act in a space.")
+    } else {
+        Some("This server admits only paired devices: pair to join.")
     }
 }
 
@@ -148,6 +164,11 @@ mod tests {
             ClientMessage::SetMode {
                 mode: "plan".into(),
             },
+            ClientMessage::PairBegin {
+                commitment: "c".into(),
+            },
+            ClientMessage::PairReveal { nonce: "n".into() },
+            ClientMessage::PairCancel,
         ]
     }
 
@@ -164,9 +185,34 @@ mod tests {
 
     #[test]
     fn each_role_sends_only_what_it_may() {
-        let watching = ["hello", "ping", "pong", "list_spaces", "join", "leave"];
+        let watching = [
+            "hello",
+            "ping",
+            "pong",
+            "list_spaces",
+            "join",
+            "leave",
+            "pair_begin",
+            "pair_reveal",
+            "pair_cancel",
+        ];
         assert_eq!(permitted(ConnectionRole::Visitor), watching);
         assert_eq!(permitted(ConnectionRole::Unknown), watching);
+        assert_eq!(
+            permitted(ConnectionRole::Pairing),
+            [
+                "hello",
+                "ping",
+                "pong",
+                "pair_begin",
+                "pair_reveal",
+                "pair_cancel"
+            ]
+        );
+        assert_eq!(
+            refusal(ConnectionRole::Pairing, &ClientMessage::ListSpaces),
+            Some("This server admits only paired devices: pair to join.")
+        );
         let collaborating: Vec<String> = every_message()
             .iter()
             .map(|message| {
@@ -215,5 +261,7 @@ mod tests {
             ConnectionRole::Visitor
         );
         assert!(Access::visitor().is_visitor());
+        assert_eq!(Access::pairing().role(None), ConnectionRole::Pairing);
+        assert!(Access::pairing().is_visitor());
     }
 }
