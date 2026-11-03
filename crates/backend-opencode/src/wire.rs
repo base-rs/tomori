@@ -41,9 +41,7 @@ pub fn event_for(
         "session.text.delta" => text_delta(data, session_id, "delta"),
         // Reasoning is not spoken: the speech stream reads only the
         // assistant's text, and the space model records reasoning separately
-        // from the snapshot. The Claude Code backend makes the same
-        // distinction (its `thinking_delta` is collected into the message's
-        // parts but never surfaced as a `TextDelta`).
+        // from the snapshot.
         "session.reasoning.delta" => None,
         // `session.text.ended` names the message that just finished. It fires
         // once, and only after the `session.text.started` that already

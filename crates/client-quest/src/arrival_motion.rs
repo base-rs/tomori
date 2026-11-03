@@ -650,7 +650,7 @@ mod tests {
     fn backends() -> Scene {
         Scene::layout(&lobby_view(Some(ring(
             Step::Backend,
-            &[Key::Backend("claude".into()), Key::Backend("echo".into())],
+            &[Key::Backend("opencode".into()), Key::Backend("echo".into())],
         ))))
     }
 
@@ -966,7 +966,7 @@ mod tests {
         let mut motion = Motion::default();
         let now = settle(&mut motion, &lobby(), 0.0);
         motion.update(&backends(), now);
-        let key = Key::Backend("claude".into());
+        let key = Key::Backend("opencode".into());
         let early = motion.scene(now + RING * 0.1);
         let choice = early.object(&key).unwrap();
         assert!(choice.position.distance(CREATE) < 0.05);

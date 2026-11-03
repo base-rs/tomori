@@ -2273,7 +2273,7 @@ mod tests {
         let mut state = SpaceState {
             id: SPACE.into(),
             title: "Tomori".into(),
-            backend: "claude-code".into(),
+            backend: "opencode".into(),
             directory: "/work/tomori".into(),
             environment: "sky".into(),
             activity: Activity::Idle,
@@ -2383,7 +2383,7 @@ mod tests {
             spaces: vec![SpaceSummary {
                 id: SPACE.into(),
                 title: "Tomori".into(),
-                backend: "claude-code".into(),
+                backend: "opencode".into(),
                 directory: "/work/tomori".into(),
                 environment: "sky".into(),
                 activity: Activity::Running,
@@ -3524,7 +3524,7 @@ mod tests {
             spaces: vec![SpaceSummary {
                 id: SPACE.into(),
                 title: "Tomori".into(),
-                backend: "claude-code".into(),
+                backend: "opencode".into(),
                 directory: "/work/tomori".into(),
                 environment: "sky".into(),
                 activity: Activity::Idle,
@@ -3771,7 +3771,7 @@ mod tests {
                 .map(|i| SpaceSummary {
                     id: i.to_string(),
                     title: long.clone(),
-                    backend: "claude-code".into(),
+                    backend: "opencode".into(),
                     directory: "/".into(),
                     environment: "sky".into(),
                     activity: Activity::Unknown,

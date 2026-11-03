@@ -1415,7 +1415,7 @@ mod tests {
             ],
         });
         space.apply(Event::Closed {
-            reason: Some("claude exited with 1".into()),
+            reason: Some("the agent exited with 1".into()),
         });
         let states: Vec<_> = space
             .state(Vec::new())

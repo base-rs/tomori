@@ -149,7 +149,7 @@ impl SpaceState {
     }
 }
 
-/// A mode a session can be switched to, such as a Claude Code permission mode or an OpenCode primary agent.
+/// A mode a session can be switched to, such as an OpenCode primary agent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mode {
     /// The agent's identifier, sent back in [`crate::ClientMessage::SetMode`].

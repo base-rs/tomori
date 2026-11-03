@@ -44,8 +44,7 @@ pub fn approval(permission: &Permission) -> protocol::Approval {
 /// The most standing options shown with one approval.
 const OPTION_COUNT_LIMIT: usize = 4;
 
-/// Longest option label, in characters. Like Claude Code's terminal, an option too long to describe in full is not
-/// offered, rather than granting something its label leaves out.
+/// Longest option label, in characters. An option too long to describe in full is not offered, rather than granting something its label leaves out.
 const OPTION_LABEL_LIMIT: usize = 400;
 
 /// The standing options participants may choose for `permission`. Only these can be granted.
@@ -63,9 +62,9 @@ pub fn options(permission: &Permission) -> Vec<protocol::ApprovalOption> {
         .collect()
 }
 
-/// A spoken-style label for a standing option, naming everything it grants and where it is kept, in the manner of
-/// Claude Code's terminal dialog: "Yes, allow all edits during this session" or "Yes, and don't ask again for
-/// Bash(make) in this project".
+/// A spoken-style label for a standing option, naming everything it grants and where it is kept, in the manner of an
+/// agent's terminal dialog: "Yes, allow all edits during this session" or "Yes, and don't ask again for Bash(make) in
+/// this project".
 pub fn grant_label(grants: &[Grant]) -> String {
     // Grants of one kind and scope are named together, in the order they first appear.
     let mut groups: Vec<(&'static str, GrantScope, Vec<String>)> = Vec::new();

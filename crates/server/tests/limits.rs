@@ -193,7 +193,7 @@ fn an_enormous_question_is_trimmed_to_the_budget_and_can_still_be_answered() {
     let mut ada = server.connect("ada", "Ada");
     ada.create_space("Question");
     let session = server.backend.started()[0].clone();
-    // As with Claude Code's AskUserQuestion, the field key is the question itself.
+    // The field key is the question itself, as agents key answers.
     let asked = "Which? ".repeat(100_000);
     session.emit(Event::QuestionAsked(Question {
         id: "q1".to_owned(),

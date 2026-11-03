@@ -75,7 +75,7 @@ impl WorkspaceRoots {
         })
     }
 
-    /// The default: the server's current working directory alone, so that where the operator starts the server is where agents may work, as with `claude` itself.
+    /// The default: the server's current working directory alone, so that where the operator starts the server is where agents may work, as with an agent's own terminal interface.
     pub fn current() -> Result<Self, String> {
         let current = std::env::current_dir().map_err(|error| {
             format!("could not determine the current directory: {error}; give --workspace-root")

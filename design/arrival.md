@@ -52,7 +52,7 @@ The headset client's flow from launch to joining a space (`crates/client-quest`)
 - Test that a space's colour and form are a function of its identifier alone, and that the same space looks the same after reconnecting and to a second participant. Confirm that a change in a space's activity or participant count shows on its object.
 - On the headset, choose a server, open and step back through the creation rings, enter a space and leave it, and confirm that each change animates as described rather than cutting, that stepping back reverses it, and that a choice made mid-transition takes effect without waiting for it to finish. Test that each transition's progress is a function of elapsed time that reaches its end state, and that interrupting it continues from the current state without a jump.
 - Confirm that arrival shows the Minimal grid, that joining a space switches to that space's environment, and that leaving returns to the grid. Confirm that arrival's objects use none of Sky's meshes or materials.
-- Test the session listing for each backend that supports attaching: subagent child sessions and archived sessions are not listed, sessions are ordered by last activity, the reported fields match the agent's own session records (for Claude Code, its transcripts under `~/.claude/projects`; for OpenCode, its session API), and fields the backend can't report are absent rather than invented.
+- Test the session listing for each backend that supports attaching: subagent child sessions and archived sessions are not listed, sessions are ordered by last activity, the reported fields match the agent's own session records (for OpenCode, its session API), and fields the backend can't report are absent rather than invented.
 
 Open questions, not yet decided:
 

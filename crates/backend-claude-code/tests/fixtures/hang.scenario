@@ -1,2 +1,0 @@
-# An agent that ignores standard input closing, so it must be killed.
-hang
