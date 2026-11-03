@@ -131,6 +131,7 @@ pub struct Renderer {
     base_scene_len: usize,
     workspace: crate::workspace_graphics::WorkspaceGraphics,
     arrival: crate::arrival_graphics::ArrivalLabels,
+    panels: crate::ui_panel::Pipeline,
 }
 
 impl Renderer {
@@ -266,6 +267,7 @@ impl Renderer {
         );
         let arrival =
             crate::arrival_graphics::ArrivalLabels::new(device, format, &camera_layout, samples);
+        let panels = crate::ui_panel::Pipeline::new(device, format, samples);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::Minimal,
@@ -287,7 +289,18 @@ impl Renderer {
             base_scene_len: 0,
             workspace,
             arrival,
+            panels,
         }
+    }
+
+    /// A panel drawn by this renderer's scene pass, holding at most `capacity` vertices.
+    pub fn panel(&self, device: &wgpu::Device, capacity: usize) -> crate::ui_panel::Panel {
+        crate::ui_panel::Panel::new(device, &self.panels, capacity)
+    }
+
+    /// How far the floating panel drops while the swarm is busy, so that it does not cover it.
+    pub fn caption_offset(&self) -> f32 {
+        self.caption_offset
     }
 
     /// Each eye's multisampled color target, which its scene pass resolves into the eye's own target; none for a single sample.
@@ -521,7 +534,7 @@ impl Renderer {
         targets: &[wgpu::TextureView],
         matrices: &[Mat4],
         scene_to_space: Mat4,
-        caption: Option<(&crate::caption::Caption, Mat4)>,
+        panels: &[(&crate::ui_panel::Panel, Mat4)],
     ) -> wgpu::SubmissionIndex {
         assert_eq!(targets.len(), matrices.len());
         assert!((1..=2).contains(&targets.len()));
@@ -542,6 +555,10 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&scene_to_clip.to_cols_array()),
             );
+            // Each panel's model is in the same space as the eyes' matrices.
+            for (panel, model) in panels {
+                panel.prepare(queue, eye, matrices[eye] * *model);
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eye"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -593,11 +610,12 @@ impl Renderer {
                 matrices[eye] * scene_to_space,
             );
             self.arrival.draw(&mut pass, &self.camera_bindings[eye]);
-            drop(pass);
-            if let Some((caption, head)) = caption {
-                let head =
-                    head * Mat4::from_translation(glam::Vec3::new(0.0, self.caption_offset, 0.0));
-                caption.draw(&mut encoder, queue, &targets[eye], eye, matrices[eye], head);
+            // Panels are translucent, so they are drawn last, against the depth of everything else.
+            if !panels.is_empty() {
+                self.panels.set(&mut pass);
+                for (panel, _) in panels {
+                    panel.draw(&mut pass, eye);
+                }
             }
         }
         queue.submit([encoder.finish()])
@@ -841,7 +859,7 @@ mod tests {
                     * Mat4::look_at_rh(eye, eye + glam::Vec3::new(0.0, 0.15, -1.0), glam::Vec3::Y)
             });
             let capture = |renderer: &Renderer, matrices: [Mat4; 2], anchor: Mat4| {
-                renderer.render(&device, &queue, &views, &matrices, anchor, None);
+                renderer.render(&device, &queue, &views, &matrices, anchor, &[]);
                 let buffers: [_; 2] = std::array::from_fn(|_| {
                     device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Sky test readback"),
@@ -1083,7 +1101,7 @@ mod tests {
                     std::slice::from_ref(&view),
                     &[camera],
                     Mat4::IDENTITY,
-                    None,
+                    &[],
                 );
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("signal readback"),
@@ -1185,7 +1203,7 @@ mod tests {
                     std::slice::from_ref(&view),
                     &[Mat4::IDENTITY],
                     Mat4::IDENTITY,
-                    None,
+                    &[],
                 );
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("controller test readback"),
@@ -1330,7 +1348,7 @@ mod tests {
                 projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
             });
             let capture = |renderer: &Renderer, matrices: [Mat4; 2], scene_to_space: Mat4| {
-                renderer.render(&device, &queue, &views, &matrices, scene_to_space, None);
+                renderer.render(&device, &queue, &views, &matrices, scene_to_space, &[]);
                 let buffers: [_; 2] = std::array::from_fn(|_| {
                     device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("workspace test readback"),
@@ -1642,7 +1660,7 @@ mod tests {
                     std::slice::from_ref(&view),
                     &[matrix],
                     Mat4::IDENTITY,
-                    None,
+                    &[],
                 );
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("arrival test readback"),
@@ -1821,8 +1839,7 @@ mod tests {
                 }],
                 ..Default::default()
             });
-            let mut caption = crate::caption::Caption::new(&device, format);
-            caption.set_text(&queue, "Hello from the desktop window.");
+            let caption_text = "Hello from the desktop window.";
             let mut swarm = Swarm::new();
             for _ in 0..120 {
                 swarm.step(1.0 / 72.0, None);
@@ -1858,13 +1875,15 @@ mod tests {
                         time: 1.0,
                     },
                 );
+                let mut caption = crate::caption::Caption::new(&device, &renderer);
+                caption.set_text(&queue, caption_text);
                 renderer.render(
                     &device,
                     &queue,
                     std::slice::from_ref(&view),
                     &[matrix],
                     Mat4::IDENTITY,
-                    Some((&caption, Mat4::from_translation(eye))),
+                    &caption.panels(Mat4::from_translation(eye)),
                 );
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("multisample test readback"),
@@ -2021,12 +2040,14 @@ mod tests {
             for _ in 0..30 {
                 workers.update(Some("root"), &workspace, 0.05);
             }
-            let mut caption = crate::caption::Caption::new(&device, format);
-            caption.set_text(&queue, "Hello from the headset.");
-            caption.set_recording_progress(
-                &queue,
-                Some(std::time::Duration::from_secs(15)),
-                std::time::Duration::from_secs(60),
+            let indicator = crate::recording::canvas(
+                &crate::recording::Phase::Recording {
+                    elapsed: std::time::Duration::from_secs(15),
+                    heard: "Hello from the headset.".into(),
+                    answering: None,
+                },
+                Some(std::time::Duration::from_secs(60)),
+                0.5,
             );
             let mut swarm = Swarm::new();
             for _ in 0..120 {
@@ -2081,17 +2102,21 @@ mod tests {
                         time: 1.0,
                     },
                 );
-                renderer.render(
-                    &device,
-                    &queue,
-                    &views,
-                    &matrices,
-                    Mat4::IDENTITY,
-                    Some((
-                        &caption,
-                        Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)),
-                    )),
-                );
+                let mut caption = crate::caption::Caption::new(&device, &renderer);
+                caption.set_text(&queue, "Hello from the headset.");
+                let mut card = renderer.panel(&device, 24_000);
+                card.set(&queue, &indicator);
+                let mut panels =
+                    caption.panels(Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)));
+                panels.push((
+                    &card,
+                    crate::recording::facing(
+                        glam::Vec3::new(-0.2, 1.4, -0.6),
+                        glam::Vec3::new(0.0, 1.6, 0.0),
+                        1.0,
+                    ),
+                ));
+                renderer.render(&device, &queue, &views, &matrices, Mat4::IDENTITY, &panels);
                 let layer = u64::from(WIDTH * HEIGHT * 4);
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("headset test readback"),
@@ -2221,30 +2246,46 @@ mod tests {
             let projection = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
             let matrices = [-0.032, 0.032]
                 .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
-            let mut caption =
-                crate::caption::Caption::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+            let mut caption = crate::caption::Caption::new(&device, &renderer);
             caption.set_text(
                 &queue,
                 "VOICE TO TEXT\nReady.\n\nHello from the Quest microphone!",
             );
-            // Exercise empty/green/amber/red/full recording bars and hiding
-            // the overlay again without replacing the conversation text.
+            // Exercise the recording indicator through its states, beside the panel, and drawing no panel at all.
+            let mut indicator = renderer.panel(&device, 24_000);
+            let limit = Some(std::time::Duration::from_secs(60));
             for elapsed in [Some(0), Some(15), Some(50), Some(55), Some(60), None] {
-                caption.set_recording_progress(
-                    &queue,
-                    elapsed.map(std::time::Duration::from_secs),
-                    std::time::Duration::from_secs(60),
-                );
+                let mut panels =
+                    caption.panels(Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)));
+                if let Some(elapsed) = elapsed {
+                    indicator.set(
+                        &queue,
+                        &crate::recording::canvas(
+                            &crate::recording::Phase::Recording {
+                                elapsed: std::time::Duration::from_secs(elapsed),
+                                heard: "Hello from the Quest microphone!".into(),
+                                answering: None,
+                            },
+                            limit,
+                            0.5,
+                        ),
+                    );
+                    panels.push((
+                        &indicator,
+                        crate::recording::facing(
+                            glam::Vec3::new(-0.2, 1.2, -0.4),
+                            glam::Vec3::new(0.0, 1.6, 0.0),
+                            1.0,
+                        ),
+                    ));
+                }
                 renderer.render(
                     &device,
                     &queue,
                     &targets,
                     &matrices,
                     Mat4::IDENTITY,
-                    Some((
-                        &caption,
-                        Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)),
-                    )),
+                    &panels,
                 );
             }
             // Exercise every activity shape/halo through both eye targets.
@@ -2267,7 +2308,7 @@ mod tests {
                     working: true,
                 };
                 renderer.update(&queue, &swarm, None, false);
-                renderer.render(&device, &queue, &targets, &matrices, Mat4::IDENTITY, None);
+                renderer.render(&device, &queue, &targets, &matrices, Mat4::IDENTITY, &[]);
             }
             // Exercise the same single-view + resized-depth path as desktop.
             renderer.resize(&device, 128, 128);
@@ -2277,7 +2318,7 @@ mod tests {
                 &targets[..1],
                 &matrices[..1],
                 Mat4::IDENTITY,
-                None,
+                &[],
             );
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             assert!(error_scope.pop().await.is_none());

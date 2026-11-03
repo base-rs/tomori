@@ -371,6 +371,7 @@ mod tests {
                 backends: vec![],
                 roots: vec![],
                 environments: vec![],
+                utterance_limit: None,
             }));
         let mut space = SpaceState {
             id: "space".into(),

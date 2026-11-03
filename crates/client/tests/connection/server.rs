@@ -140,6 +140,7 @@ impl<B: ReadableBody> Session<B> {
                             backends: vec![],
                             roots: vec![],
                             environments: vec![],
+                            utterance_limit: None,
                         });
                     }
                     ClientMessage::Join { space } => self.reply(ServerMessage::Space {

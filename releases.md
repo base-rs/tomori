@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- While you hold **X** to talk, a small card rises from the left controller, where X is, instead of a timer floating above the panel: it shows how long you have been talking against the server's limit, with a bar, the last words heard, and "Release X to send". In the last 30 seconds before the limit it turns amber and says how long is left, and red in the last 10. When you let go it says "Sending…", then where your words went, such as "Queued, 2nd", or "Not sent" with why until you press **X** again or dismiss it with **B**. While the live microphone is on, a small `LIVE` badge stands on the left controller. Without the controller tracked, the card follows your left wrist, or stands low in your view.
+
+- `tomori-server` tells clients how long a voice message may be, in its `Welcome`, as `utterance_limit` in seconds: 5 minutes with `--speech-backend offline`, and none with the streaming backend.
+
+- The panel and the new controller cards are drawn in the world with the rest of the scene, translucent, so that a hand or controller in front of them covers them. The cards' text can show accented letters, Greek, box drawing and a few symbols, rather than `?`.
+
 - The headset draws with 4× multisample anti-aliasing, as desktop windows do, so edges are smooth instead of jagged. The samples stay in the GPU's tile memory and are resolved as each eye is drawn. Start it with the intent extra `tomori.msaa` set to `off` to compare, or if it costs frames.
 
 - Point at a worker and ask about it, as an early prototype of shared attention (#81). In a space, the right controller's ray, or the desktop's mouse, highlights the worker it points at. The headset draws the ray in a space as in arrival: it reaches the worker it highlights, and is short and plain when it meets none. Point at one as you press **X**, or while you talk, and your words reach the agent with a line naming that worker, its session and its state, such as `[Pointing at worker "Review commit 2657a52" (opencode session ses_…, running)]`; pointing only before you press **X** doesn't count. The server describes the worker from its own state, never from what the headset says. The trigger still attracts the swarm. In `--console`, `point` lists the workers and `point N` points at one. Older servers ignore the pointing, and older clients send none.

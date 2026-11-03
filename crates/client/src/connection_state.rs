@@ -66,6 +66,8 @@ pub enum ConnectionState {
         roots: Vec<protocol::WorkspaceRoot>,
         /// The environments a space may be bound to, so the client can choose one when creating a space.
         environments: Vec<protocol::EnvironmentInfo>,
+        /// The longest utterance the server's speech recognition takes, when it has a limit, so that recording can warn before it.
+        utterance_limit: Option<Duration>,
     },
     /// The connection ended; another attempt follows after `retry_in`.
     Disconnected {
@@ -125,6 +127,7 @@ mod tests {
                 backends: vec![],
                 roots: vec![],
                 environments: vec![],
+                utterance_limit: None,
             }
             .is_connected()
         );

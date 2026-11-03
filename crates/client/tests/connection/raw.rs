@@ -29,6 +29,7 @@ pub fn welcome() -> Vec<u8> {
         backends: vec![],
         roots: vec![],
         environments: vec![],
+        utterance_limit: None,
     })
 }
 

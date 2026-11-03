@@ -112,7 +112,20 @@ enum Talk {
         pointed: Option<String>,
     },
     /// X was released; waiting for the server's final transcript.
-    Sending { utterance: String, heard: String },
+    Sending {
+        utterance: String,
+        heard: String,
+        answering: bool,
+    },
+}
+
+/// What became of the last words sent, which the recording indicator shows for a moment, or until dismissed for a failure. See `design/hand-menu.md`.
+#[derive(Clone, Debug, PartialEq)]
+enum Outcome {
+    /// Transcribed as `text`, and queued, or applied as an answer.
+    Sent { answered: bool, text: String },
+    /// Not sent, with why, which is also the problem shown.
+    Failed(String),
 }
 
 impl Talk {
@@ -260,6 +273,10 @@ pub struct Conversation {
     /// When the approval or question shown appeared, until [`REQUEST_GRACE`] has passed.
     request_at: Option<Instant>,
     capture_generation: u64,
+    /// The longest utterance the server's recognition takes, from its Welcome, when it has a limit.
+    utterance_limit: Option<Duration>,
+    /// What became of the last words sent, and when.
+    outcome: Option<(Outcome, Instant)>,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
     launch: String,
     utterances: u64,
@@ -337,6 +354,8 @@ impl Conversation {
             leave_hold: None,
             request_at: None,
             capture_generation: 0,
+            utterance_limit: None,
+            outcome: None,
             launch: format!(
                 "{:x}",
                 SystemTime::now()
@@ -501,12 +520,13 @@ impl Conversation {
                 if self.talk.as_ref().map(Talk::utterance) == Some(failed.utterance.as_str()) {
                     self.stop_talking();
                     self.talk = None;
-                    self.error = Some(match failed.failure {
+                    let error: String = match failed.failure {
                         UtteranceFailure::Disconnected => LOST.into(),
                         UtteranceFailure::Congested => {
                             "Network too slow; your words were not sent.".into()
                         }
-                    });
+                    };
+                    self.failed(error);
                 }
             }
         }
@@ -520,7 +540,7 @@ impl Conversation {
             match &self.talk {
                 Some(Talk::Recording { .. }) => {
                     self.stop_talking();
-                    self.error = Some(LOST.into());
+                    self.failed(LOST.into());
                 }
                 // The server may still queue it, but its transcript cannot reach us.
                 Some(Talk::Sending { .. }) => {
@@ -538,10 +558,12 @@ impl Conversation {
             backends,
             roots,
             environments,
+            utterance_limit,
         } = &state
         {
             log::info!("Connected to {server} as {role:?}");
             self.source = Some(*source);
+            self.utterance_limit = *utterance_limit;
             self.role = *role;
             self.certificate = *certificate;
             // In a space a problem, such as words lost as the connection dropped, stays until it is dismissed.
@@ -707,18 +729,21 @@ impl Conversation {
                 text,
                 finished,
             } => {
-                if let Some(talk) = self
-                    .talk
-                    .as_mut()
-                    .filter(|talk| talk.utterance() == utterance)
+                let ours = self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str());
+                if ours && finished {
+                    // The queue entry now shows the words. An earlier utterance's failure stays shown.
+                    let answered = match self.talk.take() {
+                        Some(
+                            Talk::Recording { answering, .. } | Talk::Sending { answering, .. },
+                        ) => answering,
+                        None => false,
+                    };
+                    self.outcome = Some((Outcome::Sent { answered, text }, Instant::now()));
+                } else if ours
+                    && let Some(Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) =
+                        self.talk.as_mut()
                 {
-                    if finished {
-                        // The queue entry now shows the words. An earlier utterance's failure stays shown.
-                        self.talk = None;
-                    } else {
-                        let (Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) = talk;
-                        *heard = text;
-                    }
+                    *heard = text;
                 }
             }
             ServerMessage::TranscriptFailed { utterance, error } => {
@@ -730,7 +755,7 @@ impl Conversation {
                     }
                 }
                 // Also shown for an earlier utterance, whose words were not sent either.
-                self.error = Some(error);
+                self.failed(error);
             }
             // Agent speech is heard rather than shown: its audio plays through the speaker.
             ServerMessage::Speech { segment, text, .. } => {
@@ -1785,7 +1810,11 @@ impl Conversation {
                         .filter(|_| !answering)
                         .map(|worker| protocol::Pointed::Worker { worker }),
                 ));
-                self.talk = Some(Talk::Sending { utterance, heard });
+                self.talk = Some(Talk::Sending {
+                    utterance,
+                    heard,
+                    answering,
+                });
             }
             return;
         }
@@ -1806,6 +1835,8 @@ impl Conversation {
         }
         self.utterances += 1;
         let utterance = format!("{}-{}", self.launch, self.utterances);
+        // A new recording replaces what the indicator said of the last.
+        self.outcome = None;
         // A problem shown stays until it is dismissed or replaced; see `design/interaction.md`.
         self.notice = None;
         let answer = self.answerable().map(|question| protocol::AnswerTarget {
@@ -1966,7 +1997,96 @@ impl Conversation {
         if cancelled {
             self.talk = None;
         }
-        self.error = Some(error.into());
+        self.failed(error.into());
+    }
+
+    /// Show `error` as the problem, and on the recording indicator, as words that were not sent.
+    fn failed(&mut self, error: String) {
+        self.outcome = Some((Outcome::Failed(error.clone()), Instant::now()));
+        self.error = Some(error);
+    }
+
+    /// What the recording indicator on the left controller says at `now`, if anything. See `design/hand-menu.md`.
+    pub fn recording_phase(&self, now: Instant) -> Option<crate::recording::Phase> {
+        use crate::recording::Phase;
+        match &self.talk {
+            Some(Talk::Recording {
+                started,
+                heard,
+                answering,
+                ..
+            }) => {
+                return Some(Phase::Recording {
+                    elapsed: now.saturating_duration_since(*started),
+                    heard: heard.clone(),
+                    answering: answering
+                        .then(|| {
+                            self.space
+                                .as_ref()
+                                .and_then(|space| space.question.as_ref())
+                                .map(|question| question.title.clone())
+                        })
+                        .flatten(),
+                });
+            }
+            Some(Talk::Sending {
+                heard, answering, ..
+            }) => {
+                return Some(Phase::Sending {
+                    heard: heard.clone(),
+                    answering: *answering,
+                });
+            }
+            None => {}
+        }
+        match &self.outcome {
+            Some((Outcome::Sent { answered, text }, at))
+                if now.saturating_duration_since(*at) < crate::recording::OUTCOME =>
+            {
+                // Where the words are in the queue, by this participant's newest entry with them.
+                let position = (!answered)
+                    .then(|| {
+                        let waiting: Vec<_> = self
+                            .space
+                            .as_ref()?
+                            .queue
+                            .iter()
+                            .filter(|entry| {
+                                matches!(entry.state, QueueState::Queued | QueueState::Sending)
+                            })
+                            .collect();
+                        waiting
+                            .iter()
+                            .rposition(|entry| {
+                                Some(entry.source) == self.source
+                                    && entry.text.trim() == text.trim()
+                            })
+                            .map(|index| index + 1)
+                    })
+                    .flatten();
+                Some(Phase::Sent {
+                    answered: *answered,
+                    position,
+                })
+            }
+            // Until B dismisses the problem, or another recording starts.
+            Some((Outcome::Failed(reason), _)) if self.error.as_ref() == Some(reason) => {
+                Some(Phase::Failed {
+                    reason: reason.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The longest utterance the server's recognition takes, when it says.
+    pub fn utterance_limit(&self) -> Option<Duration> {
+        self.utterance_limit
+    }
+
+    /// Whether the live microphone is on, which the `LIVE` badge on the left controller shows.
+    pub fn live(&self) -> bool {
+        self.live
     }
 
     /// Ending the utterance failed, so its words were not sent: stop showing
@@ -1981,6 +2101,7 @@ impl Conversation {
     }
 
     /// How long X has been held, while recording.
+    #[cfg(any(not(target_os = "android"), test))]
     pub fn recording(&self) -> Option<Duration> {
         match &self.talk {
             Some(Talk::Recording { started, .. }) => Some(started.elapsed()),
@@ -3061,6 +3182,7 @@ mod tests {
             backends,
             roots,
             environments: sky(),
+            utterance_limit: None,
         })
     }
 
@@ -3720,6 +3842,7 @@ mod tests {
             backends: vec![],
             roots: vec![],
             environments: sky(),
+            utterance_limit: None,
         }));
         conversation.take_actions();
         conversation
@@ -3854,6 +3977,7 @@ mod tests {
             backends: vec![],
             roots: vec![],
             environments: sky(),
+            utterance_limit: None,
         }));
         assert!(sent(&mut conversation).is_empty());
         let view = conversation.arrival().unwrap();
@@ -4316,6 +4440,7 @@ mod tests {
                     label: "Observe".into(),
                 },
             ],
+            utterance_limit: None,
         }));
         conversation.take_actions();
         create_in(&mut conversation);
@@ -4411,6 +4536,7 @@ mod tests {
             backends: backends(),
             roots: roots(),
             environments: vec![],
+            utterance_limit: None,
         }));
         conversation.take_actions();
         create_in(&mut conversation);
@@ -5247,6 +5373,7 @@ mod tests {
             backends: vec![],
             roots: vec![],
             environments: sky(),
+            utterance_limit: None,
         }));
         assert!(conversation.text().contains("- Ada queued"));
         // Choosing another server forgets the number until it welcomes you.
@@ -5974,6 +6101,153 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1));
         let mut relaunched = joined(|_| {});
         assert_ne!(press(&mut relaunched), first);
+    }
+
+    #[test]
+    fn the_recording_indicator_follows_an_utterance_to_the_queue() {
+        use crate::recording::Phase;
+        let mut conversation = joined(|space| {
+            space.queue = vec![entry("q-1", "Bob", QueueState::Queued)];
+        });
+        // The limit comes from the server's Welcome.
+        assert_eq!(conversation.utterance_limit(), None);
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+            utterance_limit: Some(Duration::from_secs(300)),
+        }));
+        assert_eq!(
+            conversation.utterance_limit(),
+            Some(Duration::from_secs(300))
+        );
+        let now = Instant::now();
+        assert_eq!(conversation.recording_phase(now), None);
+        let utterance = press(&mut conversation);
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance: utterance.clone(),
+            text: "check the".into(),
+            finished: false,
+        }));
+        let later = Instant::now() + Duration::from_secs(2);
+        assert!(matches!(
+            conversation.recording_phase(later),
+            Some(Phase::Recording { elapsed, heard, answering: None })
+                if elapsed >= Duration::from_secs(2) && heard == "check the"
+        ));
+        conversation.talk(false);
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Sending {
+                heard: "check the".into(),
+                answering: false
+            })
+        );
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance,
+            text: "check the CI".into(),
+            finished: true,
+        }));
+        conversation.apply(space(|space| {
+            space.queue = vec![
+                entry("q-1", "Bob", QueueState::Queued),
+                QueueEntry {
+                    text: "check the CI".into(),
+                    ..entry("q-2", "Ada", QueueState::Queued)
+                },
+            ];
+        }));
+        let now = Instant::now();
+        assert_eq!(
+            conversation.recording_phase(now),
+            Some(Phase::Sent {
+                answered: false,
+                position: Some(2)
+            })
+        );
+        // It shows for a moment, then goes.
+        assert_eq!(
+            conversation.recording_phase(now + crate::recording::OUTCOME),
+            None
+        );
+    }
+
+    #[test]
+    fn the_recording_indicator_shows_a_failure_until_it_is_dismissed() {
+        use crate::recording::Phase;
+        let mut conversation = joined(|_| {});
+        let utterance = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance,
+            error: "Nothing was sent: longer than 5 minutes.".into(),
+        }));
+        let failed = Some(Phase::Failed {
+            reason: "Nothing was sent: longer than 5 minutes.".into(),
+        });
+        assert_eq!(conversation.recording_phase(Instant::now()), failed);
+        assert_eq!(
+            conversation.recording_phase(Instant::now() + Duration::from_secs(60)),
+            failed
+        );
+        // B dismisses it with the problem.
+        conversation.back();
+        assert_eq!(conversation.recording_phase(Instant::now()), None);
+        // Pressing X again replaces it.
+        let utterance = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance,
+            error: "Nothing was heard.".into(),
+        }));
+        press(&mut conversation);
+        assert!(matches!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Recording { .. })
+        ));
+    }
+
+    #[test]
+    fn the_recording_indicator_names_the_question_being_answered() {
+        use crate::recording::Phase;
+        let mut conversation = joined(|space| {
+            space.voice_answers = true;
+            space.question = Some(Question {
+                id: "q".into(),
+                title: "Which branch?".into(),
+                text: "Pick one.".into(),
+                field: "branch".into(),
+                supported: true,
+            });
+        });
+        let utterance = press(&mut conversation);
+        assert!(matches!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Recording { answering: Some(field), .. }) if field == "Which branch?"
+        ));
+        conversation.talk(false);
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance,
+            text: "main".into(),
+            finished: true,
+        }));
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Sent {
+                answered: true,
+                position: None
+            })
+        );
+        // The live microphone shows as a badge.
+        assert!(!conversation.live());
+        conversation.toggle_live();
+        assert!(conversation.live());
     }
 
     #[test]

@@ -420,6 +420,7 @@ struct State {
     gpu: WindowGpu,
     renderer: Renderer,
     caption: Caption,
+    indicator: crate::controller_ui::Indicator,
     size: PhysicalSize<u32>,
     occluded: bool,
     participant: Participant,
@@ -451,8 +452,8 @@ impl State {
             gpu.config.height,
             samples,
         );
-        let mut caption = Caption::new(&gpu.device, gpu.config.format);
-        caption.set_recording_progress(&gpu.queue, None, Duration::ZERO);
+        let caption = Caption::new(&gpu.device, &renderer);
+        let indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,
@@ -464,6 +465,7 @@ impl State {
             gpu,
             renderer,
             caption,
+            indicator,
             size,
             occluded: false,
             participant,
@@ -608,8 +610,6 @@ impl State {
         }
         let queue = &self.gpu.queue;
         self.caption.set_text(queue, &conversation.text());
-        self.caption
-            .set_recording_progress(queue, conversation.recording(), Duration::ZERO);
         let visual = self.signals.update(
             crate::interaction::Inputs {
                 session: if focused {
@@ -671,6 +671,21 @@ impl State {
             scene.viewer = Some(eye);
         }
         let in_arrival = conversation.arrival().is_some();
+        // A desktop has no controllers, so the recording indicator stands low in the view.
+        self.indicator.update(
+            queue,
+            conversation,
+            crate::recording::Trackers {
+                view: Some(crate::controller_ui::view_spot(head)),
+                ..Default::default()
+            },
+            Some(eye),
+            crate::controller_ui::Moment {
+                now,
+                dt,
+                time: self.arrival_time,
+            },
+        );
         self.renderer
             .set_scenery(self.motion.scenery(self.arrival_time));
         let attracting = pointing.attracting && !menu_shown;
@@ -742,7 +757,21 @@ impl State {
             &[p.head.view_projection(size.x / size.y)],
             Mat4::IDENTITY,
             // As on the headset: arrival has no panel, and the hand menu hides it.
-            (!in_arrival && !menu_shown).then_some((&self.caption, panel_pose)),
+            &if !in_arrival && !menu_shown {
+                self.caption.panels(
+                    panel_pose
+                        * Mat4::from_translation(Vec3::new(
+                            0.0,
+                            self.renderer.caption_offset(),
+                            0.0,
+                        )),
+                )
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .chain(self.indicator.panels(Mat4::IDENTITY))
+            .collect::<Vec<_>>(),
         );
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);

@@ -75,7 +75,7 @@ impl SpectatorView {
             &[projection],
             Mat4::from_cols_array(&frame.scene_to_space),
             // The headset's head-locked HUD would obstruct the spectator view.
-            None,
+            &[],
         );
     }
 }
