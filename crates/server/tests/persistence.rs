@@ -224,6 +224,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         session: session.into(),
         environment: "sky".into(),
         attribution: true,
+        brief: false,
         instructions: "Mind the docs.".into(),
         closed: None,
         closed_order: None,
@@ -275,6 +276,73 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
     assert_eq!(kept[1].closed, None);
     // Its own instructions are kept for when its backend is enabled again.
     assert_eq!(kept[1].instructions, "Mind the docs.");
+}
+
+#[test]
+fn only_a_space_chosen_brief_is_brief_after_a_restart() {
+    let state = State::new("speech");
+    let backend = FakeBackend::new();
+    let (brief, full) = {
+        let server = start(&backend, &state.0, None);
+        let mut ada = server.connect("ada", "Ada");
+        let brief = ada.create_space("Brief").id;
+        ada.send(&ClientMessage::SetSpeech {
+            speech: protocol::SpeechSetting::Brief,
+        });
+        ada.space(|space| space.id == brief && space.speech == protocol::SpeechSetting::Brief);
+        let full = ada.create_space("Full").id;
+        (brief, full)
+    };
+    let kept = state.kept();
+    assert!(kept.iter().find(|space| space.id == brief).unwrap().brief);
+    assert!(!kept.iter().find(|space| space.id == full).unwrap().brief);
+    // A space speaking in full is kept without the setting, as every space was before it was stored.
+    let text = std::fs::read_to_string(state.0.join(SPACES_FILE)).unwrap();
+    assert_eq!(text.matches("\"brief\"").count(), 1, "{text}");
+
+    let server = start(&backend, &state.0, None);
+    let mut ada = server.connect("ada", "Ada");
+    for (id, speech) in [
+        (&brief, protocol::SpeechSetting::Brief),
+        (&full, protocol::SpeechSetting::Full),
+    ] {
+        ada.send(&ClientMessage::Join { space: id.clone() });
+        let restored = ada.space(|space| &space.id == id && space.error.is_none());
+        assert_eq!(restored.speech, speech);
+        ada.send(&ClientMessage::Leave);
+    }
+}
+
+#[test]
+fn a_space_kept_before_its_speech_was_stored_speaks_in_full() {
+    let state = State::new("unkept-speech");
+    std::fs::create_dir_all(&state.0).unwrap();
+    // A record from before the speech setting was stored, when every space began brief.
+    std::fs::write(
+        state.0.join(SPACES_FILE),
+        serde_json::json!({
+            "spaces": [{
+                "id": "space-old-1",
+                "title": "Old",
+                "backend": "fake",
+                "directory": std::env::temp_dir().to_string_lossy(),
+                "session": "fake-from-before",
+                "environment": "sky",
+                "attribution": true,
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(!SpaceStore::open(&state.0).unwrap().spaces()[0].brief);
+    let backend = FakeBackend::new();
+    let server = start(&backend, &state.0, None);
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::Join {
+        space: "space-old-1".into(),
+    });
+    let space = ada.space(|space| space.id == "space-old-1");
+    assert_eq!(space.speech, protocol::SpeechSetting::Full);
 }
 
 #[test]

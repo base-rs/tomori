@@ -642,6 +642,7 @@ impl HubState {
                     session: model.session.clone(),
                     environment: model.environment.clone(),
                     attribution: model.attribution(),
+                    brief: model.speech() == SpeechSetting::Brief,
                     instructions: model.space_instructions().to_owned(),
                     closed: model
                         .closed_reason()
@@ -2427,7 +2428,10 @@ impl Hub {
                 };
                 let record = state.space_mut(&space).expect("checked above");
                 match record.model.set_speech(speech) {
-                    Ok(()) => state.touch_space(&space),
+                    Ok(()) => {
+                        state.touch_space(&space);
+                        deferred.push(Deferred::Keep);
+                    }
                     Err(error) => state.error(participant, error),
                 }
             }
@@ -2801,6 +2805,11 @@ impl Hub {
                     Snapshot::default(),
                 );
                 model.set_attribution(kept.attribution);
+                if kept.brief {
+                    model
+                        .set_speech(SpeechSetting::Brief)
+                        .expect("brief is a known setting");
+                }
                 let takes = self.takes_instructions(&kept.backend);
                 model.set_instructions(kept.instructions, takes);
                 let (commands, receiver) = async_channel::unbounded();
@@ -3248,12 +3257,12 @@ impl Hub {
         }
     }
 
-    /// How much of each reply the space speaks; brief for a space that is gone.
+    /// How much of each reply the space speaks; full for a space that is gone.
     #[cfg_attr(not(feature = "speech"), allow(dead_code))]
     pub(crate) fn speech_setting(&self, space: &str) -> SpeechSetting {
         self.lock()
             .space(space)
-            .map_or(SpeechSetting::Brief, |record| record.model.speech())
+            .map_or(SpeechSetting::Full, |record| record.model.speech())
     }
 
     /// Tell everyone in the space that agent speech could not be produced.

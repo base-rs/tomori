@@ -114,7 +114,7 @@ If anything stops the words reaching the agent intact, such as lost audio, a dro
 
 The agent's replies are spoken as they stream in, and everyone in the space hears them and each other's push-to-talk audio through the headset or desktop speakers. You never hear your own recording back. While **X** is held, nothing plays, so that the speakers cannot be transcribed as your words; the reply carries on meanwhile and resumes where it has got to when you release (see [design/speech.md](design/speech.md) and [design/live-audio.md](design/live-audio.md)).
 
-Replies are brief by default: each message speaks its first paragraphs, up to about 20 seconds, then says "More on the panel." Any participant can switch a space to full speech with `set_speech` (the headset has no control for it yet).
+Replies are spoken in full. Any participant can switch a space to brief speech from the **Y** list, or with `set_speech`: each message then speaks its first paragraphs, up to about 20 seconds, then says "More on the panel." A space chosen brief stays brief across a server restart.
 
 The server keeps the latest two spoken replies, up to 5 minutes of audio. If you join a space, or put your headset back on, having missed any of the latest reply, you hear it from its start, then whatever followed, until you have caught up with live speech; others in the space are unaffected. Taking the headset off counts as away, and turns the live microphone off. The headset tells the server when it is put on or taken off, from its proximity sensor and the OpenXR session state, and the status line counts who is away.
 

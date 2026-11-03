@@ -25,6 +25,9 @@ pub struct KeptSpace {
     pub session: String,
     pub environment: String,
     pub attribution: bool,
+    /// Whether a participant chose brief speech for the space. Speech is full otherwise, as for a space kept before the setting was stored, so that only a choice made since keeps a space brief. See `design/speech.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub brief: bool,
     /// The space's own instructions to the agent, if an owner gave any. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
@@ -168,6 +171,7 @@ mod tests {
             session: "session-1".into(),
             environment: "sky".into(),
             attribution: false,
+            brief: false,
             instructions: String::new(),
             closed: None,
             closed_order: None,
