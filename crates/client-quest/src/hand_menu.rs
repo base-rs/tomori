@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockState};
 
 use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
@@ -75,6 +75,24 @@ impl Palm {
         let towards = (head - self.wrist).try_normalize()?;
         Some(self.normal.dot(towards).clamp(-1.0, 1.0).acos())
     }
+}
+
+/// From the eyes to the neck, about which the head turns, in the head's space: the eyes are about 7.5 cm above it and 8 cm in front.
+const EYES_TO_NECK: Vec3 = Vec3::new(0.0, -0.075, 0.0805);
+
+/// The point that what the hands hold faces, from the head's transform with its origin between the eyes: the middle of the head, above the neck and level with the eyes.
+///
+/// Turning the head swings the eyes about the neck, sideways and back, by several centimetres. A panel held near the face that faced the eyes would turn against the head, and, raised above the wrist along its own up, swing sideways the other way; this point stays put as the head turns, and moves only as the head does. See `design/hand-menu.md`.
+pub fn head_centre(head: Mat4) -> Vec3 {
+    head.transform_point3(EYES_TO_NECK) - Vec3::Y * EYES_TO_NECK.y
+}
+
+/// The head's transform, between the eyes, turned `yaw` degrees to the left and `pitch` up about a neck at `neck`, for tests.
+#[cfg(test)]
+pub fn head_turned(neck: Vec3, yaw: f32, pitch: f32) -> Mat4 {
+    let rotation =
+        Quat::from_rotation_y(yaw.to_radians()) * Quat::from_rotation_x(pitch.to_radians());
+    Mat4::from_rotation_translation(rotation, neck - rotation * EYES_TO_NECK)
 }
 
 /// Whether the menu is shown, with hysteresis in angle and time.
@@ -841,6 +859,53 @@ mod tests {
         let down = (objects[1].position - objects[0].position).normalize();
         assert!(down.dot(towards).abs() < 0.06, "{down:?} {towards:?}");
         assert!(objects.iter().all(|object| object.label.tilt));
+    }
+
+    #[test]
+    fn the_middle_of_the_head_stays_put_as_the_head_turns() {
+        let neck = Vec3::new(0.1, 1.5, 0.05);
+        let level = head_turned(neck, 0.0, 0.0);
+        let eyes = level.transform_point3(Vec3::ZERO);
+        let centre = head_centre(level);
+        // Level with the eyes, and behind them.
+        assert!((centre.y - eyes.y).abs() < 1e-5);
+        assert!((centre - eyes).dot(Vec3::Z) > 0.07);
+        for (yaw, pitch) in [(-45.0, 0.0), (45.0, 0.0), (30.0, -40.0), (-60.0, 20.0)] {
+            let head = head_turned(neck, yaw, pitch);
+            // The eyes swing by centimetres...
+            assert!(head.transform_point3(Vec3::ZERO).distance(eyes) > 0.02);
+            // ...but the middle of the head does not.
+            assert!(head_centre(head).distance(centre) < 1e-5, "{yaw} {pitch}");
+        }
+    }
+
+    #[test]
+    fn the_menu_stays_on_the_wrist_as_the_head_turns() {
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.2, -0.3),
+            normal: Vec3::new(0.2, 0.6, 0.6).normalize(),
+        };
+        let model = Model {
+            role: ConnectionRole::Owner,
+            ..Default::default()
+        };
+        let menu = HandMenu {
+            section: Some(Section::PeopleAndSecurity),
+            ..Default::default()
+        };
+        let neck = Vec3::new(0.0, 1.5, 0.05);
+        let place = |yaw: f32| {
+            menu.objects(&palm, &model, head_centre(head_turned(neck, yaw, -30.0)))
+                .into_iter()
+                .map(|object| object.position)
+                .collect::<Vec<_>>()
+        };
+        let ahead = place(0.0);
+        for yaw in [-45.0, 45.0] {
+            for (turned, ahead) in place(yaw).iter().zip(&ahead) {
+                assert!(turned.distance(*ahead) < 1e-5, "{yaw}: {turned} {ahead}");
+            }
+        }
     }
 
     #[test]

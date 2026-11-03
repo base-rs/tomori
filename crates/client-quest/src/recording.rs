@@ -538,6 +538,23 @@ mod tests {
     }
 
     #[test]
+    fn the_indicator_does_not_turn_as_the_head_does() {
+        use crate::hand_menu::{head_centre, head_turned};
+        let at = Vec3::new(-0.15, 1.2, -0.35);
+        let neck = Vec3::new(0.0, 1.5, 0.05);
+        let ahead = facing(at, head_centre(head_turned(neck, 0.0, -20.0)), 1.0);
+        for yaw in [-45.0, 45.0] {
+            let head = head_turned(neck, yaw, -20.0);
+            let model = facing(at, head_centre(head), 1.0);
+            assert!(model.abs_diff_eq(ahead, 1e-5), "{yaw}");
+            // It still faces the eyes, near enough to read.
+            let eyes = head.transform_point3(Vec3::ZERO);
+            let normal = model.transform_vector3(Vec3::Z);
+            assert!(normal.dot((eyes - at).normalize()) > 0.9, "{yaw}");
+        }
+    }
+
+    #[test]
     fn losing_the_controller_falls_back_to_the_wrist_then_the_view() {
         let wrist = Vec3::new(-0.1, 1.0, -0.3);
         let view = Vec3::new(0.0, 1.3, -0.6);
