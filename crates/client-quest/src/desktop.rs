@@ -53,6 +53,92 @@ pub fn run(spectator: bool, pipewire: bool, feed: Option<Feed>) -> Result<()> {
     }
 }
 
+/// A window's Vulkan surface and device, configured for sRGB output with vsync, as every desktop window uses them.
+pub(crate) struct WindowGpu {
+    pub surface: wgpu::Surface<'static>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub config: wgpu::SurfaceConfiguration,
+    pub adapter: wgpu::Adapter,
+}
+
+impl WindowGpu {
+    pub(crate) async fn new(window: Arc<Window>) -> Result<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let size = window.inner_size();
+        let surface = instance.create_surface(window)?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+            .context("finding a desktop Vulkan adapter")?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("desktop device"),
+                ..Default::default()
+            })
+            .await?;
+        let mut config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .context("surface has no supported configuration")?;
+        let caps = surface.get_capabilities(&adapter);
+        config.format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(config.format);
+        config.present_mode = wgpu::PresentMode::AutoVsync;
+        surface.configure(&device, &config);
+        Ok(Self {
+            surface,
+            device,
+            queue,
+            config,
+            adapter,
+        })
+    }
+
+    /// The samples per pixel to draw `format` with: 4, for multisample anti-aliasing, where the adapter supports it, or else 1.
+    pub(crate) fn samples(&self, format: wgpu::TextureFormat) -> u32 {
+        const SAMPLES: u32 = 4;
+        let supported = |format: wgpu::TextureFormat| {
+            self.adapter
+                .get_texture_format_features(format)
+                .flags
+                .sample_count_supported(SAMPLES)
+        };
+        if supported(format) && supported(wgpu::TextureFormat::Depth32Float) {
+            SAMPLES
+        } else {
+            1
+        }
+    }
+}
+
+/// Acquire the next frame, reconfiguring the surface if it is outdated; `None` when there is nothing to draw into this time.
+pub(crate) fn acquire(
+    surface: &wgpu::Surface<'static>,
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+) -> Result<Option<wgpu::SurfaceTexture>> {
+    Ok(match surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(frame)
+        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
+        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            surface.configure(device, config);
+            None
+        }
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => None,
+        other => anyhow::bail!("Could not acquire desktop frame: {other:?}"),
+    })
+}
+
 #[derive(Default)]
 struct App {
     state: Option<State>,
@@ -248,37 +334,21 @@ impl State {
         pipewire: bool,
         feed: Option<Feed>,
     ) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let surface = instance.create_surface(window.clone())?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
-            .await
-            .context("finding a desktop Vulkan adapter")?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("desktop device"),
-                ..Default::default()
-            })
-            .await?;
+        let gpu = WindowGpu::new(window.clone()).await?;
+        let render_format = if pipewire {
+            crate::pipewire_video::FORMAT
+        } else {
+            gpu.config.format
+        };
+        let samples = gpu.samples(render_format);
+        let WindowGpu {
+            surface,
+            device,
+            queue,
+            config,
+            adapter,
+        } = gpu;
         let size = window.inner_size();
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .context("surface has no supported configuration")?;
-        let caps = surface.get_capabilities(&adapter);
-        config.format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(config.format);
-        config.present_mode = wgpu::PresentMode::AutoVsync;
-        surface.configure(&device, &config);
         let video = if pipewire {
             Some(crate::pipewire_video::Video::new(
                 &device,
@@ -287,18 +357,19 @@ impl State {
         } else {
             None
         };
-        let render_format = if pipewire {
-            crate::pipewire_video::FORMAT
-        } else {
-            config.format
-        };
         let (render_width, render_height) = if pipewire {
             (crate::pipewire_video::WIDTH, crate::pipewire_video::HEIGHT)
         } else {
             (config.width, config.height)
         };
-        let mut renderer =
-            Renderer::new(&device, &queue, render_format, render_width, render_height);
+        let mut renderer = Renderer::with_samples(
+            &device,
+            &queue,
+            render_format,
+            render_width,
+            render_height,
+            samples,
+        );
         // The desktop window has no server, so it is never in a space and chooses its scenery itself.
         renderer.set_environment(crate::environment::Environment::initial());
         let spectator = match (spectator, feed) {
@@ -306,7 +377,7 @@ impl State {
             _ => None,
         };
         log::info!(
-            "Desktop adapter: {} — {}x{}",
+            "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             adapter.get_info().name,
             config.width,
             config.height
@@ -377,18 +448,7 @@ impl State {
         let frame = if self.occluded || self.size.width == 0 || self.size.height == 0 {
             None
         } else {
-            match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(frame)
-                | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
-                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                    self.surface.configure(&self.device, &self.config);
-                    None
-                }
-                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                    None
-                }
-                other => anyhow::bail!("Could not acquire desktop frame: {other:?}"),
-            }
+            acquire(&self.surface, &self.device, &self.config)?
         };
         if frame.is_none() && self.video.is_none() {
             return Ok(());

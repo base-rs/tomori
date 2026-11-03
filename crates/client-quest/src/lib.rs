@@ -19,6 +19,8 @@ mod delegation;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 #[cfg(not(target_os = "android"))]
+mod desktop_participant;
+#[cfg(not(target_os = "android"))]
 mod discover;
 mod environment;
 mod graphics;
@@ -92,6 +94,17 @@ pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
     xr::run(&(), || false, conversation, connection)
 }
+
+/// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls.
+#[cfg(not(target_os = "android"))]
+pub fn run_desktop(overrides: Overrides) -> anyhow::Result<()> {
+    let (conversation, connection) = desktop_connection(overrides);
+    desktop_participant::run(conversation, connection)
+}
+
+/// The desktop window's keys and what they stand for on the headset.
+#[cfg(not(target_os = "android"))]
+pub const DESKTOP_CONTROLS: &str = desktop_participant::CONTROLS;
 
 /// Show the headset's panel in the terminal, to use a server without a headset or a GPU.
 #[cfg(not(target_os = "android"))]

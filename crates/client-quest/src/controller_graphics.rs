@@ -117,6 +117,7 @@ impl Controllers {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        samples: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("controllers.wgsl"));
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -194,7 +195,10 @@ impl Controllers {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });
