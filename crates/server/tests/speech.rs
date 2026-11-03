@@ -949,7 +949,7 @@ fn the_client_player_plays_the_spoken_reply() {
     let mut output = [0_i16; 480];
     loop {
         assert!(Instant::now() < deadline, "the reply never played");
-        player.render(48_000, &mut output);
+        player.render(48_000, client::playback::Layout::Mono, &mut output);
         // Bob's push-to-talk is relayed too; the fake synthesizer's samples are all 100.
         if output.contains(&100) {
             break;

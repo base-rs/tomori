@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use protocol::{AudioFrame, REPLAY_SOURCE};
 
-use super::{Earcon, Mixer, MixerOptions, PlaybackStatistics};
+use super::spatial::Scene;
+use super::{Direction, Earcon, Layout, Mixer, MixerOptions, PlaybackStatistics};
 
 /// How long after its last audio agent speech played again still counts as playing: longer than the breath between spoken segments, so that a replay counts as playing throughout.
 const REPLAY_PAUSE: Duration = Duration::from_millis(700);
@@ -17,7 +18,15 @@ enum Command {
     LocalSource(Option<u32>),
     Clear,
     AgentMuted(bool),
-    Play(Earcon),
+    Play(Earcon, Direction),
+    Probe,
+}
+
+/// The scene the application last set, until the callback takes it.
+#[derive(Default)]
+struct SceneSlot {
+    scene: Scene,
+    fresh: bool,
 }
 
 #[derive(Default)]
@@ -26,6 +35,7 @@ struct Shared {
     /// Whether agent speech played again for this participant was playing at the last render.
     replaying: AtomicBool,
     statistics: Mutex<PlaybackStatistics>,
+    scene: Mutex<SceneSlot>,
 }
 
 /// Plays what a [`crate::Client`] receives: drains its audio into a [`Mixer`] and renders the mix for an output device.
@@ -43,6 +53,8 @@ pub struct Player {
     mixer: Option<Mixer>,
     local_source: Option<u32>,
     agent_muted: bool,
+    /// Whether mixers load the echo probe.
+    probe: bool,
 }
 
 /// The application's handle on a [`Player`]. Cloneable, and never blocks the player.
@@ -65,8 +77,17 @@ impl Player {
             mixer: None,
             local_source: None,
             agent_muted: false,
+            probe: false,
         };
         (player, PlayerControl { commands, shared })
+    }
+
+    /// Synthesize the echo probe now and for later mixers, outside the audio callback, so that [`PlayerControl::play_probe`] can play it. Only the echo test needs it.
+    pub fn load_probe(&mut self) {
+        self.probe = true;
+        if let Some(mixer) = &mut self.mixer {
+            mixer.load_probe();
+        }
     }
 
     /// Make the mixer for `sample_rate` now, outside the audio callback, since making one synthesizes every sound cue. An output calls this with the device's rate before it starts; [`Self::render`] makes one only if the rate changes after that.
@@ -80,6 +101,9 @@ impl Player {
         });
         mixer.set_local_source(self.local_source);
         mixer.set_agent_muted(self.agent_muted);
+        if self.probe {
+            mixer.load_probe();
+        }
         // A mixer made while push-to-talk records starts silent, rather than fading out what the microphone would hear.
         if self.shared.silenced.load(Ordering::Relaxed) {
             mixer.silence_now();
@@ -87,8 +111,8 @@ impl Player {
         self.mixer = Some(mixer);
     }
 
-    /// Fill `output` with the next mono samples at `sample_rate`, after taking every frame received since the last call.
-    pub fn render(&mut self, sample_rate: u32, output: &mut [i16]) {
+    /// Fill `output` with the next samples at `sample_rate`, mono or interleaved stereo as `layout` says, after taking every frame received since the last call and the latest scene.
+    pub fn render(&mut self, sample_rate: u32, layout: Layout, output: &mut [i16]) {
         if sample_rate == 0 {
             output.fill(0);
             return;
@@ -105,7 +129,8 @@ impl Player {
                     self.agent_muted = muted;
                     mixer.set_agent_muted(muted);
                 }
-                Command::Play(earcon) => mixer.play(earcon),
+                Command::Play(earcon, direction) => mixer.play(earcon, direction),
+                Command::Probe => mixer.play_probe(),
                 Command::Clear => {
                     mixer.clear();
                     // Including what arrived before the clear but was not yet rendered, such as a backlog from while no output played.
@@ -116,9 +141,24 @@ impl Player {
         while let Ok(frame) = self.audio.try_recv() {
             mixer.push(frame);
         }
+        // The latest scene, swapped rather than copied, so that the callback never allocates for it; one the application is writing is taken next time.
+        let slot = match self.shared.scene.try_lock() {
+            Ok(slot) => Some(slot),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut slot) = slot
+            && slot.fresh
+        {
+            std::mem::swap(mixer.scene_mut(), &mut slot.scene);
+            slot.fresh = false;
+        }
         // Silenced audio is still mixed, so that it is consumed in real time and resumes live rather than replaying what was missed.
         mixer.set_silenced(self.shared.silenced.load(Ordering::Relaxed));
-        mixer.mix(output);
+        match layout {
+            Layout::Mono => mixer.mix(output),
+            Layout::Stereo => mixer.mix_stereo(output),
+        }
         self.shared.replaying.store(
             mixer.is_source_recent(REPLAY_SOURCE, REPLAY_PAUSE),
             Ordering::Relaxed,
@@ -152,9 +192,25 @@ impl PlayerControl {
         self.shared.replaying.load(Ordering::Relaxed)
     }
 
-    /// Play a sound cue, once. It is local: never sent and never a source, and [`Self::clear`] does not stop it.
-    pub fn play(&self, earcon: Earcon) {
-        let _ = self.commands.send(Command::Play(earcon));
+    /// Play a sound cue, once, from `direction`. It is local: never sent and never a source, and [`Self::clear`] does not stop it.
+    pub fn play(&self, earcon: Earcon, direction: Direction) {
+        let _ = self.commands.send(Command::Play(earcon, direction));
+    }
+
+    /// Play the echo probe, once [`Player::load_probe`] has rendered it, for the echo test to measure what the microphone hears of it.
+    pub fn play_probe(&self) {
+        let _ = self.commands.send(Command::Probe);
+    }
+
+    /// Set where the listener and the sources are, typically once a frame. `change` must write the whole scene: it is given an older one to reuse its storage, which may be one the callback has finished with. The callback takes only the latest, at its next render, and never waits for this.
+    pub fn set_scene(&self, change: impl FnOnce(&mut Scene)) {
+        let mut slot = self
+            .shared
+            .scene
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        change(&mut slot.scene);
+        slot.fresh = true;
     }
 
     /// Silence playback, fading out over a few milliseconds, while still consuming what arrives in real time; the cues that [`Earcon::bypasses_silence`] still play. Used while the microphone records push-to-talk, so that playback cannot be picked up and transcribed; see `design/live-audio.md`.

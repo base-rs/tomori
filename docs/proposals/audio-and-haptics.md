@@ -1,6 +1,6 @@
 # Proposal: Audio and Haptics as One Feedback Design
 
-Status: **stage 1 agreed**, November 2026. The user's decisions are recorded under [Decisions](#decisions). The sound cues and vibration of stage 1 are a requirement in `design/feedback.md`, which takes precedence over this document; the rest of stage 1, spatial playback, ducking and the first step of echo cancellation, follows in its own change. Stages 2 and 3 remain proposals for discussion.
+Status: **stage 1 agreed and implemented**, November 2026. The user's decisions are recorded under [Decisions](#decisions). Stage 1 is now a requirement in `design/feedback.md` (sound cues and vibration) and `design/spatial-audio.md` (spatial playback, ducking and the first step of echo cancellation), with changes to `design/live-audio.md`, `design/spaces.md` and others, which take precedence over this document. Stages 2 and 3 remain proposals for discussion.
 
 ## The request
 
@@ -26,20 +26,26 @@ The short answer to the last question is yes. Quest controllers vibrate through 
   - environment sources at their panels.
 
   The client then renders stereo with equal-power panning, a small interaural delay, distance attenuation with a floor, and gain smoothing. This costs almost nothing on the Quest. HRTF can come later, as an option.
+
 - **One feedback vocabulary of about a dozen events.** Each event pairs a short procedurally synthesized earcon with a controller vibration, on the hand that acted. Examples are hovering onto something, choosing it, recording, sent, failed, a request waiting, catching up, a knock, and the live microphone. Everything else stays silent. A **Feedback** setting chooses full, reduced (requests and failures only) or off, for sound and haptics separately.
+
 - **Mixing rules.**
   - The agent ducks about 8 dB while a person speaks.
   - Environment audio ducks under any speech.
   - Each participant gets a local volume and mute.
   - Received voices are levelled gently, and the existing limiter stays last.
+
 - **Echo cancellation in two steps.**
   - **Step A (MVP):** use the platform's canceller properly. Today the speaker opens with `AudioUsage::Media` and no shared audio session (`crates/client-quest/src/playback.rs:197`). Step A changes that, logs whether Android reports an `AcousticEchoCanceler`, and measures echo with a repeatable test.
   - **Step B:** only if step A falls short on the Quest, run WebRTC's AEC3 on the client. It would use `webrtc-audio-processing` with the exact mix the player renders as its reference. The pure-Rust `decibri-aec` would be measured alongside it.
+
 - **Voices.**
   - The main agent keeps `af_heart`.
   - Workers stay silent until they have something short to say, such as finishing or needing approval. Then the server speaks a short announcement, positioned at the worker's station, in a voice from a small palette.
   - Announcements go into the space's one speech stream between blocks, so that two voices never talk at once.
+
 - **Environment audio** (#84, #88) enters the same mixer as positioned sources, under the same ducking, volume and echo rules.
+
 - **MVP is client-only, with no protocol change.** It covers:
   1. stereo spatial playback;
   2. the haptic action and core vibrations;
@@ -98,6 +104,7 @@ Everything below is from `origin/main` at `a55e9bb`.
 - **No haptic output action exists.**
   - The action set (`crates/client-quest/src/xr.rs:1117–1192`) creates pose, float, bool and vector actions only.
   - The startup log reports render model, hand tracking, simultaneous hands and user presence extensions (`xr.rs:41–60`), but not the haptic ones.
+
 - **The openxr crate supports haptics.** The crate is `openxr 0.22` (`crates/client-quest/Cargo.toml:32`). It has:
   - `Action<Haptic>::apply_feedback` and `stop_feedback`;
   - `HapticVibration`, with duration, frequency and amplitude;
@@ -106,6 +113,7 @@ Everything below is from `origin/main` at `a55e9bb`.
   - the `fb_haptic_amplitude_envelope` and `fb_haptic_pcm` extension flags.
 
   Meta documents both extensions for its Touch controllers. Whether this runtime reports them is not yet known, because Tomori doesn't log them. Stage 1 adds that log line.
+
 - **The cues are visual only.** Feedback today is the panel's text, the swarm's colour (`interaction.rs`), the hover highlight of the pointing ray (`pointing.rs`), and the wrist glow for a knock (`hand_menu::cue`, `hand_menu.rs:497`).
 
 ### Problems, in short
@@ -133,7 +141,7 @@ The client already knows everything it needs: its own head pose each frame, the 
 - **The client places each source.**
 
 | Source | Position | When unknown |
-|---|---|---|
+| --- | --- | --- |
 | `AGENT_SOURCE`, `REPLAY_SOURCE` | The swarm's animated centre, starting at `swarm::CENTER` | `swarm::CENTER` |
 | A participant | Their head, from their latest relayed presence, offset 10 cm down to the mouth | A seat on a ring around the swarm, by public handle (see open questions) |
 | A worker's announcement (stage 2) | That worker's station anchor | The swarm |
@@ -184,13 +192,17 @@ HRTF matters most for headphones. Most Quest users hear the strap speakers, wher
 ### Principles
 
 - **Few, distinct and paired.** Each event has one sound and one vibration with the same rhythm, such as one tap or two. A participant learns the rhythm once, and it works through either channel.
+
 - **On the hand that acted.**
   - Pointing, choosing, the wrist transcript and leaving use the **right** controller.
   - Recording, the live microphone and the hand menu's knock use the **left**.
 
   This matches the controller UI proposal: the recording card sits on the left controller, and the transcript and requests on the right wrist.
+
 - **Feedback for state changes, not for state.** A cue marks the moment something changes. Nothing hums continuously, and the visual stays the record of the current state.
+
 - **Never the only channel.** Every cue duplicates something already visible: the panel or status pill, the recording card, a highlight, or the wrist glow. Hand tracking has no haptics, and the desktop has no haptics, so sound carries the cue there.
+
 - **Quieter than speech.** Earcons sit about 12 dB below speech, are short (40–250 ms), and come from one small family of pitches, a pentatonic set, so that they sound related and never clash with each other.
 
 ### The vocabulary
@@ -198,7 +210,7 @@ HRTF matters most for headphones. Most Quest users hear the strap speakers, wher
 Haptic values are for the core `XrHapticVibration`: amplitude from 0 to 1, duration, and frequency left unspecified. "MIN" is `Duration::MIN_HAPTIC`.
 
 | Event | When exactly | Sound | Haptic | Hand |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **Hover** | The ray enters a new target: a worker, an arrival object, a hand menu item or a card button. Not on leaving, not while pulling the swarm | None by default; an optional faint tick | One tick, MIN at 0.2, at most one per 80 ms | Right |
 | **Choose** | The trigger chooses, or A confirms a choice, mode or cancellation | Soft click | One tap, 20 ms at 0.5 | Right |
 | **Recording starts** | X is pressed and the gate opens | Short rising "on" tick, 40 ms (see below) | One tap, 25 ms at 0.6 | Left |
@@ -312,7 +324,7 @@ Android attaches its acoustic echo canceller to `VoiceCommunication` capture, wh
 The client has an advantage most apps lack: it renders the exact signal that goes to the speaker, in `Player::render`. So the far-end reference is available in-process, sample-accurate apart from the device's output and input latency, which a canceller's delay estimator absorbs.
 
 | Option | What it is | Quality | Cost on Quest 3 (estimated) | Licence | Integration |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | **WebRTC AEC3** via `webrtc-audio-processing` 2.x (tonarino) | Bindings to PulseAudio and PipeWire's packaging of WebRTC's audio processing module: AEC3, noise suppression, AGC2 | The reference standard for conferencing; robust delay estimation and double-talk handling | A few percent of one core at 16 kHz mono, in 10 ms frames | BSD-3 (WebRTC) and MIT (bindings); Abseil under Apache-2.0 | C++ through meson with the `bundled` feature. It needs the Android NDK C++ toolchain and Abseil, so it is real build work for the APK. Others have built it for Android ABIs |
 | **speexdsp** (MDF canceller) | The classic C library | Adequate for linear echo; weak on double-talk and on loudspeaker distortion | Below 1% | BSD-style | Small C, easy to cross-compile; Rust bindings exist |
 | **`decibri-aec`** 0.2 | A new pure-Rust canceller with its own delay acquisition | Reports AECMOS gains on the ICASSP challenge set, but only by its author; unproven elsewhere | Unknown; to be measured | Apache-2.0 | Pure Rust, no cross-compilation work. It is young, with one maintainer |
@@ -414,7 +426,7 @@ The environment framework (PR #90) gives environments **media streams** (#84). T
 ## Server and protocol changes
 
 | Stage | Change |
-|---|---|
+| --- | --- |
 | MVP | None |
 | 2 | `ServerMessage::Speech.speaker: Option<Speaker>` (additive). Worker announcements in `crates/server/src/voice.rs`'s pacer, with a speaker id per segment through `speech::Speech`. A fixed level gain on synthesized speech |
 | 3 | Environment media streams (#84), designed there; this proposal only consumes them |
@@ -485,7 +497,6 @@ The user answered questions 2, 3, 4, 6 and 7 in November 2026, and asked for sta
 ## Open questions for the user
 
 These were the questions put to the user; their answers are under [Decisions](#decisions).
-
 
 1. **The MVP scope.** Is the MVP right: spatial playback, haptics, earcons, ducking and echo cancellation step A, with per-person volume in stage 2? Or should per-person volume come first?
 2. **Hover vibration.** On by default (a light tick) or off by default? And should hovering also make a faint sound?

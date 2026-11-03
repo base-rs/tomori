@@ -71,3 +71,5 @@ The server's recognition and synthesis pipelines, the speakable-text filter and 
 - Test that a new space speaks a reply whole; that, once a participant chooses brief, a brief reply speaks its first blocks up to the limit, cuts at a block boundary or, for a long first block, a sentence, and says "More on the panel." once; and that only a space chosen brief is brief after a restart, a space kept before the setting was stored being full.
 
 Latency targets for transcript finalization and time to first audio are not yet agreed. Time to first audio includes the wait for the first block to close.
+
+Delegated workers speak nothing yet. In November 2026 the user decided that workers may later speak short updates, such as finishing or needing an approval, in the agent's voice for now, as `docs/proposals/audio-and-haptics.md` proposes for its second stage; how they are scheduled is not yet agreed.

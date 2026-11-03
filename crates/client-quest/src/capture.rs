@@ -57,6 +57,11 @@ pub trait Capture {
     ) -> Result<Recording, String> {
         Err("Live microphone is not available on this platform.".into())
     }
+
+    /// The audio session the open live microphone captures in, where the platform allocates one, so that the speaker can play in the same session while it is open. See `design/spatial-audio.md`.
+    fn live_session(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// Average interleaved channels into mono.
@@ -322,12 +327,13 @@ mod android {
     use super::{Active, Capture, Failed, InputStream, Recording, Samples, run_capture};
     use ndk::audio::{
         AudioDirection, AudioFormat, AudioInputPreset, AudioSharingMode, AudioStream,
-        AudioStreamBuilder,
+        AudioStreamBuilder, SessionId,
     };
     use std::{
+        num::NonZeroI32,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicI32, Ordering},
         },
         thread::JoinHandle,
     };
@@ -338,14 +344,30 @@ mod android {
         android: Arc<crate::android::Android>,
         requested: bool,
         requested_early: bool,
+        /// The live microphone's audio session while it is open, or 0.
+        session: Arc<AtomicI32>,
+        /// The audio session the live microphone last used, or 0, used again each time it opens so that the speaker, playing in it, need not reopen; as when push-to-talk during live audio ends.
+        kept: Arc<AtomicI32>,
+        /// Capture live audio with the recognition preset and no echo canceller, so that the echo test can compare; see `design/spatial-audio.md`.
+        uncancelled: bool,
+        /// Enable the echo canceller on the live microphone's session, or disable it, for the echo test to compare.
+        canceller: bool,
     }
 
     impl Android {
-        pub fn new(android: Arc<crate::android::Android>) -> Self {
+        pub fn new(
+            android: Arc<crate::android::Android>,
+            uncancelled: bool,
+            canceller: bool,
+        ) -> Self {
             Self {
                 android,
                 requested: false,
                 requested_early: false,
+                session: Arc::default(),
+                kept: Arc::default(),
+                uncancelled,
+                canceller,
             }
         }
     }
@@ -381,12 +403,16 @@ mod android {
             failed: Failed,
             active: Active,
         ) -> Result<Recording, String> {
-            self.start(
-                samples,
-                failed,
-                AudioInputPreset::VoiceCommunication,
-                Some(active),
-            )
+            let preset = if self.uncancelled {
+                AudioInputPreset::VoiceRecognition
+            } else {
+                AudioInputPreset::VoiceCommunication
+            };
+            self.start(samples, failed, preset, Some(active))
+        }
+
+        fn live_session(&self) -> Option<i32> {
+            Some(self.session.load(Ordering::Relaxed)).filter(|session| *session != 0)
         }
     }
 
@@ -400,10 +426,24 @@ mod android {
         ) -> Result<Recording, String> {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = stop.clone();
+            // Live audio with the communication preset captures in an audio session of its own, with the platform's echo canceller attached where it has one.
+            // Live audio without a session, as the echo test's `uncancelled` run captures, still says what shapes it, on the capture thread.
+            let unsessioned = (active.is_some() && preset != AudioInputPreset::VoiceCommunication)
+                .then(|| self.android.clone());
+            let session = (active.is_some() && preset == AudioInputPreset::VoiceCommunication)
+                .then(|| Session {
+                    current: self.session.clone(),
+                    kept: self.kept.clone(),
+                    android: self.android.clone(),
+                    canceller: self.canceller,
+                });
             let thread = std::thread::Builder::new()
                 .name("tomori-microphone".into())
                 .spawn(move || {
-                    if let Err(error) = capture(samples, &thread_stop, preset, active) {
+                    if let Some(android) = unsessioned {
+                        android.log_audio_state(None, log::Level::Info);
+                    }
+                    if let Err(error) = capture(samples, &thread_stop, preset, active, session) {
                         failed(error);
                     }
                 })
@@ -438,38 +478,115 @@ mod android {
         stop: &AtomicBool,
         preset: AudioInputPreset,
         active: Option<Active>,
+        session: Option<Session>,
     ) -> Result<(), String> {
         // Shared mode supports Android's resampler, so ask for the recognizer's 16 kHz mono directly.
+        let builder = |session: Option<Option<SessionId>>| {
+            let builder = AudioStreamBuilder::new()
+                .map_err(|error| format!("Cannot open the microphone: {error}"))?
+                .direction(AudioDirection::Input)
+                .sharing_mode(AudioSharingMode::Shared)
+                .channel_count(1)
+                .sample_rate(SAMPLE_RATE as i32)
+                .format(AudioFormat::PCM_Float)
+                .input_preset(preset);
+            // `Some(None)` allocates a new session.
+            Ok::<_, String>(match session {
+                Some(session) => builder.session_id(session),
+                None => builder,
+            })
+        };
         let open = || {
-            let stream = AudioStreamBuilder::new()
-                .and_then(|builder| {
-                    builder
-                        .direction(AudioDirection::Input)
-                        .sharing_mode(AudioSharingMode::Shared)
-                        .channel_count(1)
-                        .sample_rate(SAMPLE_RATE as i32)
-                        .format(AudioFormat::PCM_Float)
-                        .input_preset(preset)
-                        .open_stream()
-                })
-                .map_err(|error| format!("Cannot open the microphone: {error}"))?;
+            let kept = session
+                .as_ref()
+                .and_then(|session| NonZeroI32::new(session.kept.load(Ordering::Relaxed)));
+            let opened = |session| {
+                builder(session)?
+                    .open_stream()
+                    .map_err(|error| format!("Cannot open the microphone: {error}"))
+            };
+            let stream = match (&session, kept) {
+                (None, _) => opened(None),
+                (Some(_), None) => opened(Some(None)),
+                // The session used before, or a new one if it is refused.
+                (Some(_), Some(kept)) => {
+                    opened(Some(Some(SessionId::Allocated(kept)))).or_else(|error| {
+                        log::info!("{error} in audio session {kept} again, so allocating another");
+                        opened(Some(None))
+                    })
+                }
+            }?;
             if stream.sample_rate() != SAMPLE_RATE as i32
                 || stream.channel_count() != 1
                 || stream.format() != AudioFormat::PCM_Float
             {
                 return Err("The microphone opened in an unexpected format.".into());
             }
-            Ok(Input(stream))
+            let mut canceller = None;
+            if let Some(session) = &session {
+                match stream.session_id() {
+                    SessionId::Allocated(id) => {
+                        // In full the first time in a session; again, as when push-to-talk during live audio ends, only at debug.
+                        let level = if session.kept.load(Ordering::Relaxed) == id.get() {
+                            log::Level::Debug
+                        } else {
+                            log::Level::Info
+                        };
+                        log::log!(
+                            level,
+                            "Live microphone in audio session {}, preset {preset:?}",
+                            id.get()
+                        );
+                        // The platform attaches its echo canceller to this preset where it has one; ask for it by session, enable it (or disable it, for the echo test), and say what it and the other effects report. See `design/client-logging.md`.
+                        canceller = session
+                            .android
+                            .echo_canceller(id.get(), session.canceller, level)
+                            .unwrap_or_else(|error| {
+                                log::warn!("Cannot reach the echo canceller: {error:#}");
+                                None
+                            });
+                        session.android.log_audio_state(Some(id.get()), level);
+                        session.kept.store(id.get(), Ordering::Relaxed);
+                        session.current.store(id.get(), Ordering::Relaxed);
+                    }
+                    SessionId::None => {
+                        log::info!("Live microphone has no audio session, preset {preset:?}")
+                    }
+                }
+            }
+            Ok(Input(stream, canceller))
         };
         // 20 ms reads, one outgoing frame each.
         let mut buffer = [0.0_f32; (SAMPLE_RATE / 50) as usize];
-        log::info!("Microphone opening (16 kHz mono)");
+        log::info!("Microphone opening (16 kHz mono, {preset:?})");
         let result = run_capture(open, &mut *samples, stop, active.as_ref(), &mut buffer);
+        if let Some(session) = &session {
+            session.current.store(0, Ordering::Relaxed);
+        }
         log::info!("Microphone closed");
         result
     }
 
-    struct Input(AudioStream);
+    /// What live capture with the communication preset needs for its audio session.
+    struct Session {
+        /// Where the session is published while the stream is open.
+        current: Arc<AtomicI32>,
+        /// The session to capture in again, and where a new one is kept.
+        kept: Arc<AtomicI32>,
+        android: Arc<crate::android::Android>,
+        /// Whether to enable the echo canceller, or disable it for the echo test.
+        canceller: bool,
+    }
+
+    /// The stream, and the echo canceller attached to its session while it is open.
+    struct Input(
+        AudioStream,
+        #[expect(
+            dead_code,
+            reason = "kept for its lifetime: dropping it releases the canceller"
+        )]
+        Option<crate::android::EchoCanceller>,
+    );
 
     impl InputStream for Input {
         fn start(&mut self) -> Result<(), String> {

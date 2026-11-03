@@ -204,6 +204,24 @@ impl Feed {
         // Build the frame.
         let frame = self.build_frame(&presence, aspect, dt);
 
+        // The audience hears as the participant it follows, from their head, or from the neutral view; see `design/spatial-audio.md`.
+        let listener = match self.following.and_then(|source| presence.get(&source)) {
+            Some(followed) => Pose {
+                position: followed.head.position,
+                orientation: followed.head.orientation,
+            },
+            None => Pose {
+                position: (CENTER + Vec3::new(0.0, 0.0, 3.0)).to_array(),
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+        self.connection.listen_as(self.following);
+        self.connection.listen(
+            Some(listener),
+            crate::spatial_audio::centre(&frame.agents),
+            &self.conversation,
+        );
+
         // Log when the caption changes, so the follow transition is visible.
         if self.last_caption.as_deref() != Some(frame.caption.as_str()) {
             log::info!("Spectator: {}", frame.caption.replace('\n', " "));

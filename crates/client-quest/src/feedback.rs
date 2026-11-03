@@ -6,7 +6,7 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use client::playback::Earcon;
+use client::playback::{Direction, Earcon};
 use serde::{Deserialize, Serialize};
 
 /// At most one hover tick in this time, so that sweeping across several targets does not chatter.
@@ -80,6 +80,9 @@ pub struct Settings {
     pub sounds: Level,
     #[serde(default)]
     pub vibration: Level,
+    /// Play every source in both ears alike, for people who hear with one ear; distance still changes loudness. See `design/spatial-audio.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mono: bool,
 }
 
 /// Something that changed, which the participant hears and feels. See `design/feedback.md` for exactly when each happens.
@@ -164,6 +167,18 @@ impl Event {
         )
     }
 
+    /// Where the cue sounds from: towards the hand that acted, from the agent for what the agent needs, or in the middle.
+    pub fn direction(self) -> Direction {
+        match self {
+            Self::RequestWaiting | Self::RequestReminder | Self::CatchingUp => Direction::Agent,
+            Self::Sent => Direction::Centre,
+            event => match event.hand() {
+                Hand::Left => Direction::Left,
+                Hand::Right => Direction::Right,
+            },
+        }
+    }
+
     pub fn earcon(self) -> Option<Earcon> {
         match self {
             Self::Hover
@@ -245,7 +260,7 @@ pub struct Feedback {
     last_hover: Option<Instant>,
     /// Each pulse still to come, with its hand and whether its event is essential, so that a change to the setting can drop the rest.
     pulses: Vec<(Instant, Hand, Pulse, bool)>,
-    earcons: Vec<Earcon>,
+    earcons: Vec<(Earcon, Direction)>,
     /// The hold-to-leave ramp, from 0 to 1, while B is held in a space, and whether it has left.
     ramp: Option<f32>,
     left: bool,
@@ -263,7 +278,6 @@ impl Feedback {
         }
     }
 
-    #[cfg(test)]
     pub fn settings(&self) -> Settings {
         self.settings
     }
@@ -320,7 +334,7 @@ impl Feedback {
             && self.settings.sounds.allows(event)
             && let Some(earcon) = event.earcon()
         {
-            self.earcons.push(earcon);
+            self.earcons.push((earcon, event.direction()));
         }
         if event == Event::Left {
             self.left = true;
@@ -338,8 +352,8 @@ impl Feedback {
         }
     }
 
-    /// The cues to play, oldest first.
-    pub fn take_earcons(&mut self) -> std::vec::Drain<'_, Earcon> {
+    /// The cues to play, oldest first, and where each sounds from.
+    pub fn take_earcons(&mut self) -> std::vec::Drain<'_, (Earcon, Direction)> {
         self.earcons.drain(..)
     }
 
@@ -560,6 +574,34 @@ mod tests {
     }
 
     #[test]
+    fn cues_sound_towards_the_hand_or_from_the_agent() {
+        let directions: Vec<_> = EVENTS.iter().map(|event| event.direction()).collect();
+        assert_eq!(
+            directions,
+            [
+                Direction::Right,
+                Direction::Right,
+                Direction::Left,
+                Direction::Left,
+                Direction::Centre,
+                Direction::Left,
+                Direction::Right,
+                Direction::Agent,
+                Direction::Agent,
+                Direction::Agent,
+                Direction::Left,
+                Direction::Left,
+                Direction::Left,
+                Direction::Right,
+                Direction::Left,
+                Direction::Right,
+                Direction::Left,
+                Direction::Left,
+            ]
+        );
+    }
+
+    #[test]
     fn reduced_keeps_requests_failures_and_knocks() {
         let essential: Vec<_> = EVENTS
             .into_iter()
@@ -595,7 +637,11 @@ mod tests {
                 false,
             ),
         ] {
-            feedback.set_settings(Settings { sounds, vibration });
+            feedback.set_settings(Settings {
+                sounds,
+                vibration,
+                mono: false,
+            });
             feedback.emit(event, now);
             assert_eq!(
                 feedback.take_earcons().count() > 0,
@@ -607,7 +653,14 @@ mod tests {
                 felt,
                 "{vibration:?} {event:?}"
             );
-            assert_eq!(feedback.settings(), Settings { sounds, vibration });
+            assert_eq!(
+                feedback.settings(),
+                Settings {
+                    sounds,
+                    vibration,
+                    mono: false
+                }
+            );
         }
     }
 
@@ -627,7 +680,8 @@ mod tests {
             kept,
             Settings {
                 sounds: Level::Reduced,
-                vibration: Level::Full
+                vibration: Level::Full,
+                mono: false,
             }
         );
         assert_eq!(
@@ -643,7 +697,10 @@ mod tests {
         feedback.emit(Event::RequestWaiting, now);
         assert!(feedback.haptics(now + ms(500)).is_empty());
         assert_eq!(
-            feedback.take_earcons().collect::<Vec<_>>(),
+            feedback
+                .take_earcons()
+                .map(|(earcon, _)| earcon)
+                .collect::<Vec<_>>(),
             [Earcon::Request]
         );
         feedback.set_haptics(true);
@@ -675,6 +732,7 @@ mod tests {
         feedback.set_settings(Settings {
             sounds: Level::Full,
             vibration: Level::Reduced,
+            mono: false,
         });
         // The knock's second tap, which is essential, remains; the live microphone's does not.
         let due = feedback.haptics(now + ms(500));
@@ -716,6 +774,7 @@ mod tests {
         feedback.set_settings(Settings {
             sounds: Level::Full,
             vibration: Level::Off,
+            mono: false,
         });
         assert!(feedback.haptics(now + ms(500)).is_empty());
     }
@@ -773,7 +832,13 @@ mod tests {
         // Leaving taps once and clicks, and ends the ramp.
         feedback.emit(Event::Left, now);
         assert!((amplitude(&feedback.haptics(now)) - 0.7).abs() < 1e-6);
-        assert_eq!(feedback.take_earcons().collect::<Vec<_>>(), [Earcon::Leave]);
+        assert_eq!(
+            feedback
+                .take_earcons()
+                .map(|(earcon, _)| earcon)
+                .collect::<Vec<_>>(),
+            [Earcon::Leave]
+        );
         // Still held after leaving: nothing more.
         feedback.hold_to_leave(Some(1.2));
         feedback.hold_to_leave(Some(0.2));
@@ -790,6 +855,7 @@ mod tests {
         feedback.set_settings(Settings {
             sounds: Level::Full,
             vibration: Level::Reduced,
+            mono: false,
         });
         feedback.hold_to_leave(Some(0.3));
         assert!(feedback.haptics(now).is_empty());
@@ -798,7 +864,12 @@ mod tests {
     #[test]
     fn a_new_request_is_cued_once_and_reminded_once_unless_opened() {
         let (mut feedback, now) = feedback();
-        let cues = |feedback: &mut Feedback| feedback.take_earcons().collect::<Vec<_>>();
+        let cues = |feedback: &mut Feedback| {
+            feedback
+                .take_earcons()
+                .map(|(earcon, _)| earcon)
+                .collect::<Vec<_>>()
+        };
         feedback.observe_requests([], now);
         assert!(cues(&mut feedback).is_empty());
         feedback.observe_requests(["a", "b"], now);
@@ -829,7 +900,10 @@ mod tests {
         feedback.observe_knocks([], now);
         feedback.observe_knocks(["k2", "k3"], now);
         assert_eq!(
-            feedback.take_earcons().collect::<Vec<_>>(),
+            feedback
+                .take_earcons()
+                .map(|(earcon, _)| earcon)
+                .collect::<Vec<_>>(),
             [Earcon::Knock, Earcon::Knock]
         );
         assert_eq!(feedback.haptics(now).len(), 2);

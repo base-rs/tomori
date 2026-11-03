@@ -231,6 +231,8 @@ pub enum MenuKey {
     /// Step the Feedback setting's sounds or vibration to the next level.
     Sounds,
     Vibration,
+    /// Turn mono audio on or off.
+    Mono,
     /// A row that is only read, by its place.
     Text(usize),
     /// The cue on the wrist.
@@ -345,6 +347,7 @@ pub enum Choice {
     /// Step the sounds, or the vibration, to the next level.
     Sounds,
     Vibration,
+    Mono,
 }
 
 /// One row of the menu.
@@ -435,6 +438,14 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 &mut items,
                 MenuKind::Text,
                 "Reduced: requests, failures, knocks".into(),
+            );
+            button(
+                &mut items,
+                MenuKey::Mono,
+                format!(
+                    "Mono audio: {}",
+                    if model.feedback.mono { "on" } else { "off" }
+                ),
             );
         }
         Some(Section::Space) => {
@@ -784,6 +795,7 @@ impl HandMenu {
             MenuKey::ClearInstructions => Some(Choice::ClearInstructions),
             MenuKey::Sounds => Some(Choice::Sounds),
             MenuKey::Vibration => Some(Choice::Vibration),
+            MenuKey::Mono => Some(Choice::Mono),
             MenuKey::Knock => Some(Choice::Knock),
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
@@ -994,6 +1006,7 @@ mod tests {
             feedback: Settings {
                 sounds: Level::Reduced,
                 vibration: Level::Full,
+                mono: false,
             },
             ..Default::default()
         };
@@ -1007,6 +1020,7 @@ mod tests {
                     "Sounds: reduced",
                     "Vibration: full",
                     "Reduced: requests, failures, knocks",
+                    "Mono audio: off",
                 ]
             );
         }
@@ -1015,6 +1029,7 @@ mod tests {
         assert_eq!(menu.section, Some(Section::Sound));
         assert_eq!(menu.choose(&MenuKey::Sounds), Some(Choice::Sounds));
         assert_eq!(menu.choose(&MenuKey::Vibration), Some(Choice::Vibration));
+        assert_eq!(menu.choose(&MenuKey::Mono), Some(Choice::Mono));
         assert_eq!(menu.choose(&MenuKey::Back), None);
         assert_eq!(menu.section, None);
     }

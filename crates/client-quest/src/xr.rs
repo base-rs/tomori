@@ -791,6 +791,12 @@ pub fn run(
                 input.haptics.apply(&session, hand, haptic);
             }
         }
+        // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
+        connection.listen(
+            scene_anchor.to_scene_transform(head_pose(&views)),
+            crate::spatial_audio::centre(&coordinator_samples),
+            &conversation,
+        );
         // Report this participant's head, controllers and hands to the server, in
         // the space's scene coordinates, so the others in the space can render them.
         // Visitors send no presence; see `design/security.md`.

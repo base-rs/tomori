@@ -8,6 +8,8 @@ For the virtual camera, the PipeWire spectator renders at 1920×1080 at up to 30
 
 The spectator animates its swarm from the joined space's observed activity rather than displaying a static neutral arrangement. Worker transitions use the animated swarm's positions. This does not replace the shared-scene requirement in [clients.md](clients.md).
 
+The spectator plays stereo and hears as the participant it follows does, from their head, with the others seated around them, or from its neutral view with nobody to follow (see `spatial-audio.md`), so that its audience hears the agent where they see the swarm.
+
 The spectator reports no engagement, so the server keeps it at the live edge of agent speech: its audience hears replies as they are spoken, never a catch-up of what was said before it joined. See `speech.md`.
 
 ## Rationale

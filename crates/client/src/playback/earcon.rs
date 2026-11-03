@@ -227,10 +227,53 @@ impl Spec {
     }
 }
 
-/// Every cue rendered at one device rate.
+/// How long the echo probe lasts.
+pub const PROBE_LENGTH: std::time::Duration = std::time::Duration::from_millis(1_500);
+/// The echo probe's level, as RMS of full scale: −20 dBFS, about as loud as speech.
+pub const PROBE_LEVEL: f32 = 0.1;
+
+/// A speech-band test sound for measuring how much of what the speaker plays the microphone hears: a dozen inharmonic tones from about 250 Hz to 3.3 kHz, rising and falling about four times a second as syllables do, so that a noise suppressor does not take it for steady noise, faded in and out over 50 ms, at [`PROBE_LEVEL`] RMS. Not a cue: it is played only by the echo test. See `design/spatial-audio.md`.
+pub fn probe(sample_rate: u32) -> Vec<f32> {
+    const TONES: [f64; 12] = [
+        251.0, 347.0, 487.0, 683.0, 911.0, 1_201.0, 1_543.0, 1_907.0, 2_293.0, 2_683.0, 3_011.0,
+        3_307.0,
+    ];
+    let rate = f64::from(sample_rate.max(1));
+    let length = (PROBE_LENGTH.as_secs_f64() * rate).round() as usize;
+    let fade = (0.05 * rate).max(1.0);
+    let mut samples: Vec<f64> = (0..length)
+        .map(|index| {
+            let time = index as f64 / rate;
+            let edge = (index as f64 / fade)
+                .min((length - index) as f64 / fade)
+                .min(1.0);
+            // Syllable-like: between a fifth and the whole, about four times a second.
+            let syllable = 0.6 - 0.4 * (TAU * 4.3 * time).cos();
+            // Phases spread so that the tones do not all peak together.
+            let sum: f64 = TONES
+                .iter()
+                .enumerate()
+                .map(|(tone, frequency)| (TAU * frequency * time + tone as f64 * 2.1).sin())
+                .sum();
+            sum * edge * syllable
+        })
+        .collect();
+    let rms =
+        (samples.iter().map(|sample| sample * sample).sum::<f64>() / length.max(1) as f64).sqrt();
+    let scale = if rms > 0.0 {
+        f64::from(PROBE_LEVEL) * f64::from(i16::MAX) / rms
+    } else {
+        0.0
+    };
+    samples.iter_mut().for_each(|sample| *sample *= scale);
+    samples.into_iter().map(|sample| sample as f32).collect()
+}
+
+/// Every cue rendered at one device rate, and the echo probe once loaded.
 pub struct Bank {
     sample_rate: u32,
     sounds: Vec<Vec<f32>>,
+    probe: Vec<f32>,
 }
 
 impl Bank {
@@ -241,7 +284,20 @@ impl Bank {
                 .iter()
                 .map(|earcon| earcon.spec().render(sample_rate))
                 .collect(),
+            probe: Vec::new(),
         }
+    }
+
+    /// Render the echo probe, which only the echo test plays, so that it is not synthesized otherwise.
+    pub fn load_probe(&mut self) {
+        if self.probe.is_empty() {
+            self.probe = probe(self.sample_rate);
+        }
+    }
+
+    /// The echo probe at this rate, or nothing until it is loaded.
+    pub fn probe(&self) -> &[f32] {
+        &self.probe
     }
 
     pub fn sample_rate(&self) -> u32 {

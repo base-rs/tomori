@@ -9,7 +9,7 @@ use crate::{
     feedback::{Event as Feedback, Hand},
     hands,
     identity::{Identity, Store},
-    playback::{Playback, Speaking},
+    playback::{Playback, Route, Speaking},
     server_choice::{self, Choice, Source},
 };
 use client::{
@@ -61,6 +61,16 @@ pub struct Connection {
     replay: Replay,
     /// How close to the server's limit the recording in progress has been cued: 0, 1 at [`crate::recording::WARNING`], 2 at [`crate::recording::CRITICAL`].
     limit_cued: u8,
+    /// Where each voice comes from: the other participants' latest heads, from relayed presence. See `design/spatial-audio.md`.
+    heads: std::collections::HashMap<u32, Pose>,
+    /// This client's own participant number on the current connection, which is never placed.
+    local_source: Option<u32>,
+    /// The participant whose head the spectator hears from, who is the listener rather than a source.
+    listening_as: Option<u32>,
+    /// The other participants in the space, kept between frames to avoid allocating.
+    others: Vec<u32>,
+    /// Measures how much of the speaker the live microphone hears, when started with it.
+    echo_test: Option<EchoTest>,
 }
 
 /// Speech played again to this participant: a replay they asked for, or a catch-up on joining or returning.
@@ -150,6 +160,117 @@ struct Captured {
     microphone: Option<Microphone>,
     /// Why capture stopped early.
     failure: Option<String>,
+    /// What the microphone heard since last taken, for the echo test.
+    heard: Heard,
+}
+
+/// The energy of captured samples, from −1 to 1, and how many there were.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Heard {
+    energy: f64,
+    samples: u64,
+}
+
+impl Heard {
+    fn add(&mut self, other: Heard) {
+        self.energy += other.energy;
+        self.samples += other.samples;
+    }
+
+    /// The level heard, in dBFS RMS, if anything was.
+    fn level(&self) -> Option<f64> {
+        (self.samples > 0).then(|| 10.0 * (self.energy / self.samples as f64).max(1e-12).log10())
+    }
+}
+
+/// When the echo test listens, from when the live microphone opens: first the room, then the probe the speaker plays. See `design/spatial-audio.md`.
+const ECHO_FLOOR: std::ops::Range<Duration> =
+    Duration::from_millis(300)..Duration::from_millis(1_000);
+const ECHO_PROBE: Duration = Duration::from_millis(1_000);
+/// How long the echo test waits for the speaker to play as it needs before giving up, saying so.
+const ECHO_WAIT: Duration = Duration::from_secs(5);
+/// The part of the probe measured, after it starts: its steady middle, allowing for the speaker's and microphone's latency.
+const ECHO_HEARD: std::ops::Range<Duration> =
+    Duration::from_millis(300)..Duration::from_millis(1_300);
+
+/// The echo test, for the live microphone opened at `opened`: what it heard of the room and of the probe. See `design/spatial-audio.md`.
+#[derive(Debug)]
+struct EchoTest {
+    /// How the live microphone captures, for the log: with the platform's echo canceller or without.
+    label: &'static str,
+    /// Whether the speaker plays as voice communication in the microphone's session for this test, so that it waits for that.
+    routed: bool,
+    /// When the live microphone opened, while the test waits for the speaker to play as it should.
+    armed: Option<Instant>,
+    /// The audio session the speaker played in as voice communication during the test, or `None` as media, for the log.
+    speaker: Option<i32>,
+    opened: Option<Instant>,
+    probed: Option<Instant>,
+    floor: Heard,
+    echo: Heard,
+}
+
+impl EchoTest {
+    /// Attribute what the microphone `heard`, up to `now`, to the room or the probe. Returns the result to log once both are measured, and whether to play the probe now.
+    fn update(&mut self, heard: Heard, now: Instant) -> (Option<String>, bool) {
+        let Some(opened) = self.opened else {
+            return (None, false);
+        };
+        let since = now.saturating_duration_since(opened);
+        let mut probe = false;
+        match self.probed {
+            None if since >= ECHO_PROBE => {
+                self.probed = Some(now);
+                probe = true;
+            }
+            None if ECHO_FLOOR.contains(&since) => self.floor.add(heard),
+            None => {}
+            Some(probed) => {
+                let since = now.saturating_duration_since(probed);
+                if ECHO_HEARD.contains(&since) {
+                    self.echo.add(heard);
+                } else if since >= ECHO_HEARD.end {
+                    self.opened = None;
+                    let level = |heard: Heard| {
+                        heard
+                            .level()
+                            .map_or_else(|| "nothing".into(), |level| format!("{level:.1} dBFS"))
+                    };
+                    let probe = 20.0 * f64::from(client::playback::PROBE_LEVEL).log10();
+                    let below = self.echo.level().map_or_else(String::new, |echo| {
+                        format!(", {:.1} dB below the probe", probe - echo)
+                    });
+                    // Within a few dB of the room, the echo is lost in it, and the measurement says only that it is at most this.
+                    let room = match (self.echo.level(), self.floor.level()) {
+                        (Some(echo), Some(floor)) if echo - floor < 3.0 => {
+                            format!(
+                                ", within {:.1} dB of the room, so at most this",
+                                echo - floor
+                            )
+                        }
+                        (Some(echo), Some(floor)) => {
+                            format!(", {:.1} dB above the room", echo - floor)
+                        }
+                        _ => String::new(),
+                    };
+                    return (
+                        Some(format!(
+                            "Echo test ({}, the speaker {}): the speaker played a probe at {probe:.1} dBFS; the microphone heard {} during it{below}{room}; the room was {}",
+                            self.label,
+                            self.speaker.map_or_else(
+                                || "as media".into(),
+                                |session| format!("as voice communication in session {session}")
+                            ),
+                            level(self.echo),
+                            level(self.floor),
+                        )),
+                        false,
+                    );
+                }
+            }
+        }
+        (None, probe)
+    }
 }
 
 impl Voice {
@@ -192,6 +313,13 @@ impl Voice {
         let shared = self.shared.clone();
         let samples = Box::new(move |samples: &[f32]| {
             let mut captured = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            captured.heard.add(Heard {
+                energy: samples
+                    .iter()
+                    .map(|sample| f64::from(*sample).powi(2))
+                    .sum(),
+                samples: samples.len() as u64,
+            });
             // A capture only feeds a microphone bound to its own connection;
             // the outbox drops its frames once that connection has ended.
             if let Some(microphone) = captured.microphone.as_mut()
@@ -407,6 +535,10 @@ struct Speaker {
     reported: bool,
     /// Whether agent speech is muted locally, kept across connections.
     muted: bool,
+    /// How the open output plays, and how the next one should.
+    route: Route,
+    /// Whether the players made for later connections load the echo probe, for the echo test.
+    probe: bool,
 }
 
 impl Speaker {
@@ -419,14 +551,39 @@ impl Speaker {
             retry_at: None,
             reported: false,
             muted: false,
+            route: Route::default(),
+            probe: false,
         }
+    }
+
+    /// Play as `route` says: an open output that plays otherwise is closed and opened again at once. See `design/spatial-audio.md`.
+    fn reroute(&mut self, route: Route) -> Option<String> {
+        if route == self.route {
+            return None;
+        }
+        log::info!(
+            "Speaker: playing {}",
+            match route.communication {
+                Some(session) =>
+                    format!("as voice communication in session {session}, for the live microphone"),
+                None => "as media".into(),
+            }
+        );
+        self.route = route;
+        self.output.take()?;
+        self.retry_at = None;
+        // What is buffered is still current: rerouting must not cut a reply short.
+        self.start(false)
     }
 
     /// Take the new client's received audio; nothing plays until [`Self::open`].
     fn attach(&mut self, client: &mut Client) {
         self.detach();
         if let Some(audio) = client.take_audio() {
-            let (player, control) = Player::new(audio, MixerOptions::default());
+            let (mut player, control) = Player::new(audio, MixerOptions::default());
+            if self.probe {
+                player.load_probe();
+            }
             control.set_agent_muted(self.muted);
             self.player = Some((Arc::new(Mutex::new(player)), control));
         }
@@ -472,12 +629,19 @@ impl Speaker {
 
     /// Start opening the speaker on its own thread if it is not open and is due. Failing to open is reported later by [`Self::poll`]. Returns a failure to show, once until the speaker opens again.
     fn open(&mut self) -> Option<String> {
-        let (player, control) = self.player.as_ref()?;
         if self.output.is_some() || self.retry_at.is_some_and(|at| Instant::now() < at) {
             return None;
         }
         // Audio queued while nothing played is stale.
-        control.clear();
+        self.start(true)
+    }
+
+    /// Start the speaker thread, first discarding what was queued if `clear`.
+    fn start(&mut self, clear: bool) -> Option<String> {
+        let (player, control) = self.player.as_ref()?;
+        if clear {
+            control.clear();
+        }
         *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = None;
         let failure = self.failure.clone();
         let failed = Box::new(move |error: String| {
@@ -486,7 +650,7 @@ impl Speaker {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get_or_insert(error);
         });
-        match crate::playback::start(self.playback.clone(), player.clone(), failed) {
+        match crate::playback::start(self.playback.clone(), player.clone(), failed, self.route) {
             Ok(output) => {
                 self.output = Some(output);
                 self.retry_at = None;
@@ -570,7 +734,145 @@ impl Connection {
             recording: None,
             replay: Replay::default(),
             limit_cued: 0,
+            heads: std::collections::HashMap::new(),
+            local_source: None,
+            listening_as: None,
+            others: Vec::new(),
+            echo_test: None,
         }
+    }
+
+    /// Measure, each time the live microphone opens, how much of a probe the speaker plays it hears, and log it: `label` says how the microphone captures. Needs a quiet room. See `design/spatial-audio.md`.
+    #[cfg(any(target_os = "android", test))]
+    pub fn set_echo_test(&mut self, label: &'static str, routed: bool) {
+        log::info!(
+            "Echo test ({label}): each time the live microphone opens, a probe plays a second after the speaker is ready; keep the room quiet and the volume the same between runs"
+        );
+        if let Some((player, _)) = &self.speaker.player {
+            player
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .load_probe();
+        }
+        self.speaker.probe = true;
+        self.echo_test = Some(EchoTest {
+            label,
+            routed,
+            armed: None,
+            speaker: None,
+            opened: None,
+            probed: None,
+            floor: Heard::default(),
+            echo: Heard::default(),
+        });
+    }
+
+    /// Route the speaker for the live microphone, and run the echo test.
+    fn listen_live(&mut self, conversation: &mut Conversation) {
+        // Push-to-talk while live closes the live stream for a while, so the session stays until live audio stops or the microphone opens in another.
+        let route = Route {
+            communication: self
+                .voice
+                .live
+                .then(|| {
+                    self.voice
+                        .capture
+                        .live_session()
+                        .or(self.speaker.route.communication)
+                })
+                .flatten(),
+        };
+        if let Some(error) = self.speaker.reroute(route) {
+            conversation.fail(error);
+        }
+        let heard = std::mem::take(&mut self.voice.lock().heard);
+        if let Some(test) = &mut self.echo_test {
+            if !self.voice.live {
+                test.opened = None;
+                test.armed = None;
+                return;
+            }
+            // Timed from when the speaker plays as the test needs, after any reopening for the live microphone: as voice communication, not having fallen back to media, when the test needs that.
+            let now = Instant::now();
+            if let Some(armed) = test.armed {
+                let playing = self
+                    .speaker
+                    .output
+                    .as_ref()
+                    .filter(|output| output.is_open())
+                    .map(Speaking::communication);
+                match playing {
+                    Some(communication) if !test.routed || communication.is_some() => {
+                        test.armed = None;
+                        test.speaker = communication;
+                        test.opened = Some(now);
+                    }
+                    _ if now.saturating_duration_since(armed) >= ECHO_WAIT => {
+                        test.armed = None;
+                        log::warn!(
+                            "Echo test ({}): nothing measured, as the speaker did not play {} within {} seconds",
+                            test.label,
+                            if test.routed {
+                                "as voice communication in the live microphone's session"
+                            } else {
+                                "at all"
+                            },
+                            ECHO_WAIT.as_secs()
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let (result, probe) = test.update(heard, Instant::now());
+            if probe && let Some(control) = self.speaker.control() {
+                control.play_probe();
+            }
+            if let Some(result) = result {
+                log::info!("{result}");
+            }
+        }
+    }
+
+    /// Hear as `participant` does, from their head, as the spectator does for the participant it follows: they are the listener, so their own voice is not placed on a seat.
+    #[cfg(not(target_os = "android"))]
+    pub fn listen_as(&mut self, participant: Option<u32>) {
+        self.listening_as = participant;
+    }
+
+    /// Where this participant hears from now, in the space's scene coordinates, and where the agent is, typically the swarm's centre; called once a frame. Every other participant in the space is placed as [`crate::spatial_audio`] says. Without a listener, every source plays centred.
+    pub fn listen(
+        &mut self,
+        listener: Option<controller::Pose>,
+        agent: [f32; 3],
+        conversation: &Conversation,
+    ) {
+        let Some(control) = self.speaker.control() else {
+            return;
+        };
+        self.others.clear();
+        if let Some((space, _)) = conversation.joined_space() {
+            self.others.extend(
+                space
+                    .participants
+                    .iter()
+                    .map(|participant| participant.source)
+                    .filter(|source| {
+                        Some(*source) != self.local_source && Some(*source) != self.listening_as
+                    }),
+            );
+        }
+        self.others.sort_unstable();
+        self.others.dedup();
+        let others = &self.others;
+        self.heads.retain(|source, _| others.contains(source));
+        let listener = listener.map(|pose| client::playback::spatial::Listener {
+            position: pose.position,
+            orientation: pose.orientation,
+        });
+        let mono = self.feedback.settings().mono;
+        control.set_scene(|scene| {
+            crate::spatial_audio::fill(scene, listener, agent, others, &self.heads, mono)
+        });
     }
 
     /// What the participant hears and feels as things change, for the frame loop to report pointing and choosing to, and to take vibrations from.
@@ -680,6 +982,17 @@ impl Connection {
                 }
             }
             self.observe(&event);
+            match &event {
+                Event::Message(ServerMessage::Presence { source, head, .. }) => {
+                    self.heads.insert(*source, *head);
+                }
+                Event::State(ConnectionState::Connected { source, .. }) => {
+                    self.local_source = Some(*source);
+                    self.heads.clear();
+                }
+                Event::Message(ServerMessage::Left) => self.heads.clear(),
+                _ => {}
+            }
             // The spectator renders presence, which the conversation ignores.
             if let Event::Message(message @ ServerMessage::Presence { .. }) = &event
                 && let Some(presence) = self.presence.as_deref_mut()
@@ -717,6 +1030,7 @@ impl Connection {
             control.set_silenced(self.voice.talking());
         }
         conversation.set_replaying(self.speaker.is_replaying());
+        self.listen_live(conversation);
         self.cue(conversation);
     }
 
@@ -847,8 +1161,8 @@ impl Connection {
             .filter(|_| self.speaker.output.is_some())
         {
             Some(control) => {
-                for earcon in self.feedback.take_earcons() {
-                    control.play(earcon);
+                for (earcon, direction) in self.feedback.take_earcons() {
+                    control.play(earcon, direction);
                 }
             }
             None => self.feedback.take_earcons().for_each(drop),
@@ -993,7 +1307,20 @@ impl Connection {
                         None => Err("Not connected.".into()),
                     };
                     match result {
-                        Ok(()) => self.feedback.emit(Feedback::LiveOn, Instant::now()),
+                        Ok(()) => {
+                            self.feedback.emit(Feedback::LiveOn, Instant::now());
+                            if let Some(test) = &mut self.echo_test {
+                                *test = EchoTest {
+                                    armed: Some(Instant::now()),
+                                    speaker: None,
+                                    opened: None,
+                                    probed: None,
+                                    floor: Heard::default(),
+                                    echo: Heard::default(),
+                                    ..*test
+                                };
+                            }
+                        }
                         Err(error) => {
                             self.voice.recording = None;
                             self.feedback
@@ -1784,12 +2111,16 @@ mod tests {
             &self,
             player: crate::playback::Shared,
             failed: crate::playback::Failed,
+            _route: Route,
         ) -> Result<crate::playback::Output, String> {
             if self.refuse.load(Ordering::Relaxed) {
                 return Err("No speaker is available.".into());
             }
             let mut output = [1; 48];
-            player.lock().unwrap().render(48_000, &mut output);
+            player
+                .lock()
+                .unwrap()
+                .render(48_000, client::playback::Layout::Mono, &mut output);
             assert_eq!(output, [0; 48]);
             *self.failed.lock().unwrap() = Some(failed);
             self.opened.fetch_add(1, Ordering::Relaxed);
@@ -1837,7 +2168,11 @@ mod tests {
     }
 
     fn cues(connection: &mut Connection) -> Vec<client::playback::Earcon> {
-        connection.feedback.take_earcons().collect()
+        connection
+            .feedback
+            .take_earcons()
+            .map(|(earcon, _)| earcon)
+            .collect()
     }
 
     fn message(message: ServerMessage) -> Event {
@@ -1950,6 +2285,7 @@ mod tests {
         let quiet = Settings {
             sounds: Level::Off,
             vibration: Level::Reduced,
+            mono: false,
         };
         conversation.push_action(Action::SetFeedback(quiet));
         connection.perform(&mut conversation);
@@ -1978,7 +2314,10 @@ mod tests {
         });
         let heard = |player: &crate::playback::Shared| {
             let mut output = vec![0; 4_800];
-            player.lock().unwrap().render(48_000, &mut output);
+            player
+                .lock()
+                .unwrap()
+                .render(48_000, client::playback::Layout::Mono, &mut output);
             output.iter().any(|sample| *sample != 0)
         };
         // Without a connection recording fails at once; the tick still plays through the silencing, and the failure does not.
@@ -2071,6 +2410,119 @@ mod tests {
             replay: true,
         }));
         assert_eq!(cues(&mut connection), [Earcon::CatchingUp]);
+    }
+
+    #[test]
+    fn the_echo_test_hears_the_room_then_the_probe_and_reports_once() {
+        let (mut connection, _conversation) = feedback_connection();
+        connection.set_echo_test("test", false);
+        let test = connection.echo_test.as_mut().unwrap();
+        let start = Instant::now();
+        let at = |milliseconds: u64| start + Duration::from_millis(milliseconds);
+        let heard = |level: f64| Heard {
+            energy: level * level * 320.0,
+            samples: 320,
+        };
+        // Before the live microphone opens, nothing.
+        assert_eq!(test.update(heard(1.0), at(0)), (None, false));
+        test.opened = Some(start);
+        // The first 300 ms are ignored, then the room is heard until the probe plays at one second.
+        assert_eq!(test.update(heard(1.0), at(100)), (None, false));
+        assert_eq!(test.update(heard(0.001), at(500)), (None, false));
+        assert_eq!(test.update(heard(0.001), at(900)), (None, false));
+        assert_eq!(test.update(Heard::default(), at(1_000)), (None, true));
+        assert_eq!(test.update(heard(1.0), at(1_100)), (None, false));
+        assert_eq!(test.update(heard(0.01), at(1_400)), (None, false));
+        assert_eq!(test.update(heard(0.01), at(2_200)), (None, false));
+        let (result, probe) = test.update(Heard::default(), at(2_400));
+        assert!(!probe);
+        assert_eq!(
+            result.as_deref(),
+            Some(
+                "Echo test (test, the speaker as media): the speaker played a probe at -20.0 dBFS; the microphone heard -40.0 dBFS during it, 20.0 dB below the probe, 20.0 dB above the room; the room was -60.0 dBFS"
+            )
+        );
+        // Once only, until the microphone opens again.
+        assert_eq!(test.update(heard(1.0), at(3_000)), (None, false));
+        assert_eq!(Heard::default().level(), None);
+    }
+
+    #[test]
+    fn the_echo_test_waits_for_the_speaker_to_play_as_it_should() {
+        let (mut connection, mut conversation) = feedback_connection();
+        let (_audio, received) = std::sync::mpsc::sync_channel(1);
+        let (player, control) = Player::new(received, MixerOptions::default());
+        connection.speaker.player = Some((Arc::new(Mutex::new(player)), control));
+        connection.set_echo_test("test", true);
+        assert!(connection.speaker.probe);
+        // Live, but the speaker is not open yet: still waiting.
+        connection.voice.live = true;
+        connection.echo_test.as_mut().unwrap().armed = Some(Instant::now());
+        connection.listen_live(&mut conversation);
+        assert!(connection.echo_test.as_ref().unwrap().opened.is_none());
+        assert_eq!(connection.speaker.open(), None);
+        until(|| {
+            connection
+                .speaker
+                .output
+                .as_ref()
+                .is_some_and(Speaking::is_open)
+        });
+        // Open, but as media rather than in the microphone's session, which this test needs: it waits, and gives up after a while.
+        connection.listen_live(&mut conversation);
+        assert!(connection.echo_test.as_ref().unwrap().armed.is_some());
+        connection.echo_test.as_mut().unwrap().armed = Some(Instant::now() - ECHO_WAIT);
+        connection.listen_live(&mut conversation);
+        let test = connection.echo_test.as_ref().unwrap();
+        assert!(test.armed.is_none() && test.opened.is_none());
+        // A test that needs no session starts once the speaker is open, as media.
+        let test = connection.echo_test.as_mut().unwrap();
+        test.routed = false;
+        test.armed = Some(Instant::now());
+        connection.listen_live(&mut conversation);
+        let test = connection.echo_test.as_ref().unwrap();
+        assert!(test.armed.is_none() && test.opened.is_some());
+        assert_eq!(test.speaker, None);
+        // Live audio stopping ends the test.
+        connection.voice.live = false;
+        connection.listen_live(&mut conversation);
+        assert!(connection.echo_test.as_ref().unwrap().opened.is_none());
+    }
+
+    #[test]
+    fn rerouting_the_speaker_reopens_it_only_when_the_route_changes() {
+        let mut speaker = Speaker::new(Box::new(FakeSpeaker::default()));
+        let route = Route {
+            communication: Some(42),
+        };
+        // Nothing open: only remembered for the next open.
+        assert_eq!(speaker.reroute(route), None);
+        assert_eq!(speaker.route, route);
+        assert_eq!(speaker.reroute(route), None);
+        assert!(speaker.output.is_none());
+    }
+
+    #[test]
+    fn rerouting_an_open_speaker_reopens_it_once() {
+        let fake = FakeSpeaker::default();
+        let opened = fake.opened.clone();
+        let mut speaker = Speaker::new(Box::new(fake));
+        let (_audio, received) = std::sync::mpsc::sync_channel(1);
+        let (player, control) = Player::new(received, MixerOptions::default());
+        speaker.player = Some((Arc::new(Mutex::new(player)), control));
+        assert_eq!(speaker.open(), None);
+        until(|| opened.load(Ordering::Relaxed) == 1);
+        let route = Route {
+            communication: Some(42),
+        };
+        assert_eq!(speaker.reroute(route), None);
+        until(|| opened.load(Ordering::Relaxed) == 2);
+        until(|| speaker.output.as_ref().is_some_and(Speaking::is_open));
+        // The fake opens as media, as a speaker that fell back would.
+        assert_eq!(speaker.output.as_ref().unwrap().communication(), None);
+        assert_eq!(speaker.reroute(route), None);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(opened.load(Ordering::Relaxed), 2);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
 
 /// `feedback` shows the Feedback setting, and `feedback sounds LEVEL` or `feedback vibration LEVEL` changes one half of it, as the hand menu's Sound section does. See `design/feedback.md`.
 fn feedback(conversation: &mut Conversation, argument: &str) {
@@ -24,16 +24,19 @@ fn feedback(conversation: &mut Conversation, argument: &str) {
         ["vibration", word] if level(word).is_some() => {
             conversation.change_feedback(None, level(word))
         }
+        ["mono", "on"] => conversation.set_mono(true),
+        ["mono", "off"] => conversation.set_mono(false),
         _ => {
-            println!("(feedback sounds|vibration full|reduced|off)");
+            println!("(feedback sounds|vibration full|reduced|off, or feedback mono on|off)");
             return;
         }
     }
     let settings = conversation.menu_model().feedback;
     println!(
-        "  Sounds: {}; vibration: {}",
+        "  Sounds: {}; vibration: {}; mono audio: {}",
         settings.sounds.label(),
-        settings.vibration.label()
+        settings.vibration.label(),
+        if settings.mono { "on" } else { "off" }
     );
 }
 

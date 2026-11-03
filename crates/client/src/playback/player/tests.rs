@@ -40,7 +40,7 @@ fn frame(source: u32, sequence: u32, value: i16) -> AudioFrame {
 
 fn render(player: &mut Player, length: usize) -> Vec<i16> {
     let mut output = vec![1; length];
-    player.render(RATE, &mut output);
+    player.render(RATE, Layout::Mono, &mut output);
     output
 }
 
@@ -75,7 +75,7 @@ fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
     render(&mut player, FRAME);
     let mut output = vec![1; FRAME * 2];
     sender.send(frame(AGENT_SOURCE, 2, 20)).unwrap();
-    player.render(RATE * 2, &mut output);
+    player.render(RATE * 2, Layout::Mono, &mut output);
     assert!(output.iter().all(|&sample| sample == 0));
 }
 
@@ -99,7 +99,7 @@ fn never_plays_the_local_participant() {
         }
     }
     let mut output = [1; 2 * FRAME];
-    player.render(2 * RATE, &mut output);
+    player.render(2 * RATE, Layout::Mono, &mut output);
     assert_eq!(output, [7; 2 * FRAME]);
 }
 
@@ -166,7 +166,7 @@ fn an_unknown_device_rate_renders_silence() {
     let (sender, mut player, _control) = player();
     sender.send(frame(1, 0, 100)).unwrap();
     let mut output = [1; FRAME];
-    player.render(0, &mut output);
+    player.render(0, Layout::Mono, &mut output);
     assert_eq!(output, [0; FRAME]);
 }
 
@@ -174,10 +174,10 @@ fn an_unknown_device_rate_renders_silence() {
 fn plays_a_sound_cue_once_and_clearing_keeps_it() {
     let (_sender, mut player, control) = player();
     let cue = super::super::Bank::new(RATE).samples(Earcon::Choose).len();
-    control.play(Earcon::Choose);
+    control.play(Earcon::Choose, Direction::Centre);
     assert!(render(&mut player, cue).iter().any(|sample| *sample != 0));
     assert_eq!(render(&mut player, FRAME), [0; FRAME]);
-    control.play(Earcon::Choose);
+    control.play(Earcon::Choose, Direction::Centre);
     control.clear();
     assert!(render(&mut player, cue).iter().any(|sample| *sample != 0));
     // A mixer prepared while silenced starts silent.
@@ -186,6 +186,59 @@ fn plays_a_sound_cue_once_and_clearing_keeps_it() {
     player.prepare(RATE * 3);
     player.prepare(0);
     let mut output = vec![1; FRAME];
-    player.render(RATE * 3, &mut output);
+    player.render(RATE * 3, Layout::Mono, &mut output);
     assert_eq!(output, [0; FRAME]);
+}
+
+#[test]
+fn renders_stereo_from_the_latest_scene() {
+    let (sender, mut player, control) = player();
+    control.set_scene(|scene| {
+        scene.listener = Some(crate::playback::spatial::Listener {
+            position: [0.0, 1.6, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        });
+        scene.sources = vec![(1, [-2.0, 1.6, 0.0])];
+    });
+    // Replaced before the callback takes it: only the latest counts.
+    control.set_scene(|scene| scene.sources[0].1 = [2.0, 1.6, 0.0]);
+    for sequence in 0..4 {
+        sender.send(frame(1, sequence, 1_000)).unwrap();
+    }
+    let mut output = vec![0; FRAME * 2 * 3];
+    player.render(RATE, Layout::Stereo, &mut output);
+    let (left, right): (Vec<_>, Vec<_>) = output.chunks(2).map(|pair| (pair[0], pair[1])).unzip();
+    assert!(
+        right.iter().map(|s| i32::from(*s)).sum::<i32>()
+            > 2 * left.iter().map(|s| i32::from(*s)).sum::<i32>()
+    );
+}
+
+#[test]
+fn plays_the_echo_probe() {
+    let (_sender, mut player, control) = player();
+    control.play_probe();
+    assert!(render(&mut player, 200).iter().all(|sample| *sample == 0));
+    // Loaded into the mixer there is, and into those made later.
+    player.load_probe();
+    control.play_probe();
+    assert!(render(&mut player, 200).iter().any(|sample| *sample != 0));
+    control.play_probe();
+    let mut output = vec![0; 200];
+    player.render(RATE * 2, Layout::Mono, &mut output);
+    assert!(output.iter().any(|sample| *sample != 0));
+}
+
+#[test]
+fn a_scene_set_after_a_render_is_written_whole() {
+    let (_sender, mut player, control) = player();
+    control.set_scene(|scene| scene.sources = vec![(1, [1.0, 0.0, 0.0])]);
+    render(&mut player, FRAME);
+    // The slot now holds the callback's older scene, which the change replaces whole.
+    control.set_scene(|scene| {
+        assert!(scene.sources.is_empty());
+        scene.sources = vec![(2, [2.0, 0.0, 0.0])];
+    });
+    render(&mut player, FRAME);
+    control.set_scene(|scene| assert_eq!(scene.sources, [(1, [1.0, 0.0, 0.0])]));
 }

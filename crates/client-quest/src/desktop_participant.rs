@@ -827,6 +827,12 @@ impl State {
                 },
             );
         }
+        // Every source is heard from where it is, relative to this participant's head; see `design/spatial-audio.md`.
+        p.connection.listen(
+            controller::Pose::from_transform(head),
+            crate::spatial_audio::centre(&self.coordinator_samples),
+            conversation,
+        );
         // The others in a space see this participant's head; a desktop has no controllers or hands to report. Visitors send no presence; see `design/security.md`.
         if conversation.role().participates()
             && let Some(pose) = controller::Pose::from_transform(head)
