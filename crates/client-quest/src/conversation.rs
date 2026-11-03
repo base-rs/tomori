@@ -677,6 +677,10 @@ impl Conversation {
         }
         let entered = self.mode != Mode::Space
             || self.space.as_ref().is_none_or(|space| space.id != state.id);
+        // The server put this participant in a space they did not ask for, as their last space when they connect: join it
+        // as their own choice, which clears what it needed while nobody was there, now that they see it. A jump moves on
+        // from it instead.
+        let unasked = entered && self.joining.is_none() && !self.jumping;
         if entered {
             log::info!("Joined space {} ({})", state.title, state.id);
             self.close_space();
@@ -700,6 +704,9 @@ impl Conversation {
         }
         if let Some(approval) = &state.approval {
             self.option = self.option.min(approval.options.len());
+        }
+        if unasked {
+            self.join(state.id.clone());
         }
         let previous = self
             .space
@@ -725,21 +732,14 @@ impl Conversation {
         self.space = Some(state);
     }
 
-    /// Finish a jump with the first listing: join the space that most needs attention, unless already in it. If someone dealt with it meanwhile, stay in the lobby and say so.
+    /// Finish a jump with the first listing: join the space that most needs attention, even one the server already put this participant in, since joining is what says it has been seen. If someone dealt with it meanwhile, stay in the lobby and say so.
     fn land(&mut self) {
-        let current = self
-            .space
-            .as_ref()
-            .filter(|_| self.mode == Mode::Space)
-            .map(|space| space.id.clone());
         match arrival::most_urgent(&self.spaces) {
             Some(index) => {
                 let space = self.spaces[index].id.clone();
                 log::info!("Jumping to space {space}");
-                if current.as_ref() != Some(&space) {
-                    self.selected = index;
-                    self.join(space);
-                }
+                self.selected = index;
+                self.join(space);
             }
             None if self.mode == Mode::Lobby => {
                 let server = self
@@ -2695,19 +2695,56 @@ mod tests {
             Some(arrival::Key::Space("notes".into()))
         );
 
-        // Already in the space that needs attention: nothing more to do.
+        // Already put in the space that needs attention: joining it says it has been seen.
         let mut conversation = Conversation::new("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
         conversation.take_actions();
         conversation.apply(space(|_| {}));
+        assert!(sent(&mut conversation).is_empty());
         listed(
             &mut conversation,
             vec![needing(SPACE, "Tomori", protocol::Attention::Input, 5)],
         );
-        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: SPACE.into()
+            }]
+        );
+        conversation.apply(space(|_| {}));
         assert_eq!(conversation.mode(), Mode::Space);
+        assert!(conversation.arrival().is_none());
+    }
+
+    #[test]
+    fn a_space_the_server_puts_you_in_unasked_is_joined_as_your_choice() {
+        // A fresh launch connects, and the server puts the participant back in their last space.
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        conversation.take_actions();
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.mode(), Mode::Space);
+        // Joining it clears what it needed while nobody was there, now that the participant sees it.
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: SPACE.into()
+            }]
+        );
+        conversation.apply(space(|_| {}));
+        assert!(sent(&mut conversation).is_empty());
+        // A space joined on request is not joined again.
+        conversation.back();
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::Left));
+        listed(&mut conversation, vec![summary(SPACE, "Tomori")]);
+        conversation.accept();
+        conversation.take_actions();
+        conversation.apply(space(|_| {}));
+        assert!(sent(&mut conversation).is_empty());
     }
 
     #[test]

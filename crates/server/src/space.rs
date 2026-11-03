@@ -643,8 +643,7 @@ impl SpaceModel {
                 {
                     let mut restored = message_model(message);
                     let shown = &self.messages[index];
-                    // Its end, and so a reply, may only now be known, after a gap that lost its events.
-                    let replied = !is_reply(shown) && is_reply(&restored);
+                    let was_reply = is_reply(shown);
                     // Its text may be recorded before the message is marked completed, and a record does not say
                     // which tools failed: what the space already knows is kept.
                     restored.completed |= shown.completed;
@@ -657,6 +656,8 @@ impl SpaceModel {
                             tool.state = "failed";
                         }
                     }
+                    // Its end, and so a reply, may only now be known, after a gap that lost its events.
+                    let replied = !was_reply && is_reply(&restored);
                     self.messages[index] = restored;
                     if replied && self.participants.is_empty() {
                         self.unheard = true;
@@ -1169,6 +1170,25 @@ mod tests {
             Some(false),
             vec![assistant("n", "All done.", true)],
         ));
+        assert_eq!(space.attention(), Some(Attention::Reply));
+
+        // Completed live with no text, its text lost in the gap, then restored from a record not yet marked completed.
+        let mut space = model();
+        space.apply(Event::Busy);
+        space.apply(Event::MessageStarted {
+            message: "r".into(),
+            role: backend::Role::Assistant,
+        });
+        space.apply(reconnecting());
+        space.apply(resynchronized(Some(true), vec![assistant("r", "", false)]));
+        space.apply(Event::MessageCompleted {
+            message: "r".into(),
+        });
+        space.apply(Event::Idle);
+        assert_eq!(space.attention(), None);
+        space.apply(Event::MessageRestored {
+            message: assistant("r", "Here it is.", false),
+        });
         assert_eq!(space.attention(), Some(Attention::Reply));
 
         // Read again while still being written, and restored once the agent has recorded it, after the turn ended.

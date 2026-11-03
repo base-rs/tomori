@@ -187,7 +187,9 @@ pub fn fit_state(state: &mut SpaceState) {
 /// Longest directory shown in the lobby listing once the listing is over budget, in bytes.
 const LISTED_DIRECTORY_BYTES: usize = 120;
 
-/// Trim the lobby listing to [`SNAPSHOT_BUDGET`]: shorten directories to their final components, then leave out closed spaces, then the oldest spaces.
+/// Trim the lobby listing to [`SNAPSHOT_BUDGET`]: shorten directories to their final components, then leave out closed spaces, then the oldest spaces, keeping those that need attention longest, the most urgent last of all.
+///
+/// The spaces needing attention are left out least urgent first, so the space a client would jump to is kept while any is.
 pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
     let mut size = json_len(spaces);
     if size <= SNAPSHOT_BUDGET {
@@ -207,31 +209,40 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
             size -= before.saturating_sub(json_len(&space.directory));
         }
     }
-    // A closed space that needs attention, because it closed while nobody was in it, is left out after the others.
-    while size > SNAPSHOT_BUDGET
-        && let Some(index) = spaces
-            .iter()
-            .position(|space| {
-                space.activity == protocol::Activity::Closed && space.attention.is_none()
-            })
-            .or_else(|| {
-                spaces
-                    .iter()
-                    .position(|space| space.activity == protocol::Activity::Closed)
-            })
-    {
-        let space = spaces.remove(index);
-        size -= json_len(&space) + 1;
-    }
-    // Then the oldest, those that need attention last.
     while size > SNAPSHOT_BUDGET && !spaces.is_empty() {
-        let index = spaces
-            .iter()
-            .position(|space| space.attention.is_none())
-            .unwrap_or(0);
+        let quiet = |closed: bool| {
+            spaces.iter().position(|space| {
+                space.attention.is_none()
+                    && (!closed || space.activity == protocol::Activity::Closed)
+            })
+        };
+        let index = quiet(true)
+            .or_else(|| quiet(false))
+            .unwrap_or_else(|| least_urgent(spaces));
         let space = spaces.remove(index);
         size -= json_len(&space) + 1;
     }
+}
+
+/// The index of the space that least needs attention: the lowest level, then the one that has needed it for the least time.
+fn least_urgent(spaces: &[SpaceSummary]) -> usize {
+    let rank = |attention: Option<protocol::Attention>| match attention {
+        Some(protocol::Attention::Input) => 0,
+        Some(protocol::Attention::Problem) => 1,
+        Some(protocol::Attention::Reply) => 2,
+        Some(protocol::Attention::Unknown) | None => 3,
+    };
+    spaces
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, space)| {
+            (
+                rank(space.attention),
+                std::cmp::Reverse(space.attention_age.unwrap_or(0)),
+                std::cmp::Reverse(*index),
+            )
+        })
+        .map_or(0, |(index, _)| index)
 }
 
 #[cfg(test)]
@@ -351,6 +362,58 @@ mod tests {
         assert_eq!(spaces.last().unwrap().id, "space-1999");
         assert!(spaces.iter().any(|space| space.id == "space-1001"));
         assert!(!spaces.iter().any(|space| space.id == "space-1000"));
+    }
+
+    #[test]
+    fn a_trimmed_listing_keeps_the_spaces_needing_attention_longest() {
+        use protocol::Attention;
+        let mut spaces = listing(2000);
+        let mark = |space: &mut SpaceSummary, attention, age| {
+            space.attention = Some(attention);
+            space.attention_age = Some(age);
+        };
+        // The oldest spaces need attention, and some of the spaces that need none are closed.
+        mark(&mut spaces[0], Attention::Reply, 900);
+        mark(&mut spaces[1], Attention::Input, 30);
+        mark(&mut spaces[2], Attention::Problem, 10);
+        spaces[2].activity = protocol::Activity::Closed;
+        for space in spaces.iter_mut().skip(1000).step_by(2) {
+            space.activity = protocol::Activity::Closed;
+        }
+        fit_spaces(&mut spaces);
+        assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
+        let ids: Vec<&str> = spaces.iter().map(|space| space.id.as_str()).collect();
+        assert_eq!(ids[..3], ["space-0", "space-1", "space-2"]);
+
+        // Once only spaces needing attention are left, the least urgent go first.
+        let mut all = listing(1200);
+        for (index, space) in all.iter_mut().enumerate() {
+            let attention = match index % 3 {
+                0 => Attention::Reply,
+                1 => Attention::Problem,
+                _ => Attention::Input,
+            };
+            mark(space, attention, u32::try_from(index).unwrap());
+        }
+        let mut spaces = all.clone();
+        fit_spaces(&mut spaces);
+        assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
+        assert!(spaces.len() < all.len());
+        let urgency = |space: &SpaceSummary| {
+            let rank = match space.attention {
+                Some(Attention::Input) => 0,
+                Some(Attention::Problem) => 1,
+                _ => 2,
+            };
+            (rank, std::cmp::Reverse(space.attention_age))
+        };
+        let kept = |space: &SpaceSummary| spaces.iter().any(|listed| listed.id == space.id);
+        let least_kept = spaces.iter().map(urgency).max().unwrap();
+        for dropped in all.iter().filter(|space| !kept(space)) {
+            assert!(urgency(dropped) > least_kept, "{} was dropped", dropped.id);
+        }
+        // The longest waiting input is kept.
+        assert!(spaces.iter().any(|space| space.id == "space-1199"));
     }
 
     #[test]

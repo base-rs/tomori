@@ -369,7 +369,7 @@ struct SpaceRecord {
     /// Closed, but kept as open, and not forgotten, so that it is bound again when the server next starts: closed by shutdown, or not bound again after a restart for a reason that may pass. See `design/spaces.md`.
     kept_open: bool,
     /// The attention the space was last listed as needing, and since when, so the listing can say how long it has
-    /// waited. Stamped whenever participants are told the space changed.
+    /// waited. Stamped after each agent event and whenever participants are told the space changed.
     attention: Cell<Option<(Attention, Instant)>>,
 }
 

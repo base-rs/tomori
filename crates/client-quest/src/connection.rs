@@ -563,8 +563,12 @@ impl Connection {
         if let Some(error) = self.voice.failure() {
             conversation.microphone_failed(error);
         }
-        self.browse(focused && conversation.is_browsing(), conversation);
-        conversation.tick(Instant::now());
+        let browsing = focused && conversation.is_browsing();
+        self.browse(browsing, conversation);
+        // Only while the server list is seen and kept current, so nothing connects automatically behind the system menu.
+        if browsing {
+            conversation.tick(Instant::now());
+        }
         conversation.expire_pairing(Instant::now());
         let mut reopen = None;
         while let Some(event) = self.client.as_ref().and_then(Client::try_event) {
