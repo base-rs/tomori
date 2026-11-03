@@ -1,4 +1,4 @@
-# Speech
+# `tomori-speech`
 
 Speech recognition and synthesis for the Tomori server, run in the server process through [sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/). Each engine runs on threads owned by this crate. Engines start when the server starts, and a failure is reported to the utterance or sentence that saw it. Nothing is retried silently. See `design/speech.md`.
 
@@ -72,6 +72,8 @@ The `sherpa-onnx` crate links prebuilt sherpa-onnx and ONNX Runtime libraries fr
 - `.cargo/config.toml` sets `SHERPA_ONNX_ARCHIVE_DIR` to `.tools/sherpa-onnx`, so the build script copies the archive from there instead of downloading. If the archive is missing, the build fails with `SHERPA_ONNX_ARCHIVE_DIR does not contain expected archive: …`; run the script.
 - The build script unpacks the archive into `target/sherpa-onnx-prebuilt` (about 90 MB) and links whatever it finds there on later builds without checking it again. The script removes the copy in the workspace's target directory, as `cargo metadata` reports it, unless the verified archive is beside it. To be sure the libraries were built from the verified archive, delete `target/sherpa-onnx-prebuilt` and build again.
 - An environment variable overrides the setting in `.cargo/config.toml`: setting `SHERPA_ONNX_ARCHIVE_DIR` yourself uses another directory, and setting `SHERPA_ONNX_LIB_DIR` links the libraries in that directory instead, as for CUDA below. Neither is checked. Cargo reads `.cargo/config.toml` from the directory it runs in, so build from inside the repository: `cargo build --manifest-path` run from elsewhere ignores the setting and lets the build script download an unchecked archive.
+
+Outside this repository, such as when a project depends on `tomori-speech` or `tomori-server` from crates.io, or runs `cargo install tomori-server`, this repository's `.cargo/config.toml` does not apply. Set `SHERPA_ONNX_ARCHIVE_DIR` to a directory holding the archive that [`scripts/fetch-sherpa-onnx.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/fetch-sherpa-onnx.sh) has verified, or the `sherpa-onnx` build script downloads the archive from GitHub without checking it. On docs.rs, it downloads and links nothing.
 
 By default the libraries are linked statically and run on the CPU, so `tomori-server` needs no extra shared libraries at run time:
 

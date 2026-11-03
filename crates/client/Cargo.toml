@@ -1,22 +1,24 @@
 [package]
 name = "tomori-client"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "Connection, reconnection and playback for Tomori clients"
-repository = "https://github.com/ioquatix/tomori"
-license = "MIT"
-publish = false
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "client", "agents", "xr", "audio"]
+categories = ["network-programming", "multimedia::audio"]
 
 [dependencies]
 base-http = "0.2.0"
 base-http-client = { version = "0.2.0", features = ["rustls"] }
 base-scheduler = "0.3.0"
 base-scheduler-native = "0.3.1"
-tomori-discovery = { path = "../discovery" }
+tomori-discovery = { version = "0.1.0", path = "../discovery" }
 futures-lite = "2.6.1"
-tomori-protocol = { path = "../protocol" }
-tomori-security = { path = "../security" }
+tomori-protocol = { version = "0.1.0", path = "../protocol" }
+tomori-security = { version = "0.1.0", path = "../security" }
 
 [dev-dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }

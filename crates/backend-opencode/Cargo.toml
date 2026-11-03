@@ -1,16 +1,18 @@
 [package]
 name = "tomori-backend-opencode"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "The OpenCode backend for the Tomori server: sessions on a running `opencode serve` process, driven over its HTTP and SSE APIs"
-repository = "https://github.com/ioquatix/tomori"
-license = "MIT"
-publish = false
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "opencode", "agents", "backend"]
+categories = ["development-tools", "api-bindings"]
 
 [dependencies]
 async-channel = "2"
-tomori-backend = { path = "../backend" }
+tomori-backend = { version = "0.1.0", path = "../backend" }
 base-http = "0.2.0"
 base-http-client = "0.2.0"
 base-scheduler = "0.3.0"

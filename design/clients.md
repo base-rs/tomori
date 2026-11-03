@@ -4,9 +4,9 @@ This describes the layout of Tomori clients. The headset and desktop application
 
 ## Requirement
 
-Each kind of hardware or output has its own client implementation in a separate workspace crate named `client-<target>`, such as `client-quest` for Meta Quest headsets and `client-spectator` for the Linux spectator/OBS output. Clients share a platform-neutral core:
+Each kind of hardware or output has its own client implementation in a separate workspace crate in `crates/client-<target>`, named `tomori-<target>` as `crates.md` requires, such as `crates/client-quest` (`tomori-quest`) for Meta Quest headsets and `crates/client-spectator` (`tomori-spectator`) for the Linux spectator/OBS output. Clients share a platform-neutral core:
 
-- `crates/client`: the server connection, reconnection, outgoing audio, per-source jitter buffers, the playback mixer and the player that feeds it received audio for a device callback. It contains no rendering, windowing or device code, and builds for every client target.
+- `crates/client` (`tomori-client`): the server connection, reconnection, outgoing audio, per-source jitter buffers, the playback mixer and the player that feeds it received audio for a device callback. It contains no rendering, windowing or device code, and builds for every client target.
 - A shared scene model derived from space state and participant presence, also free of rendering code, so that clients with different renderers present the same scene.
 - Engagement, whether the participant is wearing the device and attending, is derived in the core from platform-neutral signals (whether the application has input, and whether a sensor reports the device worn) by one state machine free of rendering and platform code. Each client feeds it its platform's signals, such as the OpenXR session state and the user presence extension on Quest, and the protocol carries only the resulting device-neutral fact; see `spaces.md`.
 - Rendering code shared by clients that use the same engine lives in its own crate, not in one client that others depend on.
@@ -27,7 +27,7 @@ Workspace layout and dependencies of client crates, the client core, the shared 
 
 ## Validation
 
-- Inspect the workspace: each client is a separate `client-<target>` crate, and the core and scene crates depend on no rendering, windowing or platform audio crate.
+- Inspect the workspace: each client is a separate crate in `crates/client-<target>`, and the core and scene crates depend on no rendering, windowing or platform audio crate.
 - Check that the core builds for every client target, including `aarch64-linux-android`.
 - Inspect the server for logic that depends on a client's hardware rather than its reported capabilities.
 

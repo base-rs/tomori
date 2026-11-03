@@ -1,12 +1,14 @@
 [package]
 name = "tomori-server"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 description = "The Tomori server: spaces, agent sessions and live audio over one duplex connection per client"
-repository = "https://github.com/ioquatix/tomori"
-license = "MIT"
-publish = false
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "agents", "xr", "server", "speech"]
+categories = ["network-programming", "command-line-utilities"]
 
 [[bin]]
 name = "tomori-server"
@@ -69,31 +71,31 @@ speech-shared = ["speech", "tomori-speech/shared"]
 
 [dependencies]
 async-channel = "2"
-tomori-backend = { path = "../backend" }
-tomori-backend-opencode = { path = "../backend-opencode", optional = true }
+tomori-backend = { version = "0.1.0", path = "../backend" }
+tomori-backend-opencode = { version = "0.1.0", path = "../backend-opencode", optional = true }
 base-http = "0.2.0"
 base-endpoint = { version = "0.1.0", features = ["rustls"] }
 base-http-server = { version = "0.2.0", features = ["rustls"] }
 base-scheduler = "0.3.0"
 base-scheduler-native = "0.3.1"
-tomori-discovery = { path = "../discovery" }
+tomori-discovery = { version = "0.1.0", path = "../discovery" }
 env_logger = "0.11"
 event-listener = "5"
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
 gethostname = "1.1"
 log = "0.4"
-tomori-protocol = { path = "../protocol" }
+tomori-protocol = { version = "0.1.0", path = "../protocol" }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
-tomori-security = { path = "../security", features = ["issue"] }
+tomori-security = { version = "0.1.0", path = "../security", features = ["issue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tomori-speech = { path = "../speech", optional = true }
+tomori-speech = { version = "0.1.0", path = "../speech", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
-tomori-security = { path = "../security", features = ["issue"] }
-tomori-client = { path = "../client" }
+tomori-security = { version = "0.1.0", path = "../security", features = ["issue"] }
+tomori-client = { version = "0.1.0", path = "../client" }

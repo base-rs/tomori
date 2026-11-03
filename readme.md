@@ -2,7 +2,7 @@
 
 A conversational spatial workspace for people and agents, currently a native **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**. 128 agents inhabit a moonlit Sky environment or a minimal floor grid. Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest renders the interactive scene and joins conversations through a Tomori server on the PC, which runs the agent sessions.
 
-Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The Rust package and executable are named `tomori`. The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
+Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The headset and desktop application is the Rust package `tomori-quest`, whose library and executable are named `tomori`, and the server is `tomori-server`; the other crates are listed under [Crates](#crates). The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
 
 - **Right trigger:** outside a space, choose what the right controller's ray points at; a pull that starts away from every object, or any pull inside a space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
@@ -296,6 +296,20 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 
 The Vulkan device uses the runtime-selected physical GPU and enables the full extension/feature set required by wgpu. Swapchain images remain runtime-owned; wgpu has no permission to destroy them. Each frame waits for submitted GPU work before releasing the XR image, leaving it in `COLOR_ATTACHMENT_OPTIMAL`. This simple conservative synchronization favors correctness over maximum throughput. Tracking loss and non-rendering frames submit no layer; sessions handle ready/stopping/exit events. The scene initially faces the headset; the app uses `LOCAL_FLOOR` when available so the Quest's system Meta-button recenter moves the scene, falling back to `LOCAL` with an approximate 1.6 m floor offset. Reference space changes take effect at the runtime's specified frame time. Recentering doesn't reset the agents, conversation, or interaction state. This is opaque VR, not passthrough; optional tracked-hand skeletons are described above.
 
+## Crates
+
+The workspace's crates are named `tomori-` followed by their role, in folders under `crates/` without the prefix. They share one version and one [releases.md](releases.md), and are released together. These are published to crates.io, though none has been published yet:
+
+- [`tomori-protocol`](crates/protocol/readme.md): the wire protocol shared by clients and the server.
+- [`tomori-client`](crates/client/readme.md): a client's connection, reconnection, microphone audio and playback.
+- [`tomori-discovery`](crates/discovery/readme.md): Bonjour advertising and browsing of servers.
+- [`tomori-security`](crates/security/readme.md): tokens, pairing and certificate pinning.
+- [`tomori-backend`](crates/backend/readme.md) and [`tomori-backend-opencode`](crates/backend-opencode/readme.md): the agent backend interface, and its OpenCode implementation.
+- [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
+- [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`.
+
+`tomori-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
+
 ## Third-Party Components
 
 Original project code is released under the MIT License; see [license.md](license.md). Third-party components retain their own licenses:
@@ -309,7 +323,7 @@ Original project code is released under the MIT License; see [license.md](licens
 
 Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
 
-No Tomori crate is published yet: which crates are published, and their names, are planned in [#73](https://github.com/ioquatix/tomori/issues/73).
+No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build.
 
 ## Releases
 
@@ -326,3 +340,9 @@ See [releases.md](releases.md) for the full release history.
 ## Contributing
 
 Please open an issue or pull request on [GitHub](https://github.com/ioquatix/tomori).
+
+### Agent Context
+
+Run `cargo bake agent:context:install` to install shared context and skills. Use `cargo bake agent:context:list` and `cargo bake agent:context:show` to discover relevant guides, follow `agents.md` if present, and apply skills under `.agents/skills/`. The installer preserves repository-owned `agents.md`; it does not create or regenerate that file.
+
+Tomori's published crates provide context of their own for projects that depend on them, in [crates/protocol/context/](crates/protocol/context/) and [crates/client/context/](crates/client/context/).

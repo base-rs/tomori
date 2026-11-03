@@ -1,4 +1,4 @@
-# environment-sky
+# `tomori-environment-sky`
 
 Tomori's first concrete environment: a stationary moonlit sky, sparse stars,
 cloud banks, a platform, an open shrine blockout and warm emissive lanterns.
