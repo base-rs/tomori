@@ -879,6 +879,21 @@ pub enum Command {
         mode: String,
         reply: async_channel::Sender<backend::Result<()>>,
     },
+    /// Set `id`'s instruction entry `key` to `value`, or remove it when `value` is `None`.
+    Instruction {
+        id: String,
+        identity: Arc<AtomicU64>,
+        key: String,
+        value: Option<String>,
+        reply: async_channel::Sender<backend::Result<()>>,
+    },
+    /// Remove the instruction entries `keys` from the session `id`, unless it is attached when this is performed:
+    /// then a space was bound to it again, and the entries are that space's.
+    ForgetInstructions {
+        id: String,
+        keys: Vec<String>,
+        reply: async_channel::Sender<backend::Result<()>>,
+    },
     /// Close `id`'s registration without deleting its OpenCode session.
     Close {
         id: String,
@@ -1222,7 +1237,9 @@ fn refuse(command: Command, error: backend::Error) {
         | Command::Interrupt { reply, .. }
         | Command::Decide { reply, .. }
         | Command::Answer { reply, .. }
-        | Command::SetMode { reply, .. } => {
+        | Command::SetMode { reply, .. }
+        | Command::Instruction { reply, .. }
+        | Command::ForgetInstructions { reply, .. } => {
             let _ = reply.try_send(Err(error));
         }
         // Closing needs no connection; see `hold`.
@@ -1241,7 +1258,9 @@ fn abandoned(command: &Command) -> bool {
         | Command::Interrupt { reply, .. }
         | Command::Decide { reply, .. }
         | Command::Answer { reply, .. }
-        | Command::SetMode { reply, .. } => reply.is_closed(),
+        | Command::SetMode { reply, .. }
+        | Command::Instruction { reply, .. }
+        | Command::ForgetInstructions { reply, .. } => reply.is_closed(),
         Command::Close { .. } | Command::Shutdown => false,
     }
 }
@@ -2978,6 +2997,49 @@ fn prepare_command<'a, S: Timers>(
                 None
             })
         }
+        Command::Instruction {
+            id,
+            identity,
+            key,
+            value,
+            reply,
+        } => {
+            if !owns_registration(registrations, &id, &identity, &reply) {
+                return None;
+            }
+            Box::pin(async move {
+                let result = match value {
+                    Some(value) => {
+                        api::put_instruction(client, resolved, &id, &key, &value, cancellation)
+                            .await
+                    }
+                    None => removed(
+                        api::delete_instruction(client, resolved, &id, &key, cancellation).await,
+                    ),
+                };
+                let _ = reply.try_send(result.map_err(map_failure));
+                None
+            })
+        }
+        // Commands are performed in order, so an attachment that finished first is seen here, and one that follows
+        // sets its own entries afterwards.
+        Command::ForgetInstructions { id, reply, .. } if registrations.contains_key(&id) => {
+            let _ = reply.try_send(Ok(()));
+            return None;
+        }
+        Command::ForgetInstructions { id, keys, reply } => Box::pin(async move {
+            let mut result = Ok(());
+            for key in keys {
+                result = removed(
+                    api::delete_instruction(client, resolved, &id, &key, cancellation).await,
+                );
+                if result.is_err() {
+                    break;
+                }
+            }
+            let _ = reply.try_send(result.map_err(map_failure));
+            None
+        }),
         Command::SetMode {
             id,
             identity,
@@ -3030,6 +3092,17 @@ fn prepare_command<'a, S: Timers>(
         }
     };
     Some(request)
+}
+
+/// The outcome of removing an instruction entry: OpenCode answers not found when the session, and so the entry, no
+/// longer exists, which is what removing it asked for.
+fn removed(result: Result<(), Failure>) -> Result<(), Failure> {
+    match result {
+        Err(Failure {
+            status: Some(404), ..
+        }) => Ok(()),
+        result => result,
+    }
 }
 
 /// Apply a finished request to the registrations.
@@ -5193,6 +5266,10 @@ mod tests {
         record_requests: usize,
         /// Each session's message listing, if not empty.
         messages: HashMap<String, Value>,
+        /// Each session's instruction entries.
+        instructions: HashMap<String, BTreeMap<String, Value>>,
+        /// The instruction requests received, as method, session and key.
+        instruction_requests: Vec<(String, String, String)>,
         stopping: bool,
     }
 
@@ -5347,6 +5424,11 @@ mod tests {
         let _ = std::io::Read::read_exact(&mut reader, &mut body);
         authorizations.lock().unwrap().push(authorization.clone());
         let respond = |socket: &mut std::net::TcpStream, status: &str, body: &str| {
+            // A response without content has no framing fields.
+            if status.starts_with("204") {
+                let _ = write!(socket, "HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
+                return;
+            }
             let _ = write!(
                 socket,
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -5398,6 +5480,40 @@ mod tests {
             ("200 OK", r#"{"data":[],"cursor":{"next":null}}"#.to_owned())
         } else if path.starts_with("/api/session?directory=") {
             ("200 OK", r#"{"data":[]}"#.to_owned())
+        } else if let Some(rest) = path.strip_prefix("/api/experimental/session/") {
+            let mut state = shared.state.lock().unwrap();
+            let (id, key) = rest
+                .split_once("/instructions/entries")
+                .map(|(id, key)| (id.to_owned(), key.trim_start_matches('/').to_owned()))
+                .unwrap_or_default();
+            state
+                .instruction_requests
+                .push((method.clone(), id.clone(), key.clone()));
+            shared.changed.notify_all();
+            if !state.sessions.contains_key(&id) {
+                (
+                    "404 Not Found",
+                    r#"{"_tag":"SessionNotFoundError","message":"not found"}"#.to_owned(),
+                )
+            } else {
+                let entries = state.instructions.entry(id).or_default();
+                match method.as_str() {
+                    "PUT" => {
+                        let value: Value = serde_json::from_slice(&body).unwrap();
+                        entries.insert(key, value["value"].clone());
+                        ("204 No Content", String::new())
+                    }
+                    "DELETE" => {
+                        entries.remove(&key);
+                        ("204 No Content", String::new())
+                    }
+                    _ => (
+                        "200 OK",
+                        json!({ "data": entries.iter().map(|(key, value)| json!({"key": key, "value": value})).collect::<Vec<_>>() })
+                            .to_string(),
+                    ),
+                }
+            }
         } else if let Some(id) = session {
             let mut state = shared.state.lock().unwrap();
             while state.stalled_prompts.contains(&id)
@@ -5791,6 +5907,168 @@ mod tests {
             let _ = tx.send((result, std::time::Instant::now()));
         });
         rx
+    }
+
+    #[test]
+    fn instruction_entries_are_set_and_removed_across_a_reconnect() {
+        use backend::Session;
+
+        let shared = Arc::new(FakeShared::default());
+        let mut first = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(first.address));
+        let (commands, connection) = connect_to(&address);
+        let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Instructions".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        block_on(commands.reply_with(|reply| Command::Snapshot {
+            id: id.clone(),
+            identity: events.identity.clone(),
+            reply,
+        }))
+        .and_then(SnapshotReply::accept)
+        .unwrap();
+        let watched = watch(&events);
+        let session = crate::OpenCodeSession::new(id.clone(), events.clone(), commands.clone());
+        let entries = |shared: &FakeShared| {
+            shared
+                .state
+                .lock()
+                .unwrap()
+                .instructions
+                .get(&id)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Each entry is put with its text as the value, and replaced or removed by key.
+        block_on(session.set_instruction("tomori", Some("Reply briefly."))).unwrap();
+        block_on(session.set_instruction("tomori-space", Some("Mind the tests."))).unwrap();
+        block_on(session.set_instruction("tomori-space", Some("Mind the docs."))).unwrap();
+        assert_eq!(
+            entries(&shared),
+            BTreeMap::from([
+                ("tomori".to_owned(), json!("Reply briefly.")),
+                ("tomori-space".to_owned(), json!("Mind the docs.")),
+            ])
+        );
+        block_on(session.set_instruction("tomori-space", None)).unwrap();
+        assert_eq!(
+            entries(&shared),
+            BTreeMap::from([("tomori".to_owned(), json!("Reply briefly."))])
+        );
+        // A key OpenCode would refuse is refused without asking it.
+        let requests = shared.state.lock().unwrap().instruction_requests.len();
+        let refused = block_on(session.set_instruction("Tomori/space", Some("x"))).unwrap_err();
+        assert_eq!(refused.kind, backend::ErrorKind::Invalid);
+        assert_eq!(
+            shared.state.lock().unwrap().instruction_requests.len(),
+            requests
+        );
+
+        // The service restarts. An entry set while it is down waits for the connection, and is put once it returns,
+        // after which the session is read again and entries can be set as before.
+        let requests = shared.state.lock().unwrap().event_requests;
+        first.stop();
+        until(&watched, "the disconnection notice", |event| {
+            matches!(event, Event::Reconnecting { .. })
+        });
+        let held = {
+            let session = crate::OpenCodeSession::new(id.clone(), events.clone(), commands.clone());
+            in_thread(move || {
+                block_on(session.set_instruction("tomori-environment", Some("The sky.")))
+            })
+        };
+        let second = FakeService::start(shared.clone(), "secret");
+        *address.lock().unwrap() = second.address;
+        wait_for(
+            &shared,
+            "the event stream was never requested again",
+            |state| state.event_requests > requests,
+        );
+        let (result, _) = held
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the held entry was never put");
+        assert!(result.is_ok(), "{result:?}");
+        until(&watched, "the resynchronization", |event| {
+            matches!(event, Event::Resynchronized { .. })
+        });
+        block_on(session.set_instruction("tomori", Some("Reply very briefly."))).unwrap();
+        assert_eq!(
+            entries(&shared),
+            BTreeMap::from([
+                ("tomori".to_owned(), json!("Reply very briefly.")),
+                ("tomori-environment".to_owned(), json!("The sky.")),
+            ])
+        );
+
+        // Setting one on a session that no longer exists says so.
+        let (gone, gone_events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Gone".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        shared.update(|state| {
+            state.sessions.remove(&gone);
+        });
+        let gone_session = crate::OpenCodeSession::new(gone.clone(), gone_events, commands.clone());
+        let missing = block_on(gone_session.set_instruction("tomori", Some("x"))).unwrap_err();
+        assert_eq!(missing.kind, backend::ErrorKind::NotFound);
+        block_on(gone_session.close()).unwrap();
+
+        // A session attached when forgetting is performed keeps its entries: a space was bound to it again.
+        block_on(commands.reply_with(|reply| Command::ForgetInstructions {
+            id: id.clone(),
+            keys: vec!["tomori".into()],
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(entries(&shared).len(), 2);
+        // Once it is closed, forgetting removes them, and a session that no longer exists has none.
+        block_on(session.close()).unwrap();
+        block_on(commands.reply_with(|reply| Command::ForgetInstructions {
+            id: id.clone(),
+            keys: vec![
+                "tomori".into(),
+                "tomori-environment".into(),
+                "tomori-space".into(),
+            ],
+            reply,
+        }))
+        .unwrap();
+        assert!(entries(&shared).is_empty());
+        shared.update(|state| {
+            state.sessions.remove(&id);
+        });
+        block_on(commands.reply_with(|reply| Command::ForgetInstructions {
+            id: id.clone(),
+            keys: vec!["tomori".into()],
+            reply,
+        }))
+        .unwrap();
+        assert!(
+            shared
+                .state
+                .lock()
+                .unwrap()
+                .instruction_requests
+                .iter()
+                .all(|(_, _, key)| backend::valid_instruction_key(key))
+        );
+
+        drop(session);
+        drop(gone_session);
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(second);
     }
 
     #[test]

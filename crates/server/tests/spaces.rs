@@ -149,6 +149,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         directory: "/tmp".into(),
         session: None,
         environment: Some("observe".into()),
+        instructions: None,
     });
     assert_eq!(ada.error(), "Unknown environment; available: sky.");
     ada.send(&ClientMessage::ListSpaces);
@@ -176,6 +177,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     assert_eq!(bob.space(|state| state.title == "Older").environment, "sky");
 }
@@ -297,6 +299,7 @@ fn a_failed_initial_snapshot_opens_no_space_and_a_retry_succeeds() {
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     let error = bob.error();
     assert!(error.contains("initial session state"), "{error}");
@@ -344,6 +347,7 @@ fn a_snapshot_failure_releases_the_only_space_slot_before_retry() {
         directory: "/tmp".into(),
         session: None,
         environment: None,
+        instructions: None,
     });
     let error = ada.error();
     assert!(error.contains("initial session state"), "{error}");
@@ -367,6 +371,7 @@ fn duplicate_attachment_does_not_close_the_existing_space() {
         directory: "/tmp".into(),
         session: Some(existing.id()),
         environment: None,
+        instructions: None,
     });
     assert!(bob.error().contains("already attached"));
     assert!(!existing.log().closed);
@@ -396,6 +401,7 @@ fn a_failed_snapshot_of_an_attached_session_can_be_retried() {
         directory: "/tmp".into(),
         session: Some(id.clone()),
         environment: None,
+        instructions: None,
     };
     ada.send(&request("Failed"));
     assert!(ada.error().contains("initial session state"));
@@ -797,6 +803,7 @@ fn shutdown_completes_while_a_space_is_being_created() {
         directory: "/tmp".to_owned(),
         session: None,
         environment: None,
+        instructions: None,
     });
     wait_creating(&backend, 1);
 
@@ -973,6 +980,7 @@ fn a_creator_who_moved_on_is_not_moved_into_the_new_space() {
         directory: "/tmp".to_owned(),
         session: None,
         environment: None,
+        instructions: None,
     });
     wait_creating(&backend, 1);
     join(&mut ada, &other, 2);

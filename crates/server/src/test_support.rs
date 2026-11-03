@@ -464,6 +464,7 @@ impl TestClient {
             directory: "/tmp".to_owned(),
             session: None,
             environment: Some(crate::environments::SKY.to_owned()),
+            instructions: None,
         });
         let title = title.to_owned();
         self.space(|state| state.title == title)

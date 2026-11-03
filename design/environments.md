@@ -8,6 +8,8 @@ Each space is bound to exactly one environment. The environment is chosen when t
 
 Arrival, outside any space, uses the Minimal grid as its waiting area (see `arrival.md`).
 
+An environment may contribute a layer of the instructions Tomori gives a space's agent, about what it presents and which tools and data sources to use (see `spaces.md`). Sky contributes none yet.
+
 Long-term direction, not yet requirements:
 
 - An environment is much more than scenery. It can be dynamic and data-backed, with its own interaction, such as Fantail Observe, a separate project that shows a running system's topology and telemetry spatially. Environments are expected to be built on the server-owned scene graph and modules in `scene-modules.md`.
