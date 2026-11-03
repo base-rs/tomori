@@ -77,11 +77,11 @@ pub fn resolve_url(url: &str) -> Option<Resolved> {
     })
 }
 
-/// Read the `opencode serve --service` registration file, returning the
-/// recorded URL and credentials. The file is a JSON object with fields
-/// `id`, `version`, `url`, `pid`, `password`.
-pub fn read_service_file() -> Option<Resolved> {
-    let path = xdg_state_dir()?.join("service.json");
+/// Read the `opencode serve --service` registration file at `path` (normally
+/// `service.json` in [`xdg_state_dir`]), returning the recorded URL and
+/// credentials. The file is a JSON object with fields `id`, `version`, `url`,
+/// `pid`, `password`.
+pub fn read_service_file_at(path: &std::path::Path) -> Option<Resolved> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let url = value.get("url")?.as_str()?;
@@ -101,20 +101,30 @@ pub fn read_service_file() -> Option<Resolved> {
 
 /// Resolve the OpenCode service in the canonical order: `explicit`, the
 /// `OPENCODE_URL` environment variable, the XDG state file, then the default
-/// URL.
+/// URL. The backend calls this before every connection attempt, because a
+/// restarted service may record another port and password.
 pub fn resolve(explicit: Option<&str>) -> Resolved {
-    if let Some(url) = explicit.map(str::trim).filter(|url| !url.is_empty())
-        && let Some(resolved) = resolve_url(url)
-    {
-        return resolved;
+    let environment = std::env::var("OPENCODE_URL").ok();
+    let service_file = xdg_state_dir().map(|directory| directory.join("service.json"));
+    resolve_from(explicit, environment.as_deref(), service_file.as_deref())
+}
+
+/// [`resolve`] with its sources given: the explicit URL, the value of
+/// `OPENCODE_URL`, and the path of the registration file.
+pub fn resolve_from(
+    explicit: Option<&str>,
+    environment: Option<&str>,
+    service_file: Option<&std::path::Path>,
+) -> Resolved {
+    for url in [explicit, environment].into_iter().flatten() {
+        let url = url.trim();
+        if !url.is_empty()
+            && let Some(resolved) = resolve_url(url)
+        {
+            return resolved;
+        }
     }
-    if let Ok(url) = std::env::var("OPENCODE_URL")
-        && !url.trim().is_empty()
-        && let Some(resolved) = resolve_url(url.trim())
-    {
-        return resolved;
-    }
-    if let Some(resolved) = read_service_file() {
+    if let Some(resolved) = service_file.and_then(read_service_file_at) {
         return resolved;
     }
     resolve_url(DEFAULT_URL).expect("the default URL is well-formed")
@@ -174,6 +184,46 @@ mod tests {
         let resolved = resolve_url("http://example.com:8080/path").unwrap();
         assert_eq!(resolved.host, "example.com");
         assert_eq!(resolved.port, 8080);
+    }
+
+    #[test]
+    fn a_changed_service_file_is_read_again_and_the_environment_overrides_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "tomori-opencode-endpoint-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("service.json");
+        std::fs::write(
+            &path,
+            r#"{"url":"http://127.0.0.1:4100","password":"first"}"#,
+        )
+        .unwrap();
+        let first = resolve_from(None, None, Some(&path));
+        assert_eq!(first.port, 4100);
+        assert_eq!(first.auth, Some(("opencode".into(), "first".into())));
+        // A restarted service records another port and password.
+        std::fs::write(
+            &path,
+            r#"{"url":"http://127.0.0.1:4200","password":"second"}"#,
+        )
+        .unwrap();
+        let second = resolve_from(None, None, Some(&path));
+        assert_eq!(second.port, 4200);
+        assert_eq!(second.auth, Some(("opencode".into(), "second".into())));
+        let overridden = resolve_from(None, Some(" http://127.0.0.1:4300 "), Some(&path));
+        assert_eq!(overridden.port, 4300);
+        assert!(overridden.auth.is_none());
+        let explicit = resolve_from(
+            Some("http://127.0.0.1:4400"),
+            Some("http://127.0.0.1:4300"),
+            Some(&path),
+        );
+        assert_eq!(explicit.port, 4400);
+        std::fs::remove_dir_all(&directory).unwrap();
+        // Without the file, the well-known default applies.
+        assert_eq!(resolve_from(None, Some(""), Some(&path)).port, 4096);
     }
 
     #[test]

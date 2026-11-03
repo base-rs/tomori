@@ -187,7 +187,15 @@ impl SpaceModel {
             error: None,
             worker_error: None,
         };
-        for message in snapshot.messages {
+        model.load_messages(snapshot.messages);
+        model
+    }
+
+    /// Replace the conversation with a snapshot's messages.
+    fn load_messages(&mut self, messages: Vec<backend::SnapshotMessage>) {
+        self.messages.clear();
+        self.user_messages.clear();
+        for message in messages {
             let mut text = Vec::new();
             let mut tools = Vec::new();
             for part in message.parts {
@@ -203,7 +211,7 @@ impl SpaceModel {
                     }),
                 }
             }
-            model.push_message(MessageModel {
+            self.push_message(MessageModel {
                 id: message.id,
                 role: role(message.role),
                 text: text.join("\n\n"),
@@ -211,7 +219,50 @@ impl SpaceModel {
                 completed: message.completed,
             });
         }
-        model
+    }
+
+    /// Take the session as the backend read it again after losing events. The conversation, running state and modes
+    /// are replaced. Pending requests the snapshot no longer lists are withdrawn, including any whose decision or
+    /// answers are being delivered, since the agent no longer waits for them; those it lists and the space already
+    /// holds keep their place and any partial answers, and new ones are queued after them. Workers are left to their
+    /// own events. The error the backend reported for the gap no longer applies, so it is cleared.
+    fn resynchronize(&mut self, snapshot: Snapshot) {
+        let Snapshot {
+            busy,
+            messages,
+            permissions,
+            questions,
+            workers: _,
+            modes,
+        } = snapshot;
+        self.load_messages(messages);
+        if busy.is_some() {
+            self.busy = busy;
+        }
+        self.modes = modes;
+        let listed: HashSet<&str> = permissions
+            .iter()
+            .map(|permission| permission.id.as_str())
+            .collect();
+        self.approvals
+            .retain(|pending| listed.contains(pending.id.as_str()));
+        self.deciding
+            .retain(|pending| listed.contains(pending.id.as_str()));
+        for permission in permissions {
+            self.apply(Event::PermissionRequested(permission));
+        }
+        let listed: HashSet<&str> = questions
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect();
+        self.questions
+            .retain(|pending| listed.contains(pending.question.id.as_str()));
+        self.submitting
+            .retain(|pending| listed.contains(pending.question.id.as_str()));
+        for question in questions {
+            self.apply(Event::QuestionAsked(question));
+        }
+        self.error = None;
     }
 
     pub fn activity(&self) -> Activity {
@@ -330,11 +381,17 @@ impl SpaceModel {
             }
             Event::ToolStarted {
                 message, tool, id, ..
-            } => self.message(&message).tools.push(ToolModel {
-                id,
-                name: tool,
-                state: "working",
-            }),
+            } => {
+                // A start the session was re-read with is not added again.
+                let tools = &mut self.message(&message).tools;
+                if !tools.iter().any(|known| known.id == id) {
+                    tools.push(ToolModel {
+                        id,
+                        name: tool,
+                        state: "working",
+                    });
+                }
+            }
             Event::ToolFinished { id, error } => {
                 if let Some(tool) = self
                     .messages
@@ -400,6 +457,11 @@ impl SpaceModel {
             }
             Event::Error { message } => {
                 self.error = Some(message);
+            }
+            Event::Resynchronized { snapshot } => {
+                if !self.closed {
+                    self.resynchronize(snapshot);
+                }
             }
             Event::Closed { reason } => {
                 self.closed = true;
@@ -804,6 +866,134 @@ mod tests {
         space.apply(Event::PermissionResolved { id: "p2".into() });
         space.apply(Event::QuestionResolved { id: "q2".into() });
         assert_eq!(space.activity(), Activity::Idle);
+    }
+
+    #[test]
+    fn a_resynchronization_replaces_the_conversation_and_reconciles_requests() {
+        let question = |id: &str| backend::Question {
+            id: id.into(),
+            title: id.into(),
+            fields: Vec::new(),
+        };
+        let mut space = model();
+        space.apply(Event::MessageStarted {
+            message: "partial".into(),
+            role: backend::Role::Assistant,
+        });
+        space.apply(Event::TextDelta {
+            message: "partial".into(),
+            text: "Half a".into(),
+        });
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend::Worker {
+                id: "worker".into(),
+                parent: None,
+                title: "Worker".into(),
+                state: backend::WorkerState::Running,
+            }],
+        });
+        // "kept" waits with a partial answer; "resolved" was answered during
+        // the gap; "deciding" was claimed and its decision is being delivered.
+        space.apply(Event::PermissionRequested(permission("deciding")));
+        space.apply(Event::PermissionRequested(permission("resolved")));
+        space.apply(Event::PermissionRequested(permission("kept")));
+        assert!(space.claim_approval("deciding", None).is_ok());
+        space.apply(Event::QuestionAsked(question("kept")));
+        space.apply(Event::QuestionAsked(question("gone")));
+        space.questions[0]
+            .answers
+            .push(("field".into(), AnswerValue::Text("partly".into())));
+        space.apply(Event::Error {
+            message: "Lost the connection to OpenCode; reconnecting.".into(),
+        });
+
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                busy: Some(true),
+                messages: vec![backend::SnapshotMessage {
+                    id: "partial".into(),
+                    role: backend::Role::Assistant,
+                    parts: vec![Part::Text {
+                        text: "Half a reply, finished during the gap.".into(),
+                    }],
+                    completed: true,
+                }],
+                permissions: vec![
+                    permission("kept"),
+                    permission("raised"),
+                    permission("deciding"),
+                ],
+                questions: vec![question("kept"), question("asked")],
+                // Workers are left to their own events.
+                workers: Vec::new(),
+                modes: Modes::default(),
+            },
+        });
+        let state = space.state(Vec::new());
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(
+            state.messages[0].text,
+            "Half a reply, finished during the gap."
+        );
+        assert!(state.messages[0].completed);
+        assert_eq!(state.error, None);
+        assert_eq!(state.workers.len(), 1);
+        assert_eq!(state.workers_authoritative, Some(true));
+        assert_eq!(space.activity(), Activity::Waiting);
+        let approvals: Vec<_> = space.approvals.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(approvals, ["kept", "raised"]);
+        let deciding: Vec<_> = space.deciding.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(deciding, ["deciding"]);
+        let questions: Vec<_> = space
+            .questions
+            .iter()
+            .map(|pending| (pending.question.id.as_str(), pending.answers.len()))
+            .collect();
+        assert_eq!(questions, [("kept", 1), ("asked", 0)]);
+
+        // A request resolved during the gap is withdrawn even while its
+        // decision is being delivered.
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                busy: Some(false),
+                ..Snapshot::default()
+            },
+        });
+        assert!(space.approvals.is_empty() && space.deciding.is_empty());
+        assert!(space.questions.is_empty());
+        assert_eq!(space.activity(), Activity::Idle);
+        assert!(space.state(Vec::new()).messages.is_empty());
+
+        // A tool start repeated after the state it was read with is not added twice.
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                messages: vec![backend::SnapshotMessage {
+                    id: "m".into(),
+                    role: backend::Role::Assistant,
+                    parts: vec![Part::Tool {
+                        id: "t".into(),
+                        tool: "bash".into(),
+                        input: serde_json::Value::Null,
+                        finished: false,
+                    }],
+                    completed: false,
+                }],
+                ..Snapshot::default()
+            },
+        });
+        space.apply(Event::ToolStarted {
+            message: "m".into(),
+            tool: "bash".into(),
+            id: "t".into(),
+            input: serde_json::Value::Null,
+        });
+        assert_eq!(space.messages[0].tools.len(), 1);
+        // A space already closed keeps its closing state.
+        space.apply(Event::Closed { reason: None });
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot::default(),
+        });
+        assert_eq!(space.activity(), Activity::Closed);
     }
 
     #[test]

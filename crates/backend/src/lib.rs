@@ -321,6 +321,14 @@ pub enum Event {
     Error {
         message: String,
     },
+    /// The backend lost events, such as when its connection to the agent dropped, and has read the session again.
+    /// The snapshot replaces the conversation, running state, modes and pending requests, as when the session was
+    /// first opened; requests the snapshot does not list are no longer pending. Events reported after this one follow
+    /// it. Its `workers` are not used: workers keep travelling as [`Event::WorkersChanged`] and
+    /// [`Event::WorkersUnavailable`], so a resynchronization never retires one.
+    Resynchronized {
+        snapshot: Snapshot,
+    },
     /// The session ended and produces no more events.
     Closed {
         reason: Option<String>,

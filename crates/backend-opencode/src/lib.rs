@@ -6,7 +6,9 @@
 //! One backend binds to one running `opencode serve` process. It owns a
 //! dedicated thread that holds the scheduler, HTTP client, driver, and the
 //! server's one global event stream; sessions are `'static` handles that talk
-//! to that thread over channels. Permissions and questions are answered only
+//! to that thread over channels. When the service restarts or its event
+//! stream ends, the thread finds the service again and reconnects, and re-reads
+//! each attached session. Permissions and questions are answered only
 //! when a participant acts. See `design/agent-backends.md`.
 
 use std::sync::Mutex;
@@ -69,12 +71,16 @@ impl OpenCode {
             Some(Ok(connection)) => Ok(connection.commands.clone()),
             Some(Err(error)) => Err(error.clone()),
             None => {
-                let resolved = endpoint::resolve(self.config.url.as_deref());
+                // Resolved again before every connection attempt: a restarted
+                // service may record another port and password.
+                let url = self.config.url.clone();
+                let resolve: connection::Resolve =
+                    Box::new(move || endpoint::resolve(url.as_deref()));
                 let (commands, receiver) = connection::Commands::new();
                 let thread = std::thread::Builder::new()
                     .name("opencode-connection".to_owned())
                     .spawn(move || {
-                        connection::run_thread(resolved, receiver);
+                        connection::run_thread(resolve, receiver);
                     })
                     .map_err(|error| {
                         Error::new(
