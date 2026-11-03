@@ -773,6 +773,21 @@ impl Server {
                         cancellation,
                     )) as Pin<Box<dyn Future<Output = ()>>>);
                 }
+                Ok(Job::ForgetInstructions { backend, session }) => {
+                    let hub = self.hub.clone();
+                    spaces.push(Box::pin(async move {
+                        let Some(found) = hub.backends.get(&backend) else {
+                            return;
+                        };
+                        let keys = crate::instructions::KEYS.map(str::to_owned).to_vec();
+                        if let Err(error) = found.forget_instructions(&session, keys).await {
+                            log::warn!(
+                                "Could not remove Tomori's instructions from {backend} session {session}: {}",
+                                error.message
+                            );
+                        }
+                    }) as Pin<Box<dyn Future<Output = ()>>>);
+                }
                 Err(_) => break,
             }
         }
@@ -1247,6 +1262,21 @@ async fn drive(
                 SpaceCommand::SetMode { mode, participant } => {
                     let result = session.set_mode(&mode).await;
                     hub.space_mode_set(space, &participant, result);
+                }
+                SpaceCommand::Instructions => {
+                    let (entries, all) = hub.instructions_due(space);
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    let mut result = Ok(());
+                    for (key, value) in entries {
+                        result = session.set_instruction(&key, value.as_deref()).await;
+                        // The rest would most likely fail alike; they are all given again after the next reconnection.
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    hub.space_instructed(space, result, all);
                 }
                 SpaceCommand::Close => break,
             }

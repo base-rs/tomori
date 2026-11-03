@@ -87,7 +87,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::Join { .. }
         | ClientMessage::Leave
         | ClientMessage::Knock => watcher,
-        ClientMessage::CreateSpace { .. } | ClientMessage::ListSessions { .. } => owner,
+        ClientMessage::CreateSpace { .. }
+        | ClientMessage::ListSessions { .. }
+        | ClientMessage::SetInstructions { .. } => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
         | ClientMessage::UtteranceEnd { .. }
@@ -137,6 +139,7 @@ mod tests {
                 directory: "/tmp".into(),
                 session: None,
                 environment: None,
+                instructions: None,
             },
             ClientMessage::ListSessions {
                 backend: "fake".into(),
@@ -182,6 +185,7 @@ mod tests {
             ClientMessage::SetSpeech {
                 speech: protocol::SpeechSetting::Full,
             },
+            ClientMessage::SetInstructions { text: "t".into() },
             ClientMessage::PairBegin {
                 commitment: "c".into(),
             },
@@ -246,7 +250,9 @@ mod tests {
                     .unwrap()
                     .to_owned()
             })
-            .filter(|kind| kind != "create_space" && kind != "list_sessions")
+            .filter(|kind| {
+                kind != "create_space" && kind != "list_sessions" && kind != "set_instructions"
+            })
             .collect();
         assert_eq!(permitted(ConnectionRole::Collaborator), collaborating);
         assert_eq!(

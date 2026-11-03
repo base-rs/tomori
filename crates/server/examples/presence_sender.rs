@@ -208,6 +208,7 @@ fn main() {
                 directory,
                 session: None,
                 environment: None,
+                instructions: None,
             });
             client.wait_for(|message| match message {
                 ServerMessage::Space { state } => Some(state.id.clone()),

@@ -62,6 +62,10 @@ pub enum ClientMessage {
         /// The identifier of one of the environments the server offers in `Welcome`, which the space is bound to for its lifetime. Absent from older clients, which did not choose one: the server then binds the first environment it offers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<String>,
+        /// The space's own instructions to the agent, its [`crate::AgentInstructions::space`] layer, if the owner gave
+        /// any. Ignored by older servers, and by a server whose backend takes no instructions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
     },
     /// Join a space, leaving any other space.
     Join {
@@ -120,6 +124,12 @@ pub enum ClientMessage {
     /// Switch the current space's session to one of the modes it offers. Any participant may switch it.
     SetMode {
         mode: String,
+    },
+    /// Replace the current space's own instructions to the agent, its [`crate::AgentInstructions::space`] layer; empty
+    /// text removes them. Owners only. Sent only to a server whose [`crate::SpaceState::instructions`] is present. See
+    /// `design/spaces.md`.
+    SetInstructions {
+        text: String,
     },
     /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
     PairBegin {
@@ -317,6 +327,49 @@ mod tests {
     }
 
     #[test]
+    fn instructions_have_a_stable_wire_format() {
+        assert_eq!(
+            serde_json::to_value(ClientMessage::SetInstructions {
+                text: "Mind the docs.".into()
+            })
+            .unwrap(),
+            serde_json::json!({"type": "set_instructions", "text": "Mind the docs."})
+        );
+        let create: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "create_space", "title": "t", "backend": "opencode", "directory": "/tmp",
+            "instructions": "Mind the docs."
+        }))
+        .unwrap();
+        assert!(matches!(
+            create,
+            ClientMessage::CreateSpace { instructions: Some(text), .. } if text == "Mind the docs."
+        ));
+        // A space state from an older server has none, and one whose layers are all known round-trips.
+        let state: crate::SpaceState = serde_json::from_value(serde_json::json!({
+            "id": "s", "title": "t", "backend": "b", "directory": "/", "activity": "idle", "messages": [],
+            "queue": [], "approval": null, "question": null, "workers": [], "presentations": [],
+            "participants": [], "attribution": true, "error": null
+        }))
+        .unwrap();
+        assert_eq!(state.instructions, None);
+        let layers = crate::AgentInstructions {
+            tomori: "Be brief.".into(),
+            environment: String::new(),
+            space: "Mind the docs.".into(),
+            error: None,
+        };
+        let json = serde_json::to_value(&layers).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"tomori": "Be brief.", "environment": "", "space": "Mind the docs."})
+        );
+        assert_eq!(
+            serde_json::from_value::<crate::AgentInstructions>(json).unwrap(),
+            layers
+        );
+    }
+
+    #[test]
     fn replay_engagement_and_speech_settings_have_a_stable_wire_format() {
         assert_eq!(
             serde_json::to_value(ClientMessage::Replay { message: None }).unwrap(),
@@ -431,9 +484,11 @@ mod tests {
             directory: "/tmp".into(),
             session: None,
             environment: Some("sky".into()),
+            instructions: None,
         })
         .unwrap();
         assert_eq!(json["environment"], "sky");
+        assert!(json.get("instructions").is_none());
 
         // An older server offers none.
         let welcome: ServerMessage = serde_json::from_value(serde_json::json!({

@@ -14,6 +14,7 @@ mod connection;
 mod door;
 mod environments;
 mod hub;
+mod instructions;
 pub mod kept;
 
 mod limits;

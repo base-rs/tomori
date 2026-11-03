@@ -3,9 +3,9 @@
 
 //! A scripted in-memory backend for tests and for running the server without an agent.
 //!
-//! Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
+//! Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. They take instruction entries, which tests can read with [`FakeSession::instructions`], unless the backend was told to take none with [`FakeBackend::take_no_instructions`]. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -27,6 +27,10 @@ pub struct FakeLog {
     pub interrupts: usize,
     /// The modes the server asked for, in order.
     pub modes: Vec<String>,
+    /// The instruction entries the server set, or removed with `None`, in order, including those refused.
+    pub instructions: Vec<(String, Option<String>)>,
+    /// How many of [`Self::instructions`] the server had given when each prompt was delivered.
+    pub instructed_at_prompts: Vec<usize>,
     /// Whether the server closed the session.
     pub closed: bool,
 }
@@ -49,6 +53,12 @@ struct FakeShared {
     commands_released: Arc<event_listener::Event>,
     next: AtomicU64,
     sessions: Mutex<Vec<FakeSession>>,
+    /// The backend takes no instructions; see [`FakeBackend::take_no_instructions`].
+    no_instructions: AtomicBool,
+    /// Setting instructions fails as unavailable; see [`FakeBackend::fail_instructions`].
+    instruction_failure: Arc<AtomicBool>,
+    /// The sessions whose instruction entries were forgotten, with the keys, in order.
+    forgotten: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 impl FakeBackend {
@@ -67,6 +77,23 @@ impl FakeBackend {
     /// Simulate an unavailable initial session snapshot.
     pub fn fail_snapshots(&self, fail: bool) {
         self.shared.snapshot_failure.store(fail, Ordering::SeqCst);
+    }
+
+    /// Take no instructions, as a backend without [`Capabilities::instructions`].
+    pub fn take_no_instructions(&self) {
+        self.shared.no_instructions.store(true, Ordering::SeqCst);
+    }
+
+    /// Make setting instructions fail, as an agent whose endpoint for them changed would.
+    pub fn fail_instructions(&self, fail: bool) {
+        self.shared
+            .instruction_failure
+            .store(fail, Ordering::SeqCst);
+    }
+
+    /// The sessions whose instruction entries the server forgot, with the keys, in order.
+    pub fn forgotten(&self) -> Vec<(String, Vec<String>)> {
+        self.shared.forgotten.lock().unwrap().clone()
     }
 
     /// Make creating and attaching sessions wait until [`release_creation`](Self::release_creation), as a slow agent start would.
@@ -124,6 +151,8 @@ impl FakeBackend {
                 snapshot_failure: self.shared.snapshot_failure.clone(),
                 commands_held: self.shared.commands_held.clone(),
                 commands_released: self.shared.commands_released.clone(),
+                instruction_failure: self.shared.instruction_failure.clone(),
+                instructions: Mutex::new(BTreeMap::new()),
                 outbound: Mutex::new(FakeOutbound {
                     current: Some(handle),
                     backlog: VecDeque::new(),
@@ -166,7 +195,34 @@ impl Backend for FakeBackend {
             interrupt: true,
             questions: true,
             workers: true,
+            instructions: !self.shared.no_instructions.load(Ordering::SeqCst),
         }
+    }
+
+    async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {
+        if self.shared.no_instructions.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Unsupported, "no instructions"));
+        }
+        if let Some(session) = self
+            .started()
+            .into_iter()
+            .find(|session| session.inner.id == id)
+        {
+            // Bound again: its entries are the new binding's.
+            if session.inner.bound.lock().unwrap().is_some() {
+                return Ok(());
+            }
+            let mut entries = session.inner.instructions.lock().unwrap();
+            for key in &keys {
+                entries.remove(key);
+            }
+        }
+        self.shared
+            .forgotten
+            .lock()
+            .unwrap()
+            .push((id.to_owned(), keys));
+        Ok(())
     }
 
     async fn sessions(&self, directory: &str) -> Result<Vec<SessionSummary>> {
@@ -259,6 +315,9 @@ struct FakeSessionInner {
     snapshot_failure: Arc<AtomicBool>,
     commands_held: Arc<AtomicBool>,
     commands_released: Arc<event_listener::Event>,
+    instruction_failure: Arc<AtomicBool>,
+    /// The session's instruction entries, as the agent would keep them.
+    instructions: Mutex<BTreeMap<String, String>>,
     outbound: Mutex<FakeOutbound>,
     busy: AtomicBool,
     bound: Mutex<Option<u64>>,
@@ -364,6 +423,11 @@ impl FakeSession {
         }
     }
 
+    /// The session's instruction entries now.
+    pub fn instructions(&self) -> BTreeMap<String, String> {
+        self.inner.instructions.lock().unwrap().clone()
+    }
+
     pub fn log(&self) -> FakeLog {
         self.inner.log.lock().unwrap().clone()
     }
@@ -429,7 +493,12 @@ impl Session for FakeSession {
         {
             return Ok(());
         }
-        self.inner.log.lock().unwrap().prompts.push(prompt.clone());
+        {
+            let mut log = self.inner.log.lock().unwrap();
+            log.prompts.push(prompt.clone());
+            let given = log.instructions.len();
+            log.instructed_at_prompts.push(given);
+        }
         self.emit(Event::Delivered {
             key: prompt.key.clone(),
         });
@@ -493,6 +562,31 @@ impl Session for FakeSession {
             modes.clone()
         };
         self.emit(Event::ModesChanged(modes));
+        Ok(())
+    }
+
+    async fn set_instruction(&self, key: &str, value: Option<&str>) -> Result<()> {
+        let _binding = self.current_binding()?;
+        if !backend::valid_instruction_key(key) {
+            return Err(Error::new(ErrorKind::Invalid, "not an instruction key"));
+        }
+        self.inner
+            .log
+            .lock()
+            .unwrap()
+            .instructions
+            .push((key.to_owned(), value.map(str::to_owned)));
+        if self.inner.instruction_failure.load(Ordering::SeqCst) {
+            return Err(Error::new(
+                ErrorKind::Unavailable,
+                "the fake agent refused the instructions",
+            ));
+        }
+        let mut entries = self.inner.instructions.lock().unwrap();
+        match value {
+            Some(value) => entries.insert(key.to_owned(), value.to_owned()),
+            None => entries.remove(key),
+        };
         Ok(())
     }
 

@@ -166,6 +166,8 @@ pub enum SpaceCommand {
         mode: String,
         participant: String,
     },
+    /// Give the agent the space's instructions as they are when the driver performs this, from [`Hub::instructions_due`]. At most one is queued for each space at a time. See `design/spaces.md`.
+    Instructions,
     Close,
 }
 
@@ -178,6 +180,8 @@ pub struct CreateRequest {
     pub session: Option<String>,
     /// The identifier of the offered environment the space is bound to.
     pub environment: String,
+    /// The space's own instructions to the agent, empty for none.
+    pub instructions: String,
     /// The participant who asked; they join the space once it exists, unless they have joined another space meanwhile.
     pub creator: String,
     /// The space the creator was in when they asked.
@@ -193,6 +197,11 @@ pub enum Job {
         participant: String,
         backend: String,
         directory: String,
+    },
+    /// Remove Tomori's instruction entries from `session` of `backend`, whose space was forgotten.
+    ForgetInstructions {
+        backend: String,
+        session: String,
     },
 }
 
@@ -262,6 +271,8 @@ struct HubState {
     shutting_down: bool,
     /// Set when a space was forgotten, so that the kept spaces are written once the lock is released.
     unkept: bool,
+    /// The backends and sessions of spaces forgotten since the supervisor was last asked to remove their instruction entries; see [`Hub::recount`].
+    forgotten: Vec<(String, String)>,
     /// The one pairing pending, if any; see `design/security.md`.
     pairing: Option<PendingPairing>,
     next_pairing: u64,
@@ -379,6 +390,8 @@ struct SpaceRecord {
     speech: Retention,
     /// Wakes the space's speech pacer, so that it paces a replay or catch-up that just started.
     waker: Option<Box<dyn Fn() + Send>>,
+    /// While an instructions command is queued for the driver, whether it gives every layer rather than the space's own alone, so that changes made meanwhile join it rather than queue without bound.
+    instructing: Cell<Option<bool>>,
     /// The keys and texts of the latest spoken answers applied, so that a repeated finalization of one is acknowledged rather than answered again; see [`ANSWERED`].
     answered: std::collections::VecDeque<(String, String)>,
 }
@@ -406,6 +419,21 @@ impl SpaceRecord {
             _ => 0,
         });
         summary
+    }
+
+    /// Give the agent the space's instructions, every layer if `all` and otherwise the space's own, before any input queued after this. A command already queued gives them as they are when it is performed, so it is widened rather than another queued. A driver that has stopped needs none.
+    fn instruct(&self, all: bool) {
+        if self.model.instructions().is_none() || self.model.is_closed() {
+            return;
+        }
+        if let Some(queued) = self.instructing.get() {
+            self.instructing.set(Some(queued || all));
+            return;
+        }
+        self.instructing.set(Some(all));
+        if self.commands.try_send(SpaceCommand::Instructions).is_err() {
+            self.instructing.set(None);
+        }
     }
 
     /// Wake the space's speech pacer, if it has one, to pace a replay or catch-up that just started.
@@ -611,6 +639,7 @@ impl HubState {
                     session: model.session.clone(),
                     environment: model.environment.clone(),
                     attribution: model.attribution(),
+                    instructions: model.space_instructions().to_owned(),
                     closed: model
                         .closed_reason()
                         .filter(|_| !space.kept_open)
@@ -644,6 +673,12 @@ impl HubState {
             return false;
         };
         let forgotten: HashSet<&String> = forgettable[..excess].iter().map(|(_, id)| id).collect();
+        for space in &self.spaces {
+            if forgotten.contains(&space.model.id) && space.model.instructions().is_some() {
+                self.forgotten
+                    .push((space.model.backend.clone(), space.model.session.clone()));
+            }
+        }
         self.spaces
             .retain(|space| !forgotten.contains(&space.model.id));
         self.unkept |= excess > 0;
@@ -1245,6 +1280,23 @@ impl Hub {
             state.counts = counts;
             self.counts_changed.notify(usize::MAX);
         }
+        self.forget_instructions(state);
+    }
+
+    /// Ask the supervisor to remove Tomori's instruction entries from the sessions of forgotten spaces, which are Tomori's alone, unless another space is bound to the same session. Called with [`Self::recount`], which follows every change that can forget a space. See `design/spaces.md`.
+    fn forget_instructions(&self, state: &mut HubState) {
+        for (backend, session) in std::mem::take(&mut state.forgotten) {
+            let bound = state
+                .spaces
+                .iter()
+                .any(|space| space.model.backend == backend && space.model.session == session);
+            if !bound && !session.is_empty() {
+                // Once shutting down, the jobs are closed, and the entries stay until the space's session is used again.
+                let _ = self
+                    .jobs
+                    .try_send(Job::ForgetInstructions { backend, session });
+            }
+        }
     }
 
     fn run(&self, deferred: Vec<Deferred>) {
@@ -1726,8 +1778,13 @@ impl Hub {
                 directory,
                 session,
                 environment,
+                instructions,
             } => {
+                let instructions = instructions.unwrap_or_default();
                 let checked = limits::check(&title, limits::TITLE_BYTES, "title")
+                    .and_then(|()| {
+                        limits::check(&instructions, limits::INSTRUCTIONS_BYTES, "instructions")
+                    })
                     .and_then(|()| limits::check(&directory, limits::DIRECTORY_BYTES, "directory"))
                     .and_then(|()| match &session {
                         Some(session) => limits::check(session, limits::SESSION_BYTES, "session"),
@@ -1771,6 +1828,7 @@ impl Hub {
                     directory,
                     session,
                     environment,
+                    instructions,
                     creator: participant.to_owned(),
                     creator_space: space.map(str::to_owned),
                 };
@@ -2287,6 +2345,26 @@ impl Hub {
                     state.error(participant, "The agent session has stopped.");
                 }
             }
+            ClientMessage::SetInstructions { text } => {
+                if let Err(error) = limits::check(&text, limits::INSTRUCTIONS_BYTES, "instructions")
+                {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.model.set_space_instructions(&text) {
+                    Ok(()) => {
+                        // While the agent has not taken them all, every layer is given again, so that taking this one alone does not hide that.
+                        record.instruct(record.model.instructions_failed());
+                        state.touch_space(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    Err(error) => state.error(participant, error),
+                }
+            }
             ClientMessage::Replay { message } => {
                 if let Some(message) = &message
                     && let Err(error) = limits::check(message, limits::IDENTIFIER_BYTES, "message")
@@ -2607,7 +2685,7 @@ impl Hub {
         }
         state.next_space += 1;
         let id = format!("space-{}-{}", state.run, state.next_space);
-        let model = SpaceModel::new(
+        let mut model = SpaceModel::new(
             id.clone(),
             request.title.clone(),
             request.backend.clone(),
@@ -2615,6 +2693,10 @@ impl Hub {
             request.environment.clone(),
             session,
             snapshot,
+        );
+        model.set_instructions(
+            request.instructions.trim().to_owned(),
+            self.takes_instructions(&request.backend),
         );
         log::info!(
             "Space {id} {:?} is bound to {} session {} in the {} environment.",
@@ -2634,7 +2716,10 @@ impl Hub {
             speech: Retention::default(),
             waker: None,
             answered: std::collections::VecDeque::new(),
+            instructing: Cell::new(None),
         });
+        // Given before any input, so that the agent has them for its first turn.
+        state.spaces.last().expect("pushed above").instruct(true);
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
         self.keep();
@@ -2700,6 +2785,8 @@ impl Hub {
                     Snapshot::default(),
                 );
                 model.set_attribution(kept.attribution);
+                let takes = self.takes_instructions(&kept.backend);
+                model.set_instructions(kept.instructions, takes);
                 let (commands, receiver) = async_channel::unbounded();
                 match kept.closed {
                     Some(reason) => {
@@ -2734,6 +2821,7 @@ impl Hub {
                     speech: Retention::default(),
                     waker: None,
                     answered: std::collections::VecDeque::new(),
+                    instructing: Cell::new(None),
                 });
             }
             for id in closed {
@@ -2773,6 +2861,8 @@ impl Hub {
             record.model.backend,
             record.model.session
         );
+        // Given again before any input, as the agent may have lost them while the server was stopped.
+        record.instruct(true);
         state.pump(id);
         state.touch_space(id);
         drop(state);
@@ -2845,7 +2935,12 @@ impl Hub {
         let Some(record) = state.space_mut(space) else {
             return;
         };
+        let resynchronized = matches!(event, Event::Resynchronized { .. });
         record.model.apply(event);
+        if resynchronized {
+            // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
+            record.instruct(true);
+        }
         // Stamped now rather than when the snapshot is sent, so a level that ends and starts again within one
         // snapshot interval starts its age again.
         record.stamp_attention(Instant::now());
@@ -2991,6 +3086,45 @@ impl Hub {
                 );
             }
         }
+    }
+
+    /// The agent was given the space's instructions, or refused them. The space works without them, so a refusal is shown in the space rather than closing it. See `design/spaces.md`.
+    pub(crate) fn space_instructed(&self, space: &str, result: backend::Result<()>, all: bool) {
+        let mut state = self.lock();
+        let Some(record) = state.space_mut(space) else {
+            return;
+        };
+        if let Err(error) = &result {
+            log::warn!(
+                "The agent of space {space} did not take its instructions: {}",
+                error.message
+            );
+        }
+        record
+            .model
+            .instructed(result.map_err(|error| error.message), all);
+        state.touch_space(space);
+    }
+
+    /// The instruction entries the driver of `space` gives now, for its queued [`SpaceCommand::Instructions`], and whether they are every layer. Empty once the space has closed.
+    pub(crate) fn instructions_due(&self, space: &str) -> (Vec<(String, Option<String>)>, bool) {
+        let state = self.lock();
+        let Some(record) = state.space(space) else {
+            return (Vec::new(), false);
+        };
+        let all = record.instructing.take().unwrap_or(true);
+        let mut entries = record.model.instruction_entries();
+        if !all {
+            entries.retain(|(key, _)| key == crate::instructions::SPACE_KEY);
+        }
+        (entries, all)
+    }
+
+    /// Whether the backend named `backend` takes instruction entries.
+    fn takes_instructions(&self, backend: &str) -> bool {
+        self.backends
+            .get(backend)
+            .is_some_and(|backend| backend.capabilities().instructions)
     }
 
     /// The driver stopped: the session produces no more events.
@@ -3181,6 +3315,65 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "fake")]
+    #[test]
+    fn instructions_queue_once_and_are_read_when_given() {
+        let (jobs, _) = async_channel::unbounded();
+        let hub = Hub::new(
+            Backends::new().with(crate::fake::FakeBackend::new()),
+            Arc::new(NullTranscriber::new()),
+            jobs,
+            Vec::new(),
+            SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
+        );
+        let (commands, receiver) = async_channel::unbounded();
+        let request = CreateRequest {
+            title: "Space".to_owned(),
+            backend: "fake".to_owned(),
+            directory: "/tmp".to_owned(),
+            session: None,
+            creator: "ada".to_owned(),
+            creator_space: None,
+            environment: "sky".to_owned(),
+            instructions: "Mind the docs.".to_owned(),
+        };
+        let id = hub
+            .register_space(
+                &request,
+                "session".to_owned(),
+                Snapshot::default(),
+                commands,
+            )
+            .unwrap();
+        // Changes made while the command given on creation waits join it.
+        for _ in 0..3 {
+            hub.lock().space(&id).unwrap().instruct(false);
+        }
+        assert_eq!(receiver.len(), 1);
+        let (entries, all) = hub.instructions_due(&id);
+        assert!(all);
+        assert_eq!(entries.len(), 3);
+        // Once it is performed, a change of the space's own layer gives that alone, as it is when performed.
+        hub.lock().space(&id).unwrap().instruct(false);
+        hub.lock()
+            .space_mut(&id)
+            .unwrap()
+            .model
+            .set_space_instructions("Mind the tests.")
+            .unwrap();
+        assert_eq!(receiver.len(), 2);
+        assert_eq!(
+            hub.instructions_due(&id),
+            (
+                vec![(
+                    crate::instructions::SPACE_KEY.to_owned(),
+                    Some("Mind the tests.".to_owned())
+                )],
+                false
+            )
+        );
+    }
+
     /// Connect and say hello as `participant`.
     fn greet(hub: &Hub, participant: &str) -> ConnectionId {
         let (connection, ..) = hub.connect(Cancellation::new(), Access::open()).unwrap();
@@ -3206,6 +3399,7 @@ mod tests {
             creator: creator.to_owned(),
             creator_space: None,
             environment: "sky".to_owned(),
+            instructions: String::new(),
         };
         hub.register_space(
             &request,

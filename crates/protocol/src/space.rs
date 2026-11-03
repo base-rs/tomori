@@ -161,9 +161,32 @@ pub struct SpaceState {
     /// [`crate::ClientMessage::SetSpeech`]; a client sends those only to such a server. See `design/speech.md`.
     #[serde(default)]
     pub speech: SpeechSetting,
+    /// The instructions Tomori gives the agent in this space, in layers, so that everyone in it can see them. Absent
+    /// when the space's backend takes no instructions, and from older servers. See `design/spaces.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<AgentInstructions>,
     /// Whether the server applies an utterance marked with [`crate::AnswerTarget`] as the answer to the presented question, rather than queueing it. False from older servers, which would queue it; a client marks an utterance as an answer only when this is set. See `design/spaces.md`.
     #[serde(default)]
     pub voice_answers: bool,
+}
+
+/// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and
+/// read by the agent in this order. An empty layer is not given. See `design/spaces.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInstructions {
+    /// Tomori's own, the same in every space: how to converse in a shared, spoken space.
+    #[serde(default)]
+    pub tomori: String,
+    /// The space's environment's, about what it presents and how to use it.
+    #[serde(default)]
+    pub environment: String,
+    /// The space's own, given by an owner when creating it and changed by an owner with
+    /// [`crate::ClientMessage::SetInstructions`].
+    #[serde(default)]
+    pub space: String,
+    /// Why the agent may not have the layers shown, such as the agent refusing them. The space works without them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// How much of each reply a space speaks. See `design/speech.md`.

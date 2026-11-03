@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), i (show the agent's instructions), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), q (quit).";
 
 pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
     let (sender, input) = mpsc::channel();
@@ -32,6 +32,17 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
         conversation.tick_space(std::time::Instant::now());
         match input.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
+                // The rest of the line is the instructions, so it is not split into commands.
+                if let Some(text) = line.trim_start().strip_prefix("instruct")
+                    && (text.is_empty() || text.starts_with(char::is_whitespace))
+                {
+                    conversation.instruct(text);
+                    connection.poll(true, &mut conversation);
+                    if let Some(notice) = conversation.menu_model().notice {
+                        println!("({notice})");
+                    }
+                    continue;
+                }
                 for command in line.split_whitespace() {
                     match command {
                         "u" => conversation.navigate(0, -1),
@@ -72,6 +83,29 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                                 println!("  {}", item.text);
                             }
                         }
+                        // The hand menu's Agent section, with each layer in full; see `design/hand-menu.md`.
+                        "i" => match conversation.menu_model() {
+                            model if !model.in_space => println!("(Join a space first.)"),
+                            crate::hand_menu::Model {
+                                instructions: None, ..
+                            } => println!("  This agent takes no instructions from Tomori."),
+                            crate::hand_menu::Model {
+                                instructions: Some(layers),
+                                ..
+                            } => {
+                                for (label, text) in [
+                                    ("Tomori's", &layers.tomori),
+                                    ("The environment's", &layers.environment),
+                                    ("This space's", &layers.space),
+                                ] {
+                                    let text = if text.trim().is_empty() { "none" } else { text };
+                                    println!("  {label}: {text}");
+                                }
+                                if let Some(error) = &layers.error {
+                                    println!("  {error}");
+                                }
+                            }
+                        },
                         "+" | "-" => {
                             match conversation.knocks().first().map(|knock| knock.id.clone()) {
                                 Some(id) => conversation.decide_knock(&id, command == "+"),

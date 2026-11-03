@@ -599,6 +599,71 @@ pub async fn switch_agent<'scope>(
     Ok(())
 }
 
+/// The path of the session's instruction entry `key`. The key is checked by the caller against OpenCode's pattern,
+/// which needs no escaping.
+fn instruction_path(session_id: &str, key: &str) -> String {
+    format!(
+        "/api/experimental/session/{}/instructions/entries/{}",
+        urlencoding(session_id),
+        urlencoding(key)
+    )
+}
+
+/// `PUT /api/experimental/session/:id/instructions/entries/:key`: attach or replace one durable instruction entry,
+/// which OpenCode announces to the model at its next step boundary. The value is the entry's text.
+pub async fn put_instruction<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    key: &str,
+    value: &str,
+    cancellation: &Cancellation,
+) -> Result<(), Failure> {
+    let payload = serde_json::json!({ "value": value });
+    let mut request = Request::new(
+        Method::PUT,
+        Path::from(instruction_path(session_id, key)),
+        BufferedBody::from(payload.to_string().into_bytes()),
+    );
+    if let Ok(field) = Field::new("content-type", "application/json") {
+        let _ = request.fields.append(field);
+    }
+    let response = exchange(
+        client,
+        request,
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    read_json(response, cancellation).await?;
+    Ok(())
+}
+
+/// `DELETE /api/experimental/session/:id/instructions/entries/:key`: remove one instruction entry, which OpenCode
+/// announces to the model at its next step boundary.
+pub async fn delete_instruction<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    key: &str,
+    cancellation: &Cancellation,
+) -> Result<(), Failure> {
+    let request = Request::new(
+        Method::DELETE,
+        Path::from(instruction_path(session_id, key)),
+        EmptyBody,
+    );
+    let response = exchange(
+        client,
+        request,
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    read_json(response, cancellation).await?;
+    Ok(())
+}
+
 /// `POST /api/session/:id/interrupt`: stop the running turn.
 pub async fn interrupt<'scope>(
     client: &Client<'scope>,
