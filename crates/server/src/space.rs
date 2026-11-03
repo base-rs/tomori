@@ -244,7 +244,7 @@ impl SpaceModel {
             workers,
             workers_authoritative: true,
             attribution: true,
-            speech: SpeechSetting::Brief,
+            speech: SpeechSetting::Full,
             modes: snapshot.modes,
             error: None,
             worker_error: None,
@@ -536,7 +536,7 @@ impl SpaceModel {
         }
     }
 
-    /// How much of each reply is spoken. Brief unless a participant chose otherwise.
+    /// How much of each reply is spoken. Full unless a participant chose brief.
     pub fn speech(&self) -> SpeechSetting {
         self.speech
     }
