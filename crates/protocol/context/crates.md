@@ -24,7 +24,7 @@ The crates share one version and are released together, so depend on the same ve
 
 ## Choosing crates
 
-- **A client of an existing server:** depend on `tomori-client` and `tomori-protocol`. The client handles discovery, tokens and pinning itself.
+- **A client of an existing server:** depend on `tomori-client` and `tomori-protocol`. The client presents tokens and pins certificates, and re-exports discovery; the application supplies the token, and stores the certificate fingerprint to pin.
 - **Another implementation of the protocol, in Rust:** depend on `tomori-protocol` alone, and follow its framing, versioning and keepalive rules.
 - **A backend for another agent:** depend on `tomori-backend`, and report structured events rather than text for display or speech.
 - **A server:** run `tomori-server`. Building a customized server as a library is not supported yet.
