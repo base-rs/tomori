@@ -145,6 +145,16 @@ impl Store {
         self.with_credentials(|credentials| credentials.get(server).cloned().unwrap_or_default())
     }
 
+    /// The server kept with the certificate `fingerprint`, and what is kept for it, so that a server reached another way, such as over USB and then over Wi-Fi, is recognized by its certificate.
+    pub fn credential_for_certificate(&self, fingerprint: &str) -> Option<(String, Credential)> {
+        self.with_credentials(|credentials| {
+            credentials
+                .iter()
+                .find(|(_, credential)| credential.certificate.as_deref() == Some(fingerprint))
+                .map(|(server, credential)| (server.clone(), credential.clone()))
+        })
+    }
+
     /// Pin `fingerprint` as `server`'s certificate.
     pub fn remember_certificate(&self, server: &str, fingerprint: &str) {
         self.change_credential(server, |credential| {
@@ -380,6 +390,15 @@ mod tests {
         let text = fs::read_to_string(directory.join(CREDENTIALS_FILE)).unwrap();
         assert!(!text.contains("127.0.0.1"));
         fs::remove_dir_all(directory).unwrap();
+
+        // A server is also found by its certificate.
+        let store = Store::new(None);
+        store.remember_certificate("127.0.0.1:8765", "ab");
+        store.remember_token("127.0.0.1:8765", "tomori_usb");
+        let (server, credential) = store.credential_for_certificate("ab").unwrap();
+        assert_eq!(server, "127.0.0.1:8765");
+        assert_eq!(credential.token.as_deref(), Some("tomori_usb"));
+        assert_eq!(store.credential_for_certificate("cd"), None);
 
         // Without storage, they are kept while the app runs.
         let memory = Store::new(None);

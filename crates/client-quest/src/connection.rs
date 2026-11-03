@@ -632,11 +632,21 @@ impl Connection {
         while let Some(action) = conversation.next_action() {
             match action {
                 Action::Connect(choice) => {
-                    let key = choice
+                    let mut key = choice
                         .instance
                         .clone()
                         .unwrap_or_else(|| choice.address.clone());
-                    let kept = self.store.credential(&key);
+                    let mut kept = self.store.credential(&key);
+                    // A server reached another way, such as over USB and then over Wi-Fi, is recognized by the certificate it advertises. That certificate is then pinned, so only the server holding its key receives what is kept for it.
+                    if kept == Default::default()
+                        && let Some((server, credential)) =
+                            choice.fingerprint.as_deref().and_then(|fingerprint| {
+                                self.store.credential_for_certificate(fingerprint)
+                            })
+                    {
+                        key = server;
+                        kept = credential;
+                    }
                     let (transport, pinned) =
                         transport(kept.certificate.as_deref(), choice.fingerprint.as_deref());
                     // A token given at startup goes only to the server given at startup, or over USB to this computer: never to a discovered server, whose advertisement anyone on the network could make.
