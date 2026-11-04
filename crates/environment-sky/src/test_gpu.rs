@@ -37,15 +37,17 @@ fn report(message: impl std::fmt::Display) {
     let _ = writeln!(std::io::stderr(), "{message}");
 }
 
-/// Opens the preferred adapter and a device on it, or returns why there is no adapter.
+/// The backends tests render with: Vulkan, and Metal only when built with `--features wgpu/metal`, to preview on a Mac.
+const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::METAL);
+
+/// Opens the preferred adapter of `backends` and a device on it, or returns why there is no adapter.
 ///
 /// # Panics
 ///
 /// If the adapter refuses a device.
-fn create() -> Result<Gpu, String> {
+fn create(backends: wgpu::Backends) -> Result<Gpu, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        // Metal only when built with `--features wgpu/metal`, to preview on a Mac.
-        backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
+        backends,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     // High performance orders discrete and integrated GPUs first and software (`DeviceType::Cpu`) adapters last, so a software adapter is only chosen when it is the only one.
@@ -75,13 +77,30 @@ fn create() -> Result<Gpu, String> {
 /// If no adapter is found while [`REQUIRE_GPU`] is set, or if the adapter refuses a device.
 pub fn open() -> Option<Gpu> {
     static GPU: OnceLock<Result<Gpu, String>> = OnceLock::new();
-    match GPU.get_or_init(create) {
+    found(
+        GPU.get_or_init(|| create(BACKENDS)),
+        std::env::var(REQUIRE_GPU).ok().as_deref(),
+    )
+}
+
+/// The shared GPU if there is one, or `None` after saying why the calling test is skipped; fails if `required`, as [`REQUIRE_GPU`] says.
+fn found(gpu: &Result<Gpu, String>, required: Option<&str>) -> Option<Gpu> {
+    match gpu {
         Ok(gpu) => Some(gpu.clone()),
         Err(error) => {
-            report(missing(error, std::env::var(REQUIRE_GPU).ok().as_deref()));
+            report(missing(error, required));
             None
         }
     }
+}
+
+/// Runs `test` with the binary's shared GPU, as [`open`] gives it, and returns what it returns; or skips it, returning `None`, where there is no adapter.
+///
+/// # Panics
+///
+/// As [`open`] does.
+pub fn with<T>(test: impl FnOnce(Gpu) -> T) -> Option<T> {
+    open().map(test)
 }
 
 /// The `.wgsl` files directly in `directory`, by file name and in name order, with their source.
@@ -142,8 +161,30 @@ mod tests {
     }
 
     #[test]
+    fn a_test_is_skipped_without_an_adapter() {
+        let gpu = create(wgpu::Backends::empty());
+        assert!(gpu.is_err());
+        assert!(found(&gpu, None).is_none());
+    }
+
+    #[test]
+    fn a_test_runs_with_the_shared_gpu() {
+        with(|gpu| {
+            let name = gpu.adapter.get_info().name;
+            let again = found(&Ok(gpu), Some("1")).expect("the GPU found");
+            assert_eq!(again.adapter.get_info().name, name);
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "broken.wgsl")]
     fn invalid_wgsl_names_the_shader() {
         validate_wgsl("broken.wgsl", "fn main() -> f32 { return true; }");
+    }
+
+    #[test]
+    #[should_panic(expected = "unparsable.wgsl")]
+    fn unparsable_wgsl_names_the_shader() {
+        validate_wgsl("unparsable.wgsl", "fn main( {");
     }
 }
