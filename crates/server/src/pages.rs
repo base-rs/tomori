@@ -344,5 +344,7 @@ mod tests {
     #[test]
     fn a_form_that_is_not_utf_8_has_no_values() {
         assert_eq!(form_value(b"id=\xff", "id"), None);
+        // Nor does a name that is not well formed.
+        assert_eq!(form_value(b"%zz=1", "id"), None);
     }
 }

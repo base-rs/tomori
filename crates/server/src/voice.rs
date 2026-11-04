@@ -876,7 +876,8 @@ mod enabled {
             // Another message of the same turn continues its reply.
             voice.observe(&started("n"));
             assert_eq!(voice.reply, 1);
-            assert!(Mute.synthesize("", &mut |_| {}).is_ok());
+            let mut ignore = drop::<AudioChunk>;
+            assert!(Mute.synthesize("", &mut ignore).is_ok());
             voice.observe(&Event::TextDelta {
                 message: "other".into(),
                 text: "Hi.".into(),

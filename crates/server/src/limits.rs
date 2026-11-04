@@ -489,7 +489,8 @@ mod tests {
     fn a_long_directory_is_cut_between_characters() {
         let mut spaces = listing(400);
         for space in &mut spaces {
-            space.directory = format!("/{}", "日".repeat(DIRECTORY_BYTES / 3 - 1));
+            // Ending with a character of another width, so that the cut falls inside one.
+            space.directory = format!("/{}é", "日".repeat(DIRECTORY_BYTES / 3 - 1));
         }
         // A short directory is kept whole.
         spaces[0].directory = "/short".into();
