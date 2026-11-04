@@ -1141,6 +1141,22 @@ mod tests {
     }
 
     #[test]
+    fn another_space_in_the_same_environment_keeps_the_environment_whole() {
+        let mut motion = Motion::default();
+        let mut now = settle(&mut motion, &joining("one"), 0.0);
+        now = settle(&mut motion, &entered("one"), now);
+        let whole = Scenery {
+            environment: Environment::Sky,
+            reveal: None,
+        };
+        assert_eq!(motion.scenery(now), whole);
+        motion.update(&entered("two"), now);
+        for time in [FRAME, REVEAL * 0.3, REVEAL] {
+            assert_eq!(motion.scenery(now + time), whole);
+        }
+    }
+
+    #[test]
     fn a_space_entered_in_the_grid_shows_only_the_grid() {
         let mut motion = Motion::default();
         let now = settle(&mut motion, &joining("one"), 0.0);
