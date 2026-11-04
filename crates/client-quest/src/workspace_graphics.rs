@@ -105,11 +105,13 @@ impl ContentCache {
                 }
             }
         });
-        if match (&self.card, &bounded) {
-            (Some(a), Some(b)) => same_card(a, b),
-            (None, None) => true,
-            _ => false,
-        } {
+        // Neither is `None` here: no card at all was kept above.
+        if self
+            .card
+            .as_ref()
+            .zip(bounded.as_ref())
+            .is_some_and(|(a, b)| same_card(a, b))
+        {
             return;
         }
         self.pages = bounded.as_ref().map(content_pages).unwrap_or_default();

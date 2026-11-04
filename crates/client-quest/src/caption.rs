@@ -54,6 +54,14 @@ fn wrap(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typographic_quotes_and_dashes_are_drawn_plainly() {
+        assert_eq!(
+            wrapped_lines("\u{201c}Yes\u{201d} \u{2013} it\u{2019}s done \u{1f600}"),
+            ["\"Yes\" - it's done ?"]
+        );
+    }
     #[test]
     fn caption_layout_bounds_words_unicode_and_long_transcripts() {
         for text in [

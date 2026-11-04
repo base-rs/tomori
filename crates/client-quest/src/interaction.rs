@@ -113,7 +113,9 @@ impl Signals {
                 SessionActivity::Working => Mode::Working,
                 SessionActivity::Waiting => Mode::Waiting,
                 SessionActivity::Ready => Mode::Ready,
-                SessionActivity::Unavailable => Mode::Unavailable,
+                SessionActivity::Unavailable => {
+                    unreachable!("an unavailable session is handled above")
+                }
             }
         };
         self.ready_for = if mode == Mode::Ready {
@@ -141,6 +143,21 @@ impl Signals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcribing_and_an_unavailable_session_show_as_such() {
+        let mut signals = Signals::default();
+        let busy = Inputs {
+            voice_busy: true,
+            ..Default::default()
+        };
+        assert_eq!(signals.update(busy, 0.1).mode, Mode::Transcribing);
+        let unavailable = Inputs {
+            session: SessionActivity::Unavailable,
+            ..Default::default()
+        };
+        assert_eq!(signals.update(unavailable, 0.1).mode, Mode::Unavailable);
+    }
 
     #[test]
     fn queued_speech_and_chunk_gaps_never_look_ready() {

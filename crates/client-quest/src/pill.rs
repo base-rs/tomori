@@ -88,6 +88,18 @@ pub fn rows(status: &Status) -> Vec<Row> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_waiting_or_closed_agent_says_so() {
+        for (activity, label) in [(Activity::Waiting, "waiting"), (Activity::Closed, "closed")] {
+            let rows = rows(&Status {
+                activity,
+                ..status(None)
+            });
+            let text: String = rows[0].cells.iter().map(|(ch, _)| *ch).collect();
+            assert!(text.contains(label));
+        }
+    }
+
     fn status(need: Option<Need>) -> Status {
         Status {
             activity: Activity::Running,

@@ -143,6 +143,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_agent_with_no_neighbours_still_moves() {
+        let mut swarm = Swarm::new();
+        for (i, agent) in swarm.agents.iter_mut().enumerate() {
+            agent.position = Vec3::new(i as f32 * 10.0, 0.0, 0.0);
+        }
+        let before = swarm.agents[0].position;
+        swarm.step(0.1, None);
+        assert!(swarm.agents[0].position.is_finite());
+        assert_ne!(swarm.agents[0].position, before);
+    }
+
+    #[test]
     fn conversational_shapes_stay_finite_and_settle_without_teleporting() {
         let mut swarm = Swarm::new();
         for mode in [

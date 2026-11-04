@@ -486,6 +486,24 @@ pub fn key(target: &(impl Hash + ?Sized)) -> u64 {
 mod tests {
     use super::*;
 
+    impl Haptic {
+        /// How strongly it vibrates, or 0 for a stop.
+        fn amplitude(self) -> f32 {
+            match self {
+                Haptic::Vibrate { amplitude, .. } => amplitude,
+                Haptic::Stop => 0.0,
+            }
+        }
+    }
+
+    #[test]
+    fn a_pulse_starts_and_lasts_as_it_says() {
+        let made = pulse(110, 30, 0.7);
+        assert_eq!(made.start, Duration::from_millis(110));
+        assert_eq!(made.length, Some(Duration::from_millis(30)));
+        assert_eq!(made.amplitude, 0.7);
+    }
+
     fn feedback() -> (Feedback, Instant) {
         let mut feedback = Feedback::new(Settings::default());
         feedback.set_haptics(true);
@@ -819,10 +837,12 @@ mod tests {
     #[test]
     fn holding_to_leave_ramps_then_taps_once_and_stops_when_let_go() {
         let (mut feedback, now) = feedback();
-        let amplitude = |due: &[(Hand, Haptic)]| match due {
-            [(Hand::Right, Haptic::Vibrate { amplitude, .. })] => *amplitude,
-            other => panic!("{other:?}"),
+        let amplitude = |due: &[(Hand, Haptic)]| {
+            assert_eq!(due.len(), 1);
+            assert_eq!(due[0].0, Hand::Right);
+            due[0].1.amplitude()
         };
+        assert_eq!(Haptic::Stop.amplitude(), 0.0);
         feedback.hold_to_leave(Some(0.0));
         assert!((amplitude(&feedback.haptics(now)) - 0.1).abs() < 1e-6);
         feedback.hold_to_leave(Some(0.5));

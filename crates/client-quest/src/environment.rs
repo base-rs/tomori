@@ -19,10 +19,16 @@ impl Environment {
     /// The desktop window's starting scenery, from `TOMORI_ENVIRONMENT`.
     #[cfg(any(not(target_os = "android"), test))]
     pub fn initial() -> Self {
-        match std::env::var("TOMORI_ENVIRONMENT").as_deref() {
-            Ok("minimal") => Self::Minimal,
-            Ok("sky") | Err(_) => Self::Sky,
-            Ok(other) => {
+        Self::named(std::env::var("TOMORI_ENVIRONMENT").ok().as_deref())
+    }
+
+    /// The scenery `name` asks for, or Sky without a name or for one this build does not know.
+    #[cfg(any(not(target_os = "android"), test))]
+    fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("minimal") => Self::Minimal,
+            Some("sky") | None => Self::Sky,
+            Some(other) => {
                 log::warn!("Unknown TOMORI_ENVIRONMENT {other:?}; using sky");
                 Self::Sky
             }
@@ -51,6 +57,15 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_starting_scenery_is_named_or_sky() {
+        crate::test_support::log_everything();
+        assert_eq!(Environment::named(Some("minimal")), Environment::Minimal);
+        assert_eq!(Environment::named(Some("sky")), Environment::Sky);
+        assert_eq!(Environment::named(None), Environment::Sky);
+        assert_eq!(Environment::named(Some("moon")), Environment::Sky);
+    }
 
     #[test]
     fn selection_roundtrips_and_rejects_unknown_presets() {
