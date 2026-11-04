@@ -26,6 +26,7 @@ mod limits;
 pub mod offline;
 mod outbox;
 mod pages;
+mod process;
 mod projection;
 mod queue;
 #[cfg(feature = "speech")]

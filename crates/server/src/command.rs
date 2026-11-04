@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::{Backends, Builder, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 use base_scheduler::{Cancellation, SocketLocalAddress};
-use base_scheduler_native::{NativeOptions, NativeScheduler};
-use futures_lite::future::block_on;
+use base_scheduler_native::NativeScheduler;
 use tomori_protocol::Keepalive;
 
 /// The command line's usage, naming `backends`, those it can offer, such as `fake, opencode`.
@@ -418,34 +417,40 @@ fn admission(
         .with_max_visitors(arguments.max_visitors)
         .with_tls(config)
         .with_pairing(certificate.fingerprint())
-        .with_pairing_prompt(|event| match event {
-            crate::PairingEvent::Began { name } => eprintln!("{name:?} began pairing."),
-            crate::PairingEvent::Waiting { name, code } => eprintln!(
-                "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
-            ),
-            crate::PairingEvent::Paused => eprintln!(
-                "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again."
-            ),
-        });
+        .with_pairing_prompt(tell);
     confirm_pairings_on_console(server.pairing());
     Ok((server, Some(fingerprint)))
+}
+
+/// Tell the operator of `event` on the console.
+fn tell(event: &crate::PairingEvent) {
+    eprintln!("{}", prompt(event));
+}
+
+/// What to tell the operator of `event`.
+fn prompt(event: &crate::PairingEvent) -> String {
+    match event {
+        crate::PairingEvent::Began { name } => format!("{name:?} began pairing."),
+        crate::PairingEvent::Waiting { name, code } => format!(
+            "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
+        ),
+        crate::PairingEvent::Paused => "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again.".to_owned(),
+    }
 }
 
 /// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches. See `design/security.md`.
 fn confirm_pairings_on_console(pairing: crate::Pairing) {
     use std::io::BufRead;
-    let reading = std::thread::Builder::new()
-        .name("tomori-console".into())
-        .spawn(move || {
-            for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-                if let Some(reply) = console_reply(&pairing, &line) {
-                    eprintln!("{reply}");
-                }
-            }
-        });
-    if let Err(error) = reading {
-        eprintln!("Could not read the console for pairing ({error}); confirm on the status page.");
-    }
+    crate::process::console(move || {
+        for reply in std::io::stdin()
+            .lock()
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| console_reply(&pairing, &line))
+        {
+            eprintln!("{reply}");
+        }
+    });
 }
 
 /// Act on `line`, typed on the console, for `pairing`, returning what to tell the operator, if anything.
@@ -487,8 +492,53 @@ fn display_name(host: &str) -> String {
 /// The running advertisement, if any, which the server updates as its counts change.
 type Advertised = Arc<Mutex<Option<tomori_discovery::Advertisement>>>;
 
+/// An advertisement that announces the counts as they change.
+trait Announce {
+    type Error: Display;
+
+    fn update(&self, counts: tomori_discovery::Counts) -> Result<(), Self::Error>;
+}
+
+impl Announce for tomori_discovery::Advertisement {
+    type Error = tomori_discovery::Error;
+
+    fn update(&self, counts: tomori_discovery::Counts) -> Result<(), Self::Error> {
+        tomori_discovery::Advertisement::update(self, counts)
+    }
+}
+
+/// Announce `counts` with `advertisement`, if the server is advertised, saying so if it cannot.
+fn announce(advertisement: Option<&impl Announce>, counts: tomori_discovery::Counts) {
+    if let Some(advertisement) = advertisement
+        && let Err(error) = advertisement.update(counts)
+    {
+        log::warn!("Bonjour: could not advertise the new counts ({error}).");
+    }
+}
+
+/// Announce the counts with the advertisement in `advertised`, once there is one.
+fn announcer(advertised: Advertised) -> impl Fn(tomori_discovery::Counts) + Send + Sync + 'static {
+    move |counts| {
+        let advertised = advertised
+            .lock()
+            .expect("the advertisement is never left poisoned");
+        announce(advertised.as_ref(), counts);
+    }
+}
+
+/// Why serving failed, with each of its causes.
+fn failure(error: impl std::error::Error) -> String {
+    let mut message = format!("The server failed: {error}");
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
+}
+
 /// How the server advertises itself: [`tomori_discovery::advertise`], unless a test stands in for it.
-trait Advertiser:
+pub(crate) trait Advertiser:
     FnOnce(
     &str,
     u16,
@@ -587,10 +637,10 @@ fn transcriber(
     backend: &str,
     offline_model: Option<&str>,
     engines: &mut Engines,
-) -> Result<Arc<dyn Transcriber>, String> {
+) -> Arc<dyn Transcriber> {
     let Some(root) = root else {
         eprintln!("Speech recognition: off (no --speech-root); utterances fail with an error.");
-        return Ok(Arc::new(NullTranscriber::new()));
+        return Arc::new(NullTranscriber::new());
     };
     if backend == "offline" {
         return offline_transcriber(root, provider, offline_model, engines);
@@ -604,12 +654,12 @@ fn streaming_transcriber(
     root: &Path,
     provider: &str,
     engines: &mut Engines,
-) -> Result<Arc<dyn Transcriber>, String> {
+) -> Arc<dyn Transcriber> {
     use tomori_speech::stt::{TransducerConfig, TransducerRecognizer};
 
     let mut config = TransducerConfig::from_root(root);
     config.provider = provider.to_owned();
-    Ok(match TransducerRecognizer::new(&config) {
+    match TransducerRecognizer::new(&config) {
         Ok(recognizer) => {
             eprintln!(
                 "Speech recognition: streaming transducer from {} ({provider}).",
@@ -627,7 +677,7 @@ fn streaming_transcriber(
                 "Speech recognition is not available on this server: {error}."
             )))
         }
-    })
+    }
 }
 
 /// The offline (whole-clip) model from `root`, Whisper `model` or the default, which buffers each utterance and reports its transcript a couple of seconds after the participant stops.
@@ -637,7 +687,7 @@ fn offline_transcriber(
     provider: &str,
     model: Option<&str>,
     engines: &mut Engines,
-) -> Result<Arc<dyn Transcriber>, String> {
+) -> Arc<dyn Transcriber> {
     use tomori_speech::stt::{SileroVad, SileroVadConfig, WhisperConfig};
 
     let mut config = match model {
@@ -651,9 +701,9 @@ fn offline_transcriber(
             eprintln!(
                 "Speech recognition: unavailable ({error}); utterances fail with this error."
             );
-            return Ok(Arc::new(NullTranscriber::with_reason(format!(
+            return Arc::new(NullTranscriber::with_reason(format!(
                 "Speech recognition is not available on this server: {error}."
-            ))));
+            )));
         }
     };
     eprintln!(
@@ -681,7 +731,7 @@ fn offline_transcriber(
     };
     let transcriber = crate::OfflineTranscriber::new(recognizer, voice);
     engines.stoppers.push(transcriber.stopper());
-    Ok(Arc::new(transcriber))
+    Arc::new(transcriber)
 }
 
 /// `recognizer` with its final transcripts punctuated by the model from `root`, or as it is if that model cannot load.
@@ -712,20 +762,14 @@ fn punctuated(
 
 #[cfg(not(feature = "speech"))]
 fn transcriber(
-    root: Option<&Path>,
+    _root: Option<&Path>,
     _provider: &str,
     _backend: &str,
     _offline_model: Option<&str>,
     _engines: &mut Engines,
-) -> Result<Arc<dyn Transcriber>, String> {
-    if root.is_some() {
-        return Err(
-            "This server was built without the speech feature, so --speech-root is not supported."
-                .to_owned(),
-        );
-    }
+) -> Arc<dyn Transcriber> {
     eprintln!("Speech recognition: off (built without speech); utterances fail with an error.");
-    Ok(Arc::new(NullTranscriber::new()))
+    Arc::new(NullTranscriber::new())
 }
 
 /// Speech synthesis: Kokoro from `root`, or none, in which case replies are not spoken.
@@ -801,7 +845,7 @@ pub(crate) fn run(
         parse(command, &builder.usage()).and_then(|arguments| {
             let (server, fingerprint) =
                 configure(builder, &arguments, default_state.as_deref(), engines)?;
-            serve_until_signalled(server, &arguments, fingerprint)
+            crate::process::serve_until_signalled(server, &arguments, fingerprint)
         })
     };
     match result {
@@ -823,13 +867,20 @@ pub(crate) fn configure(
     let backends = backends(&builder, arguments)?;
     let roots = workspace_roots(&arguments.workspace_roots)?;
     let root = arguments.speech_root.as_deref();
+    #[cfg(not(feature = "speech"))]
+    if root.is_some() {
+        return Err(
+            "This server was built without the speech feature, so --speech-root is not supported."
+                .to_owned(),
+        );
+    }
     let transcriber = transcriber(
         root,
         &arguments.speech_provider,
         &arguments.speech_backend,
         arguments.speech_offline_model.as_deref(),
         engines,
-    )?;
+    );
     let (environments, hooks) = builder.into_parts();
     let server = Server::new(backends, transcriber)
         .with_environments(environments)
@@ -849,48 +900,8 @@ pub(crate) fn configure(
     ))
 }
 
-/// Serve on a scheduler of its own until SIGINT or SIGTERM, then shut down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
-fn serve_until_signalled(
-    server: Server,
-    arguments: &Arguments,
-    fingerprint: Option<String>,
-) -> Result<(), String> {
-    let scheduler = NativeScheduler::with_options(NativeOptions {
-        workers: 4,
-        threads: 4,
-        capacity: 1024,
-        ..Default::default()
-    })
-    .map_err(|error| format!("Could not start the scheduler: {error}"))?;
-    let cancellation = Cancellation::new();
-    #[cfg(unix)]
-    let _signals = {
-        use base_scheduler::Signals;
-        scheduler
-            .signal_subscribe(
-                &[libc::SIGINT, libc::SIGTERM],
-                Shutdown(cancellation.clone()),
-            )
-            .inspect_err(|error| eprintln!("Could not handle signals: {error}"))
-            .ok()
-    };
-    let result = block_on(serve(
-        &scheduler,
-        server,
-        arguments,
-        fingerprint,
-        &cancellation,
-        tomori_discovery::advertise,
-    ));
-    // Closing the scheduler unregisters its signal handlers, which would then swallow a repeated signal. Restore the default action first, so that a signal during the rest of shutdown still ends the process at once, without running destructors.
-    #[cfg(unix)]
-    restore_default_signals();
-    block_on(scheduler.shutdown());
-    result
-}
-
 /// Listen where `arguments` say, advertise with `start` unless turned off, and serve until `cancellation`, withdrawing the advertisement as soon as serving ends.
-async fn serve(
+pub(crate) async fn serve(
     scheduler: &NativeScheduler,
     server: Server,
     arguments: &Arguments,
@@ -899,25 +910,13 @@ async fn serve(
     start: impl Advertiser,
 ) -> Result<(), String> {
     let advertised = Advertised::default();
-    let server = server.with_counts({
-        let advertised = advertised.clone();
-        move |counts| {
-            let advertised = advertised
-                .lock()
-                .expect("the advertisement is never left poisoned");
-            if let Some(advertisement) = advertised.as_ref()
-                && let Err(error) = advertisement.update(counts)
-            {
-                log::warn!("Bonjour: could not advertise the new counts ({error}).");
-            }
-        }
-    });
+    let server = server.with_counts(announcer(advertised.clone()));
     let listener = crate::bind(scheduler, arguments.bind, cancellation)
         .await
         .map_err(|error| format!("Could not listen on {}: {error}", arguments.bind))?;
     let address = scheduler
         .socket_local_address(&listener)
-        .map_err(|error| error.to_string())?;
+        .expect("a bound listener has an address");
     let scheme = if fingerprint.is_some() {
         "https"
     } else {
@@ -939,52 +938,13 @@ async fn serve(
             .expect("the advertisement is never left poisoned")
             .take(),
     );
-    served.map(|_| ()).map_err(|error| {
-        let mut message = format!("The server failed: {error}");
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            message.push_str(&format!(": {cause}"));
-            source = cause.source();
-        }
-        message
-    })
-}
-
-/// Exit at once, without running static destructors or `atexit` handlers, which could free state that a native engine thread is still using.
-#[cfg(unix)]
-pub(crate) fn exit_now(code: libc::c_int) -> ! {
-    // SAFETY: `_exit` only ends the process; it is async-signal-safe and touches no Rust state.
-    unsafe { libc::_exit(code) }
-}
-
-/// Give SIGINT and SIGTERM their default action, which ends the process without running destructors.
-#[cfg(unix)]
-fn restore_default_signals() {
-    for signal in [libc::SIGINT, libc::SIGTERM] {
-        // SAFETY: `SIG_DFL` installs no handler, so nothing runs in signal context.
-        unsafe { libc::signal(signal, libc::SIG_DFL) };
-    }
-}
-
-/// Shut down in order on the first signal, and exit immediately on a repeated one in case shutdown hangs.
-#[cfg(unix)]
-struct Shutdown(Cancellation);
-
-#[cfg(unix)]
-impl base_scheduler::Notify<libc::c_int> for Shutdown {
-    fn notify(&self, signal: libc::c_int) {
-        if self.0.cancel() {
-            eprintln!("Shutting down; signal again to exit immediately.");
-        } else {
-            // Engine threads may still be running, so static destructors must not run.
-            exit_now(128 + signal);
-        }
-    }
+    served.map(|_| ()).map_err(failure)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
 
     fn arguments(list: &[&str]) -> Result<Arguments, String> {
         parse(list.iter().map(|argument| argument.to_string()), &usage())
@@ -1379,6 +1339,18 @@ mod tests {
         std::thread::JoinHandle<Result<(), String>>,
     ) {
         let (asked, received) = std::sync::mpsc::channel();
+        let (cancellation, serving) =
+            serving_with(server, arguments, fingerprint, failing_advertiser(asked));
+        (received, cancellation, serving)
+    }
+
+    /// Serve `server` as `arguments` say, advertised with `start`, until the returned cancellation.
+    fn serving_with(
+        server: Server,
+        arguments: Arguments,
+        fingerprint: Option<String>,
+        start: impl Advertiser + Send + 'static,
+    ) -> (Cancellation, std::thread::JoinHandle<Result<(), String>>) {
         let cancellation = Cancellation::new();
         let serving = std::thread::spawn({
             let cancellation = cancellation.clone();
@@ -1390,13 +1362,205 @@ mod tests {
                     &arguments,
                     fingerprint,
                     &cancellation,
-                    failing_advertiser(asked),
+                    start,
                 ));
                 block_on(scheduler.shutdown());
                 result
             }
         });
-        (received, cancellation, serving)
+        (cancellation, serving)
+    }
+
+    #[test]
+    fn a_server_is_advertised_over_multicast_while_it_serves() {
+        let directory = directory("advertised");
+        let mut arguments = local(&directory, &["--auth", "open", "--name", "Announced"]);
+        arguments.advertise = true;
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        let (listening, port) = std::sync::mpsc::channel();
+        let start = move |name: &str, port, address, counts, fingerprint| {
+            listening.send(port).unwrap();
+            tomori_discovery::advertise(name, port, address, counts, fingerprint)
+        };
+        let (cancellation, serving) = serving_with(server, arguments, fingerprint, start);
+        port.recv_timeout(Duration::from_secs(10)).unwrap();
+        cancellation.cancel();
+        assert_eq!(serving.join().unwrap(), Ok(()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// An advertisement whose responder has stopped.
+    struct Stopped;
+
+    impl Announce for Stopped {
+        type Error = &'static str;
+
+        fn update(&self, _: tomori_discovery::Counts) -> Result<(), Self::Error> {
+            Err("the responder stopped")
+        }
+    }
+
+    /// An advertisement whose responder announces what it is given.
+    struct Running;
+
+    impl Announce for Running {
+        type Error = &'static str;
+
+        fn update(&self, _: tomori_discovery::Counts) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn counts_are_announced_only_where_advertised_and_a_failure_is_said() {
+        announce(None::<&Stopped>, Default::default());
+        announce(Some(&Running), Default::default());
+        announce(Some(&Stopped), Default::default());
+        // Before the server is advertised, there is nothing to announce with.
+        announcer(Advertised::default())(Default::default());
+        let advertised = tomori_discovery::advertise(
+            "Announcing",
+            48768,
+            IpAddr::from([127, 0, 0, 1]),
+            Default::default(),
+            None,
+        )
+        .expect("the responder starts");
+        announce(Some(&advertised), Default::default());
+    }
+
+    /// An error with a cause.
+    #[derive(Debug)]
+    struct Caused(Option<std::io::Error>);
+
+    impl Display for Caused {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("accepting failed")
+        }
+    }
+
+    impl std::error::Error for Caused {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.as_ref().map(|cause| cause as _)
+        }
+    }
+
+    #[test]
+    fn a_failure_says_each_of_its_causes() {
+        assert_eq!(
+            failure(Caused(Some(std::io::Error::other("the listener broke")))),
+            "The server failed: accepting failed: the listener broke"
+        );
+    }
+
+    #[test]
+    fn the_operator_is_told_of_each_pairing_event() {
+        let began = crate::PairingEvent::Began {
+            name: "Quest".to_owned(),
+        };
+        assert_eq!(prompt(&began), "\"Quest\" began pairing.");
+        let waiting = crate::PairingEvent::Waiting {
+            name: "Quest".to_owned(),
+            code: "123 456".to_owned(),
+        };
+        assert!(prompt(&waiting).starts_with("Pairing request from \"Quest\": code 123 456."));
+        assert!(prompt(&crate::PairingEvent::Paused).starts_with("Pairing is paused"));
+        tell(&crate::PairingEvent::Paused);
+    }
+
+    /// The speech engines, loaded from the models CI fetches.
+    #[cfg(feature = "speech")]
+    mod speech {
+        use super::*;
+        use tomori_speech::stt::{
+            PunctuationConfig, SileroVadConfig, TransducerConfig, WhisperConfig,
+        };
+        use tomori_speech::test_models::{self, WHISPER_MODEL};
+        use tomori_speech::tts::KokoroConfig;
+
+        /// A repository named `name` with only `models` of its speech recognition models, as one missing the rest.
+        fn only(name: &str, models: &[&Path]) -> PathBuf {
+            let root = directory(name);
+            let asr = root.join(".tools/asr");
+            std::fs::create_dir_all(&asr).unwrap();
+            for model in models {
+                std::os::unix::fs::symlink(model, asr.join(model.file_name().unwrap())).unwrap();
+            }
+            root
+        }
+
+        #[test]
+        fn the_streaming_recognizer_punctuates_its_transcripts_where_it_can() {
+            let root = test_models::root();
+            let model = TransducerConfig::from_root(&root).model;
+            let punctuation = PunctuationConfig::from_root(&root).model;
+            test_models::with(
+                "the streaming recognizer and its punctuation",
+                "scripts/fetch-asr-model.sh",
+                &[&model, &punctuation],
+                || {
+                    let mut engines = Engines::default();
+                    transcriber(Some(&root), "cpu", "streaming", None, &mut engines);
+                    let unpunctuated = only("unpunctuated", &[&model]);
+                    transcriber(Some(&unpunctuated), "cpu", "streaming", None, &mut engines);
+                    assert_eq!(engines.stoppers.len(), 2);
+                    assert!(engines.stop(Instant::now() + ENGINE_STOP));
+                    std::fs::remove_dir_all(unpunctuated).unwrap();
+                },
+            );
+        }
+
+        #[test]
+        fn the_offline_recognizer_hears_voices_where_it_can() {
+            let root = test_models::root();
+            let whisper = WhisperConfig::named(&root, WHISPER_MODEL).model;
+            let vad = SileroVadConfig::from_root(&root).model;
+            test_models::with(
+                "Whisper and the voice activity detector",
+                "scripts/fetch-asr-model.sh whisper tiny.en",
+                &[&whisper, &vad],
+                || {
+                    let mut engines = Engines::default();
+                    transcriber(
+                        Some(&root),
+                        "cpu",
+                        "offline",
+                        Some(WHISPER_MODEL),
+                        &mut engines,
+                    );
+                    let unheard = only("unheard", &[&whisper]);
+                    transcriber(
+                        Some(&unheard),
+                        "cpu",
+                        "offline",
+                        Some(WHISPER_MODEL),
+                        &mut engines,
+                    );
+                    assert_eq!(engines.stoppers.len(), 2);
+                    assert!(engines.stop(Instant::now() + ENGINE_STOP));
+                    std::fs::remove_dir_all(unheard).unwrap();
+                },
+            );
+        }
+
+        #[test]
+        fn replies_are_spoken_by_sentence_or_by_block() {
+            let root = test_models::root();
+            let kokoro = KokoroConfig::from_root(&root).model;
+            test_models::with("Kokoro", "scripts/fetch-tts-model.sh", &[&kokoro], || {
+                let mut engines = Engines::default();
+                for segmentation in ["sentence", "block"] {
+                    synthesis(
+                        Server::new(Backends::new(), Arc::new(NullTranscriber::new())),
+                        Some(&root),
+                        segmentation,
+                        &mut engines,
+                    );
+                }
+                assert_eq!(engines.stoppers.len(), 2);
+                assert!(engines.stop(Instant::now() + ENGINE_STOP));
+            });
+        }
     }
 
     #[test]

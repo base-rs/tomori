@@ -96,6 +96,12 @@ tomori-speech = { version = "0.1.0", path = "../speech", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+# The model finder for the tests that load the speech engines.
+tomori-speech = { version = "0.1.0", path = "../speech", features = ["test-models"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 tomori-security = { version = "0.1.0", path = "../security", features = ["issue"] }
 tomori-client = { version = "0.1.0", path = "../client" }
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/process.rs"
+reason = "The server process's calls to the operating system: creating its scheduler and console thread, which fail only when the system refuses them, handling signals, and ending at once with _exit, after which the process writes no coverage."
