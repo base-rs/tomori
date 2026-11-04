@@ -2135,11 +2135,9 @@ impl Conversation {
                 self.wrist.toggle(&items);
                 true
             }
+            // Settled, the focus is only on what this participant may act on: a visitor is offered no choices or entries to remove.
             Some(Focus::Card(choice)) => {
-                if !self.role.participates() {
-                    self.notice = Some(VISITING.into());
-                    false
-                } else if self
+                if self
                     .request_at
                     .is_some_and(|at| at.elapsed() < REQUEST_GRACE)
                 {
@@ -2154,10 +2152,6 @@ impl Conversation {
                 }
             }
             Some(Focus::Queue(entry)) => {
-                if !self.role.participates() {
-                    self.notice = Some(VISITING.into());
-                    return false;
-                }
                 match self.cancelling.take() {
                     // A again within the undo time keeps it.
                     Some((cancelling, _)) if cancelling == entry => {
@@ -7975,6 +7969,111 @@ mod tests {
             conversation.apply(disconnected());
             conversation.set_engagement(tomori_protocol::Engagement::Away);
             assert!(conversation.take_actions().is_empty());
+        }
+
+        #[test]
+        fn rings_and_lists_with_nothing_chosen_do_nothing() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            // Back on the space list, and creating with nothing chosen, do nothing.
+            conversation.back_ring();
+            conversation.create(None);
+            // A on the backend ring with no backends, and on the environment ring with nothing to create, does nothing.
+            conversation.step = LobbyStep::Backend;
+            conversation.accept();
+            assert_eq!(conversation.step, LobbyStep::Backend);
+            conversation.step = LobbyStep::Environment;
+            conversation.accept();
+            // Back from the environment ring, for a backend that does not attach, is the folder ring.
+            conversation.backends = backends();
+            conversation.menu_backend = Some("plain".into());
+            conversation.step = LobbyStep::Environment;
+            conversation.back_ring();
+            assert_eq!(conversation.step, LobbyStep::Directory);
+            // A visitor's A on the space list's end opens nothing.
+            let mut conversation = lobby(ConnectionRole::Visitor);
+            conversation.accept();
+            assert_eq!(conversation.step, LobbyStep::Spaces);
+            // Without a space, its list and the stick's queue have nothing.
+            assert!(conversation.menu_items().is_empty());
+            assert!(conversation.wrist_items().is_empty());
+            conversation.select_queued(1);
+            conversation.mode = Mode::Space;
+            conversation.navigate(0, 1);
+            assert_eq!(conversation.space_menu, None);
+            conversation.decide();
+            assert!(conversation.take_actions().is_empty());
+        }
+
+        #[test]
+        fn a_choice_made_elsewhere_is_refused_or_left_alone() {
+            // Deciding on the wrist: A in front does not decide.
+            let mut conversation = crate::scene::fixtures::approval_waiting();
+            conversation.request_at = None;
+            conversation.decide_on_wrist = true;
+            assert!(!conversation.accept());
+            assert_eq!(
+                conversation.notice.as_deref(),
+                Some("Turn your right wrist to decide.")
+            );
+            // A visitor cannot cancel a queued entry.
+            let mut conversation = joined();
+            conversation.role = ConnectionRole::Visitor;
+            conversation.queue_selected = Some("q1".into());
+            assert!(!conversation.accept());
+            assert_eq!(conversation.notice.as_deref(), Some(VISITING));
+            // A selected entry that is no longer waiting is no longer selected.
+            let mut conversation = joined();
+            conversation.queue_selected = Some("gone".into());
+            conversation.tick_space(Instant::now());
+            assert_eq!(conversation.queue_selected, None);
+            // The space list's entry that is not there does nothing.
+            let mut conversation = joined();
+            conversation.space_menu = Some(9);
+            conversation.accept();
+            assert!(conversation.take_actions().is_empty());
+        }
+
+        #[test]
+        fn the_wrist_refuses_a_visitor_and_removes_only_waiting_entries() {
+            use crate::transcript::Focus;
+            // A visitor is offered no choice to focus.
+            let mut conversation = crate::scene::fixtures::approval_waiting();
+            conversation.request_at = None;
+            conversation.role = ConnectionRole::Visitor;
+            conversation.wrist.focus = Some(Focus::Card(1));
+            assert!(!conversation.wrist_accept());
+            assert!(conversation.take_actions().is_empty());
+            // A question's buttons are not an approval's: A decides nothing.
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.question = Some(Question {
+                    id: "q1".into(),
+                    title: "Which?".into(),
+                    text: "Which one?".into(),
+                    field: "Choice".into(),
+                    supported: true,
+                });
+                state.queue = vec![
+                    entry("e1", "Ada", QueueState::Queued),
+                    entry("e2", "Ada", QueueState::Queued),
+                ];
+            }));
+            conversation.request_at = None;
+            conversation.wrist.focus = Some(Focus::Card(1));
+            assert!(!conversation.wrist_accept());
+            // Removing one entry while another is being removed removes the other at once.
+            conversation.cancelling = Some(("e1".into(), Instant::now() + CANCEL_UNDO));
+            conversation.wrist.focus = Some(Focus::Queue("e2".into()));
+            assert!(conversation.wrist_accept());
+            // An entry that is not waiting is not removed.
+            conversation.cancelling = None;
+            conversation.wrist.focus = Some(Focus::Queue("e9".into()));
+            assert!(!conversation.wrist_accept());
+            // B dismisses a problem shown.
+            conversation.wrist.focus = None;
+            conversation.error = Some("A problem.".into());
+            assert!(conversation.wrist_back());
+            assert_eq!(conversation.error, None);
         }
     }
 }
