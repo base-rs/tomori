@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A worker that a delegated worker started now returns to that worker's station when it is deleted, as it arrived from there, rather than to the agent at the centre; if its parent leaves at the same time, or is not shown, it returns to the agent as before (#49). When the server has to leave a parent out of a space's worker list to fit its snapshot, the headset and the spectator keep showing the states of that parent's workers, and their new workers, instead of showing them as unknown (#48).
+
 - A sub-agent deleted while Tomori was reconnecting to OpenCode now leaves its space once the space is read again, rather than staying until the space is attached again. It is removed only when OpenCode confirms that it no longer exists.
 
 - An OpenCode space no longer repeats a reply that finished while it was opening. Its events wait for its initial state and follow it, except those the state already shows. Text from the OpenCode event stream with a character split between two reads, such as Japanese or an emoji, is no longer garbled. An event larger than 16 MiB now makes the backend reconnect and read each space again, rather than growing without limit.
