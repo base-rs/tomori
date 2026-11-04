@@ -262,8 +262,8 @@ pub struct Conversation {
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
     menu_directory: Option<String>,
-    /// The `CreateSpace` waiting at the environment step for its environment.
-    menu_create: Option<ClientMessage>,
+    /// The space waiting at the environment step for its environment.
+    menu_create: Option<Creation>,
     error: Option<String>,
     actions: Vec<Action>,
     /// The last body paginated, since the console's panel is drawn every frame.
@@ -1056,7 +1056,8 @@ impl Conversation {
     fn attention_status(&self) -> Option<String> {
         let space = &self.spaces[arrival::most_urgent(&self.spaces)?];
         let title = &space.title;
-        Some(match space.attention? {
+        // The most urgent space is one that needs attention.
+        space.attention.map(|attention| match attention {
             tomori_protocol::Attention::Input => format!("{title} needs you"),
             tomori_protocol::Attention::Problem => format!("{title} has a problem"),
             tomori_protocol::Attention::Reply => format!("{title} has a new reply"),
@@ -1493,7 +1494,7 @@ impl Conversation {
     }
 
     /// Send `create`, bound to the only environment the server offers, or ask which one when it offers several. A server that offers none predates environments, and binds its own.
-    fn submit(&mut self, create: ClientMessage) {
+    fn submit(&mut self, create: Creation) {
         self.joining = None;
         if self.environments.len() > 1 {
             self.menu = 0;
@@ -1502,7 +1503,7 @@ impl Conversation {
             return;
         }
         let only = self.environments.first().map(|offered| offered.id.clone());
-        self.send(with_environment(create, only));
+        self.send(create.message(only));
         self.close_menu();
     }
 
@@ -1595,12 +1596,11 @@ impl Conversation {
             Some(session) if !session.title.trim().is_empty() => session.title.clone(),
             _ => self.lobby_title(),
         };
-        let create = ClientMessage::CreateSpace {
+        let create = Creation {
             title,
             backend,
             directory,
             session: session.map(|session| session.id),
-            environment: None,
             instructions: self.next_instructions.take(),
         };
         self.submit(create);
@@ -1891,7 +1891,7 @@ impl Conversation {
                         if let (Some(environment), Some(create)) =
                             (environment, self.menu_create.take())
                         {
-                            self.send(with_environment(create, Some(environment)));
+                            self.send(create.message(Some(environment)));
                             self.close_menu();
                         }
                     }
@@ -2021,7 +2021,8 @@ impl Conversation {
         let grace = self
             .request_at
             .is_some_and(|at| at.elapsed() < REQUEST_GRACE);
-        let deciding = self.decided.is_some() && space.approval.is_some();
+        // A decision is only awaited for the approval shown: another request forgets it.
+        let deciding = self.decided.is_some();
         // Laid out again only when something it shows has changed, as it is drawn every frame.
         let key = TranscriptKey {
             revision: self.revision,
@@ -2073,7 +2074,7 @@ impl Conversation {
             you: self.source,
             participates: self.role.participates(),
             known: Some(&self.known),
-            deciding: self.decided.is_some() && space.approval.is_some(),
+            deciding: self.decided.is_some(),
             ..Default::default()
         };
         // The width it was last laid out at, on the wrist or detached, so that moving through it matches what is shown.
@@ -2143,12 +2144,11 @@ impl Conversation {
                 {
                     self.notice = Some("Read the request before choosing.".into());
                     false
-                } else if self.approval().is_some() {
+                } else {
+                    // Settled, a choice is focused only while an approval waits for this participant's decision.
                     self.option = choice - 1;
                     self.decide();
                     true
-                } else {
-                    false
                 }
             }
             Some(Focus::Queue(entry)) => {
@@ -2162,13 +2162,10 @@ impl Conversation {
                         if let Some((other, _)) = other {
                             self.cancel_now(other);
                         }
-                        if self.waiting().iter().any(|waiting| waiting.id == entry) {
-                            self.cancelling = Some((entry, Instant::now() + CANCEL_UNDO));
-                            self.notice = None;
-                            true
-                        } else {
-                            false
-                        }
+                        // Settled, the focus is only on an entry still waiting.
+                        self.cancelling = Some((entry, Instant::now() + CANCEL_UNDO));
+                        self.notice = None;
+                        true
                     }
                 }
             }
@@ -2259,15 +2256,19 @@ impl Conversation {
     /// The problem with how long it has been shown, on one line, for the transcript.
     fn problem_text(&self, now: Instant) -> Option<String> {
         let problem = self.problem()?;
-        let since = match &self.problem_seen {
-            Some((seen, since)) if *seen == problem => *since,
-            _ => now,
-        };
         Some(format!(
             "! {} {}",
-            age(now.saturating_duration_since(since)),
+            age(self.problem_age(&problem, now)),
             problem.replace('\n', " ")
         ))
+    }
+
+    /// How long `problem` has been shown at `now`: no time at all if it was not shown before.
+    fn problem_age(&self, problem: &str, now: Instant) -> Duration {
+        match &self.problem_seen {
+            Some((seen, since)) if seen == problem => now.saturating_duration_since(*since),
+            _ => Duration::ZERO,
+        }
     }
 
     /// B: in a space, close what is open, or dismiss the problem shown; it never decides an approval, cancels input or leaves, which takes holding it (see [`Self::hold_back`]). In the lobby, dismiss what is shown or return to the server list.
@@ -2580,9 +2581,8 @@ impl Conversation {
                     .filter(|_| !answering)
                     .and_then(|pointed| {
                         self.space
-                            .as_ref()?
-                            .workers
                             .iter()
+                            .flat_map(|space| &space.workers)
                             .find(|worker| &worker.id == pointed)
                     })
                     .map(|worker| worker.title.clone());
@@ -3186,6 +3186,7 @@ impl Conversation {
     }
 
     /// The space's list on `rows` rows: a window of its entries that keeps the selected one in view, then the selected entry's description, so that both always show.
+    #[cfg(any(not(target_os = "android"), test))]
     fn menu_body(&self, selected: usize, rows: usize) -> (String, String) {
         let items = self.menu_items();
         let current = self.space.as_ref().and_then(|space| space.mode.as_ref());
@@ -3208,9 +3209,9 @@ impl Conversation {
         let room = room.max(rows.saturating_sub(1) / 2);
         if description.len() > room {
             description.truncate(room);
-            if let Some(last) = description.last_mut() {
-                *last = short(&format!("{last}..."));
-            }
+            // The body has at least four rows, so the description at least one.
+            let last = description.last_mut().expect("the description keeps a row");
+            *last = short(&format!("{last}..."));
         }
         let shown = rows
             .saturating_sub(description.len() + usize::from(!description.is_empty()))
@@ -3241,14 +3242,11 @@ impl Conversation {
         )
     }
 
-    /// The label and text of what the body shows: the space's list, the pending request, or the selected message.
+    /// The label and text of what the body shows when the space's list is closed: the pending request, or the selected message.
     fn body(&self) -> (String, String) {
         let Some(space) = &self.space else {
             return ("Loading".into(), String::new());
         };
-        if let Some(selected) = self.space_menu {
-            return self.menu_body(selected, self.body_rows());
-        }
         if let Some(approval) = &space.approval {
             return (
                 format!("APPROVAL: {}", approval.title),
@@ -3290,20 +3288,15 @@ impl Conversation {
         let Some(problem) = self.problem() else {
             return Vec::new();
         };
-        let since = match &self.problem_seen {
-            Some((seen, since)) if *seen == problem => *since,
-            _ => now,
-        };
         let mut lines = wrapped_lines(&format!(
             "! {} {}",
-            age(now.saturating_duration_since(since)),
+            age(self.problem_age(&problem, now)),
             problem.replace('\n', " ")
         ));
         if lines.len() > PROBLEM_ROWS {
             lines.truncate(PROBLEM_ROWS);
-            if let Some(last) = lines.last_mut() {
-                *last = format!("{}...", &last[..last.len().min(COLUMNS - 3)]);
-            }
+            let last = &mut lines[PROBLEM_ROWS - 1];
+            *last = format!("{}...", &last[..last.len().min(COLUMNS - 3)]);
         }
         lines
     }
@@ -3513,9 +3506,9 @@ impl Conversation {
                 ));
                 if lines.len() > budget {
                     lines.truncate(budget);
-                    if let Some(last) = lines.last_mut() {
-                        *last = short(&format!("{last} more"));
-                    }
+                    // The queue strip gives way to a choice, which so has the body's rows but the problem's and one.
+                    let last = lines.last_mut().expect("a choice keeps a row");
+                    *last = short(&format!("{last} more"));
                 }
                 lines
             })
@@ -3622,6 +3615,7 @@ impl Conversation {
 }
 
 /// What an entry of the space's list is called.
+#[cfg(any(not(target_os = "android"), test))]
 fn menu_label(item: &MenuItem) -> String {
     match item {
         MenuItem::Mode(mode) => format!("Mode: {}", mode.name),
@@ -3640,12 +3634,28 @@ fn age(elapsed: Duration) -> String {
     }
 }
 
-/// `create`, a `CreateSpace`, bound to `chosen`.
-fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> ClientMessage {
-    if let ClientMessage::CreateSpace { environment, .. } = &mut create {
-        *environment = chosen;
+/// A space chosen on the creation rings, not yet bound to an environment.
+#[derive(Debug)]
+struct Creation {
+    title: String,
+    backend: String,
+    directory: String,
+    session: Option<String>,
+    instructions: Option<String>,
+}
+
+impl Creation {
+    /// The `CreateSpace` for this space in `environment`, or in the server's own when `None`.
+    fn message(self, environment: Option<String>) -> ClientMessage {
+        ClientMessage::CreateSpace {
+            title: self.title,
+            backend: self.backend,
+            directory: self.directory,
+            session: self.session,
+            environment,
+            instructions: self.instructions,
+        }
     }
-    create
 }
 
 /// An entry of the space's list, opened with Y.
@@ -7631,6 +7641,275 @@ mod tests {
     }
 
     /// More of what the conversation does as the connection and the server tell it things.
+    /// What arrives late or out of turn, and the rarer ways through the rings and the wrist.
+    mod corners {
+        use super::*;
+
+        /// Connected to a server offering two environments, so that creating a space asks which.
+        fn offering_two(backends: Vec<BackendInfo>) -> Conversation {
+            let mut conversation = in_lobby(backends.clone(), roots());
+            conversation.apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "studio".into(),
+                role: ConnectionRole::Owner,
+                certificate: None,
+                backends,
+                roots: roots(),
+                environments: vec![
+                    EnvironmentInfo {
+                        id: "sky".into(),
+                        label: "Sky".into(),
+                    },
+                    EnvironmentInfo {
+                        id: "grid".into(),
+                        label: "Grid".into(),
+                    },
+                ],
+                utterance_limit: None,
+            }));
+            conversation.take_actions();
+            conversation
+        }
+
+        /// The ring shown and the keys selected on it.
+        fn ring(conversation: &Conversation) -> Option<(arrival::Step, Vec<arrival::Key>)> {
+            conversation.arrival().unwrap().ring.map(|ring| {
+                (
+                    ring.step,
+                    ring.items
+                        .into_iter()
+                        .filter(|item| item.selected)
+                        .map(|item| item.key)
+                        .collect(),
+                )
+            })
+        }
+
+        #[test]
+        fn a_connection_or_leave_arriving_after_leaving_the_server_keeps_the_server_list() {
+            let mut conversation = in_lobby(vec![], vec![]);
+            conversation.choose_object(&arrival::Key::Connected("10.0.0.1:8765".into()));
+            assert_eq!(conversation.take_actions(), [Action::Disconnect]);
+            conversation.apply(connected());
+            assert!(sent(&mut conversation).is_empty());
+            assert_eq!(conversation.mode(), Mode::Servers);
+            conversation.apply(Event::Message(ServerMessage::Left));
+            assert!(sent(&mut conversation).is_empty());
+            assert_eq!(conversation.mode(), Mode::Servers);
+        }
+
+        #[test]
+        fn a_join_refused_without_naming_the_space_is_no_longer_awaited() {
+            let mut conversation = in_lobby(vec![], vec![]);
+            listed(&mut conversation, vec![summary("one", "One")]);
+            conversation.accept();
+            assert_eq!(
+                sent(&mut conversation),
+                [ClientMessage::Join {
+                    space: "one".into()
+                }]
+            );
+            conversation.apply(Event::Message(ServerMessage::Error {
+                error: "The server is busy.".into(),
+                space: None,
+            }));
+            assert_eq!(conversation.joining, None);
+            assert_eq!(conversation.error.as_deref(), Some("The server is busy."));
+            assert_eq!(conversation.mode(), Mode::Lobby);
+        }
+
+        #[test]
+        fn someone_elses_transcript_changes_nothing_here() {
+            let mut conversation = joined(|_| {});
+            conversation.talk(true);
+            conversation.take_actions();
+            for finished in [false, true] {
+                conversation.apply(Event::Message(ServerMessage::Transcript {
+                    utterance: "someone-else".into(),
+                    text: "deploy it".into(),
+                    finished,
+                }));
+            }
+            let Some(crate::recording::Phase::Recording { heard, .. }) =
+                conversation.recording_phase(Instant::now())
+            else {
+                unreachable!("still recording");
+            };
+            assert_eq!(heard, "");
+            assert!(conversation.outcome.is_none());
+        }
+
+        #[test]
+        fn a_jump_finding_nothing_needs_you_stays_in_the_space_the_server_rejoined() {
+            let mut conversation = Conversation::new("Ada");
+            conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
+            conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
+            conversation.apply(connected());
+            conversation.apply(space(|_| {}));
+            conversation.take_actions();
+            conversation.notice = None;
+            listed(&mut conversation, vec![summary(SPACE, "Tomori")]);
+            assert!(sent(&mut conversation).is_empty());
+            assert_eq!(conversation.mode(), Mode::Space);
+            assert_eq!(conversation.notice, None);
+        }
+
+        #[test]
+        fn stepping_back_from_the_environments_returns_to_the_folder_without_a_session_ring() {
+            let mut conversation = offering_two(backends());
+            listed(&mut conversation, vec![]);
+            conversation.choose_object(&arrival::Key::Create);
+            conversation.choose_object(&arrival::Key::Backend("plain".into()));
+            conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+            assert!(sent(&mut conversation).is_empty());
+            assert_eq!(
+                ring(&conversation).map(|(step, _)| step),
+                Some(arrival::Step::Environment)
+            );
+            conversation.back();
+            assert_eq!(
+                ring(&conversation),
+                Some((
+                    arrival::Step::Directory,
+                    vec![arrival::Key::Directory("/work/tomori".into())]
+                ))
+            );
+            assert!(sent(&mut conversation).is_empty());
+        }
+
+        #[test]
+        fn a_folder_ring_with_no_folders_does_nothing() {
+            let mut conversation = in_lobby(backends(), vec![]);
+            listed(&mut conversation, vec![]);
+            conversation.choose_object(&arrival::Key::Create);
+            conversation.choose_object(&arrival::Key::Backend("fake".into()));
+            conversation.accept();
+            assert!(sent(&mut conversation).is_empty());
+            assert_eq!(
+                ring(&conversation).map(|(step, _)| step),
+                Some(arrival::Step::Directory)
+            );
+        }
+
+        #[test]
+        fn the_queue_is_selected_only_with_nothing_else_to_choose() {
+            let waiting = |space: &mut SpaceState| {
+                space.queue = vec![entry("q-1", "Ada", QueueState::Queued)];
+            };
+            assert!(joined(waiting).selects_queue());
+            assert!(!joined(|_| {}).selects_queue());
+            let conversation = joined(|space| {
+                waiting(space);
+                space.approval = Some(approval(&[]));
+            });
+            assert!(!conversation.selects_queue());
+            let mut conversation = joined(|space| {
+                waiting(space);
+                space.speech = SpeechSetting::Brief;
+            });
+            conversation.space_menu = Some(0);
+            assert!(!conversation.selects_queue());
+        }
+
+        #[test]
+        fn deciding_on_the_wrist_refuses_a_for_a_question_and_leaves_it_to_the_wrist_otherwise() {
+            let mut conversation = joined(|space| space.question = Some(question()));
+            conversation.decide_on_wrist();
+            assert!(!conversation.accept());
+            assert_eq!(
+                conversation.notice.as_deref(),
+                Some("Turn your right wrist to decide.")
+            );
+            let text = conversation.text();
+            assert!(text.ends_with("Turn your right wrist to decide"), "{text}");
+
+            let mut conversation = joined(|_| {});
+            conversation.decide_on_wrist();
+            assert!(conversation.accept());
+            assert!(sent(&mut conversation).is_empty());
+        }
+
+        #[test]
+        fn a_sent_outcome_names_no_place_once_the_space_is_left_or_the_words_are_delivered() {
+            let mut conversation = joined(|_| {});
+            conversation.talk(true);
+            conversation.take_actions();
+            let utterance = conversation.talk.as_ref().unwrap().utterance().to_owned();
+            conversation.talk(false);
+            conversation.apply(Event::Message(ServerMessage::Transcript {
+                utterance,
+                text: "text of q-1".into(),
+                finished: true,
+            }));
+            // Delivered, the words wait nowhere.
+            conversation.apply(space(|space| {
+                space.queue = vec![entry("q-1", "Ada", QueueState::Delivered)];
+            }));
+            let sent_nowhere = Some(crate::recording::Phase::Sent {
+                answered: false,
+                position: None,
+            });
+            assert_eq!(conversation.recording_phase(Instant::now()), sent_nowhere);
+            // Nor once the space is left.
+            hold_b(&mut conversation);
+            conversation.apply(Event::Message(ServerMessage::Left));
+            assert_eq!(conversation.mode(), Mode::Lobby);
+            assert_eq!(conversation.recording_phase(Instant::now()), sent_nowhere);
+        }
+
+        #[test]
+        fn choosing_what_is_not_there_does_nothing() {
+            let mut conversation = Conversation::new("Ada");
+            conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 0)]);
+            conversation.choose_object(&arrival::Key::Server("10.0.0.9:8765".into()));
+            assert!(conversation.take_actions().is_empty());
+            assert_eq!(conversation.mode(), Mode::Servers);
+
+            let mut conversation = in_lobby(vec![], vec![]);
+            listed(&mut conversation, vec![summary("one", "One")]);
+            conversation.choose_object(&arrival::Key::Space("gone".into()));
+            assert!(sent(&mut conversation).is_empty());
+
+            let mut conversation = joined(|_| {});
+            conversation.choose_object(&arrival::Key::Create);
+            assert!(sent(&mut conversation).is_empty());
+            assert_eq!(conversation.mode(), Mode::Space);
+        }
+
+        #[test]
+        fn a_list_entry_that_is_not_there_has_no_description() {
+            let mut conversation = joined(|space| space.speech = SpeechSetting::Brief);
+            conversation.space_menu = Some(1);
+            let text = conversation.text();
+            assert!(text.contains("MODE AND SPEECH 2/1"), "{text}");
+            assert!(
+                text.contains("Speech: brief") && !text.contains("> "),
+                "{text}"
+            );
+            assert!(!text.contains("Replies"), "{text}");
+        }
+
+        #[test]
+        fn an_idle_space_whose_words_were_all_delivered_is_ready() {
+            let conversation = joined(|space| {
+                space.queue = vec![entry("q-1", "Bob", QueueState::Delivered)];
+            });
+            assert_eq!(conversation.activity(), SessionActivity::Ready);
+        }
+
+        #[test]
+        fn a_problem_not_yet_shown_has_no_age() {
+            let mut conversation = joined(|space| {
+                space.messages = vec![message("m-1", Role::Assistant, "Done.")];
+            });
+            conversation.error = Some("Something broke.".into());
+            assert_eq!(
+                conversation.problem_lines(Instant::now()),
+                ["! 0s Something broke."]
+            );
+        }
+    }
+
     mod events {
         use super::*;
         use crate::scene::fixtures::{joined, lobby, space};
