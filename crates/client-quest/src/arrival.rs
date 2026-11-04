@@ -262,10 +262,15 @@ impl Scene {
             HEADING.with_y(top + HEADING_ABOVE)
         } else {
             // Jump objects stand above their servers rather than in the row.
-            let (jumps, servers): (Vec<&Item>, Vec<&Item>) = view
+            let servers: Vec<&Item> = view
                 .items
                 .iter()
-                .partition(|item| matches!(item.key, Key::Jump(_)));
+                .filter(|item| !matches!(item.key, Key::Jump(_)))
+                .collect();
+            let jumps = view.items.iter().filter_map(|item| match &item.key {
+                Key::Jump(address) => Some((item, address)),
+                _ => None,
+            });
             // More than a row holds continue on rows above.
             let rows = servers.len().div_ceil(ROW_CAPACITY).max(1);
             for (number, row) in servers.chunks(ROW_CAPACITY).enumerate() {
@@ -281,10 +286,7 @@ impl Scene {
                     objects.push(row_object(item, position, false));
                 }
             }
-            for jump in jumps {
-                let Key::Jump(address) = &jump.key else {
-                    continue;
-                };
+            for (jump, address) in jumps {
                 let server = objects
                     .iter()
                     .find(|object| matches!(&object.key, Key::Server(found) if found == address))
@@ -645,6 +647,13 @@ pub fn clip(text: &str, columns: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_kind_of_object_has_a_size_and_every_need_a_label() {
+        assert_eq!(size(Kind::Pair { pending: false }), 0.06);
+        assert_eq!(size(Kind::Menu(crate::hand_menu::MenuKind::Button)), 0.009);
+        assert_eq!(attention_label(Attention::Unknown), "needs attention");
+    }
     use crate::pointing::{Pointer, Ray};
 
     fn item(key: Key, kind: Kind, label: &str) -> Item {
@@ -797,11 +806,11 @@ mod tests {
                     (position.z - CENTRE.z).abs() < 1e-5,
                     "facing the participant"
                 );
+                // With the create object alone, the next is itself, a whole turn on.
                 let next = positions[(index + 1) % positions.len()];
-                if positions.len() > 1 {
-                    let turn = clockwise(around(*position), around(next));
-                    assert!((turn - step).abs() < 1e-4, "{count}: {turn} not {step}");
-                }
+                let turn = clockwise(around(*position), around(next));
+                let turn = if turn == 0.0 { TAU } else { turn };
+                assert!((turn - step).abs() < 1e-4, "{count}: {turn} not {step}");
             }
         }
         // A space added at the end keeps the create object where it was.
