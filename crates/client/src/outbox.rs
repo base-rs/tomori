@@ -157,8 +157,11 @@ impl State {
     }
 
     /// Fail the open utterance because its audio cannot be queued: drop its queued frames and cancel it in their place.
-    fn fail_congested(&mut self) -> Option<FailedUtterance> {
-        let open = self.utterance.as_mut()?;
+    fn fail_congested(&mut self) -> FailedUtterance {
+        let open = self
+            .utterance
+            .as_mut()
+            .expect("only an open utterance's audio is limited");
         open.failed = true;
         open.queued = 0;
         let generation = open.generation;
@@ -175,10 +178,10 @@ impl State {
                 utterance: utterance.clone(),
             },
         });
-        Some(FailedUtterance {
+        FailedUtterance {
             utterance,
             failure: UtteranceFailure::Congested,
-        })
+        }
     }
 }
 
@@ -420,7 +423,7 @@ impl Outbox {
                     state.dropped_audio += 1;
                     let failed = state.fail_congested();
                     Self::wake(state);
-                    return Ok(failed);
+                    return Ok(Some(failed));
                 }
                 open.queued += 1;
                 Some(open.generation)
@@ -453,12 +456,18 @@ impl Outbox {
         Ok(None)
     }
 
-    /// Queue a `Ping` or `Pong` ahead of all other traffic. Keepalive messages belong to one connection, so they are discarded while disconnected.
-    pub(crate) fn keepalive(&self, message: ClientMessage) {
-        debug_assert!(matches!(
-            message,
-            ClientMessage::Ping { .. } | ClientMessage::Pong { .. }
-        ));
+    /// Queue a `Ping` ahead of all other traffic; see [`Self::keepalive`].
+    pub(crate) fn ping(&self, nonce: u64) {
+        self.keepalive(ClientMessage::Ping { nonce });
+    }
+
+    /// Queue a `Pong` ahead of all other traffic; see [`Self::keepalive`].
+    pub(crate) fn pong(&self, nonce: u64) {
+        self.keepalive(ClientMessage::Pong { nonce });
+    }
+
+    /// Queue `message`, a `Ping` or `Pong`, ahead of all other traffic. Keepalive messages belong to one connection, so they are discarded while disconnected.
+    fn keepalive(&self, message: ClientMessage) {
         let mut state = self.lock();
         if state.closed || !state.connected {
             return;
