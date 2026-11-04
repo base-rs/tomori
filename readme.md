@@ -287,8 +287,8 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 
 ## Layout / interop
 
-- `crates/client-quest/src/desktop.rs`: desktop window, orbit camera, mouse attraction.
-- `crates/client-quest/src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions: the device calls only.
+- `crates/client-quest/src/desktop.rs`: the server-less and spectator windows, orbit camera, mouse attraction; `desktop_participant.rs`: the `--desktop` window. `window.rs` is what a window gives its contents, and `desktop_window.rs` the winit and surface calls alone.
+- `crates/client-quest/src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions: the device calls only, with the values read and the choices made in `xr_types.rs`.
 - `crates/client-quest/src/scene.rs`: the frame step the headset and the desktop window share, from plain input; `scene/headset.rs` and `scene/desktop.rs` hold each platform's own logic, and `scene_graphics.rs` draws a frame.
 - `crates/client-quest/src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed two-layer XR swapchain images, one layer per eye.
 - `crates/client-quest/src/graphics.rs`, `crates/client-quest/src/swarm.wgsl`: instanced cube rendering with per-eye depth.

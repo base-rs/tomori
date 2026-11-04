@@ -3,7 +3,6 @@
 
 //! The panel in a terminal, for using a server without a headset or a GPU.
 use crate::{caption::COLUMNS, connection::Connection, conversation::Conversation};
-use anyhow::Result;
 use std::{
     io::BufRead,
     sync::mpsc::{self, Receiver, RecvTimeoutError},
@@ -100,25 +99,32 @@ fn point(conversation: &mut Conversation, argument: &str, out: &mut Out) {
     }
 }
 
-pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result<()> {
-    let (sender, input) = mpsc::channel();
+/// Show the panel of `conversation`, kept going by `connection`, on `out`, driven by the commands read from `input`, until `q` or the end of the input.
+pub fn run(
+    mut conversation: Conversation,
+    mut connection: Connection,
+    input: impl BufRead + Send + 'static,
+    out: &mut Out,
+) {
+    let (sender, lines) = mpsc::channel();
     std::thread::Builder::new()
         .name("console-input".into())
         .spawn(move || {
-            for line in std::io::stdin().lock().lines() {
+            for line in input.lines() {
+                // Input that cannot be read, or is not text, ends it.
                 let Ok(line) = line else { break };
                 if sender.send(line).is_err() {
                     break;
                 }
             }
-        })?;
+        })
+        .expect("the console's input thread");
     serve(
         &mut conversation,
         |conversation| connection.poll(true, conversation),
-        &input,
-        &mut |line| println!("{line}"),
+        &lines,
+        out,
     );
-    Ok(())
 }
 
 /// Read commands from `input` and write the panel to `out` as it changes, with `poll` keeping the conversation's connection going, until `q` or the end of the input.
@@ -377,6 +383,65 @@ mod tests {
         let (out, _) = session(&mut conversation, &["nonsense"]);
         assert_eq!(out.matches(HELP).count(), 2);
         assert!(out.contains(&format!("+{}+", "-".repeat(COLUMNS))));
+    }
+
+    /// Run the console over `input`, returning what it writes.
+    fn terminal(input: impl BufRead + Send + 'static) -> Vec<String> {
+        let (conversation, connection) = crate::test_support::participant("Ada", None);
+        let mut lines = Vec::new();
+        run(conversation, connection, input, &mut |line| {
+            lines.push(line)
+        });
+        lines
+    }
+
+    #[test]
+    fn the_terminal_is_read_on_a_thread_of_its_own() {
+        let lines = terminal(std::io::Cursor::new(b"s\nq\n".to_vec()));
+        assert_eq!(lines[0], HELP);
+        assert!(lines.iter().any(|line| line == "(Join a space first.)"));
+    }
+
+    #[test]
+    fn input_that_is_not_text_ends_the_console() {
+        let lines = terminal(std::io::Cursor::new(b"\xff\nq\n".to_vec()));
+        assert_eq!(lines, [HELP]);
+    }
+
+    /// Input whose second line is typed only once the console has quit, which says when it is dropped.
+    struct Late {
+        lines: std::vec::IntoIter<&'static [u8]>,
+        typed: mpsc::Receiver<()>,
+        _dropped: mpsc::Sender<()>,
+    }
+
+    impl std::io::Read for Late {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let line = self
+                .lines
+                .next()
+                .expect("nothing is read after the late line");
+            if line == b"late\n" {
+                let _ = self.typed.recv();
+            }
+            buffer[..line.len()].copy_from_slice(line);
+            Ok(line.len())
+        }
+    }
+
+    #[test]
+    fn what_is_typed_after_quitting_is_not_kept() {
+        let (type_late, typed) = mpsc::channel();
+        let (_dropped, dropped) = mpsc::channel();
+        let late = Late {
+            lines: vec![&b"q\n"[..], &b"late\n"[..]].into_iter(),
+            typed,
+            _dropped,
+        };
+        assert_eq!(terminal(std::io::BufReader::new(late)), [HELP]);
+        type_late.send(()).unwrap();
+        // The input thread stops, dropping the input, once it cannot hand on what was typed.
+        assert!(dropped.recv().is_err());
     }
 
     #[test]

@@ -1,30 +1,30 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+//! The server-less window, and the spectator's: the window's contents, as `desktop_window.rs` shows them. See `design/desktop.md` and `design/spectator.md`.
+
 use crate::{
     graphics::Renderer,
+    pipewire_video::{self, Producer, Video},
     pointing::Ray,
     spectator_feed::Feed,
     spectator_view::{RenderInputs, SpectatorView},
     swarm::{CENTER, Swarm},
+    window::{Contents, Flow, Gpu, Input, Settings, Surface, Wake},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use glam::{Mat4, Vec2, Vec3};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use winit::{
-    application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize, Size},
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
+    event::{MouseButton, MouseScrollDelta},
+    keyboard::KeyCode,
 };
 
 const TITLE: &str =
     "Tomori | LMB attract · RMB orbit · wheel zoom · E environment · R reset · Space pause";
+const PAUSED_TITLE: &str = "Tomori [paused] — Space to resume";
+const SPECTATOR_TITLE: &str = "Tomori | Quest spectator (OBS)";
 const SPECTATOR_WIDTH: u32 = 1920;
 const SPECTATOR_HEIGHT: u32 = 1080;
 
@@ -38,274 +38,13 @@ fn initial_window_size(spectator: bool) -> Size {
     }
 }
 
-pub fn run(spectator: bool, pipewire: bool, feed: Option<Feed>) -> Result<()> {
-    let event_loop = EventLoop::new()?;
-    let mut app = App {
-        spectator,
-        pipewire,
-        feed,
-        ..Default::default()
-    };
-    event_loop.run_app(&mut app)?;
-    match app.error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-/// The backends a desktop window draws with: Vulkan, and Metal on macOS, which has no Vulkan driver of its own.
-const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::METAL);
-
-/// A window's surface and device, configured for sRGB output with vsync, as every desktop window uses them.
-pub(crate) struct WindowGpu {
-    pub surface: wgpu::Surface<'static>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub config: wgpu::SurfaceConfiguration,
-    pub adapter: wgpu::Adapter,
-}
-
-impl WindowGpu {
-    pub(crate) async fn new(window: Arc<Window>) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: BACKENDS,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let size = window.inner_size();
-        let surface = instance.create_surface(window)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
-            .await
-            .context("finding a desktop Vulkan or Metal adapter")?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("desktop device"),
-                ..Default::default()
-            })
-            .await?;
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .context("surface has no supported configuration")?;
-        let caps = surface.get_capabilities(&adapter);
-        config.format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(config.format);
-        config.present_mode = wgpu::PresentMode::AutoVsync;
-        surface.configure(&device, &config);
-        Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            adapter,
-        })
-    }
-
-    /// The samples per pixel to draw `format` with: 4, for multisample anti-aliasing, where the adapter supports it, or else 1.
-    pub(crate) fn samples(&self, format: wgpu::TextureFormat) -> u32 {
-        crate::graphics::supported_samples(&self.adapter, format, crate::graphics::SAMPLES)
-    }
-}
-
-/// Acquire the next frame, reconfiguring the surface if it is outdated; `None` when there is nothing to draw into this time.
-pub(crate) fn acquire(
-    surface: &wgpu::Surface<'static>,
-    device: &wgpu::Device,
-    config: &wgpu::SurfaceConfiguration,
-) -> Result<Option<wgpu::SurfaceTexture>> {
-    Ok(match surface.get_current_texture() {
-        wgpu::CurrentSurfaceTexture::Success(frame)
-        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
-        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-            surface.configure(device, config);
-            None
-        }
-        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => None,
-        other => anyhow::bail!("Could not acquire desktop frame: {other:?}"),
-    })
-}
-
-#[derive(Default)]
-struct App {
-    state: Option<State>,
-    error: Option<anyhow::Error>,
-    spectator: bool,
-    pipewire: bool,
-    feed: Option<Feed>,
-    next_video_frame: Option<Instant>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
-        let result = (|| {
-            let mut attributes = Window::default_attributes()
-                .with_title(if self.spectator {
-                    "Tomori | Quest spectator (OBS)"
-                } else {
-                    TITLE
-                })
-                .with_decorations(!self.spectator)
-                .with_inner_size(initial_window_size(self.spectator));
-            if self.spectator {
-                // Keep the content itself at least 1080p even when the desktop
-                // work area excludes a panel. Escape closes the borderless window.
-                attributes = attributes
-                    .with_min_inner_size(PhysicalSize::new(SPECTATOR_WIDTH, SPECTATOR_HEIGHT));
-            }
-            let window = Arc::new(event_loop.create_window(attributes)?);
-            pollster::block_on(State::new(
-                window,
-                self.spectator,
-                self.pipewire,
-                self.feed.take(),
-            ))
-        })();
-        match result {
-            Ok(state) => {
-                state.window.request_redraw();
-                if self.pipewire {
-                    self.next_video_frame = Some(Instant::now());
-                }
-                self.state = Some(state);
-            }
-            Err(error) => {
-                self.error = Some(error);
-                event_loop.exit();
-            }
-        }
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let Some(state) = &mut self.state else {
-            return;
-        };
-        if id != state.window.id() {
-            return;
-        }
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size),
-            WindowEvent::Occluded(occluded) => {
-                state.occluded = occluded;
-                state.last_frame = Instant::now();
-                if !occluded {
-                    state.window.request_redraw();
-                }
-            }
-            WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. } => {
-                state.attracting = false;
-                state.orbiting = false;
-            }
-            WindowEvent::CursorMoved { position, .. } if state.spectator.is_none() => {
-                let cursor = Vec2::new(position.x as f32, position.y as f32);
-                if state.orbiting {
-                    state.camera.orbit(cursor - state.cursor);
-                }
-                state.cursor = cursor;
-            }
-            WindowEvent::MouseInput {
-                state: pressed,
-                button,
-                ..
-            } if state.spectator.is_none() => {
-                let pressed = pressed == ElementState::Pressed;
-                match button {
-                    MouseButton::Left => state.attracting = pressed,
-                    MouseButton::Right => state.orbiting = pressed,
-                    _ => {}
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } if state.spectator.is_none() => {
-                let amount = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y * 0.12,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.002,
-                };
-                state.camera.zoom(amount);
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat =>
-            {
-                match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
-                    PhysicalKey::Code(KeyCode::KeyR) if state.spectator.is_none() => {
-                        state.swarm = Swarm::new()
-                    }
-                    PhysicalKey::Code(KeyCode::KeyE) if state.spectator.is_none() => {
-                        state
-                            .renderer
-                            .set_environment(state.renderer.environment().next());
-                        log::info!("Environment: {:?}", state.renderer.environment());
-                    }
-                    PhysicalKey::Code(KeyCode::Space) if state.spectator.is_none() => {
-                        state.paused = !state.paused;
-                        state.window.set_title(if state.paused {
-                            "Tomori [paused] — Space to resume"
-                        } else {
-                            TITLE
-                        });
-                    }
-                    _ => {}
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                if self.pipewire {
-                    // This mode is driven by the timer, even if the window is hidden.
-                    return;
-                }
-                if state.occluded || state.size.width == 0 || state.size.height == 0 {
-                    return;
-                }
-                if let Err(error) = state.draw() {
-                    self.error = Some(error);
-                    event_loop.exit();
-                    return;
-                }
-                state.window.request_redraw();
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(next) = self.next_video_frame else {
-            return;
-        };
-        let now = Instant::now();
-        if now >= next {
-            if let Some(state) = &mut self.state
-                && let Err(error) = state.draw()
-            {
-                self.error = Some(error);
-                event_loop.exit();
-                return;
-            }
-            // Do not catch up with bursts after stalls.
-            self.next_video_frame = Some(
-                Instant::now()
-                    + Duration::from_secs_f64(1.0 / f64::from(crate::pipewire_video::FPS)),
-            );
-        }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_video_frame.unwrap()));
-    }
-}
-
-struct State {
+/// The server-less window, where the mouse attracts and orbits the swarm; or, with a feed, the spectator's borderless window, following a participant in a live space; and, with a PipeWire producer, the spectator's video source with this window as its preview.
+pub(crate) struct Demo {
     renderer: Renderer,
-    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    window: Arc<Window>,
-    size: PhysicalSize<u32>,
+    width: u32,
+    height: u32,
     swarm: Swarm,
     camera: Camera,
     cursor: Vec2,
@@ -316,47 +55,42 @@ struct State {
     last_frame: Instant,
     first_frame: bool,
     spectator: Option<SpectatorView>,
-    video: Option<crate::pipewire_video::Video>,
+    video: Option<Video>,
+    /// When the PipeWire source draws next: it is driven by a timer, even while the window is hidden.
+    next_video_frame: Option<Instant>,
 }
 
-impl State {
-    async fn new(
-        window: Arc<Window>,
-        spectator: bool,
-        pipewire: bool,
-        feed: Option<Feed>,
-    ) -> Result<Self> {
-        let gpu = WindowGpu::new(window.clone()).await?;
-        let render_format = if pipewire {
-            crate::pipewire_video::FORMAT
+impl Demo {
+    /// The window for the spectator, as `spectator` says, or the server-less window.
+    pub fn settings(spectator: bool) -> Settings {
+        Settings {
+            title: if spectator { SPECTATOR_TITLE } else { TITLE },
+            // Escape closes the spectator's borderless window.
+            decorations: !spectator,
+            size: initial_window_size(spectator),
+            // Keep the content itself at least 1080p even when the desktop work area excludes a panel.
+            min_size: spectator
+                .then(|| PhysicalSize::new(SPECTATOR_WIDTH, SPECTATOR_HEIGHT).into()),
+        }
+    }
+
+    /// Show the spectator's view of `feed`, or the server-less swarm without one, drawn with `gpu`; and publish it through `producer` too, when there is one.
+    pub fn new(gpu: Gpu, feed: Option<Feed>, producer: Option<Producer>) -> Self {
+        let render_format = if producer.is_some() {
+            pipewire_video::FORMAT
         } else {
-            gpu.config.format
+            gpu.format
         };
         let samples = gpu.samples(render_format);
-        let WindowGpu {
-            surface,
-            device,
-            queue,
-            config,
-            adapter,
-        } = gpu;
-        let size = window.inner_size();
-        let video = if pipewire {
-            Some(crate::pipewire_video::Video::new(
-                &device,
-                Some(config.format),
-            )?)
+        let video = producer.map(|producer| Video::new(&gpu.device, Some(gpu.format), producer));
+        let (render_width, render_height) = if video.is_some() {
+            (pipewire_video::WIDTH, pipewire_video::HEIGHT)
         } else {
-            None
-        };
-        let (render_width, render_height) = if pipewire {
-            (crate::pipewire_video::WIDTH, crate::pipewire_video::HEIGHT)
-        } else {
-            (config.width, config.height)
+            (gpu.width, gpu.height)
         };
         let mut renderer = Renderer::with_samples(
-            &device,
-            &queue,
+            &gpu.device,
+            &gpu.queue,
             render_format,
             render_width,
             render_height,
@@ -364,15 +98,12 @@ impl State {
         );
         // The desktop window has no server, so it is never in a space and chooses its scenery itself.
         renderer.set_environment(crate::environment::Environment::initial());
-        let spectator = match (spectator, feed) {
-            (true, Some(feed)) => Some(SpectatorView::new(feed)),
-            _ => None,
-        };
+        let spectator = feed.map(SpectatorView::new);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
-            adapter.get_info().name,
-            config.width,
-            config.height
+            gpu.adapter.get_info().name,
+            gpu.width,
+            gpu.height
         );
         if spectator.is_some() {
             log::info!("Spectator: Esc closes the borderless window.");
@@ -381,17 +112,16 @@ impl State {
                 "Left mouse: attract; right drag: orbit; wheel: zoom; R: reset; Space: pause; Esc: quit."
             );
         }
-        Ok(Self {
+        let next_video_frame = video.as_ref().map(|_| Instant::now());
+        Self {
             renderer,
-            surface,
-            device,
-            queue,
-            config,
-            window,
-            size,
+            device: gpu.device,
+            queue: gpu.queue,
+            width: gpu.width,
+            height: gpu.height,
             swarm: Swarm::new(),
             camera: Camera::default(),
-            cursor: Vec2::new(size.width as f32, size.height as f32) * 0.5,
+            cursor: Vec2::new(gpu.width as f32, gpu.height as f32) * 0.5,
             attracting: false,
             orbiting: false,
             paused: false,
@@ -400,70 +130,57 @@ impl State {
             first_frame: true,
             spectator,
             video,
-        })
+            next_video_frame,
+        }
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.size = size;
+    /// Whether nothing drawn to the window would be seen.
+    fn hidden(&self) -> bool {
+        self.occluded || self.width == 0 || self.height == 0
+    }
+
+    fn resize(&mut self, width: u32, height: u32, surface: &mut dyn Surface) {
+        self.width = width;
+        self.height = height;
         self.last_frame = Instant::now();
-        if size.width == 0 || size.height == 0 {
+        if width == 0 || height == 0 {
             return;
         }
-        self.config.width = size.width;
-        self.config.height = size.height;
         if self.video.is_some() {
             log::info!(
-                "Spectator preview size: {}x{} physical pixels (PipeWire output remains {}x{})",
-                size.width,
-                size.height,
-                crate::pipewire_video::WIDTH,
-                crate::pipewire_video::HEIGHT
+                "Spectator preview size: {width}x{height} physical pixels (PipeWire output remains {}x{})",
+                pipewire_video::WIDTH,
+                pipewire_video::HEIGHT
             );
         } else if self.spectator.is_some() {
-            log::info!(
-                "Spectator render size: {}x{} physical pixels",
-                size.width,
-                size.height
-            );
+            log::info!("Spectator render size: {width}x{height} physical pixels");
         }
-        self.surface.configure(&self.device, &self.config);
+        surface.resize(width, height);
         if self.video.is_none() {
-            self.renderer.resize(&self.device, size.width, size.height);
+            self.renderer.resize(&self.device, width, height);
         }
-        self.window.request_redraw();
+        surface.request_redraw();
     }
 
-    fn draw(&mut self) -> Result<()> {
+    fn draw(&mut self, surface: &mut dyn Surface) -> Result<()> {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        let frame = if self.occluded || self.size.width == 0 || self.size.height == 0 {
+        let frame = if self.hidden() {
             None
         } else {
-            acquire(&self.surface, &self.device, &self.config)?
+            surface.acquire()?
         };
-        if frame.is_none() && self.video.is_none() {
-            return Ok(());
-        }
-        let size = if self.video.is_some() {
-            Vec2::new(
-                crate::pipewire_video::WIDTH as f32,
-                crate::pipewire_video::HEIGHT as f32,
-            )
-        } else {
-            Vec2::new(self.size.width as f32, self.size.height as f32)
-        };
-        let matrix = self.camera.view_projection(size.x / size.y);
-        let attractor = self
-            .attracting
-            .then(|| self.camera.attractor(self.cursor, size));
-        let target = match &self.video {
-            Some(video) => video.view.clone(),
-            None => frame
-                .as_ref()
-                .unwrap()
-                .texture
-                .create_view(&Default::default()),
+        let (target, size) = match (&self.video, &frame) {
+            (Some(video), _) => (
+                video.view.clone(),
+                Vec2::new(pipewire_video::WIDTH as f32, pipewire_video::HEIGHT as f32),
+            ),
+            (None, Some(frame)) => (
+                frame.clone(),
+                Vec2::new(self.width as f32, self.height as f32),
+            ),
+            (None, None) => return Ok(()),
         };
         if let Some(spectator) = &mut self.spectator {
             spectator.render(RenderInputs {
@@ -475,6 +192,10 @@ impl State {
                 aspect: size.x / size.y,
             });
         } else {
+            let matrix = self.camera.view_projection(size.x / size.y);
+            let attractor = self
+                .attracting
+                .then(|| self.camera.attractor(self.cursor, size));
             if !self.paused {
                 self.swarm.step(dt, attractor);
             }
@@ -493,31 +214,100 @@ impl State {
             if let Err(error) = video.capture(&self.device, &self.queue) {
                 log::error!("PipeWire output stopped: {error:#}; preview remains available");
             }
-            if let Some(frame) = &frame {
-                let preview = frame.texture.create_view(&Default::default());
-                let mut encoder =
-                    self.device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("spectator preview"),
-                        });
-                video.blitter.as_ref().expect("preview blitter").copy(
-                    &self.device,
-                    &mut encoder,
-                    &video.view,
-                    &preview,
-                );
-                self.queue.submit([encoder.finish()]);
+            if let Some(preview) = &frame {
+                video.preview(&self.device, &self.queue, preview);
             }
         }
-        if let Some(frame) = frame {
-            self.window.pre_present_notify();
-            self.queue.present(frame);
+        if frame.is_some() {
+            surface.present();
         }
         if self.first_frame {
             log::info!("Presented first desktop frame");
             self.first_frame = false;
         }
         Ok(())
+    }
+}
+
+impl Contents for Demo {
+    fn input(&mut self, input: Input, surface: &mut dyn Surface) -> Result<Flow> {
+        // The spectator's window only follows its feed; Escape closes it.
+        let interactive = self.spectator.is_none();
+        match input {
+            Input::Close => return Ok(Flow::Exit),
+            Input::Resized { width, height } => self.resize(width, height, surface),
+            Input::Occluded(occluded) => {
+                self.occluded = occluded;
+                self.last_frame = Instant::now();
+                if !occluded {
+                    surface.request_redraw();
+                }
+            }
+            Input::Focused(false) | Input::CursorLeft => {
+                self.attracting = false;
+                self.orbiting = false;
+            }
+            Input::CursorMoved(cursor) if interactive => {
+                if self.orbiting {
+                    self.camera.orbit(cursor - self.cursor);
+                }
+                self.cursor = cursor;
+            }
+            Input::Mouse { button, pressed } if interactive => match button {
+                MouseButton::Left => self.attracting = pressed,
+                MouseButton::Right => self.orbiting = pressed,
+                _ => {}
+            },
+            Input::Wheel(delta) if interactive => {
+                self.camera.zoom(match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * 0.12,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 * 0.002,
+                });
+            }
+            Input::Key {
+                code,
+                pressed: true,
+                repeat: false,
+            } => match code {
+                KeyCode::Escape => return Ok(Flow::Exit),
+                KeyCode::KeyR if interactive => self.swarm = Swarm::new(),
+                KeyCode::KeyE if interactive => {
+                    self.renderer
+                        .set_environment(self.renderer.environment().next());
+                    log::info!("Environment: {:?}", self.renderer.environment());
+                }
+                KeyCode::Space if interactive => {
+                    self.paused = !self.paused;
+                    surface.set_title(if self.paused { PAUSED_TITLE } else { TITLE });
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn redraw(&mut self, surface: &mut dyn Surface) -> Result<()> {
+        // The PipeWire source is driven by its timer, even while the window is hidden.
+        if self.video.is_some() || self.hidden() {
+            return Ok(());
+        }
+        self.draw(surface)?;
+        surface.request_redraw();
+        Ok(())
+    }
+
+    fn about_to_wait(&mut self, surface: &mut dyn Surface) -> Result<Wake> {
+        let Some(mut next) = self.next_video_frame else {
+            return Ok(Wake::Wait);
+        };
+        if Instant::now() >= next {
+            self.draw(surface)?;
+            // Do not catch up with bursts after stalls.
+            next = Instant::now() + Duration::from_secs_f64(1.0 / f64::from(pipewire_video::FPS));
+            self.next_video_frame = Some(next);
+        }
+        Ok(Wake::At(next))
     }
 }
 
@@ -584,6 +374,298 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        spectator_feed::SpectatorOptions,
+        test_support::{Nowhere, Silent},
+        window::test::{TestSurface, with_gpu},
+    };
+    use std::process::{Command, Stdio};
+    use winit::dpi::PhysicalPosition;
+
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    fn feed() -> Feed {
+        Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        )
+    }
+
+    /// A producer that reads every frame and publishes it nowhere, or that has already stopped if `stopped`.
+    fn producer(stopped: bool) -> Producer {
+        let mut command = Command::new(if stopped { "true" } else { "cat" });
+        command.stdin(Stdio::piped()).stdout(Stdio::null());
+        Producer::spawn(command).unwrap()
+    }
+
+    fn input(demo: &mut Demo, surface: &mut TestSurface, input: Input) -> Flow {
+        demo.input(input, surface).unwrap()
+    }
+
+    fn key(code: KeyCode) -> Input {
+        Input::Key {
+            code,
+            pressed: true,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn the_server_less_window_has_decorations_and_the_spectator_none() {
+        let window = Demo::settings(false);
+        assert_eq!(window.title, TITLE);
+        assert!(window.decorations);
+        assert_eq!(window.min_size, None);
+        let spectator = Demo::settings(true);
+        assert_eq!(spectator.title, SPECTATOR_TITLE);
+        assert!(!spectator.decorations);
+        assert_eq!(
+            spectator.min_size,
+            Some(Size::Physical(PhysicalSize::new(1920, 1080)))
+        );
+    }
+
+    #[test]
+    fn the_server_less_window_draws_whenever_it_is_seen() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let mut demo = Demo::new(gpu, None, None);
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!((surface.presented, surface.redraws), (1, 1));
+            assert_eq!(demo.about_to_wait(&mut surface).unwrap(), Wake::Wait);
+            // Hidden, it draws nothing, and asks to draw again once it is seen.
+            input(&mut demo, &mut surface, Input::Occluded(true));
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!((surface.presented, surface.redraws), (1, 1));
+            input(&mut demo, &mut surface, Input::Occluded(false));
+            assert_eq!(surface.redraws, 2);
+            // Minimised, too.
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Resized {
+                    width: 0,
+                    height: 48,
+                },
+            );
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!(surface.presented, 1);
+            assert!(surface.sizes.is_empty());
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Resized {
+                    width: 64,
+                    height: 48,
+                },
+            );
+            assert_eq!(surface.sizes, [(64, 48)]);
+            // Nothing to draw into this time: nothing is presented, and it asks again.
+            surface.available = false;
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!((surface.presented, surface.redraws), (1, 4));
+            surface.fail = true;
+            assert!(demo.redraw(&mut surface).is_err());
+        });
+    }
+
+    #[test]
+    fn the_mouse_orbits_zooms_and_attracts_and_keys_reset_change_and_pause() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let mut demo = Demo::new(gpu, None, None);
+            let start = Vec2::new(10.0, 10.0);
+            input(&mut demo, &mut surface, Input::CursorMoved(start));
+            assert_eq!(demo.cursor, start);
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Mouse {
+                    button: MouseButton::Right,
+                    pressed: true,
+                },
+            );
+            let yaw = demo.camera.yaw;
+            input(
+                &mut demo,
+                &mut surface,
+                Input::CursorMoved(Vec2::new(60.0, 10.0)),
+            );
+            assert_ne!(demo.camera.yaw, yaw);
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Mouse {
+                    button: MouseButton::Left,
+                    pressed: true,
+                },
+            );
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Mouse {
+                    button: MouseButton::Middle,
+                    pressed: true,
+                },
+            );
+            assert!(demo.attracting && demo.orbiting);
+            // Attracting while drawn moves the swarm toward the cursor.
+            demo.redraw(&mut surface).unwrap();
+            input(&mut demo, &mut surface, Input::Focused(true));
+            assert!(demo.attracting && demo.orbiting);
+            input(&mut demo, &mut surface, Input::Focused(false));
+            assert!(!demo.attracting && !demo.orbiting);
+            demo.attracting = true;
+            input(&mut demo, &mut surface, Input::CursorLeft);
+            assert!(!demo.attracting);
+            let distance = demo.camera.distance;
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Wheel(MouseScrollDelta::LineDelta(0.0, 1.0)),
+            );
+            assert!(demo.camera.distance < distance);
+            let distance = demo.camera.distance;
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Wheel(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                    0.0, -100.0,
+                ))),
+            );
+            assert!(demo.camera.distance > distance);
+            // R resets the swarm.
+            demo.swarm.step(0.5, Some(Vec3::ONE));
+            let moved = demo.swarm.agents[0].position;
+            input(&mut demo, &mut surface, key(KeyCode::KeyR));
+            assert_ne!(demo.swarm.agents[0].position, moved);
+            // E changes the environment.
+            let environment = demo.renderer.environment();
+            input(&mut demo, &mut surface, key(KeyCode::KeyE));
+            assert_eq!(demo.renderer.environment(), environment.next());
+            // Space pauses, and says so in the title; a paused swarm stays where it is.
+            input(&mut demo, &mut surface, key(KeyCode::Space));
+            assert!(demo.paused);
+            let still = demo.swarm.agents[0].position;
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!(demo.swarm.agents[0].position, still);
+            input(&mut demo, &mut surface, key(KeyCode::Space));
+            assert_eq!(surface.titles, [PAUSED_TITLE, TITLE]);
+            // Held and released keys, and other keys, do nothing.
+            for ignored in [
+                Input::Key {
+                    code: KeyCode::Space,
+                    pressed: true,
+                    repeat: true,
+                },
+                Input::Key {
+                    code: KeyCode::Space,
+                    pressed: false,
+                    repeat: false,
+                },
+                key(KeyCode::KeyQ),
+            ] {
+                assert_eq!(input(&mut demo, &mut surface, ignored), Flow::Continue);
+            }
+            assert!(!demo.paused);
+            assert_eq!(
+                input(&mut demo, &mut surface, key(KeyCode::Escape)),
+                Flow::Exit
+            );
+            assert_eq!(input(&mut demo, &mut surface, Input::Close), Flow::Exit);
+        });
+    }
+
+    #[test]
+    fn the_spectator_only_follows_its_feed() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let mut demo = Demo::new(gpu, Some(feed()), None);
+            let cursor = demo.cursor;
+            for ignored in [
+                Input::CursorMoved(Vec2::ZERO),
+                Input::Mouse {
+                    button: MouseButton::Left,
+                    pressed: true,
+                },
+                Input::Wheel(MouseScrollDelta::LineDelta(0.0, 1.0)),
+                key(KeyCode::KeyR),
+                key(KeyCode::KeyE),
+                key(KeyCode::Space),
+            ] {
+                input(&mut demo, &mut surface, ignored);
+            }
+            assert_eq!(demo.cursor, cursor);
+            assert!(!demo.attracting && !demo.paused);
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Resized {
+                    width: 64,
+                    height: 48,
+                },
+            );
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!(surface.presented, 1);
+            assert_eq!(
+                input(&mut demo, &mut surface, key(KeyCode::Escape)),
+                Flow::Exit
+            );
+        });
+    }
+
+    #[test]
+    fn the_pipewire_source_draws_on_its_timer_with_the_window_as_its_preview() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let mut demo = Demo::new(gpu, Some(feed()), Some(producer(false)));
+            // Redraws are left to the timer.
+            demo.redraw(&mut surface).unwrap();
+            assert_eq!(surface.presented, 0);
+            let next = demo.about_to_wait(&mut surface).unwrap();
+            assert_ne!(next, Wake::Wait);
+            assert_eq!(surface.presented, 1);
+            // Not yet due: nothing more is drawn.
+            assert_eq!(demo.about_to_wait(&mut surface).unwrap(), next);
+            assert_eq!(surface.presented, 1);
+            input(
+                &mut demo,
+                &mut surface,
+                Input::Resized {
+                    width: 64,
+                    height: 48,
+                },
+            );
+            assert_eq!(surface.sizes, [(64, 48)]);
+            // Hidden, it still publishes, without a preview.
+            input(&mut demo, &mut surface, Input::Occluded(true));
+            for _ in 0..3 {
+                std::thread::sleep(Duration::from_millis(40));
+                demo.about_to_wait(&mut surface).unwrap();
+            }
+            assert_eq!(surface.presented, 1);
+            // A frame that cannot be drawn stops the window.
+            input(&mut demo, &mut surface, Input::Occluded(false));
+            surface.fail = true;
+            demo.next_video_frame = Some(Instant::now());
+            assert!(demo.about_to_wait(&mut surface).is_err());
+        });
+    }
+
+    #[test]
+    fn a_stopped_pipewire_source_leaves_the_preview() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let mut demo = Demo::new(gpu, None, Some(producer(true)));
+            std::thread::sleep(Duration::from_millis(100));
+            for _ in 0..2 {
+                demo.about_to_wait(&mut surface).unwrap();
+                demo.next_video_frame = Some(Instant::now());
+            }
+            assert_eq!(surface.presented, 2);
+        });
+    }
 
     #[test]
     fn spectator_requests_1080p_physical_pixels() {
@@ -645,6 +727,12 @@ mod tests {
         assert_eq!(pointing.chosen, Some("swarm"));
         let corner = camera.ray(Vec2::ZERO, size);
         assert_eq!(pointer.update(corner, Some(0.0), [&target]).hit, None);
+    }
+
+    #[test]
+    fn a_cursor_that_points_nowhere_attracts_to_the_centre() {
+        let camera = Camera::default();
+        assert_eq!(camera.attractor(Vec2::NAN, Vec2::splat(100.0)), CENTER);
     }
 
     #[test]

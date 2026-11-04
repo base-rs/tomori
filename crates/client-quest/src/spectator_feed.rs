@@ -69,7 +69,7 @@ impl SwarmAnimation {
 }
 
 /// The options a spectator is started with.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpectatorOptions {
     /// A server address to connect to straight away.
     pub server: Option<String>,
@@ -108,8 +108,21 @@ pub struct Feed {
 
 impl Feed {
     /// Connect to the server in `options.server`, join `options.space`, and
-    /// follow `options.follow`.
+    /// follow `options.follow`, hearing the space through the desktop's speaker.
     pub fn new(options: SpectatorOptions) -> Self {
+        Self::with_audio(
+            options,
+            Box::new(crate::desktop_audio::Microphone),
+            Box::new(crate::desktop_audio::Speaker),
+        )
+    }
+
+    /// As [`Self::new`], with `capture` and `playback` for its microphone, which it never opens, and its speaker.
+    pub fn with_audio(
+        options: SpectatorOptions,
+        capture: Box<dyn capture::Capture>,
+        playback: Box<dyn playback::Playback>,
+    ) -> Self {
         let overrides = Overrides {
             server: options.server.clone(),
             name: None,
@@ -129,8 +142,8 @@ impl Feed {
             identity,
             store,
             Box::new(()),
-            Box::new(capture::Desktop),
-            Box::new(playback::Desktop),
+            capture,
+            playback,
             &mut conversation,
         );
         // The spectator's audience sees no interface, so it hears no cues; see `design/spectator.md`.

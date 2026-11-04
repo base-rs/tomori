@@ -23,7 +23,7 @@ const FRAME_BYTES: usize = (ROW_BYTES * HEIGHT) as usize;
 pub struct Video {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
-    pub blitter: Option<wgpu::util::TextureBlitter>,
+    blitter: Option<wgpu::util::TextureBlitter>,
     buffer: wgpu::Buffer,
     pending: Option<Receiver<Result<(), wgpu::BufferAsyncError>>>,
     producer: Producer,
@@ -31,8 +31,12 @@ pub struct Video {
 }
 
 impl Video {
-    pub fn new(device: &wgpu::Device, surface_format: Option<wgpu::TextureFormat>) -> Result<Self> {
-        let producer = Producer::start()?;
+    /// Frames for `producer` to publish, drawn into [`Self::view`], with a preview blitter for a window's `surface_format` if there is one.
+    pub fn new(
+        device: &wgpu::Device,
+        surface_format: Option<wgpu::TextureFormat>,
+        producer: Producer,
+    ) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PipeWire spectator 1080p"),
             size: extent(),
@@ -53,7 +57,7 @@ impl Video {
             mapped_at_creation: false,
         });
         log::info!("PipeWire prototype: tomori-spectator, RGBA {WIDTH}x{HEIGHT} up to {FPS} fps");
-        Ok(Self {
+        Self {
             texture,
             view,
             blitter: surface_format.map(|format| wgpu::util::TextureBlitter::new(device, format)),
@@ -61,7 +65,23 @@ impl Video {
             pending: None,
             producer,
             failed: false,
-        })
+        }
+    }
+
+    /// Copy the latest frame into a window's `target`, scaled to fit, as its preview.
+    ///
+    /// # Panics
+    ///
+    /// If the video was made without a window's surface format.
+    pub fn preview(&self, device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::TextureView) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("spectator preview"),
+        });
+        self.blitter
+            .as_ref()
+            .expect("a preview blitter, for a window's surface format")
+            .copy(device, &mut encoder, &self.view, target);
+        queue.submit([encoder.finish()]);
     }
 
     /// Poll the previous readback and enqueue the latest texture if possible.
@@ -79,17 +99,11 @@ impl Video {
     }
 
     fn try_capture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<()> {
-        if let Some(status) = self
-            .producer
-            .child
-            .try_wait()
-            .context("checking GStreamer")?
-        {
-            bail!("GStreamer exited with {status}");
+        if let Some(stopped) = stopped(self.producer.child.try_wait()) {
+            bail!(stopped);
         }
-        device
-            .poll(wgpu::PollType::Poll)
-            .context("polling GPU readback")?;
+        // Polling without waiting reports no error: there is no submission to wait for, nor a timeout.
+        let _ = device.poll(wgpu::PollType::Poll);
         if let Some(pending) = &self.pending {
             match pending.try_recv() {
                 Ok(Ok(())) => {
@@ -97,7 +111,7 @@ impl Video {
                         .buffer
                         .slice(..)
                         .get_mapped_range()
-                        .context("reading mapped GPU frame")?;
+                        .expect("the readback buffer is mapped once its callback succeeds");
                     let frame = pack_rows(
                         &mapped,
                         ROW_BYTES as usize,
@@ -112,7 +126,7 @@ impl Video {
                 Ok(Err(error)) => bail!("GPU readback failed: {error}"),
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    bail!("GPU readback callback disconnected")
+                    unreachable!("wgpu calls every mapping callback once")
                 }
             }
         }
@@ -143,6 +157,15 @@ impl Video {
     }
 }
 
+/// Why GStreamer has stopped, from what waiting for it without blocking says, or `None` while it runs.
+fn stopped(status: std::io::Result<Option<std::process::ExitStatus>>) -> Option<String> {
+    match status {
+        Ok(None) => None,
+        Ok(Some(status)) => Some(format!("GStreamer exited with {status}")),
+        Err(error) => Some(format!("Cannot check GStreamer: {error}")),
+    }
+}
+
 fn extent() -> wgpu::Extent3d {
     wgpu::Extent3d {
         width: WIDTH,
@@ -163,35 +186,24 @@ fn pack_rows(bytes: &[u8], row: usize, stride: usize, height: usize) -> Vec<u8> 
     packed
 }
 
-struct Producer {
+/// The GStreamer process that publishes the frames as a PipeWire node, and the thread that writes them to it.
+pub struct Producer {
     child: Child,
     sender: Option<SyncSender<Vec<u8>>>,
     writer: Option<JoinHandle<()>>,
 }
 
 impl Producer {
-    fn start() -> Result<Self> {
+    /// Start `gst-launch-1.0` with PipeWire's sink.
+    pub fn start() -> Result<Self> {
         let mut command = gstreamer_command();
-        // A killed spectator cannot run Drop. Linux must also tear down its
-        // PipeWire child on parent death, including when a consumer is absent.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::process::CommandExt;
-            let parent = std::process::id() as libc::pid_t;
-            // SAFETY: this pre-exec closure only calls async-signal-safe libc
-            // functions and does not access shared Rust state.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::getppid() != parent {
-                        return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-                    }
-                    Ok(())
-                });
-            }
-        }
+        // A killed spectator cannot run Drop, so the PipeWire child must also end with it, including when a consumer is absent.
+        crate::child_process::end_with_parent(&mut command);
+        Self::spawn(command)
+    }
+
+    /// Start `command`, which reads the frames from its standard input, as [`gstreamer_command`] does.
+    pub fn spawn(mut command: Command) -> Result<Self> {
         let child = command
             .spawn()
             .context("starting gst-launch-1.0 (install GStreamer and its PipeWire plugin)")?;
@@ -270,6 +282,7 @@ impl Drop for Producer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tomori_environment_sky::test_gpu;
 
     #[test]
     fn frame_layout_is_tightly_packed_rgba_1080p() {
@@ -278,6 +291,97 @@ mod tests {
         assert_eq!(PADDED_ROW_BYTES, ROW_BYTES);
         assert_eq!(FRAME_BYTES, 8_294_400);
         assert_eq!(FORMAT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    }
+
+    fn producer(program: &str, arguments: &[&str]) -> Producer {
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
+        Producer::spawn(command).unwrap()
+    }
+
+    /// Capture `count` times, a little apart so that each readback completes, returning the first failure.
+    fn capture(video: &mut Video, gpu: &test_gpu::Gpu, count: usize) -> Result<()> {
+        for _ in 0..count {
+            video.capture(&gpu.device, &gpu.queue)?;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn frames_are_read_back_and_published() {
+        test_gpu::with(|gpu| {
+            let mut video = Video::new(&gpu.device, None, producer("cat", &[]));
+            capture(&mut video, &gpu, 4).unwrap();
+            assert!(!video.failed);
+        });
+    }
+
+    #[test]
+    fn publishing_stops_when_gstreamer_does() {
+        test_gpu::with(|gpu| {
+            let mut video = Video::new(&gpu.device, None, producer("true", &[]));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let error = capture(&mut video, &gpu, 1).unwrap_err();
+            assert!(error.to_string().starts_with("GStreamer exited with"));
+            // Stopped, it publishes nothing more and reports nothing more.
+            capture(&mut video, &gpu, 1).unwrap();
+            assert!(video.failed);
+        });
+    }
+
+    #[test]
+    fn publishing_stops_when_gstreamer_stops_reading() {
+        test_gpu::with(|gpu| {
+            // GStreamer that closes its input but keeps running.
+            let closes = producer("sh", &["-c", "exec 0<&-; exec sleep 10"]);
+            let mut video = Video::new(&gpu.device, None, closes);
+            let error = capture(&mut video, &gpu, 8).unwrap_err();
+            assert_eq!(error.to_string(), "GStreamer video writer disconnected");
+        });
+    }
+
+    #[test]
+    fn a_readback_still_on_its_way_is_waited_for_and_a_failed_one_stops_publishing() {
+        test_gpu::with(|gpu| {
+            let mut video = Video::new(&gpu.device, None, producer("cat", &[]));
+            let (sender, pending) = mpsc::channel();
+            video.pending = Some(pending);
+            video.capture(&gpu.device, &gpu.queue).unwrap();
+            sender.send(Err(wgpu::BufferAsyncError)).unwrap();
+            let error = video.capture(&gpu.device, &gpu.queue).unwrap_err();
+            assert!(error.to_string().starts_with("GPU readback failed"));
+        });
+    }
+
+    #[test]
+    fn gstreamer_that_cannot_be_started_or_written_to_is_reported() {
+        let error = Producer::spawn(Command::new("/nonexistent/gst-launch-1.0"))
+            .map(drop)
+            .expect_err("nothing to start");
+        assert!(error.to_string().starts_with("starting gst-launch-1.0"));
+        let error = Producer::spawn(Command::new("true"))
+            .map(drop)
+            .expect_err("no input to write to");
+        assert_eq!(error.to_string(), "opening GStreamer stdin");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gstreamer_is_stopped_when_it_exits_or_cannot_be_checked() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(stopped(Ok(None)), None);
+        assert_eq!(
+            stopped(Ok(Some(std::process::ExitStatus::from_raw(256)))).as_deref(),
+            Some("GStreamer exited with exit status: 1")
+        );
+        assert_eq!(
+            stopped(Err(std::io::Error::other("no child"))).as_deref(),
+            Some("Cannot check GStreamer: no child")
+        );
     }
 
     #[test]
@@ -305,7 +409,7 @@ mod tests {
     fn bounded_channel_drops_when_full() {
         let (tx, _rx) = mpsc::sync_channel(1);
         assert!(tx.try_send(vec![1]).is_ok());
-        assert!(matches!(tx.try_send(vec![2]), Err(TrySendError::Full(_))));
+        assert_eq!(tx.try_send(vec![2]), Err(TrySendError::Full(vec![2])));
     }
 
     #[test]

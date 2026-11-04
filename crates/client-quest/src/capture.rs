@@ -228,93 +228,55 @@ fn drain<S: InputStream>(
     Err("The microphone kept delivering audio after it was stopped.".into())
 }
 
+/// The protocol's range of sample rates.
 #[cfg(not(target_os = "android"))]
-pub use desktop::Desktop;
+const RATES: std::ops::RangeInclusive<u32> = 8_000..=48_000;
 
-/// The default input device, through cpal.
+/// The nearest rate to a device's `rate` that the protocol carries.
 #[cfg(not(target_os = "android"))]
-mod desktop {
-    use super::{Capture, Failed, Recording, Samples, downmix};
-    use cpal::{
-        ErrorKind, FromSample, SampleFormat, SizedSample, StreamConfig,
-        traits::{DeviceTrait, HostTrait, StreamTrait},
-    };
+pub fn protocol_rate(rate: u32) -> u32 {
+    rate.clamp(*RATES.start(), *RATES.end())
+}
 
-    pub struct Desktop;
+/// Mixes a desktop input stream's interleaved samples, in its own format, down to mono samples between -1 and 1. Its buffers are kept between callbacks.
+#[cfg(not(target_os = "android"))]
+pub struct Mono {
+    channels: usize,
+    converted: Vec<f32>,
+    mono: Vec<f32>,
+}
 
-    /// The protocol's range of sample rates.
-    const RATES: std::ops::RangeInclusive<u32> = 8_000..=48_000;
-
-    impl Capture for Desktop {
-        fn open(&mut self, samples: Samples, failed: Failed) -> Result<Recording, String> {
-            let started = std::time::Instant::now();
-            let device = cpal::default_host()
-                .default_input_device()
-                .ok_or("No microphone is available.")?;
-            let supported = device
-                .default_input_config()
-                .map_err(|error| format!("Cannot use the microphone: {error}"))?;
-            let mut config: StreamConfig = supported.config();
-            if !RATES.contains(&config.sample_rate) {
-                // Ask for the nearest rate the protocol carries; the device refuses it if it cannot.
-                config.sample_rate = config.sample_rate.clamp(*RATES.start(), *RATES.end());
-            }
-            let stream = match supported.sample_format() {
-                SampleFormat::F32 => build::<f32>(&device, &config, samples, failed),
-                SampleFormat::I16 => build::<i16>(&device, &config, samples, failed),
-                SampleFormat::I32 => build::<i32>(&device, &config, samples, failed),
-                SampleFormat::U16 => build::<u16>(&device, &config, samples, failed),
-                format => {
-                    return Err(format!(
-                        "The microphone's {format} samples are not supported."
-                    ));
-                }
-            }?;
-            stream
-                .play()
-                .map_err(|error| format!("Cannot start the microphone: {error}"))?;
-            log::info!(
-                "Microphone opened at {} Hz, {} channels, in {:?}",
-                config.sample_rate,
-                config.channels,
-                started.elapsed()
-            );
-            Ok(Recording::new(config.sample_rate, stream))
+#[cfg(not(target_os = "android"))]
+impl Mono {
+    pub fn new(channels: u16) -> Self {
+        Self {
+            channels: usize::from(channels),
+            converted: Vec::new(),
+            mono: Vec::new(),
         }
     }
 
-    fn build<T>(
-        device: &cpal::Device,
-        config: &StreamConfig,
-        mut samples: Samples,
-        failed: Failed,
-    ) -> Result<cpal::Stream, String>
+    /// `data`, `channels` samples per frame, as mono.
+    pub fn mix<T: cpal::Sample>(&mut self, data: &[T]) -> &[f32]
     where
-        T: SizedSample,
-        f32: FromSample<T>,
+        f32: cpal::FromSample<T>,
     {
-        let channels = usize::from(config.channels);
-        let (mut converted, mut mono) = (Vec::new(), Vec::new());
-        device
-            .build_input_stream::<T, _, _>(
-                *config,
-                move |data: &[T], _| {
-                    converted.clear();
-                    converted.extend(data.iter().map(|sample| sample.to_sample::<f32>()));
-                    downmix(&converted, channels, &mut mono);
-                    samples(&mono);
-                },
-                move |error: cpal::Error| match error.kind() {
-                    // The stream keeps capturing without a gap.
-                    ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => {
-                        log::info!("Microphone: {error}");
-                    }
-                    // Anything else, including an overrun, loses audio, which must not be sent as if whole.
-                    _ => failed(format!("The microphone failed: {error}")),
-                },
-                None,
-            )
-            .map_err(|error| format!("Cannot open the microphone: {error}"))
+        self.converted.clear();
+        self.converted
+            .extend(data.iter().map(|sample| sample.to_sample::<f32>()));
+        downmix(&self.converted, self.channels, &mut self.mono);
+        &self.mono
+    }
+}
+
+/// Handle a desktop input stream's `error`: some leave it capturing without a gap, and anything else, including an overrun, loses audio, which must not be sent as if whole, and so is `failed`.
+#[cfg(not(target_os = "android"))]
+pub fn input_failed(error: &cpal::Error, failed: &Failed) {
+    match error.kind() {
+        cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
+            log::info!("Microphone: {error}");
+        }
+        _ => failed(format!("The microphone failed: {error}")),
     }
 }
 
@@ -635,6 +597,8 @@ mod tests {
         Active, CONNECTION_LOST, Capture, Failed, InputStream, MAX_DRAIN_READS, Recording, Samples,
         downmix, run_capture,
     };
+    #[cfg(not(target_os = "android"))]
+    use super::{Mono, input_failed, protocol_rate};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -912,6 +876,39 @@ mod tests {
         let (result, delivered) = run(device, &stop, None, || {});
         assert!(result.unwrap_err().contains("kept delivering"));
         assert_eq!(delivered.len(), MAX_DRAIN_READS);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_rates_are_brought_within_the_protocol() {
+        assert_eq!(protocol_rate(4_000), 8_000);
+        assert_eq!(protocol_rate(16_000), 16_000);
+        assert_eq!(protocol_rate(96_000), 48_000);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_input_in_any_format_is_mixed_to_mono() {
+        let mut mono = Mono::new(2);
+        assert_eq!(mono.mix(&[1.0_f32, 0.0, -0.5, -0.5]), [0.5, -0.5]);
+        assert_eq!(mono.mix(&[i16::MIN, i16::MIN]), [-1.0]);
+        let mut single = Mono::new(1);
+        assert_eq!(single.mix(&[0_u16]), [-1.0]);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn desktop_input_errors_that_lose_audio_fail_the_capture() {
+        let reported = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = reported.clone();
+        let failed: Failed = Box::new(move |error| sink.lock().unwrap().push(error));
+        input_failed(&cpal::Error::new(cpal::ErrorKind::DeviceChanged), &failed);
+        input_failed(&cpal::Error::new(cpal::ErrorKind::RealtimeDenied), &failed);
+        assert!(reported.lock().unwrap().is_empty());
+        input_failed(&cpal::Error::new(cpal::ErrorKind::Xrun), &failed);
+        let reported = reported.lock().unwrap();
+        assert_eq!(reported.len(), 1);
+        assert!(reported[0].starts_with("The microphone failed: "));
     }
 
     #[test]
