@@ -244,20 +244,54 @@ mod tests {
     fn rejects_unknown_kinds_oversized_frames_and_truncation() {
         let mut decoder = FrameDecoder::new();
         decoder.push(&[9, 0, 0, 0, 0]);
-        assert!(matches!(
-            decoder.next_frame(),
-            Err(FrameError::UnknownKind(9))
-        ));
+        assert_eq!(
+            decoder.next_frame().unwrap_err().to_string(),
+            "unknown frame kind 9"
+        );
 
         let mut decoder = FrameDecoder::new();
         decoder.push(&[0]);
         decoder.push(&((MAX_FRAME_BYTES as u32 + 1).to_le_bytes()));
-        assert!(matches!(decoder.next_frame(), Err(FrameError::TooLarge(_))));
+        assert_eq!(
+            decoder.next_frame().unwrap_err().to_string(),
+            format!("frame of {} bytes exceeds the limit", MAX_FRAME_BYTES + 1)
+        );
 
         let mut decoder = FrameDecoder::new();
         decoder.push(&[0, 4, 0, 0, 0, b'{']);
         assert!(decoder.next_frame().unwrap().is_none());
-        assert!(matches!(decoder.finish(), Err(FrameError::Truncated)));
+        assert_eq!(
+            decoder.finish().unwrap_err().to_string(),
+            "connection ended inside a frame"
+        );
+    }
+
+    #[test]
+    fn a_long_lived_decoder_discards_consumed_input() {
+        let frame = Frame {
+            kind: FrameKind::Audio,
+            payload: vec![7; 1024],
+        };
+        let encoded = frame.encode();
+        let mut decoder = FrameDecoder::new();
+        // Each push leaves half a frame behind, so the buffer is never wholly consumed and is compacted only once the consumed prefix passes 64 KiB.
+        let (first, second) = encoded.split_at(encoded.len() / 2);
+        decoder.push(first);
+        let mut decoded = 0;
+        for _ in 0..100 {
+            decoder.push(second);
+            decoder.push(first);
+            while let Some(next) = decoder.next_frame().unwrap() {
+                assert_eq!(next, frame);
+                decoded += 1;
+            }
+            assert!(decoder.offset <= 64 * 1024 + encoded.len());
+            assert!(decoder.buffer.len() <= 64 * 1024 + 2 * encoded.len());
+        }
+        assert_eq!(decoded, 100);
+        decoder.push(second);
+        assert_eq!(decoder.next_frame().unwrap(), Some(frame));
+        decoder.finish().unwrap();
     }
 
     #[test]
@@ -267,11 +301,12 @@ mod tests {
             payload: vec![b' '; MAX_FRAME_BYTES + 1],
         };
         let mut output = vec![1, 2, 3];
-        assert!(matches!(
-            frame.try_encode_into(&mut output),
-            Err(FrameError::TooLarge(length)) if length == MAX_FRAME_BYTES + 1
-        ));
+        assert_eq!(
+            frame.try_encode_into(&mut output).unwrap_err().to_string(),
+            format!("frame of {} bytes exceeds the limit", MAX_FRAME_BYTES + 1)
+        );
         assert_eq!(output, [1, 2, 3]);
+        assert!(frame.try_encode().is_err());
         assert!(std::panic::catch_unwind(|| frame.encode()).is_err());
 
         let largest = Frame {
@@ -287,9 +322,34 @@ mod tests {
     #[test]
     fn kind_mismatches_are_errors() {
         let frame = Frame::server(&ServerMessage::Left);
-        assert!(matches!(
-            frame.to_audio(),
-            Err(FrameError::UnexpectedKind(FrameKind::Control))
-        ));
+        assert_eq!(
+            frame.to_audio().unwrap_err().to_string(),
+            "unexpected Control frame"
+        );
+        let audio = Frame {
+            kind: FrameKind::Audio,
+            payload: Vec::new(),
+        };
+        assert_eq!(
+            audio.to_server_message().unwrap_err().to_string(),
+            "unexpected Audio frame"
+        );
+        assert_eq!(
+            audio.to_audio().unwrap_err().to_string(),
+            "invalid audio frame: header is truncated"
+        );
+    }
+
+    #[test]
+    fn malformed_control_messages_are_errors() {
+        let frame = Frame {
+            kind: FrameKind::Control,
+            payload: b"{\"type\":\"no_such_message\"}".to_vec(),
+        };
+        let error = frame.to_client_message().unwrap_err().to_string();
+        assert!(
+            error.starts_with("invalid control message: unknown variant `no_such_message`"),
+            "{error}"
+        );
     }
 }

@@ -116,6 +116,14 @@ mod tests {
                 joints
             },
         };
+        assert!(hand.valid());
+        assert!(Hand::default().valid());
+        let mut invalid = hand;
+        invalid.joints[2] = Some(Joint {
+            position: [0.0; 3],
+            radius: 1.0,
+        });
+        assert!(!invalid.valid());
         let json = serde_json::to_string(&hand).unwrap();
         let back: Hand = serde_json::from_str(&json).unwrap();
         assert_eq!(hand, back);

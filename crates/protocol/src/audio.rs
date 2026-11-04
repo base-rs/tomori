@@ -145,6 +145,10 @@ mod tests {
         let bytes = frame().encode();
         assert_eq!(bytes.len(), AUDIO_HEADER_BYTES + 6);
         assert_eq!(AudioFrame::decode(&bytes).unwrap(), frame());
+        for gate in [Gate::Off, Gate::Live, Gate::Agent] {
+            let frame = AudioFrame { gate, ..frame() };
+            assert_eq!(AudioFrame::decode(&frame.encode()).unwrap(), frame);
+        }
     }
 
     #[test]
@@ -164,5 +168,18 @@ mod tests {
         let mut wrong = bytes;
         wrong[12..16].copy_from_slice(&1u32.to_le_bytes());
         assert_eq!(AudioFrame::decode(&wrong), Err(AudioError::SampleRate(1)));
+    }
+
+    #[test]
+    fn errors_describe_what_is_wrong() {
+        for (error, message) in [
+            (AudioError::Truncated, "header is truncated"),
+            (AudioError::Version(2), "unsupported version 2"),
+            (AudioError::Gate(3), "unknown gate 3"),
+            (AudioError::OddLength, "sample data has an odd length"),
+            (AudioError::SampleRate(1), "unsupported sample rate 1"),
+        ] {
+            assert_eq!(error.to_string(), message);
+        }
     }
 }

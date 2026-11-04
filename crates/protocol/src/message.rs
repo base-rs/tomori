@@ -536,13 +536,17 @@ mod tests {
             "type": "create_space", "title": "Tomori", "backend": "fake", "directory": "/tmp",
         }))
         .unwrap();
-        assert!(matches!(
+        assert_eq!(
             create,
             ClientMessage::CreateSpace {
+                title: "Tomori".into(),
+                backend: "fake".into(),
+                directory: "/tmp".into(),
+                session: None,
                 environment: None,
-                ..
+                instructions: None,
             }
-        ));
+        );
         let json = serde_json::to_value(ClientMessage::CreateSpace {
             title: "Tomori".into(),
             backend: "fake".into(),
