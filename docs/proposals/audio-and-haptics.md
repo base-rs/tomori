@@ -62,7 +62,7 @@ Everything below is from `origin/main` at `a55e9bb`.
 ### How sources are mixed
 
 - **One mono mix.**
-  - `client::playback::Mixer` (`crates/client/src/playback/mixer.rs`) gives each received source its own jitter buffer. The sources are participants by number, `AGENT_SOURCE` and `REPLAY_SOURCE`.
+  - `tomori_client::playback::Mixer` (`crates/client/src/playback/mixer.rs`) gives each received source its own jitter buffer. The sources are participants by number, `AGENT_SOURCE` and `REPLAY_SOURCE`.
   - It sums the sources at unity gain into **one mono `i16` stream** at the device rate, then a peak limiter (`playback/limiter.rs`, ceiling 32 000, 100 ms release) converts it.
   - The only local gains are the agent's volume and mute (`set_agent_volume`, `set_agent_muted`), which also apply to replays.
   - Each source's level is measured before its gain, for the speaking indicator (`source_level`).
@@ -428,7 +428,7 @@ The environment framework (PR #90) gives environments **media streams** (#84). T
 | Stage | Change |
 | --- | --- |
 | MVP | None |
-| 2 | `ServerMessage::Speech.speaker: Option<Speaker>` (additive). Worker announcements in `crates/server/src/voice.rs`'s pacer, with a speaker id per segment through `speech::Speech`. A fixed level gain on synthesized speech |
+| 2 | `ServerMessage::Speech.speaker: Option<Speaker>` (additive). Worker announcements in `crates/server/src/voice.rs`'s pacer, with a speaker id per segment through `tomori_speech::Speech`. A fixed level gain on synthesized speech |
 | 3 | Environment media streams (#84), designed there; this proposal only consumes them |
 
 ## Test strategy

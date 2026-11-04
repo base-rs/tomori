@@ -28,7 +28,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use protocol::AudioFrame;
+use tomori_protocol::AudioFrame;
 
 pub use offline::{MAX_UTTERANCE, OfflineRecognition, OfflineRecognizer, OfflineUtterance};
 pub use punctuation::{

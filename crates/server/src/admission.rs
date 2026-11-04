@@ -134,7 +134,7 @@ impl Handler for Admitted<'_> {
         let path = request.path.as_ref().map_or("", |path| path.as_str());
         let path = path.split('?').next().unwrap_or_default();
         // A posted form's body is read in the handler, so the request stays under the request timeout until it is answered: a peer that trickles a form cannot hold the connection. Only `/connect` streams for as long as it lasts, under the keepalive sweep instead.
-        if request.method == Method::POST && path != protocol::CONNECT_PATH {
+        if request.method == Method::POST && path != tomori_protocol::CONNECT_PATH {
             self.watch.set(Idle::Unseen);
         } else {
             let path: String = path.chars().take(LOGGED_PATH).collect();

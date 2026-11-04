@@ -11,17 +11,17 @@
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
-use backend::{
+use tomori_backend::{
     AnswerValue, Backend, Capabilities, Decision, Event, Prompt, Result, Session, SessionSpec,
     SessionSummary, Snapshot,
 };
-use protocol::BackendInfo;
+use tomori_protocol::BackendInfo;
 
 #[cfg(feature = "fake")]
 use crate::fake::{FakeBackend, FakeSession};
 
 #[cfg(feature = "opencode")]
-use backend_opencode::{OpenCode, OpenCodeSession};
+use tomori_backend_opencode::{OpenCode, OpenCodeSession};
 
 /// One of the backends compiled into this server.
 pub enum AnyBackend {

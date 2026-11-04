@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The servers offered for connection, in order of preference.
-use discovery::Servers;
-use protocol::{Attention, PROTOCOL_VERSION};
+use tomori_discovery::Servers;
+use tomori_protocol::{Attention, PROTOCOL_VERSION};
 
 /// A server on the PC reached over USB, with `adb reverse tcp:8765 tcp:8765`.
 pub const USB: &str = "127.0.0.1:8765";
@@ -62,7 +62,7 @@ impl Choice {
     }
 
     /// A discovered server, with what it advertises.
-    fn discovered(server: &discovery::Server, address: String, source: Source) -> Self {
+    fn discovered(server: &tomori_discovery::Server, address: String, source: Source) -> Self {
         Self {
             instance: Some(server.instance.clone()),
             spaces: server.spaces,
@@ -214,7 +214,7 @@ pub fn automatic(choices: &[Choice]) -> Option<&Choice> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discovery::{Event, Server};
+    use tomori_discovery::{Event, Server};
 
     fn server(instance: &str, name: &str, address: &str, protocol: Option<u32>) -> Server {
         Server {
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(summary(&choices), [(USB, Source::Usb, true)]);
         assert_eq!(
             USB.rsplit_once(':').unwrap().1,
-            protocol::DEFAULT_PORT.to_string()
+            tomori_protocol::DEFAULT_PORT.to_string()
         );
     }
 

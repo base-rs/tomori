@@ -403,7 +403,7 @@ fn resamples_to_sixteen_kilohertz() {
         let _ = sender.send(event);
     });
     utterance.push_frame(&AudioFrame {
-        gate: protocol::Gate::Agent,
+        gate: tomori_protocol::Gate::Agent,
         source: 0,
         sequence: 0,
         timestamp: 0,

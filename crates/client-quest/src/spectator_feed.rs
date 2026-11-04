@@ -23,19 +23,19 @@ use crate::{
     swarm::{CENTER, Swarm},
 };
 use glam::{Mat4, Quat, Vec3};
-use protocol::{Hand, ServerMessage};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Instant,
 };
+use tomori_protocol::{Hand, ServerMessage};
 
 /// A participant's latest presence report, as relayed by the server.
 #[derive(Clone)]
 struct ParticipantPresence {
-    head: protocol::Pose,
-    left: Option<protocol::Pose>,
-    right: Option<protocol::Pose>,
+    head: tomori_protocol::Pose,
+    left: Option<tomori_protocol::Pose>,
+    right: Option<tomori_protocol::Pose>,
     hands: Option<[Option<Hand>; 2]>,
 }
 
@@ -325,7 +325,7 @@ impl Feed {
         self.scene.update(root, workspace, dt);
 
         // Convert protocol poses to controller poses for the frame.
-        let to_pose = |p: Option<protocol::Pose>| {
+        let to_pose = |p: Option<tomori_protocol::Pose>| {
             p.map(|p| Pose {
                 position: p.position,
                 orientation: p.orientation,
@@ -374,8 +374,8 @@ impl Feed {
 mod tests {
     use super::*;
     use crate::server_choice::{Choice, Source};
-    use client::{ConnectionState, Event};
-    use protocol::{Activity, SpaceState};
+    use tomori_client::{ConnectionState, Event};
+    use tomori_protocol::{Activity, SpaceState};
 
     #[test]
     fn frames_follow_the_joined_spaces_activity() {
@@ -386,7 +386,7 @@ mod tests {
             .apply(Event::State(ConnectionState::Connected {
                 source: 1,
                 server: "Test".into(),
-                role: protocol::ConnectionRole::Visitor,
+                role: tomori_protocol::ConnectionRole::Visitor,
                 certificate: None,
                 backends: vec![],
                 roots: vec![],

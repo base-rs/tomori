@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use protocol::{QueueEntry, QueueState};
+use tomori_protocol::{QueueEntry, QueueState};
 
 /// Finished entries kept visible after delivery or failure.
 const FINISHED_LIMIT: usize = 8;

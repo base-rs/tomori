@@ -13,8 +13,8 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use glam::{Quat, Vec3};
-use protocol::{Activity, Attention};
 use std::f32::consts::{FRAC_PI_4, TAU};
+use tomori_protocol::{Activity, Attention};
 
 /// The most cubes arrival adds to the scene.
 pub const MAX_CUBES: usize = 2048;

@@ -5,7 +5,7 @@
 //!
 //! This is free of rendering code: [`rows`] lays out a [`Status`] that the conversation gives.
 
-use protocol::Activity;
+use tomori_protocol::Activity;
 
 use crate::ui_text::{Row, Span, Style, cut};
 

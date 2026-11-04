@@ -8,7 +8,7 @@
 //! - **Live** listeners hear live speech, and have heard everything recorded so far.
 //! - **Unreported** listeners hear live speech too, but their client has not yet said whether it is listening. A client that never reports engagement, such as an older client or the spectator, stays at the live edge, as before.
 //! - **Away** listeners are in the space but not listening, and **absent** ones have left it. Each keeps the position up to which it heard.
-//! - **Streaming** listeners hear retained speech from their own cursor, at the rate it plays, from [`protocol::REPLAY_SOURCE`], and are not sent live speech meanwhile, so that nobody hears the same reply twice at once.
+//! - **Streaming** listeners hear retained speech from their own cursor, at the rate it plays, from [`tomori_protocol::REPLAY_SOURCE`], and are not sent live speech meanwhile, so that nobody hears the same reply twice at once.
 //!
 //! A participant who joins or returns while listening, having missed part of the latest reply, streams from that reply's start and then everything after it, until their cursor reaches the live edge, where they become live. A replay streams the same way, from the start of the reply asked for, but stops as soon as a later reply starts live: live speech wins.
 //!
@@ -18,7 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use protocol::{AudioFrame, Engagement, Gate, REPLAY_SOURCE, ServerMessage};
+use tomori_protocol::{AudioFrame, Engagement, Gate, REPLAY_SOURCE, ServerMessage};
 
 /// The most audio retained per space, about 14 MB of 24 kHz mono speech. The oldest is dropped first.
 pub const RETAINED_AUDIO: Duration = Duration::from_secs(300);

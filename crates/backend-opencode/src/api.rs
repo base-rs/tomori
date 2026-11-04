@@ -944,7 +944,7 @@ fn valid_snapshot_message(message: &Value) -> bool {
     }
 }
 
-/// The pieces of a session needed to reconstruct a [`backend::Snapshot`]:
+/// The pieces of a session needed to reconstruct a [`tomori_backend::Snapshot`]:
 /// its record, messages, open permissions and forms, and children.
 pub struct SnapshotParts {
     pub messages: Value,
@@ -960,7 +960,7 @@ pub struct SnapshotParts {
 
 impl SnapshotParts {
     /// The snapshot's workers, derived from the children.
-    pub fn workers(&self) -> Vec<backend::Worker> {
+    pub fn workers(&self) -> Vec<tomori_backend::Worker> {
         self.children
             .iter()
             .filter_map(crate::wire::worker_from_session)
@@ -968,7 +968,7 @@ impl SnapshotParts {
     }
 
     /// All pending permissions, in the order the server returned them.
-    pub fn permissions(&self) -> Vec<backend::Permission> {
+    pub fn permissions(&self) -> Vec<tomori_backend::Permission> {
         self.permissions
             .iter()
             .filter_map(crate::wire::permission_from_request)
@@ -976,7 +976,7 @@ impl SnapshotParts {
     }
 
     /// All pending questions, in the order the server returned them.
-    pub fn questions(&self) -> Vec<backend::Question> {
+    pub fn questions(&self) -> Vec<tomori_backend::Question> {
         self.forms.iter().map(question_from_form).collect()
     }
 

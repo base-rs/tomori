@@ -3,7 +3,7 @@
 
 //! What each connection may do. A connection is admitted at the door with an [`Access`]; its role at any moment follows from that and the space it is in, and one table decides which client messages each role may send. See `design/security.md`.
 
-use protocol::{ClientMessage, ConnectionRole};
+use tomori_protocol::{ClientMessage, ConnectionRole};
 
 /// What a connection was admitted as.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +119,7 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Decision, Gate, Pose};
+    use tomori_protocol::{Decision, Gate, Pose};
 
     fn every_message() -> Vec<ClientMessage> {
         vec![
@@ -181,10 +181,10 @@ mod tests {
             ClientMessage::Replay { message: None },
             ClientMessage::StopReplay,
             ClientMessage::Engagement {
-                state: protocol::Engagement::Away,
+                state: tomori_protocol::Engagement::Away,
             },
             ClientMessage::SetSpeech {
-                speech: protocol::SpeechSetting::Full,
+                speech: tomori_protocol::SpeechSetting::Full,
             },
             ClientMessage::SetInstructions { text: "t".into() },
             ClientMessage::PairBegin {

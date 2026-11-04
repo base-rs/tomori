@@ -6,10 +6,12 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use protocol::{Activity, ClientMessage, Frame, Gate, Keepalive, QueueState, Role, ServerMessage};
-use server::Server;
-use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestServer, TextTranscriber};
+use tomori_protocol::{
+    Activity, ClientMessage, Frame, Gate, Keepalive, QueueState, Role, ServerMessage,
+};
+use tomori_server::Server;
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{TIMEOUT, TestServer, TextTranscriber};
 
 #[test]
 fn health_reports_the_protocol_version() {
@@ -17,7 +19,7 @@ fn health_reports_the_protocol_version() {
     let (status, body) = server.get("/health");
     assert_eq!(status, 200);
     let health: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(health["protocol"], protocol::PROTOCOL_VERSION);
+    assert_eq!(health["protocol"], tomori_protocol::PROTOCOL_VERSION);
     assert_eq!(server.get("/missing").0, 404);
 }
 
@@ -42,8 +44,8 @@ fn messages_before_hello_are_rejected() {
     assert_eq!(client.error(), "Send hello first.");
 }
 
-fn server_client(server: &TestServer) -> server::test_support::TestClient {
-    server::test_support::TestClient::open(server.address)
+fn server_client(server: &TestServer) -> tomori_server::test_support::TestClient {
+    tomori_server::test_support::TestClient::open(server.address)
 }
 
 #[test]
@@ -157,12 +159,12 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
     let mut stream = TcpStream::connect(server.address).unwrap();
     let mut request = format!(
         "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n\r\n",
-        protocol::CONNECT_PATH,
-        protocol::CONTENT_TYPE
+        tomori_protocol::CONNECT_PATH,
+        tomori_protocol::CONTENT_TYPE
     )
     .into_bytes();
     request.extend(chunk(&ClientMessage::Hello {
-        protocol: protocol::PROTOCOL_VERSION,
+        protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: "ada".into(),
         name: "Ada".into(),
     }));
@@ -406,7 +408,7 @@ fn idle_and_unintroduced_connections_are_closed() {
     assert!(closed_within(&mut trickle, TIMEOUT));
 
     // A connection that only answers keepalive and never says Hello.
-    let mut client = server::test_support::TestClient::open(server.address);
+    let mut client = tomori_server::test_support::TestClient::open(server.address);
     client.send(&ClientMessage::Ping { nonce: 1 });
     assert!(client.is_closed(TIMEOUT));
 

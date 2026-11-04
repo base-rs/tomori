@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use protocol::Keepalive;
+use tomori_protocol::Keepalive;
 
 use crate::Backoff;
 
@@ -13,15 +13,19 @@ pub enum Transport {
     /// Plain HTTP, as to a server in `--auth open` mode. No token is presented.
     Plain,
     /// TLS, accepting only the certificate with `pin`'s fingerprint, or, without one, whichever certificate the server presents, which [`crate::ConnectionState::Connected`] reports so that it can be pinned from then on.
-    Tls { pin: Option<security::Fingerprint> },
+    Tls {
+        pin: Option<tomori_security::Fingerprint>,
+    },
     /// TLS as [`Self::Tls`], or plain HTTP if the server presents no certificate, for an address nothing is known about yet, such as one typed in. No token is presented over plain HTTP. With a pin, or once a connection has learned the server's certificate, it is TLS only.
-    Automatic { pin: Option<security::Fingerprint> },
+    Automatic {
+        pin: Option<tomori_security::Fingerprint>,
+    },
 }
 
 /// How a [`crate::Client`] reaches and identifies itself to the server.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Options {
-    /// `host:port`, or a host alone for [`protocol::DEFAULT_PORT`]. Resolved again on every connection attempt.
+    /// `host:port`, or a host alone for [`tomori_protocol::DEFAULT_PORT`]. Resolved again on every connection attempt.
     pub address: String,
     /// A stable identity, so the server recognizes a reconnect as the same participant. A secret of this device, which the server never sends to other clients.
     pub participant: String,
@@ -38,7 +42,7 @@ pub struct Options {
     pub connect_timeout: Duration,
     /// How long closing waits for the server to finish the connection after queued control messages are sent.
     pub close_timeout: Duration,
-    /// When to ping a quiet server and when to give up on a silent one. A connection that receives nothing for [`protocol::Keepalive::timeout`] ends with [`crate::Disconnect::Timeout`] and reconnects.
+    /// When to ping a quiet server and when to give up on a silent one. A connection that receives nothing for [`tomori_protocol::Keepalive::timeout`] ends with [`crate::Disconnect::Timeout`] and reconnects.
     pub keepalive: Keepalive,
     /// Outgoing live audio frames queued while the link is congested; older frames beyond this are dropped. At 20 ms per frame the default is 160 ms. Frames of an open utterance are not counted or dropped; see [`Self::outgoing_utterance_limit`].
     pub outgoing_audio_limit: usize,

@@ -107,8 +107,8 @@ contrast; Minimal and application status/label styling are unchanged.
 ## Tests
 
 ```sh
-cargo test -p environment-sky --locked
-cargo test -p environment-sky --locked -- --ignored
+cargo test -p tomori-environment-sky --locked
+cargo test -p tomori-environment-sky --locked -- --ignored
 ```
 
 CPU tests check bounded, finite, deterministic geometry and an unobstructed
@@ -125,6 +125,6 @@ reproducible bakes, local occlusion and visibility-blocked lantern illumination.
 For an optional unshadowed/shadowed preview:
 
 ```sh
-TOMORI_SHADOW_PREVIEW=/tmp/opencode/tomori-shadows.png cargo test -p environment-sky \
+TOMORI_SHADOW_PREVIEW=/tmp/opencode/tomori-shadows.png cargo test -p tomori-environment-sky \
   --locked cached_moon_shadows -- --ignored
 ```

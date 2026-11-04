@@ -3,12 +3,12 @@
 
 //! Every server frame stays within the protocol's frame limit, whatever clients and the agent send. See `design/server.md`.
 
-use protocol::{ClientMessage, MAX_FRAME_BYTES, QueueState, ServerMessage};
 use std::sync::Arc;
+use tomori_protocol::{ClientMessage, MAX_FRAME_BYTES, QueueState, ServerMessage};
 
-use server::Server;
-use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually};
+use tomori_server::Server;
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually};
 
 /// The snapshot budget documented in `design/server.md`.
 const BUDGET: usize = MAX_FRAME_BYTES / 4;
@@ -68,14 +68,14 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
 
     ada.send(&ClientMessage::Decide {
         request: "r".repeat(10_000),
-        decision: protocol::Decision::Grant,
+        decision: tomori_protocol::Decision::Grant,
         option: Some("o".into()),
     });
     let error = ada.error();
     assert!(error.contains("request") && error.len() < 100, "{error}");
     ada.send(&ClientMessage::Decide {
         request: "r".into(),
-        decision: protocol::Decision::Grant,
+        decision: tomori_protocol::Decision::Grant,
         option: Some("o".repeat(10_000)),
     });
     let error = ada.error();
@@ -108,7 +108,7 @@ fn an_oversized_hello_is_refused() {
     ] {
         let mut client = TestClient::open(server.address);
         client.send(&ClientMessage::Hello {
-            protocol: protocol::PROTOCOL_VERSION,
+            protocol: tomori_protocol::PROTOCOL_VERSION,
             participant,
             name,
         });
@@ -193,7 +193,7 @@ fn a_long_conversation_is_trimmed_to_the_budget() {
 
 #[test]
 fn an_enormous_question_is_trimmed_to_the_budget_and_can_still_be_answered() {
-    use backend::{AnswerValue, Event, Field, FieldKind, FieldOption, Question};
+    use tomori_backend::{AnswerValue, Event, Field, FieldKind, FieldOption, Question};
     let server = TestServer::start();
     let mut ada = server.connect("ada", "Ada");
     ada.create_space("Question");
@@ -252,7 +252,7 @@ fn transcript_failure(client: &TestClient, utterance: &str) -> String {
 
 #[test]
 fn queued_input_is_bounded() {
-    let server = TestServer::with_backend(server::fake::FakeBackend::manual());
+    let server = TestServer::with_backend(tomori_server::fake::FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");
     ada.create_space("Busy");
 

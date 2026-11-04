@@ -5,13 +5,13 @@
 
 use std::time::Duration;
 
-use protocol::{ClientMessage, ConnectionRole, KnockRequest, KnockState, ServerMessage};
-use security::Grant;
-use server::test_support::{TIMEOUT, TestClient, TestServer};
+use tomori_protocol::{ClientMessage, ConnectionRole, KnockRequest, KnockState, ServerMessage};
+use tomori_security::Grant;
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer};
 
 /// A server that admits by tokens, issues them to admitted visitors over its tests' plain connections, and has a space with an owner in it.
 fn knocking_server(
-    configure: impl FnOnce(server::Server) -> server::Server + Send + 'static,
+    configure: impl FnOnce(tomori_server::Server) -> tomori_server::Server + Send + 'static,
 ) -> (TestServer, TestClient, String) {
     let server = TestServer::with_tokens(true, move |server| {
         configure(server.with_tokens_over_plain_http_for_tests())
@@ -157,7 +157,7 @@ fn knocks_are_bounded() {
     vic.send(&ClientMessage::Knock);
     assert_eq!(vic.error(), "Your knock is already waiting.");
 
-    let mut others: Vec<TestClient> = (1..server::KNOCKS_PER_SPACE)
+    let mut others: Vec<TestClient> = (1..tomori_server::KNOCKS_PER_SPACE)
         .map(|index| {
             let mut other = visitor(&server, &format!("other-{index}"), "Other", &space);
             other.send(&ClientMessage::Knock);
@@ -165,7 +165,7 @@ fn knocks_are_bounded() {
             other
         })
         .collect();
-    knocks_of(&ada, server::KNOCKS_PER_SPACE);
+    knocks_of(&ada, tomori_server::KNOCKS_PER_SPACE);
     let mut late = visitor(&server, "late", "Late", &space);
     late.send(&ClientMessage::Knock);
     assert_eq!(

@@ -299,31 +299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "backend"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "backend-opencode"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "backend",
- "base-http",
- "base-http-client",
- "base-scheduler",
- "base-scheduler-native",
- "futures-core",
- "futures-lite",
- "futures-util",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "bake"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -816,58 +791,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "base-endpoint",
- "base-http",
- "base-http-client",
- "base-http-server",
- "base-scheduler",
- "base-scheduler-native",
- "discovery",
- "futures-lite",
- "protocol",
- "rustls",
- "security",
-]
-
-[[package]]
-name = "client-quest"
-version = "0.1.0"
-dependencies = [
- "android-activity",
- "android_logger",
- "anyhow",
- "ash",
- "base-markdown",
- "basisu",
- "bytemuck",
- "client",
- "cpal",
- "discovery",
- "env_logger",
- "environment-sky",
- "font8x8",
- "glam",
- "gltf",
- "image",
- "jni 0.21.1",
- "libc",
- "log",
- "ndk",
- "openxr",
- "pollster",
- "protocol",
- "security",
- "serde",
- "serde_json",
- "wgpu",
- "wgpu-hal",
- "winit",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1152,14 +1075,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "discovery"
-version = "0.1.0"
-dependencies = [
- "mdns-sd",
- "protocol",
-]
-
-[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1247,17 +1162,6 @@ dependencies = [
  "env_filter 2.0.0",
  "jiff",
  "log",
-]
-
-[[package]]
-name = "environment-sky"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "image",
- "pollster",
- "wgpu",
 ]
 
 [[package]]
@@ -2811,14 +2715,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
-name = "protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3090,18 +2986,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "security"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.3.4",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3161,35 +3045,6 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
-]
-
-[[package]]
-name = "server"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "backend",
- "backend-opencode",
- "base-endpoint",
- "base-http",
- "base-http-server",
- "base-scheduler",
- "base-scheduler-native",
- "client",
- "discovery",
- "env_logger",
- "event-listener",
- "futures-lite",
- "futures-util",
- "gethostname",
- "libc",
- "log",
- "protocol",
- "rustls",
- "security",
- "serde",
- "serde_json",
- "speech",
 ]
 
 [[package]]
@@ -3350,17 +3205,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "speech"
-version = "0.1.0"
-dependencies = [
- "base-markdown",
- "libc",
- "log",
- "protocol",
- "sherpa-onnx",
 ]
 
 [[package]]
@@ -3603,11 +3447,167 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
+name = "tomori-backend"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tomori-backend-opencode"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "base-http",
+ "base-http-client",
+ "base-scheduler",
+ "base-scheduler-native",
+ "futures-core",
+ "futures-lite",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tomori-backend",
+]
+
+[[package]]
 name = "tomori-bake"
 version = "0.0.0"
 dependencies = [
  "bake",
  "base-project",
+]
+
+[[package]]
+name = "tomori-client"
+version = "0.1.0"
+dependencies = [
+ "base-endpoint",
+ "base-http",
+ "base-http-client",
+ "base-http-server",
+ "base-scheduler",
+ "base-scheduler-native",
+ "futures-lite",
+ "rustls",
+ "tomori-discovery",
+ "tomori-protocol",
+ "tomori-security",
+]
+
+[[package]]
+name = "tomori-discovery"
+version = "0.1.0"
+dependencies = [
+ "mdns-sd",
+ "tomori-protocol",
+]
+
+[[package]]
+name = "tomori-environment-sky"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "image",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
+name = "tomori-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tomori-quest"
+version = "0.1.0"
+dependencies = [
+ "android-activity",
+ "android_logger",
+ "anyhow",
+ "ash",
+ "base-markdown",
+ "basisu",
+ "bytemuck",
+ "cpal",
+ "env_logger",
+ "font8x8",
+ "glam",
+ "gltf",
+ "image",
+ "jni 0.21.1",
+ "libc",
+ "log",
+ "ndk",
+ "openxr",
+ "pollster",
+ "serde",
+ "serde_json",
+ "tomori-client",
+ "tomori-discovery",
+ "tomori-environment-sky",
+ "tomori-protocol",
+ "tomori-security",
+ "wgpu",
+ "wgpu-hal",
+ "winit",
+]
+
+[[package]]
+name = "tomori-security"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "tomori-server"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "base-endpoint",
+ "base-http",
+ "base-http-server",
+ "base-scheduler",
+ "base-scheduler-native",
+ "env_logger",
+ "event-listener",
+ "futures-lite",
+ "futures-util",
+ "gethostname",
+ "libc",
+ "log",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tomori-backend",
+ "tomori-backend-opencode",
+ "tomori-client",
+ "tomori-discovery",
+ "tomori-protocol",
+ "tomori-security",
+ "tomori-speech",
+]
+
+[[package]]
+name = "tomori-speech"
+version = "0.1.0"
+dependencies = [
+ "base-markdown",
+ "libc",
+ "log",
+ "sherpa-onnx",
+ "tomori-protocol",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
-use protocol::PROTOCOL_VERSION;
+use tomori_protocol::PROTOCOL_VERSION;
 
 use crate::{
     FINGERPRINT_KEY, NAME_KEY, PARTICIPANTS_KEY, PROBLEMS_KEY, PROTOCOL_KEY, REPLIES_KEY,

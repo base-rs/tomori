@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, Weak};
 
-use protocol::AudioFrame;
+use tomori_protocol::AudioFrame;
 
 use crate::hub::Hub;
 

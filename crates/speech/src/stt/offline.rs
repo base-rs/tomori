@@ -20,7 +20,7 @@ use std::{
     time::Instant,
 };
 
-use protocol::AudioFrame;
+use tomori_protocol::AudioFrame;
 
 use crate::{
     Error, Stopper,

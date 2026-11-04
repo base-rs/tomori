@@ -3,7 +3,7 @@
 
 //! The platform microphone, opened for live audio or push-to-talk. See `design/live-audio.md`.
 //!
-//! Capture hands mono samples to a callback on its own thread; [`crate::connection::Connection`] passes them to the client's [`client::Microphone`], which frames and sends them.
+//! Capture hands mono samples to a callback on its own thread; [`crate::connection::Connection`] passes them to the client's [`tomori_client::Microphone`], which frames and sends them.
 
 /// Receives captured mono samples in the range -1 to 1, on the capture thread.
 pub type Samples = Box<dyn FnMut(&[f32]) + Send>;

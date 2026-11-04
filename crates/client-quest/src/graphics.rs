@@ -111,7 +111,7 @@ pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
     reveal: Option<crate::arrival_motion::Sphere>,
-    sky: environment_sky::Sky,
+    sky: tomori_environment_sky::Sky,
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
@@ -271,7 +271,9 @@ impl Renderer {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::Minimal,
             reveal: None,
-            sky: environment_sky::Sky::with_samples(device, queue, format, width, height, samples),
+            sky: tomori_environment_sky::Sky::with_samples(
+                device, queue, format, width, height, samples,
+            ),
             pipeline,
             vertices,
             instances,
@@ -1026,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn conversational_states_render_distinct_images() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -1148,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn both_controller_poses_change_the_offscreen_image() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -1289,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn workspace_pages_render_stereo_recenter_and_clear() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -1596,7 +1598,7 @@ mod tests {
 
     /// Set `TOMORI_ARRIVAL_PREVIEW` to a PNG path to save what this renders.
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn arrival_renders_objects_ray_and_world_labels() {
         use crate::arrival::{Item, Key, Kind, Ring, Scene, Step, View};
         const WIDTH: u32 = 640;
@@ -1708,10 +1710,10 @@ mod tests {
                 selected: false,
             });
             let spaces = vec![
-                space("a1", "Tomori", protocol::Activity::Running, 2),
-                space("b2", "Fantail", protocol::Activity::Idle, 0),
-                space("c3", "Notes", protocol::Activity::Waiting, 1),
-                space("d4", "Old review", protocol::Activity::Closed, 0),
+                space("a1", "Tomori", tomori_protocol::Activity::Running, 2),
+                space("b2", "Fantail", tomori_protocol::Activity::Idle, 0),
+                space("c3", "Notes", tomori_protocol::Activity::Waiting, 1),
+                space("d4", "Old review", tomori_protocol::Activity::Closed, 0),
             ];
             let choosing = View {
                 heading: "Spaces on studio.local".into(),
@@ -1783,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn multisampling_smooths_edges_in_both_environments() {
         use crate::arrival::{Item, Key, Kind, Scene, View};
         const WIDTH: u32 = 320;
@@ -1827,7 +1829,7 @@ mod tests {
                 ..Default::default()
             });
             let pill = crate::pill::rows(&crate::pill::Status {
-                activity: protocol::Activity::Running,
+                activity: tomori_protocol::Activity::Running,
                 mode: Some("build".into()),
                 title: "Hello from the desktop window.".into(),
                 replaying: false,
@@ -1964,7 +1966,7 @@ mod tests {
 
     /// Draws as the headset does, into the two layers of one swapchain-like image, with every pass the headset draws in the scene pass, and the caption after it.
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn headset_layers_multisample_every_pass() {
         use crate::arrival::{Item, Key, Kind, Scene, View};
         // Rows of whole multiples of 256 bytes, as copying to a buffer needs.
@@ -2203,7 +2205,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p client-quest -- --ignored"]
+    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn renders_stereo_offscreen() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

@@ -5,7 +5,7 @@
 //! (head pose and one hand), so a spectator's live-follow path can be
 //! exercised without an OpenXR runtime.
 //!
-//! Usage: `cargo run -p server --example presence_sender -- [ADDRESS]`
+//! Usage: `cargo run -p tomori-server --example presence_sender -- [ADDRESS]`
 //! where `ADDRESS` defaults to `127.0.0.1:8766`. It creates a space, prints
 //! its id, and reports presence for `PRESENCE_SECS` seconds (default 30).
 //! Start the spectator in another shell with the printed space id:
@@ -17,7 +17,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::{ClientMessage, Frame, Hand, JOINT_COUNT, Joint, PROTOCOL_VERSION, ServerMessage};
+use tomori_protocol::{
+    ClientMessage, Frame, Hand, JOINT_COUNT, Joint, PROTOCOL_VERSION, ServerMessage,
+};
 
 /// A short description of a server frame, for debug logging.
 fn kind_of(message: &ServerMessage) -> String {
@@ -37,7 +39,7 @@ fn kind_of(message: &ServerMessage) -> String {
 /// protocol, with a reader thread decoding server frames into a channel.
 struct Participant {
     stream: TcpStream,
-    messages: mpsc::Receiver<protocol::ServerMessage>,
+    messages: mpsc::Receiver<tomori_protocol::ServerMessage>,
 }
 
 impl Participant {
@@ -49,12 +51,12 @@ impl Participant {
         write!(
             stream,
             "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n\r\n",
-            protocol::CONNECT_PATH,
-            protocol::CONTENT_TYPE
+            tomori_protocol::CONNECT_PATH,
+            tomori_protocol::CONTENT_TYPE
         )
         .unwrap();
 
-        let (tx, rx) = mpsc::channel::<protocol::ServerMessage>();
+        let (tx, rx) = mpsc::channel::<tomori_protocol::ServerMessage>();
         let reader = stream.try_clone().unwrap();
         thread::spawn(move || {
             read_server_frames(reader, tx);
@@ -137,7 +139,7 @@ fn read_server_frames(stream: TcpStream, tx: mpsc::Sender<ServerMessage>) {
         );
     }
 
-    let mut decoder = protocol::FrameDecoder::new();
+    let mut decoder = tomori_protocol::FrameDecoder::new();
     loop {
         let mut chunk = Vec::new();
         if read_chunk(&mut reader, &mut chunk) == 0 {
@@ -145,7 +147,7 @@ fn read_server_frames(stream: TcpStream, tx: mpsc::Sender<ServerMessage>) {
         }
         decoder.push(&chunk);
         while let Some(frame) = decoder.next_frame().unwrap() {
-            if protocol::FrameKind::Control == frame.kind
+            if tomori_protocol::FrameKind::Control == frame.kind
                 && tx.send(frame.to_server_message().unwrap()).is_err()
             {
                 return;
@@ -234,7 +236,7 @@ fn main() {
     let tick = Duration::from_millis(16);
     while start.elapsed() < Duration::from_secs(duration) {
         let t = start.elapsed().as_secs_f64() * period;
-        let head = protocol::Pose {
+        let head = tomori_protocol::Pose {
             position: [t.cos() as f32, 1.65, t.sin() as f32],
             orientation: [0.0, 0.0, 0.0, 1.0],
         };

@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
-use backend::Event;
-use discovery::{AttentionCounts, Counts};
-use protocol::{ClientMessage, ServerMessage};
-use server::Server;
-use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestServer, TextTranscriber};
+use tomori_backend::Event;
+use tomori_discovery::{AttentionCounts, Counts};
+use tomori_protocol::{ClientMessage, ServerMessage};
+use tomori_server::Server;
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{TIMEOUT, TestServer, TextTranscriber};
 
 /// Long enough that a few local connections fit within it.
 const INTERVAL: Duration = Duration::from_millis(500);

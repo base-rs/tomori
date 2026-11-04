@@ -5,7 +5,7 @@
 //!
 //! A client feeds [`Tracker`] the platform's signals: whether the application has input, and, where a sensor reports it, whether the device is worn. It reports one [`Engagement`] to the server when that changes. Being away stops the live microphone; returning lets the server play what was missed from the start of the latest reply.
 
-use protocol::Engagement;
+use tomori_protocol::Engagement;
 
 /// Whether the application has the participant's input.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

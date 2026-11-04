@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
-use protocol::PROTOCOL_VERSION;
+use tomori_protocol::PROTOCOL_VERSION;
 
 use crate::record::{INSTANCE_LIMIT, properties, truncate};
 use crate::{Counts, Error, SERVICE_TYPE};

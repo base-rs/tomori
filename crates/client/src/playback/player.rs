@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use protocol::{AudioFrame, REPLAY_SOURCE};
+use tomori_protocol::{AudioFrame, REPLAY_SOURCE};
 
 use super::spatial::Scene;
 use super::{Direction, Earcon, Layout, Mixer, MixerOptions, PlaybackStatistics};

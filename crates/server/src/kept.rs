@@ -96,7 +96,7 @@ impl fmt::Debug for SpaceStore {
 impl SpaceStore {
     /// Open the record in `directory`, creating the directory if needed. A record that cannot be read is an error, rather than no spaces, so that a server never starts having lost them.
     pub fn open(directory: &Path) -> Result<Self, KeepError> {
-        security::create_private_directory(directory)?;
+        tomori_security::create_private_directory(directory)?;
         let path = directory.join(SPACES_FILE);
         let lock = File::create(path.with_extension("lock"))?;
         match lock.try_lock() {
@@ -142,7 +142,7 @@ impl SpaceStore {
             spaces: spaces.clone(),
         })
         .expect("spaces serialize");
-        security::write_private(&self.path, text.as_bytes())?;
+        tomori_security::write_private(&self.path, text.as_bytes())?;
         *written = spaces;
         Ok(true)
     }

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use security::{Grant, TokenStore};
+use tomori_security::{Grant, TokenStore};
 
 pub const USAGE: &str =
     "Usage: tomori-server auth mint --owner --name NAME [--state-directory PATH]
@@ -152,7 +152,7 @@ mod tests {
 
         let minted = run_in(&state, &["mint", "--owner", "--name", " Ada's Quest "]).unwrap();
         let token = minted.lines().last().unwrap();
-        assert!(token.starts_with(security::TOKEN_PREFIX), "{minted}");
+        assert!(token.starts_with(tomori_security::TOKEN_PREFIX), "{minted}");
         let store = TokenStore::open(&state).unwrap();
         let entry = store.entries().remove(0);
         assert_eq!(entry.name, "Ada's Quest");

@@ -54,7 +54,7 @@ impl Servers {
 
 #[cfg(test)]
 mod tests {
-    use protocol::PROTOCOL_VERSION;
+    use tomori_protocol::PROTOCOL_VERSION;
 
     use super::*;
 

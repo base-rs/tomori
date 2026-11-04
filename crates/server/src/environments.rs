@@ -3,7 +3,7 @@
 
 //! The environments a space can be bound to. Each space is bound to exactly one, chosen when it is created; see `design/environments.md`.
 
-use protocol::EnvironmentInfo;
+use tomori_protocol::EnvironmentInfo;
 
 /// The moonlit sky, rendered by `crates/environment-sky`. The identifier is the one clients map to that renderer.
 pub const SKY: &str = "sky";

@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use security::{Authenticator, Chain, Credentials, Grant as Granted, Outcome, TokenStore, Verdict};
+use tomori_security::{
+    Authenticator, Chain, Credentials, Grant as Granted, Outcome, TokenStore, Verdict,
+};
 
 use crate::access::{Access, Grant};
 
@@ -132,7 +134,10 @@ mod tests {
             Some(Access::visitor())
         );
         assert_eq!(door.admit(&token("unknown"), false), None);
-        assert_eq!(door.admit(&token(&security::generate_token()), false), None);
+        assert_eq!(
+            door.admit(&token(&tomori_security::generate_token()), false),
+            None
+        );
         assert!(door.store().is_some());
 
         let closed = Door::tokens(store, false);

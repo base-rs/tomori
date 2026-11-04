@@ -1,5 +1,5 @@
 [package]
-name = "client-quest"
+name = "tomori-quest"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -18,21 +18,21 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-environment-sky = { path = "../environment-sky" }
+tomori-environment-sky = { path = "../environment-sky" }
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 basisu = "0.1"
 base-markdown = "0.1.4"
-client = { path = "../client" }
-security = { path = "../security" }
-discovery = { path = "../discovery" }
+tomori-client = { path = "../client" }
+tomori-security = { path = "../security" }
+tomori-discovery = { path = "../discovery" }
 glam = "0.30"
 gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 font8x8 = "0.3"
 log = "0.4"
 openxr = "0.22"
-protocol = { path = "../protocol" }
+tomori-protocol = { path = "../protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }

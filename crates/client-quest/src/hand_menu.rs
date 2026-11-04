@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3};
-use protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockState};
+use tomori_protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockState};
 
 use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
@@ -304,7 +304,7 @@ pub struct SpaceInfo {
     pub modes: Vec<(String, String, Option<String>, bool)>,
     /// The current mode's name, even when it is not one Tomori can switch to.
     pub mode: Option<String>,
-    pub speech: protocol::SpeechSetting,
+    pub speech: tomori_protocol::SpeechSetting,
     /// How many are here, and away.
     pub here: String,
 }
@@ -394,7 +394,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
         }
         let mut status = vec![space.activity.clone()];
         status.extend(space.mode.clone());
-        if space.speech == protocol::SpeechSetting::Brief {
+        if space.speech == tomori_protocol::SpeechSetting::Brief {
             status.push("brief".into());
         }
         status.push(space.here.clone());
@@ -481,10 +481,10 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         }
                     }
                 }
-                if space.speech != protocol::SpeechSetting::Unknown {
+                if space.speech != tomori_protocol::SpeechSetting::Unknown {
                     text(&mut items, MenuKind::Heading, "Speech, for everyone".into());
                     let said = match space.speech {
-                        protocol::SpeechSetting::Brief => "Brief: switch to full",
+                        tomori_protocol::SpeechSetting::Brief => "Brief: switch to full",
                         _ => "Full: switch to brief",
                     };
                     if model.role.participates() {
@@ -886,7 +886,7 @@ pub fn wrist_cue(palm: &Palm, problem: bool) -> Object {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::Joint;
+    use tomori_protocol::Joint;
 
     fn hand(wrist: Vec3, index: Vec3, little: Vec3) -> Hand {
         let mut joints = [None; crate::hands::JOINT_COUNT];
@@ -1214,7 +1214,7 @@ mod tests {
                     ),
                 ],
                 mode: Some("build".into()),
-                speech: protocol::SpeechSetting::Brief,
+                speech: tomori_protocol::SpeechSetting::Brief,
                 here: "2 here".into(),
             }),
             people: vec![

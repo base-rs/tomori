@@ -1,5 +1,5 @@
 [package]
-name = "backend-opencode"
+name = "tomori-backend-opencode"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 async-channel = "2"
-backend = { path = "../backend" }
+tomori-backend = { path = "../backend" }
 base-http = "0.2.0"
 base-http-client = "0.2.0"
 base-scheduler = "0.3.0"

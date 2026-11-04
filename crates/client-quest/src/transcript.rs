@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use protocol::{Activity, QueueState, Role, SpaceState};
+use tomori_protocol::{Activity, QueueState, Role, SpaceState};
 
 use crate::markdown_lite::{self, Inline, Kind};
 use crate::speakers::{self, Known, Speaker};
@@ -389,7 +389,7 @@ pub fn choices(space: &SpaceState) -> Vec<String> {
 }
 
 /// The entries waiting or being sent, oldest first.
-fn queue(space: &SpaceState) -> Vec<&protocol::QueueEntry> {
+fn queue(space: &SpaceState) -> Vec<&tomori_protocol::QueueEntry> {
     space
         .queue
         .iter()
@@ -1013,14 +1013,14 @@ fn body(
 
 /// Whether `message` is only tool activity, for tests.
 #[cfg(test)]
-fn tool_only(message: &protocol::Message) -> bool {
+fn tool_only(message: &tomori_protocol::Message) -> bool {
     tools(&message.text).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Approval, ApprovalOption, Message, Participant, Question, QueueEntry};
+    use tomori_protocol::{Approval, ApprovalOption, Message, Participant, Question, QueueEntry};
 
     fn message(id: &str, role: Role, text: &str) -> Message {
         Message {

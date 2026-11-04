@@ -4,17 +4,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::{
+use tomori_backend::{
     AnswerValue, Backend, Event, Field, FieldKind, FieldOption, Part, Permission, Question, Role,
     Session, SessionSpec, Snapshot, SnapshotMessage, Worker, WorkerState,
 };
-use protocol::{
+use tomori_protocol::{
     Activity, ClientMessage, Decision, Gate, Hand, JOINT_COUNT, Joint, Pose, QueueState,
     ServerMessage, SpaceState,
 };
-use server::Server;
-use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually, speech};
+use tomori_server::Server;
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{
+    TIMEOUT, TestClient, TestServer, TextTranscriber, eventually, speech,
+};
 
 /// Errors received within `window`, skipping other messages.
 fn errors_within(client: &TestClient, window: Duration) -> Vec<String> {
@@ -91,7 +93,7 @@ fn participant_identities_are_never_sent_to_other_clients() {
                     && state
                         .messages
                         .iter()
-                        .filter(|message| message.role == protocol::Role::User)
+                        .filter(|message| message.role == tomori_protocol::Role::User)
                         .count()
                         == 2 =>
             {
@@ -131,7 +133,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
     let server = TestServer::start();
     let mut ada = TestClient::open(server.address);
     ada.send(&ClientMessage::Hello {
-        protocol: protocol::PROTOCOL_VERSION,
+        protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: "ada".into(),
         name: "Ada".into(),
     });
@@ -295,7 +297,7 @@ fn a_failed_initial_snapshot_opens_no_space_and_a_retry_succeeds() {
     let mut bob = server.connect("bob", "Bob");
     bob.send(&ClientMessage::CreateSpace {
         title: "Unavailable".into(),
-        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
         directory: "/tmp".into(),
         session: None,
         environment: None,
@@ -343,7 +345,7 @@ fn a_snapshot_failure_releases_the_only_space_slot_before_retry() {
     let mut ada = server.connect("ada", "Ada");
     ada.send(&ClientMessage::CreateSpace {
         title: "Unavailable".into(),
-        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
         directory: "/tmp".into(),
         session: None,
         environment: None,
@@ -367,7 +369,7 @@ fn duplicate_attachment_does_not_close_the_existing_space() {
     let mut bob = server.connect("bob", "Bob");
     bob.send(&ClientMessage::CreateSpace {
         title: "Duplicate".into(),
-        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
         directory: "/tmp".into(),
         session: Some(existing.id()),
         environment: None,
@@ -397,7 +399,7 @@ fn a_failed_snapshot_of_an_attached_session_can_be_retried() {
     let mut ada = server.connect("ada", "Ada");
     let request = |title: &str| ClientMessage::CreateSpace {
         title: title.into(),
-        backend: server::fake::FAKE_BACKEND_NAME.into(),
+        backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
         directory: "/tmp".into(),
         session: Some(id.clone()),
         environment: None,
@@ -427,7 +429,7 @@ fn closing_a_fake_handle_still_reports_closed_once() {
         Ok(Event::Closed { .. })
     ));
     assert!(
-        matches!(futures_lite::future::block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Closed)
+        matches!(futures_lite::future::block_on(session.next_event()), Err(error) if error.kind == tomori_backend::ErrorKind::Closed)
     );
 }
 
@@ -445,7 +447,7 @@ fn closing_an_old_fake_handle_cannot_close_a_reattachment() {
     futures_lite::future::block_on(old.close()).unwrap();
     assert!(futures_lite::future::block_on(replacement.snapshot()).is_ok());
     assert!(
-        matches!(futures_lite::future::block_on(old.snapshot()), Err(error) if error.kind == backend::ErrorKind::Closed)
+        matches!(futures_lite::future::block_on(old.snapshot()), Err(error) if error.kind == tomori_backend::ErrorKind::Closed)
     );
     replacement.emit(Event::Busy);
     assert!(matches!(
@@ -597,7 +599,7 @@ fn pointing_at_a_worker_while_speaking_tells_the_agent_which() {
     });
     ada.space(|state| state.workers.len() == 1);
     let worker = |id: &str| {
-        Some(protocol::Pointed::Worker {
+        Some(tomori_protocol::Pointed::Worker {
             worker: id.to_owned(),
         })
     };
@@ -625,7 +627,7 @@ fn pointing_at_a_worker_while_speaking_tells_the_agent_which() {
     ada.say_pointing("u3", "and this one", worker("ses_forged"));
     // Longer than the 256 bytes a session identifier may have.
     ada.say_pointing("u4", "or this one", worker(&"x".repeat(257)));
-    ada.say_pointing("u5", "or that", Some(protocol::Pointed::Unknown));
+    ada.say_pointing("u5", "or that", Some(tomori_protocol::Pointed::Unknown));
     for text in ["is it finished", "and this one", "or this one", "or that"] {
         session.reply("done");
         ada.space(|state| {
@@ -735,7 +737,7 @@ fn only_the_most_recent_empty_closed_spaces_are_kept() {
     // Bob stays in the first space, so it is kept although it closes first.
     let first = ada.create_space("Space 0").id;
     join(&mut bob, &first, 2);
-    let count = server::CLOSED_SPACES + 8;
+    let count = tomori_server::CLOSED_SPACES + 8;
     let mut ids = vec![first];
     for index in 0..count {
         if index > 0 {
@@ -747,13 +749,13 @@ fn only_the_most_recent_empty_closed_spaces_are_kept() {
     }
     ada.send(&ClientMessage::ListSpaces);
     let listed: Vec<String> = ada.wait_for(|message| match message {
-        ServerMessage::Spaces { spaces } if spaces.len() <= server::CLOSED_SPACES + 1 => {
+        ServerMessage::Spaces { spaces } if spaces.len() <= tomori_server::CLOSED_SPACES + 1 => {
             Some(spaces.iter().map(|space| space.id.clone()).collect())
         }
         _ => None,
     });
     let mut expected = vec![ids[0].clone()];
-    expected.extend(ids[count - server::CLOSED_SPACES..].iter().cloned());
+    expected.extend(ids[count - tomori_server::CLOSED_SPACES..].iter().cloned());
     assert_eq!(listed, expected);
 }
 
@@ -765,7 +767,7 @@ fn the_most_recently_closed_space_is_kept_whenever_it_was_created() {
     let mut ada = server.connect("ada", "Ada");
     let first = ada.create_space("Space 0").id;
     ada.send(&ClientMessage::Leave);
-    for index in 1..=server::CLOSED_SPACES {
+    for index in 1..=tomori_server::CLOSED_SPACES {
         ada.create_space(&format!("Space {index}"));
         server.backend.started()[index].emit(Event::Closed { reason: None });
         ada.space(|state| state.activity == Activity::Closed);
@@ -783,7 +785,7 @@ fn the_most_recently_closed_space_is_kept_whenever_it_was_created() {
         }
         _ => None,
     });
-    assert_eq!(listed.len(), server::CLOSED_SPACES);
+    assert_eq!(listed.len(), tomori_server::CLOSED_SPACES);
     assert!(listed.contains(&first), "{listed:?}");
 }
 
@@ -1246,8 +1248,8 @@ fn parallel_permissions_are_decided_in_turn() {
     assert_eq!(
         session.log().decisions,
         [
-            ("p1".to_owned(), backend::Decision::AllowOnce),
-            ("p2".to_owned(), backend::Decision::Deny)
+            ("p1".to_owned(), tomori_backend::Decision::AllowOnce),
+            ("p2".to_owned(), tomori_backend::Decision::Deny)
         ]
     );
 }
@@ -1262,12 +1264,12 @@ fn an_offered_option_is_granted() {
         tool: "Bash".to_owned(),
         input: serde_json::json!({"command": "touch marker.txt"}),
         description: None,
-        options: vec![backend::PermissionOption {
+        options: vec![tomori_backend::PermissionOption {
             id: "suggestions".to_owned(),
-            grants: vec![backend::Grant::Rule {
+            grants: vec![tomori_backend::Grant::Rule {
                 tool: "Bash".to_owned(),
                 content: Some("touch marker.txt".to_owned()),
-                scope: backend::GrantScope::Local,
+                scope: tomori_backend::GrantScope::Local,
             }],
         }],
     }));
@@ -1275,7 +1277,7 @@ fn an_offered_option_is_granted() {
     let state = bob.space(|state| state.approval.is_some());
     assert_eq!(
         state.approval.unwrap().options,
-        [protocol::ApprovalOption {
+        [tomori_protocol::ApprovalOption {
             id: "suggestions".to_owned(),
             label: "Yes, and don't ask again for Bash(touch marker.txt) in this project".to_owned(),
         }]
@@ -1302,7 +1304,7 @@ fn an_offered_option_is_granted() {
         session.log().decisions,
         [(
             "p1".to_owned(),
-            backend::Decision::Grant {
+            tomori_backend::Decision::Grant {
                 option: "suggestions".to_owned()
             }
         )]
@@ -1375,17 +1377,20 @@ fn a_question_is_answered_by_any_participant() {
 fn say_answer(
     client: &mut TestClient,
     utterance: &str,
-    question: &protocol::Question,
+    question: &tomori_protocol::Question,
     text: &str,
 ) -> Result<String, String> {
     client.send(&ClientMessage::UtteranceBegin {
         utterance: utterance.to_owned(),
-        answer: Some(protocol::AnswerTarget {
+        answer: Some(tomori_protocol::AnswerTarget {
             question: question.id.clone(),
             field: question.field.clone(),
         }),
     });
-    client.send_audio(protocol::Gate::Agent, server::test_support::speech(text));
+    client.send_audio(
+        tomori_protocol::Gate::Agent,
+        tomori_server::test_support::speech(text),
+    );
     client.send(&ClientMessage::UtteranceEnd {
         utterance: utterance.to_owned(),
         pointed: None,
@@ -1874,9 +1879,9 @@ fn leaving_right_after_hello_overrides_the_rejoin() {
 fn a_participant_gone_longer_than_the_retention_is_forgotten() {
     let retention = Duration::from_millis(800);
     let server = TestServer::with_server(FakeBackend::new(), move |backends| {
-        server::Server::new(
+        tomori_server::Server::new(
             backends,
-            std::sync::Arc::new(server::test_support::TextTranscriber::default()),
+            std::sync::Arc::new(tomori_server::test_support::TextTranscriber::default()),
         )
         .with_participant_retention(retention)
     });

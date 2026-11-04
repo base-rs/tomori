@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use base_scheduler::Cancellation;
-use discovery::{AttentionCounts, Counts};
 use event_listener::{Event as Notify, EventListener};
-use protocol::{
+use tomori_backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
+use tomori_discovery::{AttentionCounts, Counts};
+use tomori_protocol::{
     Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, EnvironmentInfo, Frame,
     FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting,
     WorkspaceRoot,
@@ -56,7 +56,7 @@ pub struct Status {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpaceStatus {
     pub title: String,
-    pub activity: protocol::Activity,
+    pub activity: tomori_protocol::Activity,
     /// The display names and roles of its participants.
     pub participants: Vec<(String, ConnectionRole)>,
     /// How many visitors are watching it.
@@ -118,7 +118,7 @@ struct PendingPairing {
     /// The device's display name, which names the token it receives.
     name: String,
     commitment: String,
-    server: security::pairing::Nonce,
+    server: tomori_security::pairing::Nonce,
     code: Option<String>,
     started: Instant,
 }
@@ -126,8 +126,8 @@ struct PendingPairing {
 /// What pairing needs from the server: its certificate's fingerprint, which the code is derived from, and the token store, which issues the token. Without them, as in `--auth open` mode, the server does not pair.
 #[derive(Clone)]
 pub struct PairingSetup {
-    pub fingerprint: security::Fingerprint,
-    pub tokens: Arc<security::TokenStore>,
+    pub fingerprint: tomori_security::Fingerprint,
+    pub tokens: Arc<tomori_security::TokenStore>,
 }
 
 /// Something about pairing to show on the server's console. See `design/security.md`.
@@ -153,7 +153,7 @@ pub enum SpaceCommand {
     Send(Prompt),
     Decide {
         request: String,
-        decision: backend::Decision,
+        decision: tomori_backend::Decision,
         participant: String,
     },
     Answer {
@@ -237,7 +237,7 @@ pub struct Hub {
     /// The most visitors connected at once; see `design/security.md`.
     max_visitors: AtomicUsize,
     /// Issues collaborator tokens to admitted visitors; see [`Hub::set_tokens`].
-    tokens: RwLock<Option<Arc<security::TokenStore>>>,
+    tokens: RwLock<Option<Arc<tomori_security::TokenStore>>>,
     /// Where the spaces are kept across restarts; see [`Hub::restore`].
     kept: RwLock<Option<Arc<crate::kept::SpaceStore>>>,
     /// Whether the server serves only TLS, which pairing needs: the token it issues must not cross the network in the clear.
@@ -409,7 +409,7 @@ impl SpaceRecord {
     }
 
     /// The space as listed in the lobby at `now`, with how long it has needed its attention.
-    fn summary(&self, now: Instant) -> protocol::SpaceSummary {
+    fn summary(&self, now: Instant) -> tomori_protocol::SpaceSummary {
         let mut summary = self.model.summary();
         summary.attention_age = summary.attention.map(|level| match self.attention.get() {
             Some((stamped, since)) if stamped == level => {
@@ -452,7 +452,7 @@ struct UtteranceRecord {
     client: String,
     space: String,
     /// The question and field the transcript answers, rather than being queued.
-    answer: Option<protocol::AnswerTarget>,
+    answer: Option<tomori_protocol::AnswerTarget>,
     /// The worker the participant pointed at while speaking, as the space knew it when the utterance ended. Their
     /// client names only its identity. See `design/interaction.md`.
     pointed: Option<crate::space::PointedWorker>,
@@ -798,11 +798,11 @@ impl HubState {
     }
 
     /// The knocks waiting on `space`, as its participants see them.
-    fn knocks_for(&self, space: &str) -> Vec<protocol::KnockRequest> {
+    fn knocks_for(&self, space: &str) -> Vec<tomori_protocol::KnockRequest> {
         self.knocks
             .iter()
             .filter(|knock| knock.space == space)
-            .map(|knock| protocol::KnockRequest {
+            .map(|knock| tomori_protocol::KnockRequest {
                 id: knock.id.clone(),
                 name: knock.name.clone(),
             })
@@ -834,7 +834,7 @@ impl HubState {
             self.send(
                 participant,
                 ServerMessage::KnockState {
-                    state: protocol::KnockState::Withdrawn,
+                    state: tomori_protocol::KnockState::Withdrawn,
                 },
             );
             self.announce_knocks(space);
@@ -1041,7 +1041,7 @@ impl Hub {
     }
 
     /// Admit visitors who knock with collaborator tokens from `tokens`.
-    pub(crate) fn set_tokens(&self, tokens: Arc<security::TokenStore>) {
+    pub(crate) fn set_tokens(&self, tokens: Arc<tomori_security::TokenStore>) {
         *self.tokens.write().expect("never left poisoned") = Some(tokens);
     }
 
@@ -1057,7 +1057,7 @@ impl Hub {
         };
         let (entry, token) = match tokens.issue(
             &knock.name,
-            security::Grant::Collaborator {
+            tomori_security::Grant::Collaborator {
                 space: knock.space.clone(),
             },
         ) {
@@ -1080,7 +1080,7 @@ impl Hub {
             if !admitted && let Some(record) = state.connections.get(&knock.connection) {
                 // Still connected, but no longer the visitor who knocked, such as after reconnecting.
                 record.outbox.message(ServerMessage::KnockState {
-                    state: protocol::KnockState::Withdrawn,
+                    state: tomori_protocol::KnockState::Withdrawn,
                 });
             }
             self.recount(&mut state);
@@ -1110,7 +1110,10 @@ impl Hub {
         Some(PairingView {
             serial: pairing.serial,
             name: pairing.name.clone(),
-            code: pairing.code.as_deref().map(security::pairing::display),
+            code: pairing
+                .code
+                .as_deref()
+                .map(tomori_security::pairing::display),
         })
     }
 
@@ -1147,7 +1150,7 @@ impl Hub {
             .and_then(|setup| {
                 setup
                     .tokens
-                    .issue(&pairing.name, security::Grant::Owner)
+                    .issue(&pairing.name, tomori_security::Grant::Owner)
                     .map_err(|error| {
                         log::error!("Could not issue a token for a pairing: {error}.");
                         "The token could not be issued."
@@ -1477,7 +1480,7 @@ impl Hub {
                 );
                 if let Some(record) = state.connections.get(&knock.connection) {
                     record.outbox.message(ServerMessage::KnockState {
-                        state: protocol::KnockState::Expired,
+                        state: tomori_protocol::KnockState::Expired,
                     });
                 }
                 state.announce_knocks(&knock.space);
@@ -2008,7 +2011,7 @@ impl Hub {
                 // participant stops speaking. An oversized one, a worker the space does not have, or a kind this
                 // server does not know, is ignored rather than failing the words spoken with it.
                 let resolved = match pointed {
-                    Some(protocol::Pointed::Worker { worker })
+                    Some(tomori_protocol::Pointed::Worker { worker })
                         if worker.len() <= limits::SESSION_BYTES =>
                     {
                         state
@@ -2052,12 +2055,14 @@ impl Hub {
                     return;
                 }
                 let decision = match (decision, option) {
-                    (protocol::Decision::AllowOnce, None) => backend::Decision::AllowOnce,
-                    (protocol::Decision::Deny, None) => backend::Decision::Deny,
-                    (protocol::Decision::Grant, Some(option)) => {
-                        backend::Decision::Grant { option }
+                    (tomori_protocol::Decision::AllowOnce, None) => {
+                        tomori_backend::Decision::AllowOnce
                     }
-                    (protocol::Decision::Grant, None) => {
+                    (tomori_protocol::Decision::Deny, None) => tomori_backend::Decision::Deny,
+                    (tomori_protocol::Decision::Grant, Some(option)) => {
+                        tomori_backend::Decision::Grant { option }
+                    }
+                    (tomori_protocol::Decision::Grant, None) => {
                         state.error(participant, "Choose an option to grant.");
                         return;
                     }
@@ -2071,7 +2076,7 @@ impl Hub {
                 };
                 let record = state.space_mut(&space).expect("checked above");
                 let option = match &decision {
-                    backend::Decision::Grant { option } => Some(option.as_str()),
+                    tomori_backend::Decision::Grant { option } => Some(option.as_str()),
                     _ => None,
                 };
                 match record.model.claim_approval(&request, option) {
@@ -2147,7 +2152,7 @@ impl Hub {
                 deferred.push(Deferred::Keep);
             }
             ClientMessage::PairBegin { commitment } => {
-                if security::pairing::Nonce::parse(&commitment).is_none() {
+                if tomori_security::pairing::Nonce::parse(&commitment).is_none() {
                     state.error(
                         participant,
                         "A pairing commitment is 64 hexadecimal digits.",
@@ -2189,7 +2194,7 @@ impl Hub {
                 }
                 state.pairing_attempts.push_back(now);
                 state.next_pairing += 1;
-                let server = security::pairing::Nonce::generate();
+                let server = tomori_security::pairing::Nonce::generate();
                 let name = state.participants[participant].name.clone();
                 log::info!("{name:?} began pairing.");
                 deferred.push(Deferred::PairingPrompt(PairingEvent::Began {
@@ -2217,7 +2222,7 @@ impl Hub {
                     state.error(participant, "No pairing is waiting for that.");
                     return;
                 };
-                let device = security::pairing::Nonce::parse(&nonce)
+                let device = tomori_security::pairing::Nonce::parse(&nonce)
                     .filter(|device| device.commitment() == pairing.commitment);
                 let setup = self.pairing.read().expect("never left poisoned").clone();
                 let (Some(device), Some(setup)) = (device, setup) else {
@@ -2227,11 +2232,12 @@ impl Hub {
                     );
                     return;
                 };
-                let code = security::pairing::code(setup.fingerprint, device, pairing.server);
+                let code =
+                    tomori_security::pairing::code(setup.fingerprint, device, pairing.server);
                 let name = pairing.name.clone();
                 pairing.code = Some(code.clone());
                 outbox.message(ServerMessage::PairWaiting);
-                let shown = security::pairing::display(&code);
+                let shown = tomori_security::pairing::display(&code);
                 log::info!("Pairing request from {name:?}: code {shown}.");
                 deferred.push(Deferred::PairingPrompt(PairingEvent::Waiting {
                     name,
@@ -2305,7 +2311,7 @@ impl Hub {
                 log::info!("{:?} knocked on {space}.", knock.name);
                 state.knocks.push(knock);
                 outbox.message(ServerMessage::KnockState {
-                    state: protocol::KnockState::Pending,
+                    state: tomori_protocol::KnockState::Pending,
                 });
                 state.announce_knocks(&space);
             }
@@ -2338,7 +2344,7 @@ impl Hub {
                     );
                     if let Some(record) = state.connections.get(&knock.connection) {
                         record.outbox.message(ServerMessage::KnockState {
-                            state: protocol::KnockState::Declined,
+                            state: tomori_protocol::KnockState::Declined,
                         });
                     }
                 }
@@ -2948,13 +2954,13 @@ impl Hub {
     pub(crate) fn sessions(
         &self,
         participant: &str,
-        result: Result<Vec<backend::SessionSummary>, String>,
+        result: Result<Vec<tomori_backend::SessionSummary>, String>,
     ) {
         let message = match result {
             Ok(sessions) => ServerMessage::Sessions {
                 sessions: sessions
                     .into_iter()
-                    .map(|session| protocol::SessionSummary {
+                    .map(|session| tomori_protocol::SessionSummary {
                         id: session.id,
                         title: session.title,
                         directory: session.directory,
@@ -3028,7 +3034,7 @@ impl Hub {
         }
     }
 
-    pub(crate) fn space_sent(&self, space: &str, key: &str, result: backend::Result<()>) {
+    pub(crate) fn space_sent(&self, space: &str, key: &str, result: tomori_backend::Result<()>) {
         let mut state = self.lock();
         let Some(record) = state.space_mut(space) else {
             return;
@@ -3046,7 +3052,7 @@ impl Hub {
         space: &str,
         request: &str,
         participant: &str,
-        result: backend::Result<()>,
+        result: tomori_backend::Result<()>,
     ) {
         let mut state = self.lock();
         let Err(error) = result else {
@@ -3080,7 +3086,7 @@ impl Hub {
         space: &str,
         question: &str,
         participant: &str,
-        result: backend::Result<()>,
+        result: tomori_backend::Result<()>,
     ) {
         let mut state = self.lock();
         let Err(error) = result else {
@@ -3114,7 +3120,7 @@ impl Hub {
         &self,
         space: &str,
         participant: &str,
-        result: backend::Result<()>,
+        result: tomori_backend::Result<()>,
     ) {
         if let Err(error) = result {
             let state = self.lock();
@@ -3128,7 +3134,12 @@ impl Hub {
     }
 
     /// The agent was given the space's instructions, or refused them. The space works without them, so a refusal is shown in the space rather than closing it. See `design/spaces.md`.
-    pub(crate) fn space_instructed(&self, space: &str, result: backend::Result<()>, all: bool) {
+    pub(crate) fn space_instructed(
+        &self,
+        space: &str,
+        result: tomori_backend::Result<()>,
+        all: bool,
+    ) {
         let mut state = self.lock();
         let Some(record) = state.space_mut(space) else {
             return;
@@ -3364,7 +3375,7 @@ mod tests {
         fn begin(&self, utterance: UtteranceId, sink: TranscriptSink) {
             self.0.begin(utterance, sink)
         }
-        fn push(&self, utterance: UtteranceId, frame: &protocol::AudioFrame) {
+        fn push(&self, utterance: UtteranceId, frame: &tomori_protocol::AudioFrame) {
             self.0.push(utterance, frame)
         }
         fn end(&self, utterance: UtteranceId) {
@@ -3639,7 +3650,7 @@ mod tests {
     }
 
     /// The lobby listing `connection` would be sent.
-    fn listing(hub: &Hub, connection: ConnectionId) -> Vec<protocol::SpaceSummary> {
+    fn listing(hub: &Hub, connection: ConnectionId) -> Vec<tomori_protocol::SpaceSummary> {
         match hub.render(connection, Outgoing::Spaces) {
             Some(ServerMessage::Spaces { spaces }) => spaces,
             other => panic!("expected a listing, not {other:?}"),
@@ -3655,7 +3666,7 @@ mod tests {
         assert_eq!((quiet[0].attention, quiet[0].attention_age), (None, None));
 
         // An approval while nobody is there, then the agent finishing a reply.
-        let permission = backend::Permission {
+        let permission = tomori_backend::Permission {
             id: "p".into(),
             tool: "Bash".into(),
             input: serde_json::Value::Null,
@@ -3690,7 +3701,7 @@ mod tests {
             Event::Busy,
             Event::MessageStarted {
                 message: "m".into(),
-                role: backend::Role::Assistant,
+                role: tomori_backend::Role::Assistant,
             },
             Event::TextDelta {
                 message: "m".into(),
@@ -3732,7 +3743,7 @@ mod tests {
             Event::Busy,
             Event::MessageStarted {
                 message: "m".into(),
-                role: backend::Role::Assistant,
+                role: tomori_backend::Role::Assistant,
             },
             Event::TextDelta {
                 message: "m".into(),

@@ -3,7 +3,7 @@
 
 //! The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session. See `design/spaces.md`.
 
-use protocol::AgentInstructions;
+use tomori_protocol::AgentInstructions;
 
 use crate::environments;
 
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn every_layer_is_its_own_entry_and_an_empty_one_is_removed() {
         for key in KEYS {
-            assert!(backend::valid_instruction_key(key), "{key}");
+            assert!(tomori_backend::valid_instruction_key(key), "{key}");
         }
         let shown = layers(environments::SKY, "Mind the docs.", None);
         assert_eq!(shown.tomori, TOMORI);

@@ -6,10 +6,10 @@
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
-use protocol::{ClientMessage, ConnectionRole, ServerMessage};
-use security::Fingerprint;
-use security::pairing::{Nonce, code, display};
-use server::test_support::{TIMEOUT, TestClient, TestServer};
+use tomori_protocol::{ClientMessage, ConnectionRole, ServerMessage};
+use tomori_security::Fingerprint;
+use tomori_security::pairing::{Nonce, code, display};
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer};
 
 /// The certificate fingerprint the test servers pair with. The test clients speak plain HTTP, so the fingerprint is only what the code is derived from.
 fn fingerprint() -> Fingerprint {
@@ -19,8 +19,8 @@ fn fingerprint() -> Fingerprint {
 /// A server that admits by tokens, with visitors if `visitors`, and pairs, with its pairing handle.
 fn pairing_server(
     visitors: bool,
-    configure: impl FnOnce(server::Server) -> server::Server + Send + 'static,
-) -> (TestServer, server::Pairing) {
+    configure: impl FnOnce(tomori_server::Server) -> tomori_server::Server + Send + 'static,
+) -> (TestServer, tomori_server::Pairing) {
     let (sender, receiver) = channel();
     let server = TestServer::with_tokens(visitors, move |server| {
         let server = configure(
@@ -89,7 +89,7 @@ fn the_operator_types_the_code_to_pair_a_device_as_an_owner() {
     let entries = server.tokens.as_ref().unwrap().entries();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "Quest 3");
-    assert_eq!(entries[0].grant, security::Grant::Owner);
+    assert_eq!(entries[0].grant, tomori_security::Grant::Owner);
 
     // From now on the device connects with its token, as an owner.
     drop(quest);
@@ -184,7 +184,7 @@ fn a_device_that_does_not_reveal_in_time_is_withdrawn() {
     // Shown, so that it can be declined, though it has no code yet.
     let pending = pairing.pending().unwrap();
     assert_eq!((pending.name.as_str(), pending.code), ("Quest 3", None));
-    let deadline = std::time::Instant::now() + server::REVEAL_TIMEOUT + TIMEOUT;
+    let deadline = std::time::Instant::now() + tomori_server::REVEAL_TIMEOUT + TIMEOUT;
     let error = loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match quest.next_message(remaining) {
@@ -216,7 +216,7 @@ fn a_pairing_is_withdrawn_when_its_device_leaves() {
 fn only_so_many_pairings_begin_within_the_window() {
     let (server, pairing) = pairing_server(true, |server| server);
     let mut quest = server.connect("quest", "Quest 3");
-    for _ in 0..server::PAIRING_ATTEMPTS {
+    for _ in 0..tomori_server::PAIRING_ATTEMPTS {
         pair(&mut quest);
         assert!(pairing.decline());
         failed(&quest);
@@ -231,7 +231,7 @@ fn only_so_many_pairings_begin_within_the_window() {
     assert!(pairing.paused());
 
     // An owner who sees it on the status page, or the operator on the console, allows pairing again.
-    let (_, owner) = server.issue("Ada", security::Grant::Owner);
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
     let owner = format!("__Host-tomori-token={owner}");
     assert!(get(&server, "/", &owner).contains("Pairing is paused"));
     assert_eq!(post(&server, "/pairing/allow", &owner, "").0, 303);
@@ -239,7 +239,7 @@ fn only_so_many_pairings_begin_within_the_window() {
     pair(&mut quest);
     pairing.decline();
     failed(&quest);
-    for _ in 1..server::PAIRING_ATTEMPTS {
+    for _ in 1..tomori_server::PAIRING_ATTEMPTS {
         pair(&mut quest);
         pairing.decline();
         failed(&quest);
@@ -304,7 +304,7 @@ fn without_visitors_a_device_asking_to_pair_may_only_pair() {
     quest.hello("quest", "Quest 3");
     assert_eq!(quest.role, ConnectionRole::Pairing);
     // It learns nothing about the spaces, even as they change.
-    let (_, owner) = server.issue("Ada", security::Grant::Owner);
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     ada.create_space("Secret plans");
     while let Some(message) = quest.next_message(Duration::from_millis(300)) {
@@ -369,11 +369,14 @@ fn get(server: &TestServer, path: &str, cookie: &str) -> String {
 #[test]
 fn an_owner_confirms_a_pairing_on_the_status_page() {
     let (server, pairing) = pairing_server(true, |server| server);
-    let (_, owner) = server.issue("Ada", security::Grant::Owner);
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
     // A collaborator token for a space that exists, since one whose space is gone is revoked.
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     let studio = ada.create_space("Studio").id;
-    let (_, collaborator) = server.issue("Bob", security::Grant::Collaborator { space: studio });
+    let (_, collaborator) = server.issue(
+        "Bob",
+        tomori_security::Grant::Collaborator { space: studio },
+    );
     let owner = format!("__Host-tomori-token={owner}");
     let collaborator = format!("__Host-tomori-token={collaborator}");
     let mut quest = server.connect("quest", "Quest 3");
@@ -407,14 +410,14 @@ fn an_owner_confirms_a_pairing_on_the_status_page() {
     let (status, response) = post(&server, "/pairing/confirm", &owner, &serial);
     assert_eq!(status, 303, "{response}");
     let token = paired(&quest);
-    assert!(token.starts_with(security::TOKEN_PREFIX));
+    assert!(token.starts_with(tomori_security::TOKEN_PREFIX));
     assert!(get(&server, "/", &owner).contains("No pairing is pending"));
 }
 
 #[test]
 fn an_owner_declines_a_pairing_on_the_status_page() {
     let (server, pairing) = pairing_server(true, |server| server);
-    let (_, owner) = server.issue("Ada", security::Grant::Owner);
+    let (_, owner) = server.issue("Ada", tomori_security::Grant::Owner);
     let owner = format!("__Host-tomori-token={owner}");
     let mut quest = server.connect("quest", "Quest 3");
     pair(&mut quest);
@@ -440,7 +443,7 @@ fn an_owner_declines_a_pairing_on_the_status_page() {
 
 #[test]
 fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
-    let certificate = security::ServerCertificate::generate();
+    let certificate = tomori_security::ServerCertificate::generate();
     let fingerprint = certificate.fingerprint();
     let config = certificate.server_config().unwrap();
     let (sender, receiver) = channel();
@@ -452,12 +455,13 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
     let pairing = receiver.recv().unwrap();
 
     let connect = |token: Option<String>, pin: Option<Fingerprint>| {
-        let mut options = client::Options::new(server.address.to_string(), "quest", "Quest 3");
-        options.transport = client::Transport::Tls { pin };
+        let mut options =
+            tomori_client::Options::new(server.address.to_string(), "quest", "Quest 3");
+        options.transport = tomori_client::Transport::Tls { pin };
         options.token = token;
-        client::Client::connect(options).unwrap()
+        tomori_client::Client::connect(options).unwrap()
     };
-    let next = |client: &client::Client| {
+    let next = |client: &tomori_client::Client| {
         client
             .events()
             .recv_timeout(TIMEOUT)
@@ -465,8 +469,10 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
     };
     let quest = connect(None, None);
     let seen = loop {
-        if let client::Event::State(client::ConnectionState::Connected {
-            role, certificate, ..
+        if let tomori_client::Event::State(tomori_client::ConnectionState::Connected {
+            role,
+            certificate,
+            ..
         }) = next(&quest)
         {
             assert_eq!(role, ConnectionRole::Visitor);
@@ -482,7 +488,7 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
         })
         .unwrap();
     let server_nonce = loop {
-        if let client::Event::Message(ServerMessage::PairNonce { nonce }) = next(&quest) {
+        if let tomori_client::Event::Message(ServerMessage::PairNonce { nonce }) = next(&quest) {
             break Nonce::parse(&nonce).unwrap();
         }
     };
@@ -492,14 +498,14 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
         })
         .unwrap();
     loop {
-        if let client::Event::Message(ServerMessage::PairWaiting) = next(&quest) {
+        if let tomori_client::Event::Message(ServerMessage::PairWaiting) = next(&quest) {
             break;
         }
     }
     // The operator types the code the device shows, derived from the certificate it saw.
     pairing.confirm(&code(seen, device, server_nonce)).unwrap();
     let token = loop {
-        if let client::Event::Message(ServerMessage::Paired { token }) = next(&quest) {
+        if let tomori_client::Event::Message(ServerMessage::Paired { token }) = next(&quest) {
             break token;
         }
     };
@@ -507,7 +513,9 @@ fn a_client_pairs_over_tls_with_the_certificate_it_saw() {
 
     let owner = connect(Some(token), Some(seen));
     loop {
-        if let client::Event::State(client::ConnectionState::Connected { role, .. }) = next(&owner)
+        if let tomori_client::Event::State(tomori_client::ConnectionState::Connected {
+            role, ..
+        }) = next(&owner)
         {
             assert_eq!(role, ConnectionRole::Owner);
             break;

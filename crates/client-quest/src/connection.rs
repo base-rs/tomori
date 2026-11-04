@@ -12,16 +12,16 @@ use crate::{
     playback::{Playback, Route, Speaking},
     server_choice::{self, Choice, Source},
 };
-use client::{
-    Client, ConnectionState, Disconnect, Event, Fingerprint, Microphone, Options, Transport,
-    discovery,
-    playback::{MixerOptions, Player, PlayerControl},
-};
-use protocol::{ClientMessage, Gate, Pose, ServerMessage};
 use std::{
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
+use tomori_client::{
+    Client, ConnectionState, Disconnect, Event, Fingerprint, Microphone, Options, Transport,
+    discovery,
+    playback::{MixerOptions, Player, PlayerControl},
+};
+use tomori_protocol::{ClientMessage, Gate, Pose, ServerMessage};
 
 /// Permission to receive multicast while browsing.
 pub trait Multicast {
@@ -236,7 +236,7 @@ impl EchoTest {
                             .level()
                             .map_or_else(|| "nothing".into(), |level| format!("{level:.1} dBFS"))
                     };
-                    let probe = 20.0 * f64::from(client::playback::PROBE_LEVEL).log10();
+                    let probe = 20.0 * f64::from(tomori_client::playback::PROBE_LEVEL).log10();
                     let below = self.echo.level().map_or_else(String::new, |echo| {
                         format!(", {:.1} dB below the probe", probe - echo)
                     });
@@ -407,7 +407,7 @@ impl Voice {
         client: &Client,
         utterance: String,
         generation: u64,
-        answer: Option<protocol::AnswerTarget>,
+        answer: Option<tomori_protocol::AnswerTarget>,
     ) -> Result<(), String> {
         let resume_live = self.live && self.recording.is_some();
         if resume_live {
@@ -454,7 +454,7 @@ impl Voice {
         &mut self,
         client: Option<&Client>,
         send: bool,
-        pointed: Option<protocol::Pointed>,
+        pointed: Option<tomori_protocol::Pointed>,
     ) -> Result<(), Finish> {
         let resume_live = self.live;
         let generation = self.generation;
@@ -865,7 +865,7 @@ impl Connection {
         self.others.dedup();
         let others = &self.others;
         self.heads.retain(|source, _| others.contains(source));
-        let listener = listener.map(|pose| client::playback::spatial::Listener {
+        let listener = listener.map(|pose| tomori_client::playback::spatial::Listener {
             position: pose.position,
             orientation: pose.orientation,
         });
@@ -2117,10 +2117,11 @@ mod tests {
                 return Err("No speaker is available.".into());
             }
             let mut output = [1; 48];
-            player
-                .lock()
-                .unwrap()
-                .render(48_000, client::playback::Layout::Mono, &mut output);
+            player.lock().unwrap().render(
+                48_000,
+                tomori_client::playback::Layout::Mono,
+                &mut output,
+            );
             assert_eq!(output, [0; 48]);
             *self.failed.lock().unwrap() = Some(failed);
             self.opened.fetch_add(1, Ordering::Relaxed);
@@ -2167,7 +2168,7 @@ mod tests {
         (connection, conversation)
     }
 
-    fn cues(connection: &mut Connection) -> Vec<client::playback::Earcon> {
+    fn cues(connection: &mut Connection) -> Vec<tomori_client::playback::Earcon> {
         connection
             .feedback
             .take_earcons()
@@ -2213,7 +2214,7 @@ mod tests {
 
     #[test]
     fn this_participants_words_are_cued_when_sent_or_failed() {
-        use client::playback::Earcon;
+        use tomori_client::playback::Earcon;
         let (mut connection, _conversation) = feedback_connection();
         connection.utterances = vec!["u-1".into(), "u-2".into()];
         let transcript = |utterance: &str, finished| {
@@ -2241,7 +2242,7 @@ mod tests {
 
     #[test]
     fn a_catch_up_nobody_asked_for_is_cued_once() {
-        use client::playback::Earcon;
+        use tomori_client::playback::Earcon;
         let (mut connection, mut conversation) = feedback_connection();
         let speech = |replay| {
             message(ServerMessage::Speech {
@@ -2274,7 +2275,7 @@ mod tests {
     #[test]
     fn a_request_that_cannot_be_sent_is_cued_on_the_right_hand_and_the_setting_is_kept() {
         use crate::feedback::{Level, Settings};
-        use client::playback::Earcon;
+        use tomori_client::playback::Earcon;
         let (mut connection, mut conversation) = feedback_connection();
         connection.feedback.set_haptics(true);
         conversation.push_action(Action::Send(ClientMessage::Leave));
@@ -2314,10 +2315,11 @@ mod tests {
         });
         let heard = |player: &crate::playback::Shared| {
             let mut output = vec![0; 4_800];
-            player
-                .lock()
-                .unwrap()
-                .render(48_000, client::playback::Layout::Mono, &mut output);
+            player.lock().unwrap().render(
+                48_000,
+                tomori_client::playback::Layout::Mono,
+                &mut output,
+            );
             output.iter().any(|sample| *sample != 0)
         };
         // Without a connection recording fails at once; the tick still plays through the silencing, and the failure does not.
@@ -2334,7 +2336,7 @@ mod tests {
 
     #[test]
     fn the_live_microphone_is_cued_only_when_it_turns_on_or_off() {
-        use client::playback::Earcon;
+        use tomori_client::playback::Earcon;
         let (mut connection, mut conversation) = feedback_connection();
         // Failing to start is a failure, and stopping what never started is silent.
         conversation.push_action(Action::StartLive(0));
@@ -2351,7 +2353,7 @@ mod tests {
 
     #[test]
     fn words_on_their_way_are_lost_when_the_connection_drops() {
-        use client::playback::Earcon;
+        use tomori_client::playback::Earcon;
         let (mut connection, mut conversation) = feedback_connection();
         let dropped = || {
             Event::State(ConnectionState::Disconnected {
@@ -2390,7 +2392,7 @@ mod tests {
 
     #[test]
     fn a_replay_asked_for_that_never_comes_stops_counting_after_a_while() {
-        use client::playback::Earcon;
+        use tomori_client::playback::Earcon;
         let (mut connection, mut conversation) = feedback_connection();
         conversation.push_action(Action::Send(ClientMessage::Replay { message: None }));
         connection.perform(&mut conversation);
@@ -2607,8 +2609,8 @@ mod tests {
         speaker.player = Some((Arc::new(Mutex::new(player)), control));
         for sequence in 0..8 {
             sender
-                .send(protocol::AudioFrame {
-                    gate: protocol::Gate::Live,
+                .send(tomori_protocol::AudioFrame {
+                    gate: tomori_protocol::Gate::Live,
                     source: 1,
                     sequence,
                     timestamp: 0,

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use protocol::{Participant, SpaceState};
+use tomori_protocol::{Participant, SpaceState};
 
 use crate::ui_text::Rgba;
 
@@ -130,7 +130,7 @@ pub fn of_user_message<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{QueueEntry, QueueState};
+    use tomori_protocol::{QueueEntry, QueueState};
 
     fn space() -> SpaceState {
         SpaceState {

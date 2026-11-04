@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 
-use protocol::{AudioFrame, ClientMessage, Frame, Gate};
+use tomori_protocol::{AudioFrame, ClientMessage, Frame, Gate};
 
 /// The membership a reconnecting client restores after its Hello.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

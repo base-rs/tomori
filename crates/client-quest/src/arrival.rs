@@ -10,8 +10,8 @@ use crate::{
     server_choice::Source,
 };
 use glam::Vec3;
-use protocol::{Activity, Attention, SpaceSummary};
 use std::f32::consts::{FRAC_PI_2, TAU};
+use tomori_protocol::{Activity, Attention, SpaceSummary};
 
 /// Where the participant stands when arrival begins, in scene coordinates; labels turn to face it.
 pub const HOME: Vec3 = Vec3::new(0.0, 1.6, 0.0);

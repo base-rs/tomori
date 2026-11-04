@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
-use protocol::AudioFrame;
+use tomori_protocol::AudioFrame;
 
 use super::PlaybackStatistics;
 

@@ -17,11 +17,11 @@ use base_http_client::{Client as HttpClient, Endpoint, StreamingResponseBody};
 use base_scheduler::{Cancellation, Clock, Timers};
 use base_scheduler_native::NativeScheduler;
 use futures_lite::future::{or, zip};
-use protocol::{
+use tomori_protocol::{
     AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, Frame, FrameDecoder, FrameKind,
     PROTOCOL_VERSION, ServerMessage,
 };
-use security::{Fingerprint, Pinned};
+use tomori_security::{Fingerprint, Pinned};
 
 use crate::client::Shared;
 use crate::outbox::Batch;
@@ -208,9 +208,8 @@ async fn attempt(
 ) -> Disconnect {
     let endpoint = match &pinned {
         // The certificate is pinned rather than checked against its name, so the name is only for the handshake.
-        Some(pinned) => {
-            Endpoint::new(address).with_tls(security::client_config(pinned.clone()), "tomori")
-        }
+        Some(pinned) => Endpoint::new(address)
+            .with_tls(tomori_security::client_config(pinned.clone()), "tomori"),
         None => Endpoint::new(address),
     };
     let (client, driver) = HttpClient::new(context.scheduler, endpoint, Default::default())
@@ -448,7 +447,7 @@ fn welcome(
 
 /// Hand one frame to the application. `source` is this client's participant number on this connection.
 fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disconnect> {
-    let protocol = |error: protocol::FrameError| Disconnect::Protocol(error.to_string());
+    let protocol = |error: tomori_protocol::FrameError| Disconnect::Protocol(error.to_string());
     match frame.kind {
         FrameKind::Control => match frame.to_server_message().map_err(protocol)? {
             ServerMessage::Welcome { .. } => {
@@ -497,7 +496,7 @@ struct FrameReader<'a, 'scope> {
 impl FrameReader<'_, '_> {
     /// The next complete frame, or why the response ended.
     async fn next(&mut self) -> Result<Frame, Disconnect> {
-        let protocol = |error: protocol::FrameError| Disconnect::Protocol(error.to_string());
+        let protocol = |error: tomori_protocol::FrameError| Disconnect::Protocol(error.to_string());
         loop {
             if let Some(frame) = self.decoder.next_frame().map_err(protocol)? {
                 return Ok(frame);
