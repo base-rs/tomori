@@ -11,7 +11,8 @@
     allow(unused_variables, unused_mut, unreachable_code)
 )]
 
-use std::net::SocketAddr;
+use std::fmt::Display;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -82,6 +83,7 @@ Options:
                        at a time uses a state directory, so give each server its own.
   --help               Show this help.";
 
+#[cfg_attr(test, derive(Clone))]
 struct Arguments {
     bind: SocketAddr,
     backends: Vec<String>,
@@ -177,8 +179,10 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                 let value = arguments.next().ok_or("--speech-provider needs a name")?;
                 match value.as_str() {
                     "cpu" => {}
-                    "cuda" if cfg!(feature = "speech-shared") => {}
+                    #[cfg(feature = "speech-shared")]
+                    "cuda" => {}
                     // The static libraries linked by default contain only the CPU provider, and ONNX Runtime would silently fall back to it.
+                    #[cfg(not(feature = "speech-shared"))]
                     "cuda" => {
                         return Err("--speech-provider cuda needs a server built with the speech-shared feature and the CUDA build of sherpa-onnx; see crates/speech/readme.md.".to_owned());
                     }
@@ -302,20 +306,24 @@ fn workspace_roots(roots: &[PathBuf]) -> Result<WorkspaceRoots, String> {
     Ok(roots)
 }
 
-/// The state directory given, or else the default.
-fn state_directory(arguments: &Arguments) -> Result<PathBuf, String> {
+/// The state directory given, or else `default_state`, the one from the environment.
+fn state_directory(arguments: &Arguments, default_state: Option<&Path>) -> Result<PathBuf, String> {
     arguments
         .state_directory
         .clone()
-        .or_else(default_state_directory)
+        .or_else(|| default_state.map(Path::to_owned))
         .ok_or_else(|| {
             "No state directory: give --state-directory, or set XDG_STATE_HOME or HOME.".to_owned()
         })
 }
 
 /// Keep spaces across restarts in the state directory, and list again those kept there. A record that cannot be read stops the server from starting, rather than losing every space and the admissions to them. See `design/spaces.md`.
-fn keep_spaces(server: Server, arguments: &Arguments) -> Result<Server, String> {
-    let state = state_directory(arguments)?;
+fn keep_spaces(
+    server: Server,
+    arguments: &Arguments,
+    default_state: Option<&Path>,
+) -> Result<Server, String> {
+    let state = state_directory(arguments, default_state)?;
     let store = tomori_server::kept::SpaceStore::open(&state).map_err(|error| {
         format!(
             "Could not open the spaces kept in {}: {error}.",
@@ -333,14 +341,18 @@ fn keep_spaces(server: Server, arguments: &Arguments) -> Result<Server, String> 
 }
 
 /// Configure who the server admits, and say so. A server that accepts tokens serves only TLS, with the certificate in its state directory, whose fingerprint is returned for advertising. See `design/security.md`.
-fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<String>), String> {
+fn admission(
+    server: Server,
+    arguments: &Arguments,
+    default_state: Option<&Path>,
+) -> Result<(Server, Option<String>), String> {
     if arguments.open {
         let warning = "Anyone who can reach this server can create spaces and approve tool use (--auth open).";
         eprintln!("Warning: {warning}");
         log::warn!("{warning}");
         return Ok((server, None));
     }
-    let state = state_directory(arguments)?;
+    let state = state_directory(arguments, default_state)?;
     let store = tomori_security::TokenStore::open(&state).map_err(|error| {
         format!(
             "Could not open the token store in {}: {error}.",
@@ -405,27 +417,9 @@ fn confirm_pairings_on_console(pairing: tomori_server::Pairing) {
     let reading = std::thread::Builder::new()
         .name("tomori-console".into())
         .spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if line.eq_ignore_ascii_case("allow") {
-                    pairing.allow();
-                    eprintln!("Pairing is allowed again.");
-                } else if pairing.pending().is_none() {
-                    eprintln!("No pairing is waiting.");
-                } else if line.eq_ignore_ascii_case("decline") {
-                    pairing.decline();
-                    eprintln!("Declined the pairing.");
-                } else if let Some(code) = tomori_security::pairing::typed(line) {
-                    match pairing.confirm(&code) {
-                        Ok(name) => eprintln!("Paired {name:?} as an owner."),
-                        Err(error) => eprintln!("{error}"),
-                    }
-                } else {
-                    eprintln!("Type the 6-digit code the device shows, or \"decline\".");
+            for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                if let Some(reply) = console_reply(&pairing, &line) {
+                    eprintln!("{reply}");
                 }
             }
         });
@@ -434,10 +428,36 @@ fn confirm_pairings_on_console(pairing: tomori_server::Pairing) {
     }
 }
 
+/// Act on `line`, typed on the console, for `pairing`, returning what to tell the operator, if anything.
+fn console_reply(pairing: &tomori_server::Pairing, line: &str) -> Option<String> {
+    let line = line.trim();
+    Some(if line.is_empty() {
+        return None;
+    } else if line.eq_ignore_ascii_case("allow") {
+        pairing.allow();
+        "Pairing is allowed again.".to_owned()
+    } else if pairing.pending().is_none() {
+        "No pairing is waiting.".to_owned()
+    } else if line.eq_ignore_ascii_case("decline") {
+        pairing.decline();
+        "Declined the pairing.".to_owned()
+    } else if let Some(code) = tomori_security::pairing::typed(line) {
+        match pairing.confirm(&code) {
+            Ok(name) => format!("Paired {name:?} as an owner."),
+            Err(error) => error.to_owned(),
+        }
+    } else {
+        "Type the 6-digit code the device shows, or \"decline\".".to_owned()
+    })
+}
+
 /// The default display name: the host name without its domain, such as `studio` for `studio.local`.
 fn host_name() -> String {
-    let host = gethostname::gethostname();
-    let host = host.to_string_lossy();
+    display_name(&gethostname::gethostname().to_string_lossy())
+}
+
+/// The display name for the host named `host`: its first label, or `Tomori` without one.
+fn display_name(host: &str) -> String {
     match host.split('.').next() {
         Some(label) if !label.is_empty() => label.to_owned(),
         _ => "Tomori".to_owned(),
@@ -447,19 +467,46 @@ fn host_name() -> String {
 /// The running advertisement, if any, which the server updates as its counts change.
 type Advertised = Arc<Mutex<Option<tomori_discovery::Advertisement>>>;
 
-/// Advertise the bound `address`, with the server's current `counts` and its certificate's `fingerprint` if it serves TLS, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
+/// How the server advertises itself: [`tomori_discovery::advertise`], unless a test stands in for it.
+trait Advertiser:
+    FnOnce(
+    &str,
+    u16,
+    IpAddr,
+    tomori_discovery::Counts,
+    Option<String>,
+) -> Result<tomori_discovery::Advertisement, Self::Error>
+{
+    type Error: Display;
+}
+
+impl<F, E: Display> Advertiser for F
+where
+    F: FnOnce(
+        &str,
+        u16,
+        IpAddr,
+        tomori_discovery::Counts,
+        Option<String>,
+    ) -> Result<tomori_discovery::Advertisement, E>,
+{
+    type Error = E;
+}
+
+/// Advertise the bound `address` with `start`, with the server's current `counts` and its certificate's `fingerprint` if it serves TLS, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
 fn advertise(
     arguments: &Arguments,
     address: SocketAddr,
     counts: tomori_discovery::Counts,
     fingerprint: Option<String>,
+    start: impl Advertiser,
 ) -> Option<tomori_discovery::Advertisement> {
     if !arguments.advertise {
         eprintln!("Bonjour: not advertising (--no-advertise).");
         return None;
     }
     let name = arguments.name.clone().unwrap_or_else(host_name);
-    match tomori_discovery::advertise(&name, address.port(), address.ip(), counts, fingerprint) {
+    match start(&name, address.port(), address.ip(), counts, fingerprint) {
         Ok(advertisement) => {
             eprintln!(
                 "Bonjour: advertising {:?} as _tomori._tcp on port {}.",
@@ -725,91 +772,126 @@ fn synthesis(
 fn main() -> ExitCode {
     // Log to standard error, at info and above unless `RUST_LOG` says otherwise.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let mut command = std::env::args().skip(1).peekable();
-    if command.peek().map(String::as_str) == Some("auth") {
-        command.next();
-        return match tomori_server::auth_command::run(command, default_state_directory()) {
-            Ok(output) => {
-                print!("{output}");
-                ExitCode::SUCCESS
-            }
-            Err(message) => {
-                eprintln!("{message}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    let arguments = match parse(command) {
-        Ok(arguments) => arguments,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let backends = match backends(&arguments) {
-        Ok(backends) => backends,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let roots = match workspace_roots(&arguments.workspace_roots) {
-        Ok(roots) => roots,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let root = arguments.speech_root.as_deref();
     let mut engines = Engines::default();
-    let transcriber = match transcriber(
+    let code = run(
+        std::env::args().skip(1),
+        default_state_directory(),
+        &mut engines,
+    );
+    // Stop the speech engines before returning, so that no inference is running while static destructors, including ONNX Runtime's, run.
+    if !engines.stop(Instant::now() + ENGINE_STOP) {
+        log::error!(
+            "The speech engines did not stop within {ENGINE_STOP:?}; exiting without running destructors."
+        );
+        #[cfg(unix)]
+        exit_now(if code == ExitCode::SUCCESS { 0 } else { 1 });
+    }
+    code
+}
+
+/// Run the command line `command`, the arguments after the program's name, with `default_state` the state directory from the environment. Leaves the speech engines it started in `engines`, for the caller to stop.
+fn run(
+    command: impl Iterator<Item = String>,
+    default_state: Option<PathBuf>,
+    engines: &mut Engines,
+) -> ExitCode {
+    let mut command = command.peekable();
+    let result = if command.peek().map(String::as_str) == Some("auth") {
+        command.next();
+        tomori_server::auth_command::run(command, default_state).map(|output| print!("{output}"))
+    } else {
+        parse(command).and_then(|arguments| {
+            let (server, fingerprint) = configure(&arguments, default_state.as_deref(), engines)?;
+            serve_until_signalled(server, &arguments, fingerprint)
+        })
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The server `arguments` describe, with its certificate's fingerprint if it serves TLS: its backends, workspace roots, speech engines, admission and kept spaces. Speech engines it starts are added to `engines`.
+fn configure(
+    arguments: &Arguments,
+    default_state: Option<&Path>,
+    engines: &mut Engines,
+) -> Result<(Server, Option<String>), String> {
+    let backends = backends(arguments)?;
+    let roots = workspace_roots(&arguments.workspace_roots)?;
+    let root = arguments.speech_root.as_deref();
+    let transcriber = transcriber(
         root,
         &arguments.speech_provider,
         &arguments.speech_backend,
-        &mut engines,
-    ) {
-        Ok(transcriber) => transcriber,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let scheduler = match NativeScheduler::with_options(NativeOptions {
-        workers: 4,
-        threads: 4,
-        capacity: 1024,
-        ..Default::default()
-    }) {
-        Ok(scheduler) => scheduler,
-        Err(error) => {
-            eprintln!("Could not start the scheduler: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let mut server = Server::new(backends, transcriber)
+        engines,
+    )?;
+    let server = Server::new(backends, transcriber)
         .with_keepalive(arguments.keepalive)
         .with_workspace_roots(roots)
         .with_max_spaces(arguments.max_spaces)
         .with_attention_advertised(arguments.advertise_attention);
-    let fingerprint;
-    (server, fingerprint) = match admission(server, &arguments) {
-        Ok(admitted) => admitted,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
-    server = match keep_spaces(server, &arguments) {
-        Ok(server) => server,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (server, fingerprint) = admission(server, arguments, default_state)?;
+    let mut server = keep_spaces(server, arguments, default_state)?;
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
     }
-    let server = synthesis(server, root, &arguments.speech_segmentation, &mut engines);
+    let server = synthesis(server, root, &arguments.speech_segmentation, engines);
+    Ok((server, fingerprint))
+}
+
+/// Serve on a scheduler of its own until SIGINT or SIGTERM, then shut down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
+fn serve_until_signalled(
+    server: Server,
+    arguments: &Arguments,
+    fingerprint: Option<String>,
+) -> Result<(), String> {
+    let scheduler = NativeScheduler::with_options(NativeOptions {
+        workers: 4,
+        threads: 4,
+        capacity: 1024,
+        ..Default::default()
+    })
+    .map_err(|error| format!("Could not start the scheduler: {error}"))?;
+    let cancellation = Cancellation::new();
+    #[cfg(unix)]
+    let _signals = {
+        use base_scheduler::Signals;
+        scheduler
+            .signal_subscribe(
+                &[libc::SIGINT, libc::SIGTERM],
+                Shutdown(cancellation.clone()),
+            )
+            .inspect_err(|error| eprintln!("Could not handle signals: {error}"))
+            .ok()
+    };
+    let result = block_on(serve(
+        &scheduler,
+        server,
+        arguments,
+        fingerprint,
+        &cancellation,
+        tomori_discovery::advertise,
+    ));
+    // Closing the scheduler unregisters its signal handlers, which would then swallow a repeated signal. Restore the default action first, so that a signal during the rest of shutdown still ends the process at once, without running destructors.
+    #[cfg(unix)]
+    restore_default_signals();
+    block_on(scheduler.shutdown());
+    result
+}
+
+/// Listen where `arguments` say, advertise with `start` unless turned off, and serve until `cancellation`, withdrawing the advertisement as soon as serving ends.
+async fn serve(
+    scheduler: &NativeScheduler,
+    server: Server,
+    arguments: &Arguments,
+    fingerprint: Option<String>,
+    cancellation: &Cancellation,
+    start: impl Advertiser,
+) -> Result<(), String> {
     let advertised = Advertised::default();
     let server = server.with_counts({
         let advertised = advertised.clone();
@@ -824,77 +906,42 @@ fn main() -> ExitCode {
             }
         }
     });
-    let cancellation = Cancellation::new();
-    // Stop on Ctrl-C or SIGTERM by shutting down in order, so that the Bonjour advertisement is withdrawn rather than left to expire.
-    #[cfg(unix)]
-    let _signals = {
-        use base_scheduler::Signals;
-        scheduler
-            .signal_subscribe(
-                &[libc::SIGINT, libc::SIGTERM],
-                Shutdown(cancellation.clone()),
-            )
-            .inspect_err(|error| eprintln!("Could not handle signals: {error}"))
-            .ok()
+    let listener = tomori_server::bind(scheduler, arguments.bind, cancellation)
+        .await
+        .map_err(|error| format!("Could not listen on {}: {error}", arguments.bind))?;
+    let address = scheduler
+        .socket_local_address(&listener)
+        .map_err(|error| error.to_string())?;
+    let scheme = if fingerprint.is_some() {
+        "https"
+    } else {
+        "http"
     };
-    let result = block_on(async {
-        let listener = tomori_server::bind(&scheduler, arguments.bind, &cancellation)
-            .await
-            .map_err(|error| format!("Could not listen on {}: {error}", arguments.bind))?;
-        let address = scheduler
-            .socket_local_address(&listener)
-            .map_err(|error| error.to_string())?;
-        let scheme = if fingerprint.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        eprintln!(
-            "Tomori server listening on {scheme}://{address} (backends: {}).",
-            arguments.backends.join(", ")
-        );
-        *advertised
+    eprintln!(
+        "Tomori server listening on {scheme}://{address} (backends: {}).",
+        arguments.backends.join(", ")
+    );
+    *advertised
+        .lock()
+        .expect("the advertisement is never left poisoned") =
+        advertise(arguments, address, server.counts(), fingerprint, start);
+    let served = server.run(scheduler, listener, cancellation).await;
+    // Withdraw the advertisement as soon as serving ends.
+    drop(
+        advertised
             .lock()
-            .expect("the advertisement is never left poisoned") =
-            advertise(&arguments, address, server.counts(), fingerprint.clone());
-        let served = server.run(&scheduler, listener, &cancellation).await;
-        // Withdraw the advertisement as soon as serving ends.
-        drop(
-            advertised
-                .lock()
-                .expect("the advertisement is never left poisoned")
-                .take(),
-        );
-        served.map(|_| ()).map_err(|error| {
-            let mut message = format!("The server failed: {error}");
-            let mut source = std::error::Error::source(&error);
-            while let Some(cause) = source {
-                message.push_str(&format!(": {cause}"));
-                source = cause.source();
-            }
-            message
-        })
-    });
-    // Closing the scheduler unregisters its signal handlers, which would then swallow a repeated signal. Restore the default action first, so that a signal during the rest of shutdown still ends the process at once, without running destructors.
-    #[cfg(unix)]
-    restore_default_signals();
-    block_on(scheduler.shutdown());
-    let code = match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("{message}");
-            ExitCode::FAILURE
+            .expect("the advertisement is never left poisoned")
+            .take(),
+    );
+    served.map(|_| ()).map_err(|error| {
+        let mut message = format!("The server failed: {error}");
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            message.push_str(&format!(": {cause}"));
+            source = cause.source();
         }
-    };
-    // Stop the speech engines before returning, so that no inference is running while static destructors, including ONNX Runtime's, run.
-    if !engines.stop(Instant::now() + ENGINE_STOP) {
-        log::error!(
-            "The speech engines did not stop within {ENGINE_STOP:?}; exiting without running destructors."
-        );
-        #[cfg(unix)]
-        exit_now(if code == ExitCode::SUCCESS { 0 } else { 1 });
-    }
-    code
+        message
+    })
 }
 
 /// Exit at once, without running static destructors or `atexit` handlers, which could free state that a native engine thread is still using.
@@ -935,6 +982,540 @@ mod tests {
 
     fn arguments(list: &[&str]) -> Result<Arguments, String> {
         parse(list.iter().map(|argument| argument.to_string()))
+    }
+
+    /// An empty directory of its own for the test named `name`.
+    fn directory(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("tomori-server-main-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// Arguments for a server on an ephemeral loopback port, with its state and workspace in `directory`, and `extra`.
+    fn local(directory: &Path, extra: &[&str]) -> Arguments {
+        let directory = directory.to_str().unwrap();
+        let mut list = vec![
+            "--bind",
+            "127.0.0.1:0",
+            "--no-advertise",
+            "--state-directory",
+            directory,
+            "--workspace-root",
+            directory,
+        ];
+        list.extend_from_slice(extra);
+        arguments(&list).unwrap()
+    }
+
+    #[test]
+    fn every_option_is_read_and_every_missing_value_is_refused() {
+        let parsed = arguments(&[
+            "--bind",
+            "127.0.0.1:9999",
+            "--backend",
+            "fake",
+            "--backend",
+            "opencode",
+            "--opencode-url",
+            "http://127.0.0.1:4096",
+            "--speech-root",
+            "/srv/speech",
+            "--speech-backend",
+            "offline",
+            "--speech-segmentation",
+            "sentence",
+            "--name",
+            "Studio",
+            "--no-advertise",
+        ])
+        .unwrap();
+        assert_eq!(parsed.bind, "127.0.0.1:9999".parse().unwrap());
+        assert_eq!(parsed.backends, ["fake", "opencode"]);
+        assert_eq!(
+            parsed.opencode_url.as_deref(),
+            Some("http://127.0.0.1:4096")
+        );
+        assert_eq!(parsed.speech_root, Some(PathBuf::from("/srv/speech")));
+        assert_eq!(parsed.speech_backend, "offline");
+        assert_eq!(parsed.speech_segmentation, "sentence");
+        assert_eq!(parsed.name.as_deref(), Some("Studio"));
+        assert!(!parsed.advertise);
+
+        // Without any, the fake backend is offered, on the default port on every interface, streaming and speaking whole blocks.
+        let parsed = arguments(&[]).unwrap();
+        assert_eq!(parsed.backends, ["fake"]);
+        assert_eq!(
+            parsed.bind,
+            SocketAddr::from(([0, 0, 0, 0], tomori_protocol::DEFAULT_PORT))
+        );
+        assert_eq!(parsed.speech_backend, "streaming");
+        assert_eq!(parsed.speech_segmentation, "block");
+
+        for (list, error) in [
+            (&["--bind"][..], "--bind needs an address"),
+            (&["--backend"], "--backend needs a name"),
+            (&["--opencode-url"], "--opencode-url needs a URL"),
+            (&["--speech-root"], "--speech-root needs a directory"),
+            (&["--speech-backend"], "--speech-backend needs a name"),
+            (
+                &["--speech-backend", "batch"],
+                "--speech-backend needs streaming or offline, not \"batch\"",
+            ),
+            (
+                &["--speech-segmentation"],
+                "--speech-segmentation needs a name",
+            ),
+            (
+                &["--speech-segmentation", "word"],
+                "--speech-segmentation needs block or sentence, not \"word\"",
+            ),
+            (&["--name"], "--name needs a name"),
+            (
+                &["--max-visitors", "many"],
+                "--max-visitors needs a count, not \"many\"",
+            ),
+        ] {
+            assert_eq!(arguments(list).err().as_deref(), Some(error), "{list:?}");
+        }
+        let error = arguments(&["--bind", "nowhere"]).err().unwrap();
+        assert!(
+            error.starts_with("invalid address \"nowhere\": "),
+            "{error}"
+        );
+        assert_eq!(arguments(&["--help"]).err().as_deref(), Some(USAGE));
+        assert_eq!(arguments(&["-h"]).err().as_deref(), Some(USAGE));
+        assert_eq!(
+            arguments(&["--verbose"]).err(),
+            Some(format!("unknown argument \"--verbose\"\n\n{USAGE}"))
+        );
+    }
+
+    #[test]
+    fn the_state_directory_is_the_one_given_else_the_environments() {
+        let given = arguments(&["--state-directory", "/var/lib/tomori"]).unwrap();
+        let none = arguments(&[]).unwrap();
+        let environment = Path::new("/home/ada/.local/state/tomori");
+        assert_eq!(
+            state_directory(&given, Some(environment)),
+            Ok(PathBuf::from("/var/lib/tomori"))
+        );
+        assert_eq!(
+            state_directory(&none, Some(environment)),
+            Ok(environment.to_owned())
+        );
+        assert_eq!(
+            state_directory(&none, None),
+            Err(
+                "No state directory: give --state-directory, or set XDG_STATE_HOME or HOME."
+                    .to_owned()
+            )
+        );
+    }
+
+    /// The server `arguments` configure with no speech, or why it cannot be configured.
+    fn configured(arguments: &Arguments) -> Result<(Server, Option<String>), String> {
+        let mut engines = Engines::default();
+        let configured = configure(arguments, None, &mut engines);
+        assert!(engines.stop(Instant::now()));
+        configured
+    }
+
+    #[test]
+    fn an_open_server_serves_plain_http_and_keeps_its_spaces() {
+        let directory = directory("open");
+        let (server, fingerprint) = configured(&local(
+            &directory,
+            &["--auth", "open", "--request-timeout", "3"],
+        ))
+        .unwrap();
+        assert_eq!(fingerprint, None);
+        drop(server);
+        // Its spaces are kept in the state directory, though it issues no tokens.
+        assert!(!directory.join("tokens.json").exists());
+        assert!(!directory.join("certificate.der").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_server_admitting_by_tokens_serves_tls_with_the_certificate_it_keeps() {
+        let directory = directory("tokens");
+        let (_, fingerprint) = configured(&local(&directory, &["--no-visitors"])).unwrap();
+        let certificate = tomori_security::ServerCertificate::load_or_create(&directory).unwrap();
+        assert_eq!(fingerprint, Some(certificate.fingerprint().to_string()));
+        // Started again, it presents the same certificate, now with an owner token issued.
+        tomori_security::TokenStore::open(&directory)
+            .unwrap()
+            .issue("Ada", tomori_security::Grant::Owner)
+            .unwrap();
+        let (_, again) = configured(&local(&directory, &[])).unwrap();
+        assert_eq!(again, fingerprint);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_state_directory_that_cannot_be_used_stops_the_server_from_starting() {
+        let directory = directory("unusable");
+        let state = directory.join("state");
+        let failure = |extra: &[&str]| {
+            let mut arguments = local(&directory, extra);
+            arguments.state_directory = Some(state.clone());
+            configured(&arguments).err().unwrap()
+        };
+
+        // A file where the directory should be: neither tokens nor spaces can be kept.
+        std::fs::write(&state, "").unwrap();
+        let error = failure(&[]);
+        assert!(
+            error.starts_with("Could not open the token store in "),
+            "{error}"
+        );
+        let error = failure(&["--auth", "open"]);
+        assert!(
+            error.starts_with("Could not open the spaces kept in "),
+            "{error}"
+        );
+        std::fs::remove_file(&state).unwrap();
+
+        // A certificate that cannot be read, or a key that cannot be used.
+        std::fs::create_dir_all(state.join("certificate.der")).unwrap();
+        let error = failure(&[]);
+        assert!(
+            error.starts_with("Could not load or create the server's certificate in "),
+            "{error}"
+        );
+        std::fs::remove_dir(state.join("certificate.der")).unwrap();
+        tomori_security::ServerCertificate::load_or_create(&state).unwrap();
+        std::fs::write(state.join("key.der"), "not a key").unwrap();
+        let error = failure(&[]);
+        assert!(
+            error.starts_with("The server's certificate cannot be used: "),
+            "{error}"
+        );
+
+        // Without a state directory at all.
+        let mut arguments = local(&directory, &["--auth", "open"]);
+        arguments.state_directory = None;
+        assert_eq!(
+            configured(&arguments).err().as_deref(),
+            Some("No state directory: give --state-directory, or set XDG_STATE_HOME or HOME.")
+        );
+        let mut arguments = local(&directory, &[]);
+        arguments.state_directory = None;
+        assert_eq!(
+            configured(&arguments).err().as_deref(),
+            Some("No state directory: give --state-directory, or set XDG_STATE_HOME or HOME.")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unknown_backends_and_missing_roots_stop_the_server_from_starting() {
+        let directory = directory("refused");
+        assert_eq!(
+            configured(&local(&directory, &["--backend", "claude"]))
+                .err()
+                .as_deref(),
+            Some("unknown backend \"claude\"")
+        );
+        let mut arguments = local(&directory, &[]);
+        arguments.workspace_roots = vec![directory.join("missing")];
+        let error = configured(&arguments).err().unwrap();
+        assert!(error.starts_with("Invalid --workspace-root: "), "{error}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn every_backend_this_build_has_can_be_offered() {
+        let parsed = arguments(&["--backend", "fake", "--backend", "opencode"]).unwrap();
+        assert!(backends(&parsed).is_ok());
+        assert!(backend("fake", &parsed).is_ok());
+        assert!(backend("opencode", &parsed).is_ok());
+        assert_eq!(
+            backend("claude", &parsed).err().as_deref(),
+            Some("unknown backend \"claude\"")
+        );
+    }
+
+    #[test]
+    fn speech_without_models_starts_no_engine_and_the_server_still_starts() {
+        let directory = directory("speech");
+        let root = directory.to_str().unwrap();
+        for extra in [
+            &["--speech-root", root][..],
+            &["--speech-root", root, "--speech-backend", "offline"],
+        ] {
+            let mut engines = Engines::default();
+            let arguments = local(&directory, &[&["--auth", "open"][..], extra].concat());
+            assert!(configure(&arguments, None, &mut engines).is_ok());
+            // Recognition and synthesis are unavailable, and so is every engine's thread.
+            #[cfg(feature = "speech")]
+            assert!(engines.stoppers.is_empty());
+            assert!(engines.stop(Instant::now()));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_display_name_is_the_hosts_first_label() {
+        assert_eq!(display_name("studio.local"), "studio");
+        assert_eq!(display_name("studio"), "studio");
+        assert_eq!(display_name(""), "Tomori");
+        assert_eq!(display_name(".local"), "Tomori");
+        assert!(!host_name().is_empty());
+    }
+
+    /// What an advertiser that fails was asked to advertise, as name, port, address and fingerprint.
+    type Asked = (String, u16, IpAddr, Option<String>);
+
+    /// An advertiser that records what it was asked to advertise on `asked`, and fails as one without multicast would.
+    fn failing_advertiser(
+        asked: std::sync::mpsc::Sender<Asked>,
+    ) -> impl Advertiser<Error = &'static str> {
+        move |name: &str, port, address, _counts, fingerprint| {
+            asked
+                .send((name.to_owned(), port, address, fingerprint))
+                .unwrap();
+            Err("no multicast here")
+        }
+    }
+
+    #[test]
+    fn advertising_is_skipped_when_turned_off_and_its_failure_is_not_fatal() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 9999));
+        let (asked, received) = std::sync::mpsc::channel();
+        let off = arguments(&["--no-advertise"]).unwrap();
+        assert!(
+            advertise(
+                &off,
+                address,
+                Default::default(),
+                None,
+                failing_advertiser(asked.clone())
+            )
+            .is_none()
+        );
+        assert!(received.try_recv().is_err());
+
+        let named = arguments(&["--name", "Studio"]).unwrap();
+        let fingerprint = Some("ab".repeat(32));
+        assert!(
+            advertise(
+                &named,
+                address,
+                Default::default(),
+                fingerprint.clone(),
+                failing_advertiser(asked.clone())
+            )
+            .is_none()
+        );
+        assert_eq!(
+            received.try_recv().unwrap(),
+            ("Studio".to_owned(), 9999, address.ip(), fingerprint)
+        );
+        // Without a name, the host's.
+        advertise(
+            &arguments(&[]).unwrap(),
+            address,
+            Default::default(),
+            None,
+            failing_advertiser(asked),
+        );
+        assert_eq!(received.try_recv().unwrap().0, host_name());
+    }
+
+    /// Serve `server` as `arguments` say until the returned cancellation, with an advertiser that fails, returning what it was asked to advertise, once listening.
+    fn serving(
+        server: Server,
+        arguments: Arguments,
+        fingerprint: Option<String>,
+    ) -> (
+        std::sync::mpsc::Receiver<Asked>,
+        Cancellation,
+        std::thread::JoinHandle<Result<(), String>>,
+    ) {
+        let (asked, received) = std::sync::mpsc::channel();
+        let cancellation = Cancellation::new();
+        let serving = std::thread::spawn({
+            let cancellation = cancellation.clone();
+            move || {
+                let scheduler = NativeScheduler::new().unwrap();
+                let result = block_on(serve(
+                    &scheduler,
+                    server,
+                    &arguments,
+                    fingerprint,
+                    &cancellation,
+                    failing_advertiser(asked),
+                ));
+                block_on(scheduler.shutdown());
+                result
+            }
+        });
+        (received, cancellation, serving)
+    }
+
+    #[test]
+    fn a_configured_server_serves_until_cancelled() {
+        let directory = directory("serve");
+        let mut arguments = local(&directory, &["--auth", "open", "--name", "Served"]);
+        // Advertised, but by an advertiser that fails, which only tells the operator.
+        arguments.advertise = true;
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        // Counts are published as soon as they change, though not advertised.
+        let server = server.with_counts_interval(Duration::from_millis(1));
+        let (asked, cancellation, serving) = serving(server, arguments.clone(), fingerprint);
+        let (name, port, address, fingerprint) =
+            asked.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            (name.as_str(), address, fingerprint),
+            ("Served", IpAddr::from([127, 0, 0, 1]), None)
+        );
+
+        // It is serving: a client is welcomed, and creates a space in the workspace root.
+        let mut client =
+            tomori_server::test_support::TestClient::open(SocketAddr::from(([127, 0, 0, 1], port)));
+        client.hello("quest", "Ada");
+        client.send(&tomori_protocol::ClientMessage::CreateSpace {
+            title: "Kept".into(),
+            backend: "fake".into(),
+            directory: directory.to_str().unwrap().into(),
+            session: None,
+            environment: None,
+            instructions: None,
+        });
+        client.space(|state| state.title == "Kept");
+        drop(client);
+
+        cancellation.cancel();
+        assert_eq!(serving.join().unwrap(), Ok(()));
+        // The space is kept in the state directory, to be bound again when the server starts again.
+        assert!(configured(&arguments).is_ok());
+        let kept = tomori_server::kept::SpaceStore::open(&directory)
+            .unwrap()
+            .spaces();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].closed, None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_server_admitting_by_tokens_advertises_its_fingerprint() {
+        let directory = directory("serve-tls");
+        let mut arguments = local(&directory, &[]);
+        arguments.advertise = true;
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        let (asked, cancellation, serving) = serving(server, arguments, fingerprint.clone());
+        assert_eq!(
+            asked.recv_timeout(Duration::from_secs(10)).unwrap().3,
+            fingerprint
+        );
+        cancellation.cancel();
+        assert_eq!(serving.join().unwrap(), Ok(()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_address_the_server_cannot_listen_on_is_reported() {
+        let directory = directory("unbound");
+        // An address of the documentation range, which is on no interface here.
+        let mut arguments = local(&directory, &["--auth", "open"]);
+        arguments.bind = "192.0.2.1:0".parse().unwrap();
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        let (_, _cancellation, serving) = serving(server, arguments, fingerprint);
+        let error = serving.join().unwrap().err().unwrap();
+        assert!(
+            error.starts_with("Could not listen on 192.0.2.1:0: "),
+            "{error}"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_auth_command_and_unusable_arguments_end_with_their_exit_code() {
+        let directory = directory("run");
+        let state = Some(directory.clone());
+        let mut engines = Engines::default();
+        let run = |list: &[&str], engines: &mut Engines| {
+            super::run(
+                list.iter().map(|argument| argument.to_string()),
+                state.clone(),
+                engines,
+            )
+        };
+        assert_eq!(run(&["auth", "list"], &mut engines), ExitCode::SUCCESS);
+        assert_eq!(run(&["auth", "unknown"], &mut engines), ExitCode::FAILURE);
+        assert_eq!(run(&["--verbose"], &mut engines), ExitCode::FAILURE);
+        assert_eq!(
+            run(&["--backend", "claude", "--no-advertise"], &mut engines),
+            ExitCode::FAILURE
+        );
+        assert!(engines.stop(Instant::now()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Begin pairing as a device does, and reveal, returning the code it derives.
+    fn pair(
+        client: &mut tomori_server::test_support::TestClient,
+        fingerprint: tomori_security::Fingerprint,
+    ) -> String {
+        use tomori_protocol::{ClientMessage, ServerMessage};
+        use tomori_security::pairing::{Nonce, code};
+        let device = Nonce::generate();
+        client.send(&ClientMessage::PairBegin {
+            commitment: device.commitment(),
+        });
+        let server = client.wait_for(|message| match message {
+            ServerMessage::PairNonce { nonce } => Nonce::parse(nonce),
+            _ => None,
+        });
+        client.send(&ClientMessage::PairReveal {
+            nonce: device.to_hex(),
+        });
+        client.wait_for(|message| matches!(message, ServerMessage::PairWaiting).then_some(()));
+        code(fingerprint, device, server)
+    }
+
+    #[test]
+    fn the_operator_confirms_or_declines_pairings_on_the_console() {
+        let fingerprint = tomori_security::Fingerprint::of(b"console certificate");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let server = tomori_server::test_support::TestServer::with_tokens(true, move |server| {
+            let server = server
+                .with_pairing(fingerprint)
+                .with_tokens_over_plain_http_for_tests();
+            sender.send(server.pairing()).unwrap();
+            server
+        });
+        let pairing = receiver.recv().unwrap();
+        let reply = |line: &str| console_reply(&pairing, line);
+
+        assert_eq!(reply("  "), None);
+        assert_eq!(reply("Allow").as_deref(), Some("Pairing is allowed again."));
+        assert_eq!(reply("decline").as_deref(), Some("No pairing is waiting."));
+        assert_eq!(reply("123456").as_deref(), Some("No pairing is waiting."));
+
+        let mut quest = server.connect("quest", "Quest 3");
+        let code = pair(&mut quest, fingerprint);
+        assert_eq!(
+            reply("the code").as_deref(),
+            Some("Type the 6-digit code the device shows, or \"decline\".")
+        );
+        let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
+        assert_eq!(
+            reply(&wrong).as_deref(),
+            Some("That code does not match, so nothing was confirmed.")
+        );
+        assert_eq!(
+            reply(&code).as_deref(),
+            Some("Paired \"Quest 3\" as an owner.")
+        );
+
+        let mut tablet = server.connect("tablet", "Tablet");
+        pair(&mut tablet, fingerprint);
+        assert_eq!(reply("DECLINE").as_deref(), Some("Declined the pairing."));
+        assert_eq!(pairing.pending(), None);
     }
 
     #[test]
@@ -991,9 +1572,10 @@ mod tests {
             "cpu"
         );
         let cuda = arguments(&["--speech-provider", "cuda"]);
-        if cfg!(feature = "speech-shared") {
-            assert_eq!(cuda.unwrap().speech_provider, "cuda");
-        } else {
+        #[cfg(feature = "speech-shared")]
+        assert_eq!(cuda.unwrap().speech_provider, "cuda");
+        #[cfg(not(feature = "speech-shared"))]
+        {
             let error = cuda.err().expect("cuda is refused without speech-shared");
             assert!(error.contains("speech-shared"), "{error}");
         }
