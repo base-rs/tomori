@@ -141,10 +141,7 @@ impl Handler for Admitted<'_> {
             self.watch
                 .set(Idle::Serving(format!("{} {path}", request.method)));
         }
-        let response = self
-            .application
-            .call(request, interim, cancellation)
-            .await?;
+        let Ok(response) = self.application.call(request, interim, cancellation).await;
         let watch = self.watch.clone();
         Ok(response.map_body(|body| Tracked { body, watch }))
     }
@@ -188,5 +185,67 @@ impl<B: ReadableBody> ReadableBody for Tracked<B> {
 
     async fn read(&mut self, cancellation: &Cancellation) -> Result<BodyFrame<B::Data>, B::Error> {
         self.body.read(cancellation).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty request body.
+    struct Nothing;
+
+    impl ReadableBody for Nothing {
+        type Data = Vec<u8>;
+        type Error = std::io::Error;
+
+        fn is_empty(&self) -> bool {
+            true
+        }
+
+        fn close(&mut self, _error: Option<Self::Error>) {}
+
+        async fn read(&mut self, _: &Cancellation) -> Result<BodyFrame<Vec<u8>>, Self::Error> {
+            Ok(BodyFrame::End)
+        }
+    }
+
+    #[test]
+    fn a_connection_says_what_it_was_last_seen_doing() {
+        let admission = Admission::default();
+        let watch = admission.watch(Cancellation::new());
+        assert_eq!(
+            watch.state(),
+            "waiting for a request or closing after a response"
+        );
+        watch.set(Idle::Serving("GET /".into()));
+        assert_eq!(watch.state(), "serving GET /");
+    }
+
+    #[test]
+    fn a_connection_that_sends_no_request_in_time_is_closed() {
+        log::set_max_level(log::LevelFilter::Trace);
+        let admission = Admission::default();
+        let cancellation = Cancellation::new();
+        let _watch = admission.watch(cancellation.clone());
+        let now = Instant::now();
+        let timeout = Duration::from_secs(10);
+        admission.sweep(now, timeout);
+        assert!(!cancellation.is_cancelled());
+        admission.sweep(now + timeout, timeout);
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn a_tracked_body_is_as_empty_as_its_body() {
+        let watch = Admission::default().watch(Cancellation::new());
+        let tracked = Tracked {
+            body: Nothing,
+            watch,
+        };
+        assert!(tracked.is_empty());
+        let mut nothing = Nothing;
+        assert!(futures_lite::future::block_on(nothing.read(&Cancellation::new())).is_ok());
+        nothing.close(None);
     }
 }
