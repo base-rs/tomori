@@ -40,6 +40,6 @@ Environments have no server halves, data sources or tools yet. Those are planned
 
 ## Without the command line
 
-To embed a server without its command line, build a `Server` directly with `Server::new`, giving it `Backends` and a `Transcriber`, offer environments with `Server::with_environments`, and serve a listener from `tomori_server::bind` with `Server::run` on a `base-scheduler` scheduler. Admission, TLS and kept spaces are then configured with `Server`'s `with_` methods, which is what the command line does for you.
+To embed a server without its command line, build a `Server` directly with `Server::new`, giving it `Backends` and a `Transcriber`, offer environments with `Server::with_environments`, before or after `Server::with_kept_spaces`, since a space's layer of the instructions is looked up in the environments offered whenever it is given, and serve a listener from `tomori_server::bind` with `Server::run` on a `base-scheduler` scheduler. Admission, TLS and kept spaces are then configured with `Server`'s `with_` methods, which is what the command line does for you.
 
 The [example server](https://github.com/ioquatix/tomori/tree/main/examples/server) registers a placeholder backend and environment and tests its executable end to end. The requirements the server follows are in Tomori's [design documents](https://github.com/ioquatix/tomori/tree/main/design), such as `builders.md`, `server.md` and `environments.md`.

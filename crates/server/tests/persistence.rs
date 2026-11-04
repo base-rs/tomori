@@ -12,7 +12,7 @@ use tomori_protocol::{ClientMessage, ConnectionRole, Keepalive, ServerMessage, S
 use tomori_security::Grant;
 use tomori_server::fake::FakeBackend;
 use tomori_server::kept::{KeptSpace, SPACES_FILE, SpaceStore};
-use tomori_server::test_support::{TestServer, TextTranscriber};
+use tomori_server::test_support::{TestServer, TextTranscriber, eventually};
 use tomori_server::{RESTORING, Server};
 
 /// A state directory of its own, removed when dropped.
@@ -258,6 +258,90 @@ fn a_space_s_instructions_are_kept_and_given_again_after_a_restart() {
             .map(String::as_str),
         Some("Mind the docs.")
     );
+}
+
+#[test]
+fn a_restored_space_is_given_its_environment_s_layer_whenever_the_environments_are_offered() {
+    use tomori_server::Environment;
+    const STARS: &str = "The space shows the night sky.";
+    const TOPOLOGY: &str = "The space shows the service's topology.";
+    let state = State::new("environment-layer");
+    let backend = FakeBackend::new();
+    // Offered before the kept spaces are listed again, as `Builder::environment` offers them, or after, as a builder's `configure` hook or an embedding server may: Sky with a layer registered in its place, and another project's environment.
+    let start = |after: bool| {
+        let store = Arc::new(SpaceStore::open(&state.0).expect("the spaces open"));
+        TestServer::with_server(backend.clone(), move |backends| {
+            let offered = [
+                Environment::new("sky", "Sky").with_instructions(STARS),
+                Environment::new("minimal", "Grid"),
+                Environment::new("observe", "Observe").with_instructions(TOPOLOGY),
+            ];
+            let server = Server::new(backends, Arc::new(TextTranscriber::default()));
+            if after {
+                server.with_kept_spaces(store).with_environments(offered)
+            } else {
+                server.with_environments(offered).with_kept_spaces(store)
+            }
+        })
+    };
+    let entry = |layer: &str| ("tomori-environment".to_owned(), Some(layer.to_owned()));
+    let spaces = {
+        let server = start(false);
+        let mut ada = server.connect("ada", "Ada");
+        [("Topology", "observe", TOPOLOGY), ("Night", "sky", STARS)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (title, environment, layer))| {
+                ada.send(&ClientMessage::CreateSpace {
+                    title: title.into(),
+                    backend: "fake".into(),
+                    directory: std::env::temp_dir().to_string_lossy().into_owned(),
+                    session: None,
+                    environment: Some(environment.into()),
+                    instructions: None,
+                });
+                let id = ada.space(|space| space.title == title).id;
+                let session = backend.started()[index].clone();
+                eventually(|| {
+                    session
+                        .log()
+                        .instructions
+                        .contains(&entry(layer))
+                        .then_some(())
+                });
+                (id, session, layer)
+            })
+            .collect::<Vec<_>>()
+    };
+    for after in [true, false] {
+        let given: Vec<usize> = spaces
+            .iter()
+            .map(|(_, session, _)| session.log().instructions.len())
+            .collect();
+        let server = start(after);
+        let mut ada = server.connect("ada", "Ada");
+        for ((id, session, layer), given) in spaces.iter().zip(given) {
+            // Bound again, the agent is given the environment's layer through its instruction entries, as a new space's is.
+            eventually(|| (session.log().instructions.len() >= given + 3).then_some(()));
+            assert!(
+                session.log().instructions[given..].contains(&entry(layer)),
+                "{id}, offered after: {after}"
+            );
+            assert_eq!(
+                session
+                    .instructions()
+                    .get("tomori-environment")
+                    .map(String::as_str),
+                Some(*layer)
+            );
+            ada.send(&ClientMessage::Join { space: id.clone() });
+            let restored = ada.space(|space| space.id == *id);
+            assert_eq!(
+                restored.instructions.map(|layers| layers.environment),
+                Some((*layer).to_owned())
+            );
+        }
+    }
 }
 
 #[test]

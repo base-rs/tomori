@@ -79,8 +79,6 @@ pub struct SpaceModel {
     takes_instructions: bool,
     /// Why the agent may not have the instructions shown, until they are next given successfully.
     instructions_error: Option<String>,
-    /// The layer of the agent's instructions from the space's environment, empty when it contributes none.
-    environment_instructions: String,
     /// The worker each waiting queue entry's speaker pointed at, by entry key, as the space knew it when the entry
     /// was queued. Told to the agent with the entry. See `design/interaction.md`.
     pointing: BTreeMap<String, PointedWorker>,
@@ -335,7 +333,6 @@ impl SpaceModel {
             instructions: String::new(),
             takes_instructions: false,
             instructions_error: None,
-            environment_instructions: String::new(),
             pointing: BTreeMap::new(),
         };
         model.load_messages(snapshot.messages);
@@ -580,30 +577,30 @@ impl SpaceModel {
         self.takes_instructions = takes;
     }
 
-    /// The space's environment tells the agent `instructions`, its layer of the space's instructions, empty when it contributes none. Set whenever the space is bound to an environment, since a server is built with the environments it offers.
-    pub fn set_environment_instructions(&mut self, instructions: &str) {
-        instructions.clone_into(&mut self.environment_instructions);
-    }
-
     /// The space's own instructions, empty when it has none.
     pub fn space_instructions(&self) -> &str {
         &self.instructions
     }
 
-    /// The instruction layers in effect, or `None` when the backend takes none.
-    pub fn instructions(&self) -> Option<tomori_protocol::AgentInstructions> {
+    /// Whether the space's backend takes instructions.
+    pub fn takes_instructions(&self) -> bool {
+        self.takes_instructions
+    }
+
+    /// The instruction layers in effect, with `environment` its environment's layer, or `None` when the backend takes none. The space keeps only its environment's identifier, and the caller looks up the layer in the environments the server offers now, so that a space is given the same layer however and whenever it was bound: created, restored or changed. See `design/environments.md`.
+    pub fn instructions(&self, environment: &str) -> Option<tomori_protocol::AgentInstructions> {
         self.takes_instructions.then(|| {
             crate::instructions::layers(
-                &self.environment_instructions,
+                environment,
                 &self.instructions,
                 self.instructions_error.clone(),
             )
         })
     }
 
-    /// The entries giving the agent every layer, or none when its backend takes none or the session has closed.
-    pub fn instruction_entries(&self) -> Vec<(String, Option<String>)> {
-        match self.instructions() {
+    /// The entries giving the agent every layer, with `environment` its environment's layer as in [`Self::instructions`], or none when its backend takes none or the session has closed.
+    pub fn instruction_entries(&self, environment: &str) -> Vec<(String, Option<String>)> {
+        match self.instructions(environment) {
             Some(layers) if !self.closed => crate::instructions::entries(&layers),
             _ => Vec::new(),
         }
@@ -1184,7 +1181,8 @@ impl SpaceModel {
         self.participants.iter().chain(&self.visitors)
     }
 
-    pub fn state(&self, participants: Vec<Participant>) -> SpaceState {
+    /// The space's shared state, with `participants` those in it and `environment` its environment's layer of the instructions, as in [`Self::instructions`].
+    pub fn state(&self, participants: Vec<Participant>, environment: &str) -> SpaceState {
         SpaceState {
             id: self.id.clone(),
             title: self.title.clone(),
@@ -1233,7 +1231,7 @@ impl SpaceModel {
                 .filter(|mode| mode.len() <= limits::IDENTIFIER_BYTES)
                 .cloned(),
             modes: self.shown_modes(),
-            instructions: self.instructions(),
+            instructions: self.instructions(environment),
         }
     }
 
@@ -1275,10 +1273,10 @@ mod tests {
     #[test]
     fn an_open_space_changes_its_environment_and_a_closed_one_keeps_it() {
         let mut space = model();
-        assert!(space.state(Vec::new()).environment_changes);
+        assert!(space.state(Vec::new(), "").environment_changes);
         assert_eq!(space.set_environment("sky".into()), Ok(false));
         assert_eq!(space.set_environment("observe".into()), Ok(true));
-        assert_eq!(space.state(Vec::new()).environment, "observe");
+        assert_eq!(space.state(Vec::new(), "").environment, "observe");
         space.apply(Event::Closed { reason: None });
         assert_eq!(
             space.set_environment("sky".into()),
@@ -1293,8 +1291,8 @@ mod tests {
         // A space whose backend is not enabled keeps its own instructions, shows none and gives none.
         space.set_instructions("Mind the docs.".into(), false);
         assert_eq!(space.space_instructions(), "Mind the docs.");
-        assert_eq!(space.instructions(), None);
-        assert!(space.instruction_entries().is_empty());
+        assert_eq!(space.instructions(""), None);
+        assert!(space.instruction_entries("").is_empty());
         assert_eq!(
             space.set_space_instructions("Mind the tests."),
             Err("This agent takes no instructions from Tomori.")
@@ -1302,12 +1300,24 @@ mod tests {
         assert_eq!(space.space_instructions(), "Mind the docs.");
 
         space.set_instructions("Mind the docs.".into(), true);
-        assert_eq!(space.instruction_entries().len(), 3);
+        assert_eq!(space.instruction_entries("").len(), 3);
+        // The environment's layer is the one the caller looks up, given as its own entry and shown.
+        assert!(space.instruction_entries("Mind the stars.").contains(&(
+            crate::instructions::ENVIRONMENT_KEY.to_owned(),
+            Some("Mind the stars.".to_owned())
+        )));
+        assert_eq!(
+            space
+                .state(Vec::new(), "Mind the stars.")
+                .instructions
+                .map(|layers| layers.environment),
+            Some("Mind the stars.".to_owned())
+        );
         assert_eq!(space.set_space_instructions("  Mind the tests. "), Ok(()));
         assert!(!space.instructions_failed());
         space.instructed(Err("gone".into()), false);
         assert!(space.instructions_failed());
-        let shown = space.state(Vec::new()).instructions.unwrap();
+        let shown = space.state(Vec::new(), "").instructions.unwrap();
         assert_eq!(shown.space, "Mind the tests.");
         assert_eq!(
             shown.error.as_deref(),
@@ -1319,17 +1329,17 @@ mod tests {
         space.instructed(Ok(()), false);
         assert!(space.instructions_failed());
         space.instructed(Ok(()), true);
-        assert_eq!(space.instructions().unwrap().error, None);
+        assert_eq!(space.instructions("").unwrap().error, None);
         // A closed session is given none, and its layer cannot be changed.
         space.apply(Event::Closed { reason: None });
-        assert!(space.instruction_entries().is_empty());
+        assert!(space.instruction_entries("").is_empty());
         assert!(space.set_space_instructions("x").is_err());
     }
 
     #[test]
     fn modes_follow_the_agent_and_stay_within_limits() {
         let mut space = model();
-        assert_eq!(space.state(Vec::new()).mode, None);
+        assert_eq!(space.state(Vec::new(), "").mode, None);
         assert!(!space.offers_mode("plan"));
         let mode = |id: String, name: String| tomori_backend::Mode {
             id,
@@ -1346,7 +1356,7 @@ mod tests {
             offered,
             current: Some("plan".into()),
         }));
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.mode.as_deref(), Some("plan"));
         assert_eq!(state.modes.len(), limits::MODES);
         assert_eq!(state.modes[1].id, "named");
@@ -1363,7 +1373,7 @@ mod tests {
             reason: None,
         });
         assert_eq!(
-            space.state(Vec::new()).error.as_deref(),
+            space.state(Vec::new(), "").error.as_deref(),
             Some("The agent refused Plan mode.")
         );
     }
@@ -1749,12 +1759,12 @@ mod tests {
         space.apply(Event::PermissionRequested(permission("p1")));
         space.apply(Event::QuestionAsked(question("q1")));
         assert_eq!(space.activity(), Activity::Waiting);
-        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
-        assert_eq!(space.state(Vec::new()).question.unwrap().id, "q1");
+        assert_eq!(space.state(Vec::new(), "").approval.unwrap().id, "p1");
+        assert_eq!(space.state(Vec::new(), "").question.unwrap().id, "q1");
         space.apply(Event::PermissionResolved { id: "p1".into() });
         space.apply(Event::QuestionResolved { id: "q1".into() });
-        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p2");
-        assert_eq!(space.state(Vec::new()).question.unwrap().id, "q2");
+        assert_eq!(space.state(Vec::new(), "").approval.unwrap().id, "p2");
+        assert_eq!(space.state(Vec::new(), "").question.unwrap().id, "q2");
         space.apply(Event::PermissionResolved { id: "p2".into() });
         space.apply(Event::QuestionResolved { id: "q2".into() });
         assert_eq!(space.activity(), Activity::Idle);
@@ -1783,7 +1793,7 @@ mod tests {
                 ..Snapshot::default()
             },
         );
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         // The longest identifier a reply may name is still presented.
         assert_eq!(state.approval.unwrap().id, longest);
         assert!(state.question.is_none());
@@ -1840,7 +1850,7 @@ mod tests {
             reason: "Lost the connection to OpenCode; reconnecting.".into(),
         });
         assert_eq!(
-            space.state(Vec::new()).error.as_deref(),
+            space.state(Vec::new(), "").error.as_deref(),
             Some("Lost the connection to OpenCode; reconnecting.")
         );
 
@@ -1867,7 +1877,7 @@ mod tests {
                 modes: Modes::default(),
             },
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.messages.len(), 1);
         assert_eq!(
             state.messages[0].text,
@@ -1900,7 +1910,7 @@ mod tests {
         assert!(space.approvals.is_empty() && space.deciding.is_empty());
         assert!(space.questions.is_empty());
         assert_eq!(space.activity(), Activity::Idle);
-        assert!(space.state(Vec::new()).messages.is_empty());
+        assert!(space.state(Vec::new(), "").messages.is_empty());
 
         // While reconnecting, the state may be stale, so queued input waits
         // for the session to be read again. An error that is not the gap's
@@ -1920,7 +1930,7 @@ mod tests {
             },
         });
         assert_eq!(
-            space.state(Vec::new()).error.as_deref(),
+            space.state(Vec::new(), "").error.as_deref(),
             Some("The agent execution failed.")
         );
         assert_eq!(space.next_prompt().unwrap().key, "u1");
@@ -2113,7 +2123,7 @@ mod tests {
         space.apply(Event::PermissionRequested(offering));
         space.apply(Event::PermissionRequested(permission("p2")));
 
-        let approval = space.state(Vec::new()).approval.unwrap();
+        let approval = space.state(Vec::new(), "").approval.unwrap();
         assert_eq!(
             approval.options,
             vec![tomori_protocol::ApprovalOption {
@@ -2122,11 +2132,18 @@ mod tests {
             }]
         );
         assert!(space.claim_approval("p1", Some("always")).is_err());
-        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
+        assert_eq!(space.state(Vec::new(), "").approval.unwrap().id, "p1");
         assert!(space.claim_approval("p1", Some("suggestions")).is_ok());
 
         // An approval without options offers nothing to grant.
-        assert!(space.state(Vec::new()).approval.unwrap().options.is_empty());
+        assert!(
+            space
+                .state(Vec::new(), "")
+                .approval
+                .unwrap()
+                .options
+                .is_empty()
+        );
         assert!(space.claim_approval("p2", Some("suggestions")).is_err());
         assert!(space.claim_approval("p2", None).is_ok());
     }
@@ -2138,14 +2155,14 @@ mod tests {
         space.apply(Event::PermissionRequested(permission("p2")));
         space.apply(Event::PermissionRequested(permission("p1")));
         space.enqueue("a".into(), 1, "Ada".into(), "hello".into());
-        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
+        assert_eq!(space.state(Vec::new(), "").approval.unwrap().id, "p1");
         assert!(space.claim_approval("p2", None).is_err());
         assert!(space.claim_approval("p1", None).is_ok());
-        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p2");
+        assert_eq!(space.state(Vec::new(), "").approval.unwrap().id, "p2");
 
         // A recoverable failure presents the first request again, ahead of the second.
         space.restore_approval("p1");
-        assert_eq!(space.state(Vec::new()).approval.unwrap().id, "p1");
+        assert_eq!(space.state(Vec::new(), "").approval.unwrap().id, "p1");
         assert!(space.claim_approval("p1", None).is_ok());
         space.decided("p1");
         assert!(space.claim_approval("p2", None).is_ok());
@@ -2168,7 +2185,7 @@ mod tests {
         space.apply(Event::Closed { reason: None });
         assert_eq!(space.activity(), Activity::Closed);
         assert_eq!(space.summary().activity, Activity::Closed);
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert!(
             state
                 .queue
@@ -2209,7 +2226,7 @@ mod tests {
         ));
         // The queue shows only the words.
         assert_eq!(
-            space.state(Vec::new()).queue[0].text,
+            space.state(Vec::new(), "").queue[0].text,
             "how is this one doing?"
         );
         // The worker finishes before the words are delivered: the agent hears how it is now, quoted on one line.
@@ -2300,7 +2317,7 @@ mod tests {
             reason: Some("the agent exited with 1".into()),
         });
         let states: Vec<_> = space
-            .state(Vec::new())
+            .state(Vec::new(), "")
             .workers
             .iter()
             .map(|worker| worker.state)
@@ -2346,12 +2363,12 @@ mod tests {
                 backend_worker("zulu"),
             ],
         });
-        assert_eq!(ids(&space.state(Vec::new())), ["zulu", "alpha", "mike"]);
+        assert_eq!(ids(&space.state(Vec::new(), "")), ["zulu", "alpha", "mike"]);
         // A deleted worker leaves its place; the rest keep theirs.
         space.apply(Event::WorkersChanged {
             workers: vec![backend_worker("mike"), backend_worker("zulu")],
         });
-        assert_eq!(ids(&space.state(Vec::new())), ["zulu", "mike"]);
+        assert_eq!(ids(&space.state(Vec::new(), "")), ["zulu", "mike"]);
 
         // Enough newer workers to exceed the snapshot budget, each sorting before the oldest.
         let mut workers: Vec<_> = (0..200)
@@ -2359,7 +2376,7 @@ mod tests {
             .collect();
         workers.extend([backend_worker("mike"), backend_worker("zulu")]);
         space.apply(Event::WorkersChanged { workers });
-        let mut state = space.state(Vec::new());
+        let mut state = space.state(Vec::new(), "");
         assert_eq!(ids(&state)[..3], ["zulu", "mike", "a000"]);
         limits::fit_state(&mut state);
         let kept = ids(&state);
@@ -2375,27 +2392,30 @@ mod tests {
         space.apply(Event::Error {
             message: "unrelated error".into(),
         });
-        let current = space.state(Vec::new());
+        let current = space.state(Vec::new(), "");
         assert_eq!(current.workers_authoritative, Some(true));
         space.apply(Event::WorkersChanged { workers: vec![] });
-        let current = space.state(Vec::new());
+        let current = space.state(Vec::new(), "");
         assert_eq!(current.workers_authoritative, Some(true));
         assert_eq!(current.error.as_deref(), Some("unrelated error"));
         space.apply(Event::WorkersUnavailable {
             message: "worker observation interrupted".into(),
         });
-        let uncertain = space.state(Vec::new());
+        let uncertain = space.state(Vec::new(), "");
         assert_eq!(uncertain.workers_authoritative, Some(false));
         assert_eq!(
             uncertain.error.as_deref(),
             Some("unrelated error worker observation interrupted")
         );
         space.apply(Event::WorkersChanged { workers: vec![] });
-        let recovered = space.state(Vec::new());
+        let recovered = space.state(Vec::new(), "");
         assert_eq!(recovered.workers_authoritative, Some(true));
         assert_eq!(recovered.error.as_deref(), Some("unrelated error"));
         space.apply(Event::Closed { reason: None });
-        assert_eq!(space.state(Vec::new()).workers_authoritative, Some(false));
+        assert_eq!(
+            space.state(Vec::new(), "").workers_authoritative,
+            Some(false)
+        );
     }
 
     /// A space opened, or bound again, with the workers its backend has found so far says that its list is incomplete,
@@ -2434,7 +2454,7 @@ mod tests {
             "fake-1".into(),
             incomplete.clone(),
         );
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.workers_authoritative, Some(false));
         assert_eq!(state.error.as_deref(), Some("Still finding workers."));
         assert_eq!(ids(&state), ["older"]);
@@ -2443,7 +2463,7 @@ mod tests {
             workers: found(&["newer", "older"]),
             message: "Still finding workers.".into(),
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.workers_authoritative, Some(false));
         assert_eq!(ids(&state), ["older", "newer"]);
         assert_eq!(state.error.as_deref(), Some("Still finding workers."));
@@ -2453,19 +2473,19 @@ mod tests {
             workers: found(&["older"]),
             message: "Still finding workers.".into(),
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.workers_authoritative, Some(false));
         assert_eq!(ids(&state), ["older"]);
         space.apply(Event::WorkersChanged {
             workers: found(&["older", "newest"]),
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.workers_authoritative, Some(true));
         assert_eq!(state.error, None);
 
         // Bound again after a restart, likewise.
         space.bind("fake-2".into(), incomplete);
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.workers_authoritative, Some(false));
         assert_eq!(state.error.as_deref(), Some("Still finding workers."));
         space.bind(
@@ -2475,7 +2495,7 @@ mod tests {
                 ..Snapshot::default()
             },
         );
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.workers_authoritative, Some(true));
         assert_eq!(state.error, None);
     }
@@ -2491,7 +2511,7 @@ mod tests {
             message: "m".into(),
             text: "Hel".into(),
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.messages[0].text, "Hel");
         assert!(!state.messages[0].completed);
         space.apply(Event::TextDelta {
@@ -2501,7 +2521,7 @@ mod tests {
         space.apply(Event::MessageCompleted {
             message: "m".into(),
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.messages[0].text, "Hello");
         assert!(state.messages[0].completed);
     }
@@ -2523,7 +2543,7 @@ mod tests {
         space.apply(Event::MessageCompleted {
             message: "u".into(),
         });
-        let state = space.state(Vec::new());
+        let state = space.state(Vec::new(), "");
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].role, tomori_protocol::Role::User);
         assert_eq!(state.queue[0].state, QueueState::Delivered);
@@ -2538,11 +2558,14 @@ mod tests {
             id: "t".into(),
             input: serde_json::Value::Null,
         });
-        assert_eq!(space.state(Vec::new()).messages[0].text, "[Bash: working]");
+        assert_eq!(
+            space.state(Vec::new(), "").messages[0].text,
+            "[Bash: working]"
+        );
         space.apply(Event::ToolFinished {
             id: "t".into(),
             error: None,
         });
-        assert_eq!(space.state(Vec::new()).messages[0].text, "[Bash: done]");
+        assert_eq!(space.state(Vec::new(), "").messages[0].text, "[Bash: done]");
     }
 }

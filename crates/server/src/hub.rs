@@ -422,7 +422,7 @@ impl SpaceRecord {
 
     /// Give the agent the space's instructions, every layer if `all` and otherwise the space's own, before any input queued after this. A command already queued gives them as they are when it is performed, so it is widened rather than another queued. A driver that has stopped needs none.
     fn instruct(&self, all: bool) {
-        if self.model.instructions().is_none() || self.model.is_closed() {
+        if !self.model.takes_instructions() || self.model.is_closed() {
             return;
         }
         if let Some(queued) = self.instructing.get() {
@@ -677,7 +677,7 @@ impl HubState {
         };
         let forgotten: HashSet<&String> = forgettable[..excess].iter().map(|(_, id)| id).collect();
         for space in &self.spaces {
-            if forgotten.contains(&space.model.id) && space.model.instructions().is_some() {
+            if forgotten.contains(&space.model.id) && space.model.takes_instructions() {
                 self.forgotten
                     .push((space.model.backend.clone(), space.model.session.clone()));
             }
@@ -2472,11 +2472,9 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
-                let instructions = self.environments().instructions(&environment).to_owned();
                 let record = state.space_mut(&space).expect("checked above");
                 match record.model.set_environment(environment) {
                     Ok(true) => {
-                        record.model.set_environment_instructions(&instructions);
                         log::info!(
                             "Space {space} is now in the {} environment.",
                             record.model.environment
@@ -2787,7 +2785,6 @@ impl Hub {
             request.instructions.trim().to_owned(),
             self.takes_instructions(&request.backend),
         );
-        model.set_environment_instructions(self.environments().instructions(&model.environment));
         log::info!(
             "Space {id} {:?} is bound to {} session {} in the {} environment.",
             model.title,
@@ -2882,9 +2879,6 @@ impl Hub {
                 }
                 let takes = self.takes_instructions(&kept.backend);
                 model.set_instructions(kept.instructions, takes);
-                model.set_environment_instructions(
-                    self.environments().instructions(&model.environment),
-                );
                 let (commands, receiver) = async_channel::unbounded();
                 match kept.closed {
                     Some(reason) => {
@@ -3216,7 +3210,10 @@ impl Hub {
             return (Vec::new(), false);
         };
         let all = record.instructing.take().unwrap_or(true);
-        let mut entries = record.model.instruction_entries();
+        // The environment's layer is looked up now, in the environments offered now, rather than kept with the space, so that however the server was configured, a space is given the layer of the environment it is in.
+        let mut entries = record
+            .model
+            .instruction_entries(self.environments().instructions(&record.model.environment));
         if !all {
             entries.retain(|(key, _)| key == crate::instructions::SPACE_KEY);
         }
@@ -3364,7 +3361,10 @@ impl Hub {
                 let (_, space) = state.member(connection)?;
                 let space = state.space(&space?)?;
                 let participants = state.participants(&space.model);
-                let mut state = space.model.state(participants);
+                let mut state = space.model.state(
+                    participants,
+                    self.environments().instructions(&space.model.environment),
+                );
                 limits::fit_state(&mut state);
                 Some(ServerMessage::Space {
                     state: Box::new(state),

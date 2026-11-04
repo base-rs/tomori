@@ -3,10 +3,38 @@
 
 //! Changing a space's environment after it is created. See `design/environments.md`.
 
+use std::sync::Arc;
+
 use tomori_backend::Event;
 use tomori_protocol::{Activity, ClientMessage, ServerMessage, SpaceState};
 use tomori_security::Grant;
-use tomori_server::test_support::{TestClient, TestServer, eventually};
+use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
+use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
+use tomori_server::{Environment, Server};
+
+/// Sky's layer, registered in its place as another project's builder may.
+const STARS: &str = "The space shows the night sky.";
+/// The layer of an environment another project registers.
+const TOPOLOGY: &str = "The space shows the service's topology.";
+
+/// Tomori's own environments, with Sky given a layer, and another project's, as a builder offers them.
+fn offered() -> [Environment; 3] {
+    [
+        Environment::new("sky", "Sky").with_instructions(STARS),
+        Environment::new("minimal", "Grid"),
+        Environment::new("observe", "Observe").with_instructions(TOPOLOGY),
+    ]
+}
+
+/// The entry giving the agent the environment's `layer`, or removing it when there is none.
+fn environment_entry(layer: Option<&str>) -> (String, Option<String>) {
+    ("tomori-environment".to_owned(), layer.map(str::to_owned))
+}
+
+/// The environment's layer `session` holds now.
+fn held(session: &FakeSession) -> Option<String> {
+    session.instructions().get("tomori-environment").cloned()
+}
 
 fn join(client: &mut TestClient, id: &str) -> SpaceState {
     client.send(&ClientMessage::Join {
@@ -93,6 +121,52 @@ fn an_owner_changes_the_environment_for_everyone_in_the_space() {
     change(&mut ada, "minimal");
     assert_eq!(ada.error(), "The agent session has stopped.");
     assert_eq!(join(&mut cal, &space.id).environment, "sky");
+}
+
+#[test]
+fn the_environment_s_layer_reaches_the_agent_when_a_space_is_created_and_when_it_changes() {
+    let server = TestServer::with_server(FakeBackend::new(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(offered())
+    });
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Topology".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: Some("observe".to_owned()),
+        instructions: None,
+    });
+    let state = ada.space(|state| state.title == "Topology");
+    assert_eq!(state.instructions.unwrap().environment, TOPOLOGY);
+    // Given to the agent, through its backend's instruction entries, before its first turn.
+    let session = server.backend.started()[0].clone();
+    eventually(|| (session.log().instructions.len() == 3).then_some(()));
+    assert!(
+        session
+            .log()
+            .instructions
+            .contains(&environment_entry(Some(TOPOLOGY)))
+    );
+    assert_eq!(held(&session).as_deref(), Some(TOPOLOGY));
+
+    // Each change gives the agent the new environment's layer, removing it for one with none.
+    for (environment, layer) in [
+        ("minimal", None),
+        ("sky", Some(STARS)),
+        ("observe", Some(TOPOLOGY)),
+    ] {
+        let given = session.log().instructions.len();
+        change(&mut ada, environment);
+        let state = ada.space(|state| state.environment == environment);
+        assert_eq!(state.instructions.unwrap().environment, layer.unwrap_or(""));
+        eventually(|| (session.log().instructions.len() == given + 3).then_some(()));
+        assert!(
+            session.log().instructions[given..].contains(&environment_entry(layer)),
+            "{environment}"
+        );
+        assert_eq!(held(&session).as_deref(), layer, "{environment}");
+    }
 }
 
 #[test]
