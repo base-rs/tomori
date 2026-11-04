@@ -11,6 +11,7 @@
 - An OpenCode space no longer repeats a reply that finished while it was opening. Its events wait for its initial state and follow it, except those the state already shows. Text from the OpenCode event stream with a character split between two reads, such as Japanese or an emoji, is no longer garbled. An event larger than 16 MiB now makes the backend reconnect and read each space again, rather than growing without limit.
 
 - A request OpenCode is slow to answer no longer holds up every OpenCode space. Each space's own requests still reach OpenCode in order, but other spaces keep receiving the agent's replies and sending their own, and new spaces still open. Closing a space no longer waits for its slow request.
+- `tomori-server` no longer presents an approval or question whose identifier is longer than 1 KiB, which no client could name in its reply and which could push a space's snapshot over its budget. The space says to answer it in the agent's own interface instead, and later requests are presented as usual. An approval's "don't ask again" option with such an identifier is not offered (#50).
 
 - `tomori-server --speech-backend offline --speech-offline-model tiny.en` uses Whisper `tiny.en`, which is smaller and faster than the default, `small.en`, and less accurate; fetch it with `bash scripts/fetch-asr-model.sh whisper tiny.en`. The model scripts now check installed models against pinned digests every time they run, and fetch again any that do not match.
 

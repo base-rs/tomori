@@ -239,6 +239,92 @@ fn an_enormous_question_is_trimmed_to_the_budget_and_can_still_be_answered() {
     );
 }
 
+#[test]
+fn requests_whose_identifiers_no_reply_could_name_are_refused_visibly_within_the_budget() {
+    use tomori_backend::{
+        Decision, Event, Field, FieldKind, Grant, GrantScope, Permission, PermissionOption,
+        Question,
+    };
+    let server = TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Identifiers");
+    let session = server.backend.started()[0].clone();
+    // Each identifier alone is larger than the snapshot budget, and longer than any identifier a client may name.
+    let oversized = "i".repeat(BUDGET + 1);
+    session.emit(Event::PermissionRequested(Permission {
+        id: oversized.clone(),
+        tool: "Bash".to_owned(),
+        input: serde_json::json!({"command": "ls"}),
+        description: None,
+        options: Vec::new(),
+    }));
+    let refused = |state: &tomori_protocol::SpaceState, what: &str| {
+        state
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains(what) && error.contains("agent's own interface"))
+    };
+    let state = ada.space(|state| refused(state, "an approval"));
+    assert!(state.approval.is_none());
+    assert!(json_len(&state) <= BUDGET, "{}", json_len(&state));
+    session.emit(Event::QuestionAsked(Question {
+        id: oversized.clone(),
+        title: "Which?".to_owned(),
+        fields: vec![Field {
+            key: "which".to_owned(),
+            title: "Which?".to_owned(),
+            description: None,
+            kind: FieldKind::Text,
+            options: Vec::new(),
+            custom: false,
+        }],
+    }));
+    let grant = |id: String| PermissionOption {
+        id,
+        grants: vec![Grant::Rule {
+            tool: "Bash".to_owned(),
+            content: None,
+            scope: GrantScope::Session,
+        }],
+    };
+    session.emit(Event::PermissionRequested(Permission {
+        id: "p1".to_owned(),
+        tool: "Bash".to_owned(),
+        input: serde_json::json!({"command": "ls"}),
+        description: None,
+        options: vec![grant(oversized.clone()), grant("session".to_owned())],
+    }));
+    let state = ada.space(|state| state.approval.as_ref().is_some_and(|a| a.id == "p1"));
+    assert!(json_len(&state) <= BUDGET, "{}", json_len(&state));
+    assert!(state.question.is_none());
+    assert!(refused(&state, "a question"));
+    // Only the option a reply could name is offered, and the request can still be answered with it.
+    let approval = state.approval.unwrap();
+    assert_eq!(
+        approval
+            .options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
+        ["session"]
+    );
+    ada.send(&ClientMessage::Decide {
+        request: approval.id,
+        decision: tomori_protocol::Decision::Grant,
+        option: Some("session".to_owned()),
+    });
+    ada.space(|state| state.approval.is_none());
+    assert_eq!(
+        eventually(|| Some(session.log().decisions).filter(|decisions| !decisions.is_empty())),
+        [(
+            "p1".to_owned(),
+            Decision::Grant {
+                option: "session".to_owned()
+            }
+        )]
+    );
+}
+
 /// The error reported for `utterance`.
 fn transcript_failure(client: &TestClient, utterance: &str) -> String {
     client.wait_for(|message| match message {
