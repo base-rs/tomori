@@ -695,10 +695,9 @@ fn card(
         );
         if lines.len() > 3 {
             lines.truncate(3);
-            if let Some(last) = lines.last_mut() {
-                last.truncate(columns - 1);
-                last.push(('…', style(TEXT)));
-            }
+            let last = &mut lines[2];
+            last.truncate(columns - 1);
+            last.push(('…', style(TEXT)));
         }
         rows.extend(lines.into_iter().map(Row::new));
     };
@@ -888,10 +887,9 @@ pub fn layout(
         );
         if lines.len() > 2 {
             lines.truncate(2);
-            if let Some(last) = lines.last_mut() {
-                last.truncate(columns - 1);
-                last.push(('…', style(RED)));
-            }
+            let last = &mut lines[1];
+            last.truncate(columns - 1);
+            last.push(('…', style(RED)));
         }
         budget -= lines.len();
         rows.extend(lines.into_iter().map(Row::new));
@@ -1427,11 +1425,7 @@ mod tests {
                 assert!(rows[2].plain().ends_with('…'));
                 assert!(rows.iter().all(|row| row.cells.len() <= columns));
                 // The focused choice stays in view.
-                assert!(
-                    rows.iter().any(|row| row.plain().starts_with('▸')),
-                    "{:#?}",
-                    plain(&rows)
-                );
+                assert!(rows.iter().any(|row| row.plain().starts_with('▸')));
             }
         }
     }
@@ -1597,5 +1591,263 @@ mod tests {
                 .iter()
                 .all(|(_, style)| style.background == Some(CODE))
         );
+    }
+
+    fn approval_of(text: &str) -> Approval {
+        Approval {
+            id: "p1".into(),
+            title: "Run make".into(),
+            text: text.into(),
+            options: Vec::new(),
+        }
+    }
+
+    fn texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(Row::plain).collect()
+    }
+
+    #[test]
+    fn only_lines_of_tools_are_tool_activity() {
+        assert_eq!(tools("\n  \n"), None);
+        assert_eq!(tools("plain words"), None);
+        assert_eq!(tools("[Bash: failed]"), None);
+        assert_eq!(tools("[Bash]"), None);
+        assert_eq!(tools("[Bash: done]"), Some(vec![("Bash".into(), true)]));
+    }
+
+    #[test]
+    fn markdown_quotes_tables_and_rules_are_drawn_and_its_cache_is_bounded() {
+        let rows = parse_markdown("> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n", 12);
+        let text: Vec<String> = rows
+            .iter()
+            .map(|row| row.iter().map(|(ch, _)| *ch).collect())
+            .collect();
+        assert_eq!(
+            text,
+            ["│ quoted", "a │ b", "1 │ 2", "─".repeat(12).as_str()]
+        );
+        assert!(rows[1][0].1.bold && !rows[2][0].1.bold);
+        for n in 0..=CACHED {
+            markdown("m", &format!("text {n}"), 20);
+        }
+    }
+
+    #[test]
+    fn a_streaming_group_and_too_many_tools_say_so() {
+        let speaker = Speaker::person(1, "Ada", Some(1));
+        let group = Group {
+            key: "m1".into(),
+            speaker,
+            ids: vec!["m1"],
+            texts: Vec::new(),
+            tools: vec![("ToolName".into(), true); 9],
+            streaming: true,
+        };
+        let rows = group_rows(&group, 30);
+        assert!(rows[0].plain().ends_with('…'));
+        assert!(rows[1].plain().contains(" +"));
+    }
+
+    #[test]
+    fn an_empty_message_shows_nothing_and_a_header_names_the_mode() {
+        let mut state = space();
+        state.messages.push(message("m5", Role::Assistant, ""));
+        state.activity = Activity::Waiting;
+        state.modes = vec![tomori_protocol::Mode {
+            id: "build".into(),
+            name: "Build".into(),
+            description: None,
+        }];
+        state.mode = Some("build".into());
+        assert!(header(&state, 40).plain().ends_with("waiting Build"));
+        state.mode = Some("plan".into());
+        state.activity = Activity::Closed;
+        assert!(header(&state, 40).plain().ends_with("closed plan"));
+        let groups = groups(&state, &Known::default(), Some(1));
+        assert!(groups.last().unwrap().texts.is_empty());
+    }
+
+    #[test]
+    fn the_stick_lands_on_an_expanded_groups_last_row_and_stays_on_the_first_item() {
+        let mut space = space();
+        space.messages[2].text = "word ".repeat(200);
+        let input = input();
+        let mut state = State::default();
+        let all = items(&space, &input, &state, 30);
+        // The long reply is the third group; expand it, then step below and back up.
+        state.focus = Some(Focus::Group("m2".into(), 0));
+        assert!(state.toggle(&all));
+        let all = items(&space, &input, &state, 30);
+        state.focus = Some(Focus::Group("m4".into(), 0));
+        state.step(&all, -1, newest(&space));
+        let last = all
+            .iter()
+            .find_map(|item| match item {
+                Item::Group { key, rows, .. } if key == "m2" => Some(rows - 1),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(state.focus, Some(Focus::Group("m2".into(), last)));
+        state.focus = Some(Focus::Group("m1".into(), 0));
+        state.step(&all, -1, newest(&space));
+        assert_eq!(state.focus, Some(Focus::Group("m1".into(), 0)));
+        // Down past the expanded group's last row moves on to the next group, and A collapses it.
+        state.focus = Some(Focus::Group("m2".into(), last));
+        state.step(&all, 1, newest(&space));
+        assert_eq!(state.focus, Some(Focus::Group("m4".into(), 0)));
+        state.focus = Some(Focus::Group("m2".into(), last));
+        assert!(state.toggle(&all));
+        assert!(!state.expanded.contains("m2"));
+        // A on something other than a group does nothing; on a short group, nothing expands.
+        state.focus = None;
+        assert!(!state.toggle(&all));
+        state.focus = Some(Focus::Group("m1".into(), 0));
+        assert!(state.toggle(&all));
+        assert!(!state.expanded.contains("m1"));
+    }
+
+    #[test]
+    fn a_request_card_says_who_decides_and_how() {
+        let mut space = space();
+        space.approval = Some(approval_of(&"long words ".repeat(40)));
+        let state = State::default();
+        let (rows, _) = card(&space, &input(), &state, 30);
+        assert!(rows[3].plain().ends_with('…'));
+        for (input, said) in [
+            (Input::default(), "Waiting for a participant"),
+            (
+                Input {
+                    hands_only: true,
+                    ..input()
+                },
+                "Decide with a controller or on the PC",
+            ),
+            (
+                Input {
+                    deciding: true,
+                    ..input()
+                },
+                "Sending decision…",
+            ),
+        ] {
+            let (rows, _) = card(&space, &input, &state, 40);
+            assert!(texts(&rows).iter().any(|row| row == said));
+        }
+        space.approval = None;
+        space.question = Some(Question {
+            id: "q1".into(),
+            title: "Which?".into(),
+            text: "Which one?".into(),
+            field: "Choice".into(),
+            supported: true,
+        });
+        for (input, said) in [
+            (Input::default(), "Waiting for a participant"),
+            (
+                Input {
+                    answerable: true,
+                    ..input()
+                },
+                "Hold X to answer",
+            ),
+            (input(), "Answer on the PC"),
+        ] {
+            let (rows, _) = card(&space, &input, &state, 40);
+            assert!(texts(&rows).iter().any(|row| row == said));
+        }
+    }
+
+    #[test]
+    fn the_footer_says_what_a_and_b_do_for_each_focus() {
+        let mut space = space();
+        space.messages[2].text = "word ".repeat(200);
+        space.approval = Some(approval_of("make"));
+        space.queue = vec![QueueEntry {
+            id: "q1".into(),
+            source: 1,
+            speaker: "Ada".into(),
+            text: "and lint it".into(),
+            state: QueueState::Queued,
+        }];
+        let footer_for = |focus: Focus, input: &Input<'_>| {
+            let state = State {
+                focus: Some(focus),
+                ..Default::default()
+            };
+            let all = items(&space, input, &state, 30);
+            footer(&space, input, &state, &all, 40).plain()
+        };
+        assert_eq!(
+            footer_for(Focus::Group("m2".into(), 0), &input()),
+            "↑↓ move  A expand  B back"
+        );
+        assert_eq!(
+            footer_for(Focus::Card(0), &Input::default()),
+            "You're watching"
+        );
+        let grace = Input {
+            grace: true,
+            ..input()
+        };
+        assert_eq!(footer_for(Focus::Card(1), &grace), "Read the request first");
+        assert_eq!(footer_for(Focus::Card(9), &input()), "B back");
+        assert_eq!(
+            footer_for(Focus::Queue("q1".into()), &Input::default()),
+            "You're watching"
+        );
+        assert_eq!(
+            footer_for(Focus::Queue("q1".into()), &input()),
+            "A remove  B back"
+        );
+    }
+
+    #[test]
+    fn a_long_problem_takes_two_rows_and_nothing_fits_in_no_rows() {
+        let mut space = space();
+        space.approval = Some(approval_of("make"));
+        let problem = Input {
+            problem: Some("! ".to_owned() + &"broken ".repeat(30)),
+            ..input()
+        };
+        let mut state = State::default();
+        let rows = layout(&space, &problem, &mut state, 30);
+        assert!(rows[2].plain().ends_with('…'));
+        assert!(body(&space, &input(), &state, 30, 0).is_empty());
+        // A card too tall for the room left keeps its title, focused or not.
+        let mut tall = space.clone();
+        tall.approval = Some(Approval {
+            options: (0..8)
+                .map(|n| ApprovalOption {
+                    id: format!("o{n}"),
+                    label: format!("Option {n} with a label long enough to wrap"),
+                })
+                .collect(),
+            ..approval_of("make")
+        });
+        let mut unfocused = State::default();
+        let rows = layout(&tall, &problem, &mut unfocused, 30);
+        assert_eq!(rows.len(), ROWS + 2);
+        // A queued entry this participant selects is marked to remove.
+        tall.queue = vec![QueueEntry {
+            id: "q1".into(),
+            source: 1,
+            speaker: "Ada".into(),
+            text: "and lint it".into(),
+            state: QueueState::Queued,
+        }];
+        let selected = State {
+            focus: Some(Focus::Queue("q1".into())),
+            ..Default::default()
+        };
+        let queue = queue_rows(&tall, &input(), &selected, 30);
+        assert_eq!(queue[1].cells.last().unwrap().1.color, RED);
+        // Scrolled up, after what was seen is dropped from the latest messages, every message is newer.
+        let state = State {
+            focus: Some(Focus::Group("m1".into(), 0)),
+            seen: Some("gone".into()),
+            ..Default::default()
+        };
+        let shown = body(&space, &input(), &state, 30, 6);
+        assert!(shown.last().unwrap().plain().contains("4 new below"));
     }
 }
