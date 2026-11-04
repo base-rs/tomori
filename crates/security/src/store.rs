@@ -145,19 +145,17 @@ impl TokenStore {
 
     /// Read the file again, for changes another process made. Returns whether the tokens changed. The file is read whole rather than trusting its modification time, which may not change between two quick writes.
     pub fn reload(&self) -> Result<bool, StoreError> {
-        // Under the lock, so that a change being made, here or in another process, is either read whole or not begun.
+        // Under the lock, so that a change being made, here or in another process, is either read whole or not begun. Closing the lock file at the end releases the lock.
         let lock = File::create(self.path.with_extension("lock"))?;
         lock.lock_shared()?;
         let entries = read(&self.path)?;
         let mut state = self.write_state();
         let changed = entries != state.entries;
         state.entries = entries;
-        drop(state);
-        lock.unlock()?;
         Ok(changed)
     }
 
-    /// Apply `change` to the entries as they are in the file now, under the lock, and write them back.
+    /// Apply `change` to the entries as they are in the file now, under the lock, and write them back. Closing the lock file at the end releases the lock, so that once the change is written it is never reported as failed.
     fn change(&self, change: impl FnOnce(&mut Vec<Entry>)) -> Result<(), StoreError> {
         let lock = File::create(self.path.with_extension("lock"))?;
         lock.lock()?;
@@ -165,7 +163,6 @@ impl TokenStore {
         change(&mut entries);
         write(&self.path, &entries)?;
         self.write_state().entries = entries;
-        lock.unlock()?;
         Ok(())
     }
 
