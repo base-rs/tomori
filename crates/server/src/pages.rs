@@ -340,4 +340,9 @@ mod tests {
     fn status_page(status: &Status) -> String {
         super::status(status, None, false, Some(&[]), true)
     }
+
+    #[test]
+    fn a_form_that_is_not_utf_8_has_no_values() {
+        assert_eq!(form_value(b"id=\xff", "id"), None);
+    }
 }

@@ -192,4 +192,13 @@ mod tests {
         }
         assert_eq!(queue.queued_text("k0"), None);
     }
+
+    #[test]
+    fn cancelling_input_that_does_not_exist_says_so() {
+        let mut queue = InputQueue::default();
+        assert_eq!(
+            queue.cancel("missing"),
+            Err("That queued input no longer exists.")
+        );
+    }
 }
