@@ -34,7 +34,7 @@ impl Output {
     }
 
     /// An output that plays as voice communication in audio `session`.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg(target_os = "android")]
     pub fn communicating(stream: impl std::any::Any, session: i32) -> Self {
         Self {
             communication: Some(session),

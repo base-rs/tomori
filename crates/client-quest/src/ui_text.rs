@@ -309,6 +309,49 @@ pub fn glyph(ch: char) -> [u8; 8] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn typographic_characters_tabs_and_line_breaks_are_drawn_plainly() {
+        assert_eq!(shown('\u{201c}'), '"');
+        assert_eq!(shown('\u{2014}'), '-');
+        let style = Style::plain([1.0; 4]);
+        let cells = cut(&[Span::new("a\tb\nc", style)], 10);
+        assert_eq!(cells.iter().map(|(ch, _)| *ch).collect::<String>(), "a b c");
+        assert!(cut(&[Span::new("abc", style)], 0).is_empty());
+        let code = wrap(
+            &[Span::new("\tx", style)],
+            10,
+            Wrap {
+                continuation: Some('↵'),
+                ..Default::default()
+            },
+        );
+        assert_eq!(code[0][0].0, ' ');
+    }
+
+    #[test]
+    fn a_space_between_code_and_text_takes_no_background() {
+        let code = Style {
+            background: Some([0.1; 4]),
+            ..Style::plain([1.0; 4])
+        };
+        let plain = Style::plain([1.0; 4]);
+        let rows = wrap(
+            &[Span::new("code", code), Span::new(" text", plain)],
+            20,
+            Wrap::default(),
+        );
+        assert_eq!(
+            rows[0][4],
+            (
+                ' ',
+                Style {
+                    background: None,
+                    ..code
+                }
+            )
+        );
+    }
+
     const WHITE: Style = Style::plain([1.0; 4]);
 
     fn text(rows: &[Vec<Cell>]) -> Vec<String> {
