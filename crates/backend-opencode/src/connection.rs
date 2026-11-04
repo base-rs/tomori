@@ -3230,16 +3230,15 @@ async fn snapshot<S: Timers>(
     })
 }
 
-/// The session's message list as snapshot messages.
+/// The session's message list, as [`api::session_messages`] answers it, as snapshot messages.
 fn snapshot_messages(value: &Value) -> Vec<tomori_backend::SnapshotMessage> {
-    let Some(messages) = value
+    value
         .get("data")
         .and_then(Value::as_array)
-        .or_else(|| value.as_array())
-    else {
-        return Vec::new();
-    };
-    messages.iter().filter_map(snapshot_message).collect()
+        .into_iter()
+        .flatten()
+        .filter_map(snapshot_message)
+        .collect()
 }
 
 fn snapshot_message(value: &Value) -> Option<tomori_backend::SnapshotMessage> {
@@ -5935,6 +5934,88 @@ mod tests {
             let _ = tx.send((result, std::time::Instant::now()));
         });
         rx
+    }
+
+    #[test]
+    fn history_becomes_snapshot_messages_with_their_parts() {
+        use tomori_backend::{Part, Role, SnapshotMessage};
+        let messages = snapshot_messages(&json!({"data": [
+            {"id": "u1", "type": "user", "text": "List the files."},
+            {"id": "u2", "type": "user"},
+            {"id": "a1", "type": "assistant", "time": {"completed": 2}, "content": [
+                {"type": "reasoning", "text": "The user wants a listing."},
+                {"type": "text", "text": "Listing them."},
+                {"type": "tool", "id": "t1", "name": "bash", "state": {"status": "completed", "input": {"command": "ls"}}},
+                {"type": "tool", "id": "t2", "name": "bash", "state": {"status": "error"}},
+                {"type": "tool", "id": "t3", "name": "bash", "state": {"status": "running"}},
+                {"type": "tool"},
+                {"type": "text"},
+                {"type": "reasoning"},
+                {"type": "image"},
+                {"type": 7},
+                {}
+            ]},
+            {"id": "a2", "type": "assistant"},
+            {"id": "s1", "type": "agent-switched"},
+            {"id": "x", "type": 7},
+            {"id": 7, "type": "user"},
+            {"type": "user"}
+        ]}));
+        let tool = |id: &str, input: Value, finished: bool| Part::Tool {
+            id: id.into(),
+            tool: "bash".into(),
+            input,
+            finished,
+        };
+        let text = |text: &str| Part::Text { text: text.into() };
+        assert_eq!(
+            messages,
+            [
+                SnapshotMessage {
+                    id: "u1".into(),
+                    role: Role::User,
+                    parts: vec![text("List the files.")],
+                    completed: true,
+                },
+                SnapshotMessage {
+                    id: "u2".into(),
+                    role: Role::User,
+                    parts: vec![text("")],
+                    completed: true,
+                },
+                SnapshotMessage {
+                    id: "a1".into(),
+                    role: Role::Assistant,
+                    parts: vec![
+                        Part::Reasoning {
+                            text: "The user wants a listing.".into()
+                        },
+                        text("Listing them."),
+                        tool("t1", json!({"command": "ls"}), true),
+                        tool("t2", Value::Null, true),
+                        tool("t3", Value::Null, false),
+                        Part::Tool {
+                            id: String::new(),
+                            tool: String::new(),
+                            input: Value::Null,
+                            finished: false,
+                        },
+                        text(""),
+                        Part::Reasoning {
+                            text: String::new()
+                        },
+                    ],
+                    completed: true,
+                },
+                SnapshotMessage {
+                    id: "a2".into(),
+                    role: Role::Assistant,
+                    parts: Vec::new(),
+                    completed: false,
+                },
+            ]
+        );
+        assert_eq!(snapshot_messages(&json!({})), []);
     }
 
     /// The backend as the server uses it, reaching a service at an explicit

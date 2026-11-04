@@ -554,6 +554,25 @@ mod tests {
         use serde_json::json;
         let cases = [
             (
+                for_s("session.text.started", json!({"assistantMessageID":"m"})),
+                Some(Event::MessageStarted {
+                    message: "m".into(),
+                    role: Role::Assistant,
+                }),
+            ),
+            (
+                for_s(
+                    "session.tool.called",
+                    json!({"assistantMessageID":"m","id":"t1"}),
+                ),
+                Some(Event::ToolStarted {
+                    message: "m".into(),
+                    tool: String::new(),
+                    id: "t1".into(),
+                    input: Value::Null,
+                }),
+            ),
+            (
                 for_s(
                     "session.text.delta",
                     json!({"assistantMessageID":"m","delta":"Hi"}),
@@ -1018,7 +1037,8 @@ mod tests {
             {"id": "compaction", "mode": "primary", "hidden": true},
             {"id": "title", "mode": "primary", "hidden": true},
             {"id": "summary", "mode": "primary", "hidden": true},
-            {"id": "review", "description": "Reviews changes.", "mode": "all"}
+            {"id": "review", "description": "Reviews changes.", "mode": "all"},
+            {"description": "An agent without an id is not offered."}
         ]))
         .unwrap()
     }
@@ -1053,6 +1073,17 @@ mod tests {
             Some("plan")
         );
         assert_eq!(agent_switched(&switched, "ses_other"), None);
+        for incomplete in [
+            serde_json::json!({"type": "session.agent.switched"}),
+            serde_json::json!({"data": {"sessionID": "ses_test", "agent": "plan"}}),
+            serde_json::json!({"type": 7, "data": {"sessionID": "ses_test", "agent": "plan"}}),
+        ] {
+            assert_eq!(
+                agent_switched(&incomplete, "ses_test"),
+                None,
+                "{incomplete}"
+            );
+        }
         let mut seen = std::collections::HashSet::new();
         assert_eq!(event(&switched, "ses_test", &mut seen), None);
     }
