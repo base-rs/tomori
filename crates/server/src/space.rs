@@ -28,7 +28,7 @@ pub struct SpaceModel {
     pub title: String,
     pub backend: String,
     pub directory: String,
-    /// The environment the space is bound to for its lifetime, the same for every participant.
+    /// The environment the space is bound to, the same for every participant, which an owner may change.
     pub environment: String,
     /// The bound session's identifier, namespaced by backend.
     pub session: String,
@@ -605,6 +605,19 @@ impl SpaceModel {
         self.speech
     }
 
+    /// Bind the space to `environment`, which the caller has checked the server offers, for everyone in it. Returns
+    /// whether it changed. A closed space keeps the environment it had. See `design/environments.md`.
+    pub fn set_environment(&mut self, environment: String) -> Result<bool, &'static str> {
+        if self.closed {
+            return Err("The agent session has stopped.");
+        }
+        if self.environment == environment {
+            return Ok(false);
+        }
+        self.environment = environment;
+        Ok(true)
+    }
+
     /// Change how much of each reply is spoken, from the next reply on. An unknown setting is refused.
     pub fn set_speech(&mut self, speech: SpeechSetting) -> Result<(), &'static str> {
         match speech {
@@ -1146,6 +1159,7 @@ impl SpaceModel {
             attribution: self.attribution,
             speech: self.speech,
             voice_answers: true,
+            environment_changes: true,
             error: match (&self.error, &self.worker_error) {
                 (Some(error), Some(worker_error)) => Some(format!("{error} {worker_error}")),
                 (Some(error), None) => Some(error.clone()),
@@ -1196,6 +1210,21 @@ mod tests {
                 ..Snapshot::default()
             },
         )
+    }
+
+    #[test]
+    fn an_open_space_changes_its_environment_and_a_closed_one_keeps_it() {
+        let mut space = model();
+        assert!(space.state(Vec::new()).environment_changes);
+        assert_eq!(space.set_environment("sky".into()), Ok(false));
+        assert_eq!(space.set_environment("observe".into()), Ok(true));
+        assert_eq!(space.state(Vec::new()).environment, "observe");
+        space.apply(Event::Closed { reason: None });
+        assert_eq!(
+            space.set_environment("sky".into()),
+            Err("The agent session has stopped.")
+        );
+        assert_eq!(space.environment, "observe");
     }
 
     #[test]

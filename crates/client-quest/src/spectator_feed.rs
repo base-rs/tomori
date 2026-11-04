@@ -100,6 +100,7 @@ pub struct Feed {
     scene: Scene,
     swarm: SwarmAnimation,
     sequence: u64,
+    /// The scenery shown outside a space, or in one from a server that names no environment, from `TOMORI_ENVIRONMENT`.
     environment: Environment,
     last_poll: Instant,
     last_caption: Option<String>,
@@ -319,6 +320,7 @@ impl Feed {
             .map(|agent| agent.position.to_array())
             .collect();
 
+        let environment = self.environment();
         // Worker transitions depart from the animated coordinator, as on XR.
         let (root, workspace) = self.workers.update(self.conversation.joined_space());
         self.scene.set_coordinator_samples(&agents);
@@ -334,7 +336,7 @@ impl Feed {
 
         Frame {
             sequence: self.sequence,
-            environment: self.environment,
+            environment,
             projection: projection.to_cols_array(),
             scene_to_space: Mat4::IDENTITY.to_cols_array(),
             head: head_matrix.to_cols_array(),
@@ -366,6 +368,18 @@ impl Feed {
                 Some(name) => format!("SPECTATOR\nFollowing {name}"),
                 None => "SPECTATOR\nIn space, waiting for a participant...".to_string(),
             },
+        }
+    }
+}
+
+impl Feed {
+    /// The scenery to show: the joined space's environment, as everyone in it sees it, or the grid when this build cannot draw that one. See `design/environments.md`.
+    fn environment(&self) -> Environment {
+        match self.conversation.joined_space() {
+            Some((space, _)) if !space.environment.is_empty() => {
+                Environment::for_space(&space.environment).unwrap_or(Environment::Minimal)
+            }
+            _ => self.environment,
         }
     }
 }
@@ -419,6 +433,43 @@ mod tests {
         assert_eq!(frame.interaction.mode, interaction::Mode::Ready);
         assert!(!frame.interaction.working);
         assert_ne!(frame.agents, initial.agents);
+    }
+
+    #[test]
+    fn frames_show_the_joined_space_s_environment_as_it_changes() {
+        let mut feed = Feed::new(SpectatorOptions::default());
+        feed.environment = Environment::Sky;
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Visitor,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+            }));
+        let frame = |feed: &mut Feed, environment: &str| {
+            feed.conversation
+                .apply(Event::Message(ServerMessage::Space {
+                    state: Box::new(SpaceState {
+                        id: "space".into(),
+                        environment: environment.into(),
+                        ..Default::default()
+                    }),
+                }));
+            feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0)
+                .environment
+        };
+        // An owner's change reaches the spectator as it does everyone in the space.
+        assert_eq!(frame(&mut feed, "minimal"), Environment::Minimal);
+        assert_eq!(frame(&mut feed, "sky"), Environment::Sky);
+        // One this build cannot draw shows the grid, and a server that names none keeps the spectator's own.
+        assert_eq!(frame(&mut feed, "observe"), Environment::Minimal);
+        assert_eq!(frame(&mut feed, ""), Environment::Sky);
     }
 
     #[test]

@@ -10,6 +10,8 @@ The spectator animates its swarm from the joined space's observed activity rathe
 
 The spectator plays stereo and hears as the participant it follows does, from their head, with the others seated around them, or from its neutral view with nobody to follow (see `spatial-audio.md`), so that its audience hears the agent where they see the swarm.
 
+The spectator shows the environment of the space it watches, as everyone in it does, and follows it when an owner changes it (see `environments.md`).
+
 The spectator reports no engagement, so the server keeps it at the live edge of agent speech: its audience hears replies as they are spoken, never a catch-up of what was said before it joined. See `speech.md`.
 
 ## Rationale

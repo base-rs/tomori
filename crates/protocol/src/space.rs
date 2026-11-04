@@ -168,6 +168,11 @@ pub struct SpaceState {
     /// Whether the server applies an utterance marked with [`crate::AnswerTarget`] as the answer to the presented question, rather than queueing it. False from older servers, which would queue it; a client marks an utterance as an answer only when this is set. See `design/spaces.md`.
     #[serde(default)]
     pub voice_answers: bool,
+    /// Whether the server accepts [`crate::ClientMessage::SetEnvironment`] from an owner, changing the space's
+    /// environment for everyone in it. False from older servers, which bind a space's environment for its lifetime; a
+    /// client offers the change only when this is set. See `design/environments.md`.
+    #[serde(default)]
+    pub environment_changes: bool,
 }
 
 /// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and
@@ -641,6 +646,27 @@ mod tests {
                 .unwrap()
                 .environment,
             ""
+        );
+    }
+
+    #[test]
+    fn older_servers_do_not_change_environments() {
+        let changing = SpaceState {
+            environment_changes: true,
+            ..SpaceState::default()
+        };
+        let mut json = serde_json::to_value(&changing).unwrap();
+        assert_eq!(json["environment_changes"], true);
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(json.clone()).unwrap(),
+            changing
+        );
+        // An older server says nothing, and binds a space's environment for its lifetime.
+        json.as_object_mut().unwrap().remove("environment_changes");
+        assert!(
+            !serde_json::from_value::<SpaceState>(json)
+                .unwrap()
+                .environment_changes
         );
     }
 }

@@ -1164,6 +1164,9 @@ impl Conversation {
                     .map(|mode| mode.name.clone())
                     .or_else(|| space.mode.clone().filter(|_| !space.modes.is_empty())),
                 speech: space.speech,
+                environment: (!space.environment.is_empty())
+                    .then(|| self.environment_name(&space.environment)),
+                environments: self.changeable_environments(space),
                 here: here(space),
             }),
             people: space
@@ -1190,6 +1193,65 @@ impl Conversation {
         }
     }
 
+    /// The name the server gives the environment `id`, or the identifier itself when it offers none by that name.
+    fn environment_name(&self, id: &str) -> String {
+        self.environments
+            .iter()
+            .find(|offered| offered.id == id)
+            .map_or_else(|| id.to_owned(), |offered| offered.label.clone())
+    }
+
+    /// The environments this participant can change `space` to, as the hand menu offers them: id, name and whether it is the current one, starting with the current one when the server no longer offers it. Only owners can, and only on a server that changes environments. See `design/environments.md`.
+    fn changeable_environments(&self, space: &SpaceState) -> Vec<(String, String, bool)> {
+        if self.role != ConnectionRole::Owner || !space.environment_changes {
+            return Vec::new();
+        }
+        let mut offered: Vec<_> = self
+            .environments
+            .iter()
+            .map(|offered| {
+                (
+                    offered.id.clone(),
+                    offered.label.clone(),
+                    offered.id == space.environment,
+                )
+            })
+            .collect();
+        if !offered.iter().any(|(_, _, current)| *current) {
+            offered.insert(
+                0,
+                (
+                    space.environment.clone(),
+                    self.environment_name(&space.environment),
+                    true,
+                ),
+            );
+        }
+        offered
+    }
+
+    /// Change the joined space's environment to `id`, for everyone in it. Only owners can, and only on a server that changes environments; the server refuses one it does not offer. Says what happened in the notice. See `design/environments.md`.
+    pub fn change_environment(&mut self, id: &str) {
+        if self.role != ConnectionRole::Owner {
+            self.notice = Some("Only owners can change the space's environment.".into());
+            return;
+        }
+        let in_space = self.mode == Mode::Space;
+        let Some(space) = self.space.as_ref().filter(|_| in_space) else {
+            self.notice = Some("Join a space first.".into());
+            return;
+        };
+        if !space.environment_changes {
+            self.notice = Some("This server does not change a space's environment.".into());
+            return;
+        }
+        let name = self.environment_name(id);
+        self.send(ClientMessage::SetEnvironment {
+            environment: id.to_owned(),
+        });
+        self.notice = Some(format!("Changing the environment to {name} for everyone."));
+    }
+
     /// Act on a choice made in the hand menu.
     pub fn choose_menu(&mut self, choice: crate::hand_menu::Choice) {
         match choice {
@@ -1210,6 +1272,7 @@ impl Conversation {
                     self.send(ClientMessage::SetSpeech { speech });
                 }
             }
+            crate::hand_menu::Choice::Environment(id) => self.change_environment(&id),
             crate::hand_menu::Choice::Mute => self.toggle_mute(),
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
@@ -1379,6 +1442,7 @@ impl Conversation {
                 | ClientMessage::DecideKnock { .. }
                 | ClientMessage::SetSpeech { .. }
                 | ClientMessage::SetInstructions { .. }
+                | ClientMessage::SetEnvironment { .. }
                 | ClientMessage::Replay { .. }
                 | ClientMessage::StopReplay
         );
@@ -7005,6 +7069,106 @@ mod tests {
         conversation.choose_menu(crate::hand_menu::Choice::Leave);
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
         assert!(conversation.joined_space().is_none());
+    }
+
+    #[test]
+    fn an_owner_changes_the_environment_from_the_menu_and_everyone_follows() {
+        let mut conversation = joined(|space| space.environment_changes = true);
+        conversation.environments.push(EnvironmentInfo {
+            id: "minimal".into(),
+            label: "Grid".into(),
+        });
+        let offered = |conversation: &Conversation| {
+            let model = conversation.menu_model();
+            let space = model.space.unwrap();
+            (space.environment, space.environments)
+        };
+        assert_eq!(
+            offered(&conversation),
+            (
+                Some("Sky".into()),
+                vec![
+                    ("sky".into(), "Sky".into(), true),
+                    ("minimal".into(), "Grid".into(), false)
+                ]
+            )
+        );
+        conversation.choose_menu(crate::hand_menu::Choice::Environment("minimal".into()));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::SetEnvironment {
+                environment: "minimal".into()
+            }]
+        );
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Changing the environment to Grid for everyone.")
+        );
+        // The scenery changes only when the server says the space has, for everyone alike.
+        assert_eq!(conversation.environment(), Environment::Sky);
+        conversation.apply(space(|space| {
+            space.environment = "minimal".into();
+            space.environment_changes = true;
+        }));
+        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(
+            offered(&conversation).1[1],
+            ("minimal".into(), "Grid".into(), true)
+        );
+        // A space in an environment the server no longer offers shows it first, as the current one.
+        conversation.apply(space(|space| {
+            space.environment = "observe".into();
+            space.environment_changes = true;
+        }));
+        let (name, environments) = offered(&conversation);
+        assert_eq!(name.as_deref(), Some("observe"));
+        assert_eq!(environments[0], ("observe".into(), "observe".into(), true));
+        assert_eq!(environments.len(), 3);
+    }
+
+    #[test]
+    fn only_an_owner_on_a_server_that_changes_environments_is_offered_them() {
+        // An older server names the environment but does not change it.
+        let mut conversation = joined(|_| {});
+        let shown = conversation.menu_model().space.unwrap();
+        assert_eq!(shown.environment.as_deref(), Some("Sky"));
+        assert!(shown.environments.is_empty());
+        conversation.change_environment("sky");
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("This server does not change a space's environment.")
+        );
+        // An even older one does not name it.
+        conversation.apply(space(|space| space.environment.clear()));
+        assert_eq!(conversation.menu_model().space.unwrap().environment, None);
+        // Anyone but an owner is offered none, and asks for nothing.
+        let mut conversation = joined(|space| space.environment_changes = true);
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Collaborator,
+        }));
+        conversation.take_actions();
+        assert!(
+            conversation
+                .menu_model()
+                .space
+                .unwrap()
+                .environments
+                .is_empty()
+        );
+        conversation.choose_menu(crate::hand_menu::Choice::Environment("sky".into()));
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Only owners can change the space's environment.")
+        );
+        // Outside a space there is nothing to change.
+        let mut conversation = joined(|space| space.environment_changes = true);
+        conversation.leave();
+        conversation.take_actions();
+        conversation.change_environment("sky");
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(conversation.notice.as_deref(), Some("Join a space first."));
     }
 
     #[test]

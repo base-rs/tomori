@@ -371,9 +371,11 @@ impl Motion {
                             .iter()
                             .find(|entry| entry.identity == Key::Create)
                     });
-                if self.reveal.value(now) <= 0.0 {
+                // A space whose environment changed, for everyone in it, grows the new one out of the space as joining does, rather than keeping the one it showed. See `design/environments.md`.
+                if self.reveal.value(now) <= 0.0 || self.environment != *environment {
                     self.environment = *environment;
                     self.centre = source.map_or(APPROACH, |entry| entry.track.target().position);
+                    self.reveal = Track::at(0.0);
                 }
                 let wait = source.map_or(0.0, |entry| (entry.track.end() - now).max(0.0));
                 self.reveal.retarget(now, 1.0, None, wait, REVEAL);
@@ -1055,6 +1057,34 @@ mod tests {
         // `run` checks the rest has no jump.
         now = settle(&mut motion, &lobby(), now);
         assert_matches(&motion.scene(now), &lobby());
+    }
+
+    #[test]
+    fn a_space_s_new_environment_grows_out_of_it_in_place_of_the_old() {
+        let mut motion = Motion::default();
+        let mut now = settle(&mut motion, &joining("one"), 0.0);
+        now = settle(&mut motion, &entered("one"), now);
+        assert_eq!(
+            motion.scenery(now),
+            Scenery {
+                environment: Environment::Sky,
+                reveal: None
+            }
+        );
+        // Changed to the grid, the sky goes at once.
+        let grid = Scene::entered(Some(Key::Space("one".into())), Environment::Minimal);
+        motion.update(&grid, now);
+        assert_eq!(
+            motion.scenery(now + FRAME).environment,
+            Environment::Minimal
+        );
+        now = settle(&mut motion, &grid, now);
+        // Changed back, the sky grows again from the space, whole by the end.
+        motion.update(&entered("one"), now);
+        let growing = motion.scenery(now + REVEAL * 0.3);
+        assert_eq!(growing.environment, Environment::Sky);
+        assert!(growing.reveal.unwrap().centre.distance(APPROACH) < 1e-4);
+        assert_eq!(motion.scenery(now + REVEAL).reveal, None);
     }
 
     #[test]
