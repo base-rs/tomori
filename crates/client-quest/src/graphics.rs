@@ -789,19 +789,16 @@ fn cube() -> Vec<Vertex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tomori_environment_sky::test_gpu;
 
     #[test]
-    #[ignore = "requires a Vulkan adapter"]
     fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
         pollster::block_on(async {
             const WIDTH: u32 = 768;
             const HEIGHT: u32 = 512;
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let textures: [_; 2] = std::array::from_fn(|_| {
                 device.create_texture(&wgpu::TextureDescriptor {
@@ -955,6 +952,64 @@ mod tests {
                     glam::Vec3::Y,
                 );
             let overview = capture(&renderer, [overview; 2], Mat4::IDENTITY);
+            // Growing out of a space's object: Sky inside the sphere, the grid outside it.
+            let reveal = |radius| crate::arrival_motion::Scenery {
+                environment: Environment::Sky,
+                reveal: Some(crate::arrival_motion::Sphere {
+                    centre: glam::Vec3::new(0.0, 1.0, -2.5),
+                    radius,
+                }),
+            };
+            let mut revealed = |scenery| {
+                renderer.set_scenery(scenery);
+                renderer.update(&queue, &swarm, None, false);
+                capture(&renderer, matrices, Mat4::IDENTITY)
+            };
+            let point = revealed(reveal(0.0));
+            let growing = revealed(reveal(1.5));
+            let world = revealed(reveal(1000.0));
+            let filled = revealed(crate::arrival_motion::Scenery {
+                environment: Environment::Sky,
+                reveal: None,
+            });
+            assert_eq!(renderer.environment(), Environment::Sky);
+            // Within one step, as in `workspace_graphics`: a few interpolated colours may round differently where only the pipeline differs.
+            let changed = |a: &[u8], b: &[u8]| {
+                a.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(b.as_chunks::<4>().0)
+                    .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 1))
+                    .count()
+            };
+            let rows = |image: &[u8], rows: std::ops::Range<u32>| {
+                image[(rows.start * WIDTH * 4) as usize..(rows.end * WIDTH * 4) as usize].to_vec()
+            };
+            for eye in 0..2 {
+                assert_eq!(
+                    changed(&point[eye], &minimal[eye]),
+                    0,
+                    "a sphere of no size shows only the grid"
+                );
+                assert_eq!(
+                    changed(&world[eye], &sky[eye]),
+                    0,
+                    "a sphere around everything shows all of Sky"
+                );
+                assert_eq!(filled[eye], sky[eye], "filling the world draws as before");
+                // The sphere, centred below the view, fills its middle and bottom, and leaves the top to the grid.
+                assert_eq!(
+                    changed(&rows(&growing[eye], 0..40), &rows(&minimal[eye], 0..40)),
+                    0,
+                    "the grid shows outside the sphere"
+                );
+                let middle = rows(&growing[eye], 380..420);
+                assert!(
+                    changed(&middle, &rows(&minimal[eye], 380..420)) > middle.len() / 4 / 2,
+                    "Sky shows inside the sphere"
+                );
+                assert_ne!(growing[eye], sky[eye]);
+            }
             if let Ok(path) = std::env::var("TOMORI_SKY_PREVIEW") {
                 let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
                 for (i, bytes) in [&sky[0], &sky[1], &minimal[0], &overview[0]]
@@ -973,6 +1028,28 @@ mod tests {
             }
             assert!(scope.pop().await.is_none());
         });
+    }
+
+    #[test]
+    fn every_shader_is_valid_wgsl() {
+        let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+        // A new shader is added here, with how it is compiled.
+        assert_eq!(
+            names,
+            [
+                "caption.wgsl",
+                "controllers.wgsl",
+                "swarm.wgsl",
+                "ui_panel.wgsl",
+                "workspace.wgsl"
+            ]
+        );
+        for (name, source) in &files {
+            test_gpu::validate_wgsl(name, source);
+        }
+        // The swarm and workers are drawn with each instance's basis spliced into `swarm.wgsl`.
+        test_gpu::validate_wgsl("swarm.wgsl, oriented", &oriented_shader());
     }
 
     #[test]
@@ -1028,15 +1105,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn conversational_states_render_distinct_images() {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("conversation signal test"),
@@ -1150,15 +1223,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn both_controller_poses_change_the_offscreen_image() {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("controller test target"),
@@ -1286,20 +1355,82 @@ mod tests {
             };
             assert!(hand_changed(0, 64), "left hand should render");
             assert!(hand_changed(64, 128), "right hand should render");
+            // A model the runtime provides replaces the bundled one, on its own hand only; an empty one is ignored.
+            let pose = |x| {
+                Some(crate::controller::Pose {
+                    position: [x, 0.0, 0.5],
+                    orientation: [0.0, 0.0, 0.0, 1.0],
+                })
+            };
+            renderer.update_controllers(&queue, [pose(-0.45), pose(0.45)], [None, None]);
+            assert_eq!(capture(&renderer), with_controllers);
+            let vertex = |x, y| crate::controller::Vertex {
+                position: [x, y, 0.0],
+                normal: [0.0, 0.0, -1.0],
+                color: [1.0, 0.1, 0.1],
+                uv: [0.0, 0.0],
+            };
+            let triangle = ControllerModel {
+                vertices: vec![vertex(-0.3, -0.3), vertex(0.3, -0.3), vertex(0.0, 0.3)],
+                parts: vec![crate::controller::Part {
+                    start: 0,
+                    count: 3,
+                    texture: None,
+                }],
+                textures: Vec::new(),
+            };
+            renderer.set_controller_model(&device, &queue, 0, &triangle);
+            let replaced = capture(&renderer);
+            let differs = |a: &[u8], b: &[u8], start: usize, end: usize| {
+                (0..128).any(|y| {
+                    (start..end).any(|x| {
+                        let offset = (y * 128 + x) * 4;
+                        a[offset..offset + 4] != b[offset..offset + 4]
+                    })
+                })
+            };
+            assert!(
+                differs(&replaced, &with_controllers, 0, 64),
+                "the left model should change"
+            );
+            assert!(
+                !differs(&replaced, &with_controllers, 64, 128),
+                "the right model should not change"
+            );
+            let empty_model = ControllerModel {
+                vertices: Vec::new(),
+                parts: Vec::new(),
+                textures: Vec::new(),
+            };
+            renderer.set_controller_model(&device, &queue, 1, &empty_model);
+            renderer.set_controller_model(&device, &queue, 2, &triangle);
+            assert_eq!(
+                capture(&renderer),
+                replaced,
+                "an empty model or unknown hand is ignored"
+            );
+
+            // Without tracked controllers, the desktop's pointer is a cube that turns orange while it attracts the swarm.
+            renderer.update_controllers(&queue, [None, None], [None, None]);
+            renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), false);
+            let pointer = capture(&renderer);
+            renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), true);
+            let attracting = capture(&renderer);
+            assert_ne!(pointer, empty, "the pointer should render");
+            assert_ne!(
+                pointer, attracting,
+                "attracting should change the pointer's colour"
+            );
             assert!(error_scope.pop().await.is_none());
         });
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn workspace_pages_render_stereo_recenter_and_clear() {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let textures: [_; 2] = std::array::from_fn(|_| {
                 device.create_texture(&wgpu::TextureDescriptor {
@@ -1598,19 +1729,14 @@ mod tests {
 
     /// Set `TOMORI_ARRIVAL_PREVIEW` to a PNG path to save what this renders.
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn arrival_renders_objects_ray_and_world_labels() {
         use crate::arrival::{Item, Key, Kind, Ring, Scene, Step, View};
         const WIDTH: u32 = 640;
         const HEIGHT: u32 = 480;
         pollster::block_on(async {
-            // Metal only when built with `--features wgpu/metal`, to preview on a Mac.
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("arrival test eye"),
@@ -1785,18 +1911,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn multisampling_smooths_edges_in_both_environments() {
         use crate::arrival::{Item, Key, Kind, Scene, View};
         const WIDTH: u32 = 320;
         const HEIGHT: u32 = 200;
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1966,19 +2088,20 @@ mod tests {
 
     /// Draws as the headset does, into the two layers of one swapchain-like image, with every pass the headset draws in the scene pass, and the caption after it.
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn headset_layers_multisample_every_pass() {
         use crate::arrival::{Item, Key, Kind, Scene, View};
         // Rows of whole multiples of 256 bytes, as copying to a buffer needs.
         const WIDTH: u32 = 256;
         const HEIGHT: u32 = 256;
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu {
+                adapter,
+                device,
+                queue,
+            }) = test_gpu::open().await
+            else {
+                return;
+            };
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
             assert_eq!(supported_samples(&adapter, format, SAMPLES), 4);
             assert_eq!(supported_samples(&adapter, format, 1), 1);
@@ -2205,15 +2328,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a Vulkan adapter; run cargo test -p tomori-quest -- --ignored"]
     fn renders_stereo_offscreen() {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let targets: [wgpu::TextureView; 2] = std::array::from_fn(|_| {
                 device

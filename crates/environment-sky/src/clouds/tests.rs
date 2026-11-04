@@ -2,6 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
+use crate::test_gpu;
 use glam::{Mat4, Vec3};
 
 #[test]
@@ -60,15 +61,11 @@ fn read_image(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Textur
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter"]
 fn clouds_are_translucent_stereo_stable_and_occluded_by_foreground_depth() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            return;
+        };
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut sky = crate::Sky::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 512, 384);
         let matrices = [-0.032, 0.032].map(|x| {

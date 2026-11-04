@@ -18,11 +18,11 @@ Each space is bound to one environment, chosen when it is created and the same f
 
 Switching does not reset agents, conversations or worker positions. Sky uses the same scene/recenter transform as the workspace; it does not move the camera. Clouds use a bounded low-resolution volumetric density pass with translucent edges and approximate moonlighting; lanterns have brighter emissive faces and cast warm, occluded illumination onto the nearby static scenery through a build-time lightmap, not runtime point-light shadow maps. The same lightmap adds local ambient occlusion at contacts. The shrine and platform cast/receive softly filtered moon shadows from a cached static shadow map. Agent/status visuals and labels are not shadowed. There is no day/night cycle, scenery collision or new locomotion system.
 
-The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the on-device frame-time budget still needs measurement. To run the stereo/switch/recenter regression and optionally save a preview sheet:
+The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the on-device frame-time budget still needs measurement. The stereo/switch/recenter regression runs with the other tests (see [Tests](#tests--desktop-openxr)); to save a preview sheet:
 
 ```sh
 TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p tomori-quest \
-  sky_environment_renders_stereo_switches_and_preserves_recenter -- --ignored
+  sky_environment_renders_stereo_switches_and_preserves_recenter
 ```
 
 ## Join a space on a Tomori server
@@ -260,13 +260,14 @@ Type the controller buttons as commands, such as `a`, `b`, `y`, `u` and `d` for 
 
 ```sh
 bash scripts/fetch-sherpa-onnx.sh        # once: the speech libraries the server links
-cargo test --workspace                   # simulation, projection, desktop camera, server and client tests
-cargo test -p tomori-quest graphics::tests -- --ignored  # offscreen stereo captions / mono rendering
+cargo test --workspace                   # simulation, projection, rendering, server and client tests
 cargo run -p tomori-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
 npm test --prefix bridge          # session routing, questions and permissions
 ```
 
-`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. The main branch requires these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
+The rendering tests draw offscreen with Vulkan: on a GPU when there is one, and otherwise on a software driver such as Mesa's lavapipe (`mesa-vulkan-drivers` on Debian and Ubuntu, `vulkan-swrast` on Arch). With no Vulkan adapter at all they are skipped, each saying so; set `TOMORI_REQUIRE_GPU=1` to fail them instead, as CI does. To render on lavapipe, as CI does, on a computer with a GPU, name its driver file in `VK_DRIVER_FILES`, such as `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`. Every `.wgsl` shader is also parsed and validated with naga, with or without an adapter.
+
+`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests, including the rendering tests on lavapipe, on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. The main branch requires these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
 
 For the PC streaming-recognition test (model + public sample required):
 

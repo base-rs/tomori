@@ -37,8 +37,9 @@ jobs:
           toolchain: ${{ steps.version.outputs.rust || 'stable' }}
           # Formatting and Clippy run on stable only: their lints change between versions.
           components: ${{ matrix.rust == 'stable' && 'clippy, rustfmt' || '' }}
-      - name: Install the ALSA development files for the desktop client
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU.
+      - name: Install the ALSA development files for the desktop client, and lavapipe
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers
       - uses: actions/cache@v6
         with:
           path: .tools/sherpa-onnx
@@ -52,6 +53,9 @@ jobs:
         if: matrix.rust == 'stable'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
+        env:
+          # Fail the rendering tests, rather than skipping them, if no Vulkan adapter is found.
+          TOMORI_REQUIRE_GPU: 1
         run: cargo test --workspace --locked
 
   # The client core and the headset application for the Quest, as scripts/android.sh builds them.

@@ -108,8 +108,11 @@ contrast; Minimal and application status/label styling are unchanged.
 
 ```sh
 cargo test -p tomori-environment-sky --locked
-cargo test -p tomori-environment-sky --locked -- --ignored
 ```
+
+The Vulkan tests render on a GPU, or on a software driver such as Mesa's lavapipe,
+and are skipped, saying so, where there is no Vulkan adapter at all, unless
+`TOMORI_REQUIRE_GPU=1` is set, as CI sets it. Every shader is also validated with naga.
 
 CPU tests check bounded, finite, deterministic geometry and an unobstructed
 central work volume, periodic noise and render-target size bounds. A Vulkan
@@ -126,5 +129,5 @@ For an optional unshadowed/shadowed preview:
 
 ```sh
 TOMORI_SHADOW_PREVIEW=/tmp/opencode/tomori-shadows.png cargo test -p tomori-environment-sky \
-  --locked cached_moon_shadows -- --ignored
+  --locked cached_moon_shadows
 ```

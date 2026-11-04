@@ -2,6 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
+use crate::test_gpu;
 
 #[test]
 fn moon_frustum_contains_all_static_casters_and_receivers() {
@@ -25,17 +26,13 @@ fn moon_shadow_depth_increases_away_from_the_light() {
 }
 
 #[test]
-#[ignore = "requires a Vulkan adapter"]
 fn cached_moon_shadows_occlude_scenery_preserve_emission_and_survive_resize() {
     pollster::block_on(async {
         const WIDTH: u32 = 512;
         const HEIGHT: u32 = 512;
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            return;
+        };
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut sky = crate::Sky::new(
             &device,
