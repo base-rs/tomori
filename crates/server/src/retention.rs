@@ -485,11 +485,13 @@ mod tests {
             for (to, delivery) in deliveries {
                 assert_eq!(to, participant);
                 match delivery {
-                    Delivery::Message(ServerMessage::Speech { text, replay, .. }) => {
+                    Delivery::Message(message) => {
+                        let ServerMessage::Speech { text, replay, .. } = message else {
+                            unreachable!("only speech is kept, not {message:?}");
+                        };
                         assert!(replay);
                         texts.push(text);
                     }
-                    Delivery::Message(other) => panic!("unexpected {other:?}"),
                     Delivery::Frame(frame) => {
                         assert_eq!(frame.source, REPLAY_SOURCE);
                         values.push(frame.samples[0]);
@@ -809,21 +811,92 @@ mod tests {
         let mut sequences = Vec::new();
         for _ in 0..2 {
             retention.replay("ada", None).unwrap();
-            let mut clock = now;
-            loop {
-                let mut deliveries = Vec::new();
-                let next = retention.pace(clock, &mut deliveries);
-                for (_, delivery) in deliveries {
-                    if let Delivery::Frame(frame) = delivery {
-                        sequences.push(frame.sequence);
-                    }
-                }
-                match next {
-                    Some(next) => clock = next,
-                    None => break,
+            // Three frames are all within the lead, so they are sent at once.
+            let mut deliveries = Vec::new();
+            assert_eq!(retention.pace(now, &mut deliveries), None);
+            for (_, delivery) in deliveries {
+                if let Delivery::Frame(frame) = delivery {
+                    sequences.push(frame.sequence);
                 }
             }
         }
         assert_eq!(sequences, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn joining_again_resumes_from_where_each_state_had_heard() {
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 2);
+        // Away, unreported, live and streaming, each joining again.
+        retention.joined("away", Some(Engagement::Away));
+        retention.joined("unreported", None);
+        retention.joined("live", Some(Engagement::Engaged));
+        retention.replay("live", None).unwrap();
+        retention.joined("streaming", Some(Engagement::Engaged));
+        retention.stop("streaming");
+        for participant in ["away", "unreported", "live", "streaming"] {
+            retention.joined(participant, Some(Engagement::Engaged));
+        }
+        assert!(retention.is_streaming("away"));
+        assert!(retention.is_streaming("live"));
+    }
+
+    #[test]
+    fn engagement_moves_each_listener_between_hearing_and_not() {
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 2);
+        // Streaming, engaged again or away.
+        retention.joined("ada", Some(Engagement::Engaged));
+        assert!(!retention.engagement("ada", Engagement::Engaged));
+        assert!(!retention.engagement("ada", Engagement::Away));
+        assert!(!retention.engagement("ada", Engagement::Away));
+        // Live, engaged again.
+        retention.joined("bob", Some(Engagement::Engaged));
+        retention.stop("bob");
+        assert!(!retention.engagement("bob", Engagement::Engaged));
+        // Absent, away and then back.
+        retention.left("bob");
+        assert!(!retention.engagement("bob", Engagement::Away));
+        retention.left("bob");
+        // Having heard everything live, he has nothing to catch up on.
+        assert!(!retention.engagement("bob", Engagement::Engaged));
+        assert!(retention.hears_live("bob"));
+        // Unreported having missed some, away.
+        retention.joined("cy", None);
+        assert!(!retention.engagement("cy", Engagement::Away));
+        retention.left("ada");
+        assert!(!retention.hears_live("cy"));
+    }
+
+    #[test]
+    fn speech_longer_than_what_is_kept_is_not_kept_and_forgets_who_missed_it() {
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 1);
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.left("ada");
+        // One frame longer than all that is kept.
+        let long = RETAINED_AUDIO.as_secs() as usize + 1;
+        retention.record(
+            2,
+            Item::Frame {
+                sample_rate: 1,
+                samples: vec![0; long].into(),
+            },
+        );
+        assert!(retention.entries.is_empty());
+        assert!(retention.replies.is_empty());
+        assert!(!retention.listeners.contains_key("ada"));
+    }
+
+    #[test]
+    fn two_listeners_streaming_are_paced_to_whichever_is_due_first() {
+        let now = Instant::now();
+        let mut retention = Retention::default();
+        speak(&mut retention, 1, "m1", 1, 50);
+        retention.joined("ada", Some(Engagement::Engaged));
+        retention.joined("bob", Some(Engagement::Engaged));
+        let mut deliveries = Vec::new();
+        let next = retention.pace(now, &mut deliveries).unwrap();
+        assert!(next > now);
     }
 }
