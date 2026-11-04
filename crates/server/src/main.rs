@@ -1182,6 +1182,26 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_server_frees_its_state_directory_while_its_console_is_still_read() {
+        let directory = directory("console");
+        let (server, _) = configured(&local(&directory, &[])).unwrap();
+        // As the console thread does, until the console ends.
+        let console = server.pairing();
+        drop(server);
+        assert!(tomori_server::kept::SpaceStore::open(&directory).is_ok());
+        assert!(console.pending().is_none());
+        assert_eq!(console.confirm("123456"), Err("The server has stopped."));
+        assert!(!console.decline());
+        assert!(!console.paused());
+        console.allow();
+        assert_eq!(
+            console_reply(&console, "decline").as_deref(),
+            Some("No pairing is waiting.")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn a_state_directory_that_cannot_be_used_stops_the_server_from_starting() {
         let directory = directory("unusable");
         let state = directory.join("state");
