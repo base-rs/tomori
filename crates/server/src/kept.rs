@@ -75,6 +75,16 @@ impl From<io::Error> for KeepError {
     }
 }
 
+/// Another server holding the record is [`KeepError::Busy`].
+impl From<fs::TryLockError> for KeepError {
+    fn from(error: fs::TryLockError) -> Self {
+        match error {
+            fs::TryLockError::WouldBlock => Self::Busy,
+            fs::TryLockError::Error(error) => Self::Io(error),
+        }
+    }
+}
+
 /// The record of a server's spaces, held locked for as long as the server runs.
 pub struct SpaceStore {
     path: PathBuf,
@@ -99,11 +109,7 @@ impl SpaceStore {
         tomori_security::create_private_directory(directory)?;
         let path = directory.join(SPACES_FILE);
         let lock = File::create(path.with_extension("lock"))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Err(KeepError::Busy),
-            Err(fs::TryLockError::Error(error)) => return Err(error.into()),
-        }
+        lock.try_lock()?;
         let spaces = match fs::read_to_string(&path) {
             Ok(text) => {
                 serde_json::from_str::<Stored>(&text)
@@ -214,16 +220,47 @@ mod tests {
     fn one_server_keeps_a_directory_and_a_malformed_record_is_refused() {
         let directory = directory("refused");
         let store = SpaceStore::open(&directory).unwrap();
-        assert!(matches!(SpaceStore::open(&directory), Err(KeepError::Busy)));
+        let Err(KeepError::Busy) = SpaceStore::open(&directory) else {
+            unreachable!("expected Err(KeepError::Busy)");
+        };
         drop(store);
         fs::write(directory.join(SPACES_FILE), "not json").unwrap();
         let error = SpaceStore::open(&directory).unwrap_err();
-        assert!(matches!(error, KeepError::Format(_)));
+        let KeepError::Format(_) = error else {
+            unreachable!("expected KeepError::Format(_)");
+        };
         assert!(
             error
                 .to_string()
                 .starts_with("the record of spaces is malformed")
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_locked_or_read_is_refused_and_errors_say_why() {
+        let locked = directory("unlockable");
+        fs::create_dir_all(locked.join(SPACES_FILE).with_extension("lock")).unwrap();
+        let Err(KeepError::Io(_)) = SpaceStore::open(&locked) else {
+            unreachable!("a lock that cannot be made is an error");
+        };
+        let unread = directory("unreadable");
+        fs::create_dir_all(unread.join(SPACES_FILE)).unwrap();
+        let Err(KeepError::Io(_)) = SpaceStore::open(&unread) else {
+            unreachable!("a record that cannot be read is an error");
+        };
+        let store = SpaceStore::open(&directory("debug")).unwrap();
+        assert!(format!("{store:?}").starts_with("SpaceStore { path: "));
+        assert_eq!(
+            KeepError::Busy.to_string(),
+            "another server keeps its spaces in this state directory"
+        );
+        let KeepError::Io(_) = KeepError::from(fs::TryLockError::Error(io::Error::other("lock")))
+        else {
+            unreachable!("a lock that fails is an input error");
+        };
+        for directory in [locked, unread] {
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 }
