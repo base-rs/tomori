@@ -273,12 +273,14 @@ mod tests {
             for other in &scene.faces[i + 1..] {
                 let a = face.tile;
                 let b = other.tile;
-                assert!(
-                    a.x + a.size <= b.x
-                        || b.x + b.size <= a.x
-                        || a.y + a.size <= b.y
-                        || b.y + b.size <= a.y
-                );
+                // Apart on at least one side.
+                let apart = [
+                    a.x + a.size <= b.x,
+                    b.x + b.size <= a.x,
+                    a.y + a.size <= b.y,
+                    b.y + b.size <= a.y,
+                ];
+                assert!(apart.contains(&true));
             }
         }
         assert!(
@@ -321,14 +323,15 @@ mod tests {
             let points = triangle.iter().map(|v| Vec3::from_array(v.position));
             let min = points.clone().fold(Vec3::splat(f32::INFINITY), Vec3::min);
             let max = points.fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max);
-            assert!(
-                max.x < -0.7
-                    || min.x > 0.7
-                    || max.y < 0.4
-                    || min.y > 2.0
-                    || max.z < -3.5
-                    || min.z > -1.5
-            );
+            let outside = [
+                max.x < -0.7,
+                min.x > 0.7,
+                max.y < 0.4,
+                min.y > 2.0,
+                max.z < -3.5,
+                min.z > -1.5,
+            ];
+            assert!(outside.contains(&true));
         }
     }
 }

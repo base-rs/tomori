@@ -528,6 +528,11 @@ pub struct ArrivalLabels {
 }
 
 impl ArrivalLabels {
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// `samples` is the scene pass's sample count, which this draws within.
     pub fn new(
         device: &wgpu::Device,
@@ -888,5 +893,171 @@ mod tests {
             attention_pulse(Attention::Problem, 0.0),
             attention_pulse(Attention::Reply, 0.0)
         );
+    }
+
+    fn object(kind: Kind) -> Object {
+        Object {
+            key: Key::Create,
+            kind,
+            position: Vec3::new(0.0, 1.4, -1.6),
+            size: 0.07,
+            label: Label {
+                anchor: Vec3::new(0.0, 1.3, -1.6),
+                lines: vec!["A label".into()],
+                align: Align::Left,
+                pixel: 0.0026,
+                alpha: 1.0,
+                tilt: false,
+            },
+            description: String::new(),
+            selected: false,
+            dim: 0.0,
+            presence: 1.0,
+            choosable: true,
+        }
+    }
+
+    fn drawn(kind: Kind, time: f32) -> Vec<Cube> {
+        let mut cubes = Vec::new();
+        form(&object(kind), time, Some(HOME), &mut cubes);
+        // Arrival makes its own cubes, which may be longer than a metre, such as the USB cable.
+        assert!(cubes.iter().all(|cube| {
+            cube.position
+                .iter()
+                .chain(&cube.scale)
+                .chain(&cube.orientation)
+                .all(|value| value.is_finite())
+        }));
+        cubes
+    }
+
+    #[test]
+    fn every_kind_of_object_has_its_form() {
+        use crate::hand_menu::MenuKind;
+        for (source, available) in [
+            (Source::Override, false),
+            (Source::Remembered, true),
+            (Source::Usb, true),
+        ] {
+            let server = Kind::Server {
+                source,
+                available,
+                attention: None,
+            };
+            assert!(!drawn(server, 1.0).is_empty());
+        }
+        for open in [false, true] {
+            assert_eq!(drawn(Kind::Create { open }, 0.0).len(), 2);
+        }
+        assert_eq!(drawn(Kind::Choice, 0.0).len(), 1);
+        for pending in [false, true] {
+            assert_eq!(drawn(Kind::Pair { pending }, 0.5).len(), 3);
+        }
+        for (kind, cubes) in [
+            (MenuKind::Section { flashing: false }, 1),
+            (MenuKind::Section { flashing: true }, 1),
+            (MenuKind::Button, 1),
+            (MenuKind::Heading, 0),
+            (MenuKind::Text, 0),
+            (MenuKind::Person([0.2, 0.4, 0.6]), 1),
+            (MenuKind::Cue, 1),
+            (MenuKind::ProblemCue, 1),
+        ] {
+            assert_eq!(drawn(Kind::Menu(kind), 0.25).len(), cubes);
+        }
+    }
+
+    #[test]
+    fn a_bar_needs_a_length() {
+        assert!(bar(Vec3::ONE, Vec3::ONE, 0.01, [1.0; 3]).is_none());
+        assert!(bar(Vec3::ZERO, Vec3::ONE, 0.01, [1.0; 3]).is_some());
+    }
+
+    #[test]
+    fn hues_go_round_the_colour_wheel() {
+        let colours: Vec<[f32; 3]> = (0..6).map(|n| hsv(n as f32 / 6.0, 1.0, 1.0)).collect();
+        assert_eq!(
+            colours,
+            [
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn labels_without_text_or_opacity_draw_nothing_and_unknown_characters_draw_a_question_mark() {
+        let mut empty = object(Kind::Choice);
+        empty.label.lines.clear();
+        let mut faded = object(Kind::Choice);
+        faded.label.alpha = 0.0;
+        let mut unknown = object(Kind::Choice);
+        unknown.label.lines = vec!["\u{1f600}".into()];
+        let mut question = object(Kind::Choice);
+        question.label.lines = vec!["?".into()];
+        let mesh = |object: Object| {
+            let scene = Scene {
+                objects: vec![object],
+                ..Default::default()
+            };
+            label_mesh(&scene, None)
+        };
+        assert!(mesh(empty).is_empty());
+        assert!(mesh(faded).is_empty());
+        assert_eq!(mesh(unknown), mesh(question));
+        // An object that has gone draws no form.
+        let mut gone = object(Kind::Choice);
+        gone.presence = 0.0;
+        let scene = Scene {
+            objects: vec![gone],
+            ..Default::default()
+        };
+        let frame = Frame {
+            scene: &scene,
+            hovered: None,
+            ray: None,
+            time: 0.0,
+        };
+        assert!(cubes(&frame).is_empty());
+    }
+
+    #[test]
+    fn a_label_mesh_stops_at_the_vertex_limit_and_its_buffer_grows_to_hold_it() {
+        let mut long = object(Kind::Choice);
+        long.label.lines = vec!["#".repeat(4_000); 40];
+        // An object somewhere that cannot be drawn is left out.
+        let mut nowhere = object(Kind::Choice);
+        nowhere.position = Vec3::NAN;
+        nowhere.label.lines.clear();
+        let scene = Scene {
+            objects: vec![long, nowhere],
+            ..Default::default()
+        };
+        let mesh = label_mesh(&scene, None);
+        assert!(mesh.len() <= MAX_VERTICES && mesh.len() > MAX_VERTICES - 6);
+        tomori_environment_sky::test_gpu::with(|gpu| {
+            let mut renderer = crate::graphics::Renderer::new(
+                &gpu.device,
+                &gpu.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                64,
+                48,
+            );
+            renderer.update_arrival(
+                &gpu.device,
+                &gpu.queue,
+                &Frame {
+                    scene: &scene,
+                    hovered: None,
+                    ray: None,
+                    time: 0.0,
+                },
+            );
+            assert_eq!(renderer.arrival_label_capacity(), MAX_VERTICES);
+        });
     }
 }

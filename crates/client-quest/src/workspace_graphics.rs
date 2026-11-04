@@ -226,10 +226,8 @@ fn project_surface(surface: &[[glam::Vec3; 3]], matrix: glam::Mat4) -> Vec<Proje
             if polygon.iter().all(|p| plane.dot(*p) >= 0.0) {
                 continue;
             }
+            // A polygon clipped away by one plane is empty, and so is wholly inside every later one.
             let input = std::mem::take(&mut polygon);
-            if input.is_empty() {
-                break;
-            }
             let mut a = *input.last().unwrap();
             let mut da = plane.dot(a);
             for b in input {
@@ -751,9 +749,8 @@ fn layout(
             if workspace.stale { " [STALE]" } else { "" }
         ));
         lines.push("-".repeat(COLUMNS));
-        if let Some(lines_on_page) = content.get(content_page) {
-            lines.extend(lines_on_page.iter().cloned());
-        }
+        // Every card has at least one page of content, even if only to say it is empty.
+        lines.extend(content.get(content_page).into_iter().flatten().cloned());
         // Keep the card's field dimensions stable even on the last page.
         lines.resize(ROWS, String::new());
         // Beside the coordinator, never behind the head-locked console.
@@ -2083,9 +2080,7 @@ mod tests {
                 };
                 assert!(
                     depth(&rear) < depth(&sign),
-                    "yaw={yaw}, eye={x}, rear={}, sign={}",
-                    depth(&rear),
-                    depth(&sign)
+                    "the rear field is nearer than the sign at yaw={yaw}, eye={x}"
                 );
                 assert_eq!(panel_order(&cache.ranges, matrix), [1, 0]);
                 let recenter = glam::Mat4::from_rotation_y(-0.8)
@@ -2206,441 +2201,504 @@ mod tests {
 
     #[test]
     fn vulkan_sign_images_include_post_text_and_smooth_fade_in_both_eyes() {
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: None,
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(64),
-                    },
-                    count: None,
-                }],
-            });
-            let camera = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &camera_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera.as_entire_binding(),
-                }],
-            });
-            let extent = wgpu::Extent3d {
-                width: 512,
-                height: 512,
-                depth_or_array_layers: 1,
-            };
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let depth = device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let depth_view = depth.create_view(&Default::default());
-            let mut graphics =
-                WorkspaceGraphics::new(&device, wgpu::TextureFormat::Rgba8Unorm, &camera_layout, 1);
-            // A depth-writing opaque body in front of part of the sign.
-            let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("synthetic body layout"),
-                bind_group_layouts: &[Some(&camera_layout)],
-                immediate_size: 0,
-            });
-            let body_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("synthetic opaque body"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &ATTRIBUTES,
-                    })],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-            let mut body_mesh = Vec::new();
-            quad(
-                &mut body_mesh,
-                -0.14,
-                1.8,
-                -1.0,
-                0.14,
-                0.4,
-                [0.05, 0.1, 0.8, 1.0],
-            );
-            use wgpu::util::DeviceExt;
-            let body_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("synthetic body"),
-                contents: bytemuck::cast_slice(&body_mesh),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let workspace = Workspace {
-                nodes: vec![node("a", State::Completed)],
-                ..Default::default()
-            };
-            let mut station = Station {
-                id: "a".into(),
-                title: "Readable task".into(),
-                state: State::Completed,
-                position: [0.0, 1.25, -2.8],
-                opacity: 1.0,
-            };
-            // Rendering fixture deliberately exercises a centered arbitrary
-            // plane. Real placement is tested separately with 128 labels below.
-            graphics
-                .placements
-                .0
-                .insert(station.id.clone(), station.position);
-            let capture_order = |graphics: &WorkspaceGraphics,
-                                 matrix: glam::Mat4,
-                                 body: bool,
-                                 sorted: bool| {
-                queue.write_buffer(&camera, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let camera_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(64),
+                            },
+                            count: None,
+                        }],
+                    });
+                let camera = device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
-                    size: 512 * 512 * 4,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    size: 64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                {
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: None,
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.08,
-                                    g: 0.12,
-                                    b: 0.16,
-                                    a: 1.0,
-                                }),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &depth_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Discard,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-                    if body {
-                        pass.set_pipeline(&body_pipeline);
-                        pass.set_bind_group(0, &binding, &[]);
-                        pass.set_vertex_buffer(0, body_buffer.slice(..));
-                        pass.draw(0..6, 0..1);
-                    }
-                    if sorted {
-                        graphics.draw(&mut pass, &binding, matrix);
-                    } else if graphics.count > 0 {
-                        // Reproduce the old single blended draw in the test only.
-                        pass.set_pipeline(&graphics.pipeline);
-                        pass.set_bind_group(0, &binding, &[]);
-                        pass.set_vertex_buffer(0, graphics.vertices.slice(..));
-                        pass.draw(0..graphics.count, 0..1);
-                    }
-                }
-                encoder.copy_texture_to_buffer(
-                    texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(512 * 4),
-                            rows_per_image: Some(512),
-                        },
-                    },
-                    extent,
-                );
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| {
-                        tx.send(result).unwrap();
-                    });
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let result = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                buffer.unmap();
-                result
-            };
-            let capture = |graphics: &WorkspaceGraphics, matrix, body| {
-                capture_order(graphics, matrix, body, true)
-            };
-            let projection = glam::Mat4::perspective_rh(0.65, 1.0, 0.05, 50.0);
-            let mut eye_images = Vec::new();
-            for eye_x in [-0.032, 0.032] {
-                let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
-                let matrix = projection
-                    * glam::Mat4::look_at_rh(eye, eye + glam::Vec3::NEG_Z, glam::Vec3::Y);
-                graphics.hide();
-                let empty = capture(&graphics, matrix, false);
-                station.opacity = 1.0;
-                graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
-                let full = capture(&graphics, matrix, false);
-                // A farther result field fills the label's projected area. In
-                // particular, it must not paint over the foreground glyphs.
-                let sign = station_panel(&station, station.position, State::Completed);
-                let rear = Panel {
-                    origin: [-2.0, 2.5, -4.0],
-                    pixel: 0.01,
-                    columns: COLUMNS,
-                    lines: vec![String::new(); ROWS],
-                    accent: MUTED,
-                    opacity: 1.0,
-                    sign: None,
+                let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &camera_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera.as_entire_binding(),
+                    }],
+                });
+                let extent = wgpu::Extent3d {
+                    width: 512,
+                    height: 512,
+                    depth_or_array_layers: 1,
                 };
-                graphics.cache.update(vec![sign, rear]);
-                queue.write_buffer(
-                    &graphics.vertices,
-                    0,
-                    bytemuck::cast_slice(&graphics.cache.vertices),
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let depth = device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                let depth_view = depth.create_view(&Default::default());
+                let mut graphics = WorkspaceGraphics::new(
+                    &device,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    &camera_layout,
+                    1,
                 );
-                graphics.count = graphics.cache.vertices.len() as u32;
-                let overlap = capture(&graphics, matrix, false);
-                let visible_glyphs = (225..250)
-                    .flat_map(|y| (135..240).map(move |x| (y * 512 + x) * 4))
-                    .filter(|&i| {
-                        full[i] > 50
-                            && full[i + 1] > 180
-                            && full[i + 2] > 120
-                            && full[i..i + 3] == overlap[i..i + 3]
-                    })
-                    .count();
-                assert!(
-                    visible_glyphs > 10,
-                    "rear card hid foreground glyphs: {visible_glyphs}"
+                // A depth-writing opaque body in front of part of the sign.
+                let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("synthetic body layout"),
+                    bind_group_layouts: &[Some(&camera_layout)],
+                    immediate_size: 0,
+                });
+                let body_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("synthetic opaque body"),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some("vs_main"),
+                            compilation_options: Default::default(),
+                            buffers: &[Some(wgpu::VertexBufferLayout {
+                                array_stride: size_of::<Vertex>() as u64,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &ATTRIBUTES,
+                            })],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some("fs_main"),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            cull_mode: None,
+                            ..Default::default()
+                        },
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: wgpu::TextureFormat::Depth32Float,
+                            depth_write_enabled: Some(true),
+                            depth_compare: Some(wgpu::CompareFunction::Less),
+                            stencil: Default::default(),
+                            bias: Default::default(),
+                        }),
+                        multisample: Default::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    });
+                let mut body_mesh = Vec::new();
+                quad(
+                    &mut body_mesh,
+                    -0.14,
+                    1.8,
+                    -1.0,
+                    0.14,
+                    0.4,
+                    [0.05, 0.1, 0.8, 1.0],
                 );
-                station.opacity = 0.2;
-                graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
-                let faded = capture(&graphics, matrix, false);
-                let difference =
-                    |image: &[u8], x0: usize, x1: usize, y0: usize, y1: usize| -> u64 {
-                        (y0..y1)
-                            .flat_map(|y| (x0..x1).map(move |x| (y * 512 + x) * 4))
-                            .map(|i| {
-                                (0..3)
-                                    .map(|c| image[i + c].abs_diff(empty[i + c]) as u64)
-                                    .sum::<u64>()
-                            })
-                            .sum()
-                    };
-                let post = difference(&full, 240, 272, 280, 340);
-                let faded_post = difference(&faded, 240, 272, 280, 340);
-                assert!(
-                    post > 0 && faded_post > 0 && faded_post < post,
-                    "post must render and fade"
-                );
-                let text = difference(&full, 110, 400, 225, 270);
-                let faded_text = difference(&faded, 110, 400, 225, 270);
-                assert!(
-                    text > 0 && faded_text > 0 && faded_text < text,
-                    "sign and glyphs must render and fade"
-                );
-                let title_pixels = (225..250)
-                    .flat_map(|y| (135..240).map(move |x| (y * 512 + x) * 4))
-                    .filter(|&i| full[i] > 50 && full[i + 1] > 180 && full[i + 2] > 120)
-                    .count();
-                assert!(title_pixels > 0, "title glyph pixels must be visible");
-                let transform = glam::Mat4::from_rotation_y(0.3)
-                    * glam::Mat4::from_translation(glam::Vec3::new(0.4, 0.0, -0.2));
-                station.opacity = 1.0;
-                graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
-                let compensated =
-                    capture(&graphics, (matrix * transform.inverse()) * transform, false);
-                let changed = changed_pixels(&full, &compensated);
-                assert!(changed < 256, "recenter changed the sign: {changed} pixels");
-                eye_images.push(full);
-            }
-            assert_ne!(eye_images[0], eye_images[1]);
-
-            // Exercise the real panel meshes and depth attachment at multiple
-            // distances and bearings, in both insertion orders and both eyes.
-            // The rear field contains no glyphs, making foreground glyph pixels
-            // unambiguous. Images use synthetic content only.
-            let upload = |graphics: &mut WorkspaceGraphics, panels: Vec<Panel>| {
-                graphics.cache.update(panels);
-                if !graphics.cache.vertices.is_empty() {
-                    queue.write_buffer(
-                        &graphics.vertices,
-                        0,
-                        bytemuck::cast_slice(&graphics.cache.vertices),
+                use wgpu::util::DeviceExt;
+                let body_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("synthetic body"),
+                    contents: bytemuck::cast_slice(&body_mesh),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let workspace = Workspace {
+                    nodes: vec![node("a", State::Completed)],
+                    ..Default::default()
+                };
+                let mut station = Station {
+                    id: "a".into(),
+                    title: "Readable task".into(),
+                    state: State::Completed,
+                    position: [0.0, 1.25, -2.8],
+                    opacity: 1.0,
+                };
+                // Rendering fixture deliberately exercises a centered arbitrary
+                // plane. Real placement is tested separately with 128 labels below.
+                graphics
+                    .placements
+                    .0
+                    .insert(station.id.clone(), station.position);
+                let capture_order = |graphics: &WorkspaceGraphics,
+                                     matrix: glam::Mat4,
+                                     body: bool,
+                                     sorted: bool| {
+                    queue.write_buffer(&camera, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: None,
+                        size: 512 * 512 * 4,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: None,
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: 0.08,
+                                        g: 0.12,
+                                        b: 0.16,
+                                        a: 1.0,
+                                    }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Discard,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        if body {
+                            pass.set_pipeline(&body_pipeline);
+                            pass.set_bind_group(0, &binding, &[]);
+                            pass.set_vertex_buffer(0, body_buffer.slice(..));
+                            pass.draw(0..6, 0..1);
+                        }
+                        if sorted {
+                            graphics.draw(&mut pass, &binding, matrix);
+                        } else {
+                            // Reproduce the old single blended draw in the test only.
+                            pass.set_pipeline(&graphics.pipeline);
+                            pass.set_bind_group(0, &binding, &[]);
+                            pass.set_vertex_buffer(0, graphics.vertices.slice(..));
+                            pass.draw(0..graphics.count, 0..1);
+                        }
+                    }
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &buffer,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(512 * 4),
+                                rows_per_image: Some(512),
+                            },
+                        },
+                        extent,
                     );
-                }
-                graphics.count = graphics.cache.vertices.len() as u32;
-            };
-            let projection = glam::Mat4::perspective_rh(0.95, 1.0, 0.05, 50.0);
-            for distance in [1.8, 2.8, 4.0] {
-                for bearing in [-0.45_f32, 0.0, 0.45] {
-                    let mut sign_station = station.clone();
-                    sign_station.opacity = 1.0;
-                    sign_station.position[0] = distance * bearing.sin();
-                    sign_station.position[2] = -distance * bearing.cos();
-                    let sign =
-                        station_panel(&sign_station, sign_station.position, State::Completed);
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| {
+                            tx.send(result).unwrap();
+                        });
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let result = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                    buffer.unmap();
+                    result
+                };
+                let capture = |graphics: &WorkspaceGraphics, matrix, body| {
+                    capture_order(graphics, matrix, body, true)
+                };
+                let projection = glam::Mat4::perspective_rh(0.65, 1.0, 0.05, 50.0);
+                let mut eye_images = Vec::new();
+                for eye_x in [-0.032, 0.032] {
+                    let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
+                    let matrix = projection
+                        * glam::Mat4::look_at_rh(eye, eye + glam::Vec3::NEG_Z, glam::Vec3::Y);
+                    graphics.hide();
+                    let empty = capture(&graphics, matrix, false);
+                    station.opacity = 1.0;
+                    graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
+                    let full = capture(&graphics, matrix, false);
+                    // A farther result field fills the label's projected area. In
+                    // particular, it must not paint over the foreground glyphs.
+                    let sign = station_panel(&station, station.position, State::Completed);
                     let rear = Panel {
-                        origin: [-3.0, 3.2, -distance - 1.5],
-                        pixel: 0.016,
+                        origin: [-2.0, 2.5, -4.0],
+                        pixel: 0.01,
                         columns: COLUMNS,
                         lines: vec![String::new(); ROWS],
                         accent: MUTED,
                         opacity: 1.0,
                         sign: None,
                     };
-                    for yaw in [-0.18_f32, 0.18] {
-                        for eye_x in [-0.032, 0.032] {
-                            let eye = glam::Vec3::new(0.15 + eye_x, 1.6, 0.1);
-                            let heading = bearing + yaw;
-                            let direction = glam::Vec3::new(heading.sin(), 0.0, -heading.cos());
-                            let matrix = projection
-                                * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
-                            upload(&mut graphics, vec![rear.clone()]);
-                            let rear_image = capture(&graphics, matrix, false);
-                            upload(&mut graphics, vec![sign.clone()]);
-                            let sign_image = capture(&graphics, matrix, false);
-                            upload(&mut graphics, vec![sign.clone(), rear.clone()]);
-                            let forward = capture(&graphics, matrix, false);
-                            let buggy = capture_order(&graphics, matrix, false, false);
-                            upload(&mut graphics, vec![rear.clone(), sign.clone()]);
-                            let reverse = capture(&graphics, matrix, false);
-                            assert_eq!(
-                                forward, reverse,
-                                "insertion order changed the image: distance {distance}, yaw {yaw}, eye {eye_x}"
-                            );
-                            let glyphs: Vec<_> = (0..512 * 512)
-                                .map(|p| p * 4)
-                                .filter(|&i| {
-                                    sign_image[i] > 50
-                                        && sign_image[i + 1] > 180
-                                        && sign_image[i + 2] > 120
-                                        && rear_image[i + 1] < 100
+                    graphics.cache.update(vec![sign, rear]);
+                    queue.write_buffer(
+                        &graphics.vertices,
+                        0,
+                        bytemuck::cast_slice(&graphics.cache.vertices),
+                    );
+                    graphics.count = graphics.cache.vertices.len() as u32;
+                    let overlap = capture(&graphics, matrix, false);
+                    let visible_glyphs = (225..250)
+                        .flat_map(|y| (135..240).map(move |x| (y * 512 + x) * 4))
+                        .filter(|&i| {
+                            full[i] > 50
+                                && full[i + 1] > 180
+                                && full[i + 2] > 120
+                                && full[i..i + 3] == overlap[i..i + 3]
+                        })
+                        .count();
+                    assert!(
+                        visible_glyphs > 10,
+                        "rear card hid foreground glyphs: {visible_glyphs}"
+                    );
+                    station.opacity = 0.2;
+                    graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
+                    let faded = capture(&graphics, matrix, false);
+                    let difference =
+                        |image: &[u8], x0: usize, x1: usize, y0: usize, y1: usize| -> u64 {
+                            (y0..y1)
+                                .flat_map(|y| (x0..x1).map(move |x| (y * 512 + x) * 4))
+                                .map(|i| {
+                                    (0..3)
+                                        .map(|c| image[i + c].abs_diff(empty[i + c]) as u64)
+                                        .sum::<u64>()
                                 })
-                                .collect();
-                            assert!(
-                                glyphs.len() > 5,
-                                "no visible test glyphs: distance {distance}, yaw {yaw}, eye {eye_x}"
-                            );
-                            assert!(
-                                glyphs
-                                    .iter()
-                                    .all(|&i| sign_image[i..i + 3] == forward[i..i + 3]),
-                                "rear card covered foreground text: distance {distance}, yaw {yaw}, eye {eye_x}"
-                            );
-                            assert!(
-                                glyphs
-                                    .iter()
-                                    .any(|&i| sign_image[i..i + 3] != buggy[i..i + 3]),
-                                "old single-draw bug must fail the glyph-preservation assertion"
-                            );
-                            let pixel = glyphs[glyphs.len() / 2];
-                            let mut previous = rear_image[pixel + 1];
-                            for opacity in [0.0, 0.25, 0.5, 0.75, 1.0] {
-                                let mut faded = sign.clone();
-                                faded.opacity = opacity;
-                                upload(&mut graphics, vec![faded, rear.clone()]);
-                                let image = capture(&graphics, matrix, false);
-                                if opacity == 0.0 {
-                                    assert_eq!(
-                                        image, rear_image,
-                                        "invisible panels must not occlude"
-                                    );
-                                } else {
-                                    assert!(
-                                        image[pixel + 1] > previous,
-                                        "fade must progress smoothly"
-                                    );
-                                }
-                                previous = image[pixel + 1];
-                            }
-                            assert_eq!(previous, sign_image[pixel + 1]);
+                                .sum()
+                        };
+                    let post = difference(&full, 240, 272, 280, 340);
+                    let faded_post = difference(&faded, 240, 272, 280, 340);
+                    assert!(
+                        post > 0 && faded_post > 0 && faded_post < post,
+                        "post must render and fade"
+                    );
+                    let text = difference(&full, 110, 400, 225, 270);
+                    let faded_text = difference(&faded, 110, 400, 225, 270);
+                    assert!(
+                        text > 0 && faded_text > 0 && faded_text < text,
+                        "sign and glyphs must render and fade"
+                    );
+                    let title_pixels = (225..250)
+                        .flat_map(|y| (135..240).map(move |x| (y * 512 + x) * 4))
+                        .filter(|&i| full[i] > 50 && full[i + 1] > 180 && full[i + 2] > 120)
+                        .count();
+                    assert!(title_pixels > 0, "title glyph pixels must be visible");
+                    let transform = glam::Mat4::from_rotation_y(0.3)
+                        * glam::Mat4::from_translation(glam::Vec3::new(0.4, 0.0, -0.2));
+                    station.opacity = 1.0;
+                    graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
+                    let compensated =
+                        capture(&graphics, (matrix * transform.inverse()) * transform, false);
+                    let changed = changed_pixels(&full, &compensated);
+                    assert!(changed < 256, "recenter changed the sign: {changed} pixels");
+                    eye_images.push(full);
+                }
+                assert_ne!(eye_images[0], eye_images[1]);
 
-                            let transform = glam::Mat4::from_rotation_y(0.3)
-                                * glam::Mat4::from_translation(glam::Vec3::new(0.4, 0.0, -0.2));
-                            let recentered = capture(
-                                &graphics,
-                                (matrix * transform.inverse()) * transform,
-                                false,
-                            );
-                            let changed = changed_pixels(&forward, &recentered);
-                            assert!(changed < 128, "recenter changed overlap: {changed} pixels");
+                // Exercise the real panel meshes and depth attachment at multiple
+                // distances and bearings, in both insertion orders and both eyes.
+                // The rear field contains no glyphs, making foreground glyph pixels
+                // unambiguous. Images use synthetic content only.
+                let upload = |graphics: &mut WorkspaceGraphics, panels: Vec<Panel>| {
+                    graphics.cache.update(panels);
+                    queue.write_buffer(
+                        &graphics.vertices,
+                        0,
+                        bytemuck::cast_slice(&graphics.cache.vertices),
+                    );
+                    graphics.count = graphics.cache.vertices.len() as u32;
+                };
+                let projection = glam::Mat4::perspective_rh(0.95, 1.0, 0.05, 50.0);
+                for distance in [1.8, 2.8, 4.0] {
+                    for bearing in [-0.45_f32, 0.0, 0.45] {
+                        let mut sign_station = station.clone();
+                        sign_station.opacity = 1.0;
+                        sign_station.position[0] = distance * bearing.sin();
+                        sign_station.position[2] = -distance * bearing.cos();
+                        let sign =
+                            station_panel(&sign_station, sign_station.position, State::Completed);
+                        let rear = Panel {
+                            origin: [-3.0, 3.2, -distance - 1.5],
+                            pixel: 0.016,
+                            columns: COLUMNS,
+                            lines: vec![String::new(); ROWS],
+                            accent: MUTED,
+                            opacity: 1.0,
+                            sign: None,
+                        };
+                        for yaw in [-0.18_f32, 0.18] {
+                            for eye_x in [-0.032, 0.032] {
+                                let eye = glam::Vec3::new(0.15 + eye_x, 1.6, 0.1);
+                                let heading = bearing + yaw;
+                                let direction = glam::Vec3::new(heading.sin(), 0.0, -heading.cos());
+                                let matrix = projection
+                                    * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
+                                upload(&mut graphics, vec![rear.clone()]);
+                                let rear_image = capture(&graphics, matrix, false);
+                                upload(&mut graphics, vec![sign.clone()]);
+                                let sign_image = capture(&graphics, matrix, false);
+                                upload(&mut graphics, vec![sign.clone(), rear.clone()]);
+                                let forward = capture(&graphics, matrix, false);
+                                let buggy = capture_order(&graphics, matrix, false, false);
+                                upload(&mut graphics, vec![rear.clone(), sign.clone()]);
+                                let reverse = capture(&graphics, matrix, false);
+                                assert_eq!(
+                                    forward, reverse,
+                                    "insertion order changed the image: distance {distance}, yaw {yaw}, eye {eye_x}"
+                                );
+                                let glyphs: Vec<_> = (0..512 * 512)
+                                    .map(|p| p * 4)
+                                    .filter(|&i| {
+                                        sign_image[i] > 50
+                                            && sign_image[i + 1] > 180
+                                            && sign_image[i + 2] > 120
+                                            && rear_image[i + 1] < 100
+                                    })
+                                    .collect();
+                                assert!(
+                                    glyphs.len() > 5,
+                                    "no visible test glyphs: distance {distance}, yaw {yaw}, eye {eye_x}"
+                                );
+                                assert!(
+                                    glyphs
+                                        .iter()
+                                        .all(|&i| sign_image[i..i + 3] == forward[i..i + 3]),
+                                    "rear card covered foreground text: distance {distance}, yaw {yaw}, eye {eye_x}"
+                                );
+                                assert!(
+                                    glyphs
+                                        .iter()
+                                        .any(|&i| sign_image[i..i + 3] != buggy[i..i + 3]),
+                                    "old single-draw bug must fail the glyph-preservation assertion"
+                                );
+                                let pixel = glyphs[glyphs.len() / 2];
+                                let mut previous = rear_image[pixel + 1];
+                                for opacity in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                                    let mut faded = sign.clone();
+                                    faded.opacity = opacity;
+                                    upload(&mut graphics, vec![faded, rear.clone()]);
+                                    let image = capture(&graphics, matrix, false);
+                                    if opacity == 0.0 {
+                                        assert_eq!(
+                                            image, rear_image,
+                                            "invisible panels must not occlude"
+                                        );
+                                    } else {
+                                        assert!(
+                                            image[pixel + 1] > previous,
+                                            "fade must progress smoothly"
+                                        );
+                                    }
+                                    previous = image[pixel + 1];
+                                }
+                                assert_eq!(previous, sign_image[pixel + 1]);
+
+                                let transform = glam::Mat4::from_rotation_y(0.3)
+                                    * glam::Mat4::from_translation(glam::Vec3::new(0.4, 0.0, -0.2));
+                                let recentered = capture(
+                                    &graphics,
+                                    (matrix * transform.inverse()) * transform,
+                                    false,
+                                );
+                                let changed = changed_pixels(&forward, &recentered);
+                                assert!(
+                                    changed < 128,
+                                    "recenter changed overlap: {changed} pixels"
+                                );
+                            }
                         }
                     }
                 }
-            }
 
-            // A small real sign/card depth gap and an off-axis card center make
-            // center sorting wrong, although these surfaces never intersect.
-            // Mirror the case so both yaw signs and both eye positions matter.
-            let mut overlap_previews = Vec::new();
-            let angled_projection = glam::Mat4::perspective_rh(1.1, 1.0, 0.05, 50.0);
-            for yaw in [-0.3_f32, 0.3] {
+                // A small real sign/card depth gap and an off-axis card center make
+                // center sorting wrong, although these surfaces never intersect.
+                // Mirror the case so both yaw signs and both eye positions matter.
+                let mut overlap_previews = Vec::new();
+                let angled_projection = glam::Mat4::perspective_rh(1.1, 1.0, 0.05, 50.0);
+                for yaw in [-0.3_f32, 0.3] {
+                    let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
+                    let rear = Panel {
+                        origin: [if yaw < 0.0 { -0.2 } else { -1.84 }, 2.0, -2.76],
+                        pixel: 0.0051,
+                        columns: COLUMNS,
+                        lines: vec![String::new(); ROWS],
+                        accent: MUTED,
+                        opacity: 1.0,
+                        sign: None,
+                    };
+                    for eye_x in [-0.032, 0.032] {
+                        let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
+                        let direction = glam::Vec3::new(yaw.sin(), 0.0, -yaw.cos());
+                        let matrix = angled_projection
+                            * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
+                        let depth = |p: &Panel| {
+                            let clip = matrix * p.center().extend(1.0);
+                            clip.z / clip.w
+                        };
+                        assert!(
+                            depth(&rear) < depth(&sign),
+                            "fixture must defeat center-depth sorting"
+                        );
+                        upload(&mut graphics, vec![sign.clone()]);
+                        let sign_image = capture(&graphics, matrix, false);
+                        upload(&mut graphics, vec![sign.clone(), rear.clone()]);
+                        assert_eq!(panel_order(&graphics.cache.ranges, matrix), vec![1, 0]);
+                        let fixed = capture(&graphics, matrix, false);
+                        let buggy = capture_order(&graphics, matrix, false, false);
+                        let glyphs: Vec<_> = (0..512 * 512)
+                            .map(|p| p * 4)
+                            .filter(|&i| {
+                                sign_image[i] > 50
+                                    && sign_image[i + 1] > 180
+                                    && sign_image[i + 2] > 120
+                            })
+                            .collect();
+                        assert!(glyphs.len() > 5);
+                        assert!(
+                            glyphs
+                                .iter()
+                                .all(|&i| sign_image[i..i + 3] == fixed[i..i + 3])
+                        );
+                        assert!(
+                            glyphs
+                                .iter()
+                                .any(|&i| sign_image[i..i + 3] != buggy[i..i + 3])
+                        );
+                        upload(&mut graphics, vec![rear.clone(), sign.clone()]);
+                        assert_eq!(fixed, capture(&graphics, matrix, false));
+                        overlap_previews.extend([buggy, fixed]);
+                    }
+                }
+
+                // A depth-writing body must cover the overlapping part of the sign,
+                // while unoccluded glyphs remain visible in front of the rear card.
                 let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
                 let rear = Panel {
-                    origin: [if yaw < 0.0 { -0.2 } else { -1.84 }, 2.0, -2.76],
-                    pixel: 0.0051,
+                    origin: [-3.0, 3.2, -4.3],
+                    pixel: 0.016,
                     columns: COLUMNS,
                     lines: vec![String::new(); ROWS],
                     accent: MUTED,
@@ -2649,191 +2707,202 @@ mod tests {
                 };
                 for eye_x in [-0.032, 0.032] {
                     let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
-                    let direction = glam::Vec3::new(yaw.sin(), 0.0, -yaw.cos());
-                    let matrix = angled_projection
-                        * glam::Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y);
-                    let depth = |p: &Panel| {
-                        let clip = matrix * p.center().extend(1.0);
-                        clip.z / clip.w
-                    };
-                    assert!(
-                        depth(&rear) < depth(&sign),
-                        "fixture must defeat center-depth sorting"
-                    );
+                    let matrix = projection
+                        * glam::Mat4::look_at_rh(eye, eye + glam::Vec3::NEG_Z, glam::Vec3::Y);
                     upload(&mut graphics, vec![sign.clone()]);
                     let sign_image = capture(&graphics, matrix, false);
+                    graphics.hide();
+                    let body_image = capture(&graphics, matrix, true);
                     upload(&mut graphics, vec![sign.clone(), rear.clone()]);
-                    assert_eq!(panel_order(&graphics.cache.ranges, matrix), vec![1, 0]);
-                    let fixed = capture(&graphics, matrix, false);
-                    let buggy = capture_order(&graphics, matrix, false, false);
-                    let glyphs: Vec<_> = (0..512 * 512)
-                        .map(|p| p * 4)
-                        .filter(|&i| {
-                            sign_image[i] > 50 && sign_image[i + 1] > 180 && sign_image[i + 2] > 120
-                        })
-                        .collect();
-                    assert!(glyphs.len() > 5);
-                    assert!(
-                        glyphs
-                            .iter()
-                            .all(|&i| sign_image[i..i + 3] == fixed[i..i + 3])
-                    );
-                    assert!(
-                        glyphs
-                            .iter()
-                            .any(|&i| sign_image[i..i + 3] != buggy[i..i + 3])
-                    );
-                    upload(&mut graphics, vec![rear.clone(), sign.clone()]);
-                    assert_eq!(fixed, capture(&graphics, matrix, false));
-                    overlap_previews.extend([buggy, fixed]);
-                }
-            }
-
-            // A depth-writing body must cover the overlapping part of the sign,
-            // while unoccluded glyphs remain visible in front of the rear card.
-            let sign = test_sign([0.0, 1.25, -2.8], State::Completed);
-            let rear = Panel {
-                origin: [-3.0, 3.2, -4.3],
-                pixel: 0.016,
-                columns: COLUMNS,
-                lines: vec![String::new(); ROWS],
-                accent: MUTED,
-                opacity: 1.0,
-                sign: None,
-            };
-            for eye_x in [-0.032, 0.032] {
-                let eye = glam::Vec3::new(eye_x, 1.6, 0.0);
-                let matrix = projection
-                    * glam::Mat4::look_at_rh(eye, eye + glam::Vec3::NEG_Z, glam::Vec3::Y);
-                upload(&mut graphics, vec![sign.clone()]);
-                let sign_image = capture(&graphics, matrix, false);
-                graphics.hide();
-                let body_image = capture(&graphics, matrix, true);
-                upload(&mut graphics, vec![sign.clone(), rear.clone()]);
-                let result = capture(&graphics, matrix, true);
-                let mut blocked = 0;
-                let mut visible = 0;
-                for i in (0..sign_image.len()).step_by(4) {
-                    if sign_image[i] > 50 && sign_image[i + 1] > 180 && sign_image[i + 2] > 120 {
-                        if body_image[i + 2] > 190 && body_image[i + 1] < 50 {
-                            blocked += 1;
-                            assert_eq!(
-                                &result[i..i + 4],
-                                &body_image[i..i + 4],
-                                "body must occlude text"
-                            );
-                        } else {
-                            visible += 1;
-                            assert_eq!(
-                                &result[i..i + 3],
-                                &sign_image[i..i + 3],
-                                "unblocked text must remain visible"
-                            );
+                    let result = capture(&graphics, matrix, true);
+                    let mut blocked = 0;
+                    let mut visible = 0;
+                    for i in (0..sign_image.len()).step_by(4) {
+                        if sign_image[i] > 50 && sign_image[i + 1] > 180 && sign_image[i + 2] > 120
+                        {
+                            if body_image[i + 2] > 190 && body_image[i + 1] < 50 {
+                                blocked += 1;
+                                assert_eq!(
+                                    &result[i..i + 4],
+                                    &body_image[i..i + 4],
+                                    "body must occlude text"
+                                );
+                            } else {
+                                visible += 1;
+                                assert_eq!(
+                                    &result[i..i + 3],
+                                    &sign_image[i..i + 3],
+                                    "unblocked text must remain visible"
+                                );
+                            }
                         }
                     }
+                    assert!(
+                        blocked > 5 && visible > 5,
+                        "test needs both blocked and visible glyphs: {blocked}, {visible}"
+                    );
+
+                    // Conversely, a genuinely nearer card must cover the sign;
+                    // the fix must not simply force all signs on top of cards.
+                    let mut near = rear.clone();
+                    near.origin[2] = -1.7;
+                    upload(&mut graphics, vec![near.clone()]);
+                    let near_image = capture(&graphics, matrix, false);
+                    for panels in [vec![sign.clone(), near.clone()], vec![near, sign.clone()]] {
+                        upload(&mut graphics, panels);
+                        assert_eq!(near_image, capture(&graphics, matrix, false));
+                    }
                 }
-                assert!(
-                    blocked > 5 && visible > 5,
-                    "test needs both blocked and visible glyphs: {blocked}, {visible}"
+                {
+                    // Rows: yaw-/left, yaw-/right, yaw+/left, yaw+/right.
+                    // Columns: old insertion order, overlap-aware painter order.
+                    let mut sheet = image::RgbaImage::new(1024, 2048);
+                    for (i, bytes) in overlap_previews.into_iter().enumerate() {
+                        let tile = image::RgbaImage::from_raw(512, 512, bytes).unwrap();
+                        image::imageops::replace(
+                            &mut sheet,
+                            &tile,
+                            (i % 2) as i64 * 512,
+                            (i / 2) as i64 * 512,
+                        );
+                    }
+                    crate::test_support::preview("TOMORI_SIGN_PREVIEW", &sheet);
+                }
+
+                // Exercise the production placement, complete mesh upload and GPU
+                // buffer growth with every supported label. Aim at each actual
+                // sign in turn; this is world navigation, not an overlay bypass.
+                let stations: Vec<_> = (0..128)
+                    .map(|i| Station {
+                        id: format!("density-{i:03}"),
+                        title: format!("{i:03} {}", "READABLE ".repeat(18))
+                            .chars()
+                            .take(160)
+                            .collect(),
+                        position: crate::delegation::slot_position(i).to_array(),
+                        state: State::Unknown,
+                        opacity: 1.0,
+                    })
+                    .collect();
+                graphics.update(&device, &queue, &Workspace::default(), &stations);
+                assert_eq!(graphics.cache.ranges.len(), 128);
+                assert_eq!(
+                    graphics.cache.vertices.len(),
+                    graphics
+                        .cache
+                        .meshes
+                        .iter()
+                        .map(|(_, mesh)| mesh.len())
+                        .sum::<usize>()
                 );
-
-                // Conversely, a genuinely nearer card must cover the sign;
-                // the fix must not simply force all signs on top of cards.
-                let mut near = rear.clone();
-                near.origin[2] = -1.7;
-                upload(&mut graphics, vec![near.clone()]);
-                let near_image = capture(&graphics, matrix, false);
-                for panels in [vec![sign.clone(), near.clone()], vec![near, sign.clone()]] {
-                    upload(&mut graphics, panels);
-                    assert_eq!(near_image, capture(&graphics, matrix, false));
+                assert!(graphics.vertex_capacity >= graphics.cache.vertices.len());
+                assert!(graphics.vertex_capacity < MAX_VERTICES);
+                eprintln!(
+                    "128 full labels: {} vertices, {} GPU bytes ({} byte hard ceiling)",
+                    graphics.cache.vertices.len(),
+                    graphics.vertex_capacity * size_of::<Vertex>(),
+                    MAX_VERTICES * size_of::<Vertex>()
+                );
+                let mut sheet = image::RgbaImage::new(4096, 2048);
+                for (i, panel) in graphics.cache.panels.iter().enumerate() {
+                    let eye = glam::Vec3::new(if i % 2 == 0 { -0.032 } else { 0.032 }, 1.6, 0.0);
+                    let matrix =
+                        projection * glam::Mat4::look_at_rh(eye, panel.center(), glam::Vec3::Y);
+                    let image = capture(&graphics, matrix, false);
+                    let glyphs = (245..270)
+                        .flat_map(|y| (180..330).map(move |x| (y * 512 + x) * 4))
+                        .filter(|&p| image[p] > 200 && image[p + 1] > 200 && image[p + 2] > 200)
+                        .count();
+                    assert!(glyphs > 4, "source {i} has no readable center glyphs");
+                    {
+                        let sheet = &mut sheet;
+                        let tile = image::RgbaImage::from_raw(512, 512, image).unwrap();
+                        let tile = image::imageops::resize(
+                            &tile,
+                            256,
+                            256,
+                            image::imageops::FilterType::Triangle,
+                        );
+                        image::imageops::replace(
+                            sheet,
+                            &tile,
+                            (i % 16) as i64 * 256,
+                            (i / 16) as i64 * 256,
+                        );
+                    }
                 }
-            }
-            if let Ok(path) = std::env::var("TOMORI_SIGN_PREVIEW") {
-                // Rows: yaw-/left, yaw-/right, yaw+/left, yaw+/right.
-                // Columns: old insertion order, overlap-aware painter order.
-                let mut sheet = image::RgbaImage::new(1024, 2048);
-                for (i, bytes) in overlap_previews.into_iter().enumerate() {
-                    let tile = image::RgbaImage::from_raw(512, 512, bytes).unwrap();
-                    image::imageops::replace(
-                        &mut sheet,
-                        &tile,
-                        (i % 2) as i64 * 512,
-                        (i / 2) as i64 * 512,
-                    );
-                }
-                sheet.save(path).unwrap();
-            }
-
-            // Exercise the production placement, complete mesh upload and GPU
-            // buffer growth with every supported label. Aim at each actual
-            // sign in turn; this is world navigation, not an overlay bypass.
-            let stations: Vec<_> = (0..128)
-                .map(|i| Station {
-                    id: format!("density-{i:03}"),
-                    title: format!("{i:03} {}", "READABLE ".repeat(18))
-                        .chars()
-                        .take(160)
-                        .collect(),
-                    position: crate::delegation::slot_position(i).to_array(),
-                    state: State::Unknown,
-                    opacity: 1.0,
-                })
-                .collect();
-            graphics.update(&device, &queue, &Workspace::default(), &stations);
-            assert_eq!(graphics.cache.ranges.len(), 128);
-            assert_eq!(
-                graphics.cache.vertices.len(),
-                graphics
-                    .cache
-                    .meshes
-                    .iter()
-                    .map(|(_, mesh)| mesh.len())
-                    .sum::<usize>()
-            );
-            assert!(graphics.vertex_capacity >= graphics.cache.vertices.len());
-            assert!(graphics.vertex_capacity < MAX_VERTICES);
-            eprintln!(
-                "128 full labels: {} vertices, {} GPU bytes ({} byte hard ceiling)",
-                graphics.cache.vertices.len(),
-                graphics.vertex_capacity * size_of::<Vertex>(),
-                MAX_VERTICES * size_of::<Vertex>()
-            );
-            let preview_path = std::env::var("TOMORI_DENSITY_PREVIEW").ok();
-            let mut sheet = preview_path
-                .as_ref()
-                .map(|_| image::RgbaImage::new(4096, 2048));
-            for (i, panel) in graphics.cache.panels.iter().enumerate() {
-                let eye = glam::Vec3::new(if i % 2 == 0 { -0.032 } else { 0.032 }, 1.6, 0.0);
-                let matrix =
-                    projection * glam::Mat4::look_at_rh(eye, panel.center(), glam::Vec3::Y);
-                let image = capture(&graphics, matrix, false);
-                let glyphs = (245..270)
-                    .flat_map(|y| (180..330).map(move |x| (y * 512 + x) * 4))
-                    .filter(|&p| image[p] > 200 && image[p + 1] > 200 && image[p + 2] > 200)
-                    .count();
-                assert!(glyphs > 4, "source {i} has no readable center glyphs");
-                if let Some(sheet) = &mut sheet {
-                    let tile = image::RgbaImage::from_raw(512, 512, image).unwrap();
-                    let tile = image::imageops::resize(
-                        &tile,
-                        256,
-                        256,
-                        image::imageops::FilterType::Triangle,
-                    );
-                    image::imageops::replace(
-                        sheet,
-                        &tile,
-                        (i % 16) as i64 * 256,
-                        (i / 16) as i64 * 256,
-                    );
-                }
-            }
-            if let (Some(sheet), Some(path)) = (sheet, preview_path) {
-                sheet.save(path).unwrap();
-            }
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(scope.pop().await.is_none());
+                crate::test_support::preview("TOMORI_DENSITY_PREVIEW", &sheet);
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                assert!(scope.pop().await.is_none());
+            })
         });
+    }
+
+    #[test]
+    fn an_unchanged_card_or_none_keeps_its_pages_and_a_card_without_content_says_so() {
+        let mut cache = ContentCache::default();
+        cache.update(None);
+        cache.update(None);
+        assert!(cache.card.is_none() && cache.pages.is_empty());
+        let card = Presentation {
+            id: "p1".into(),
+            ..Default::default()
+        };
+        cache.update(Some(&card));
+        cache.update(Some(&card));
+        assert!(cache.card.is_some());
+        assert_eq!(content_pages(&card), [["[Empty content]"]]);
+    }
+
+    #[test]
+    fn a_line_break_after_a_full_line_adds_no_empty_line() {
+        let full = "x".repeat(COLUMNS);
+        assert_eq!(
+            wrap(&format!("{full}y\nz")),
+            [full.clone(), "y".into(), "z".into()]
+        );
+        assert_eq!(
+            wrap(&format!("{full}{full}\nz")),
+            [full.clone(), full, "z".into()]
+        );
+    }
+
+    #[test]
+    fn shapes_stop_at_the_vertex_limit_and_a_stroke_needs_a_length() {
+        let mut mesh = Vec::new();
+        stroke(&mut mesh, [0.0, 0.0], [0.0, 0.0], 0.01, [1.0; 4]);
+        assert!(mesh.is_empty());
+        mesh.resize(
+            MAX_VERTICES - 5,
+            Vertex {
+                position: [0.0; 3],
+                color: [0.0; 4],
+            },
+        );
+        quad(&mut mesh, 0.0, 0.0, 0.0, 1.0, 1.0, [1.0; 4]);
+        stroke(&mut mesh, [0.0, 0.0], [1.0, 0.0], 0.01, [1.0; 4]);
+        assert_eq!(mesh.len(), MAX_VERTICES - 5);
+    }
+
+    #[test]
+    fn characters_the_font_lacks_are_drawn_as_a_question_mark() {
+        let panel = |line: &str| Panel {
+            origin: [0.0, 2.0, -3.0],
+            pixel: 0.005,
+            columns: COLUMNS,
+            lines: vec![line.into()],
+            accent: WHITE,
+            opacity: 1.0,
+            sign: None,
+        };
+        let mesh = |panel: Panel| {
+            let mut mesh = Vec::new();
+            panel_mesh(&panel, &mut mesh);
+            mesh.into_iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(mesh(panel("\u{1f600}")), mesh(panel("?")));
     }
 
     #[test]
