@@ -212,14 +212,11 @@ mod enabled {
                 closing.clone(),
                 events,
             );
-            if let Err(error) = thread::Builder::new()
+            // As the synthesis thread started below, a thread the system cannot start is not survived.
+            thread::Builder::new()
                 .name("speech-pacer".into())
                 .spawn(move || pacer.run())
-            {
-                log::error!("Could not start agent speech for {space}: {error}");
-                hub.speech_failed(space, "Agent speech could not be started.".to_owned());
-                return None;
-            }
+                .expect("spawn the speech pacer");
             // Tells the pacer when synthesis has stopped, as the hub's waker keeps the channel open.
             let ended = Ended(sender);
             let speech = Speech::spawn(synthesizer, move |event| {
@@ -503,12 +500,11 @@ mod enabled {
                     (live, streams) => live.or(streams),
                 };
                 if !self.open {
-                    // Only what is already queued is left to send.
-                    match wait {
-                        None if self.pending.is_empty() => return,
-                        None => {}
-                        Some(wait) => thread::sleep(wait),
-                    }
+                    // Only what is already queued is left to send, and nothing waits once nothing is queued.
+                    let Some(wait) = wait else {
+                        return;
+                    };
+                    thread::sleep(wait);
                     continue;
                 }
                 let received = match wait {
@@ -682,12 +678,26 @@ mod enabled {
             }
         }
     }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use crate::backends::Backends;
         use crate::transcriber::NullTranscriber;
-        use tomori_speech::AudioChunk;
+        use tomori_speech::{AudioChunk, Synthesizer};
+
+        /// A synthesizer that says nothing.
+        struct Mute;
+
+        impl Synthesizer for Mute {
+            fn synthesize(
+                &mut self,
+                _: &str,
+                _: &mut dyn FnMut(AudioChunk),
+            ) -> Result<(), tomori_speech::Error> {
+                Ok(())
+            }
+        }
 
         /// A hub with a space nobody is in, and the space.
         fn space() -> (Arc<Hub>, String) {
@@ -760,6 +770,113 @@ mod enabled {
             });
             pacer.handle(SpeechEvent::Finished { segment: 2 });
             assert_eq!(breaths(&pacer), 1);
+        }
+
+        #[test]
+        fn a_segment_becomes_an_announcement_frames_and_a_breath_and_failures_are_said() {
+            let (hub, space) = space();
+            let (mut pacer, _sender) = pacer(&hub, &space);
+            pacer.handle(SpeechEvent::Started {
+                segment: 1,
+                text: "Hello.".into(),
+            });
+            // Audio without a rate is nothing.
+            pacer.audio(chunk(0, 10));
+            pacer.audio(chunk(16_000, 400));
+            // Another rate starts its frames afresh.
+            pacer.audio(chunk(24_000, 10));
+            pacer.handle(SpeechEvent::Finished { segment: 1 });
+            // A segment that never started takes no breath.
+            pacer.handle(SpeechEvent::Finished { segment: 2 });
+            for error in [
+                tomori_speech::Error::Engine("bad text".into()),
+                tomori_speech::Error::Stopped("gone".into()),
+                tomori_speech::Error::Stopped("gone".into()),
+            ] {
+                pacer.handle(SpeechEvent::Failed { segment: 3, error });
+            }
+            let kinds: Vec<&str> = pacer
+                .pending
+                .iter()
+                .map(|(_, item)| match item {
+                    Item::Announce(_) => "announce",
+                    Item::Frame { .. } => "frame",
+                    Item::Gap => "gap",
+                    Item::Failed(_) => "failed",
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                [
+                    "announce", "frame", "frame", "frame", "gap", "failed", "failed"
+                ]
+            );
+            let now = Instant::now();
+            while let Some((reply, item)) = pacer.pending.pop_front() {
+                assert!(pacer.send(reply, item, now));
+            }
+        }
+
+        #[test]
+        fn synthesis_that_stops_is_said_unless_the_space_is_closing() {
+            let (hub, space) = space();
+            let (mut pacer, _sender) = self::pacer(&hub, &space);
+            pacer.audio(chunk(16_000, 10));
+            pacer.disconnect();
+            pacer.disconnect();
+            let Some((_, Item::Failed(_))) = pacer.pending.back() else {
+                unreachable!("stopping is said after the frame");
+            };
+            let (mut closing, _sender) = self::pacer(&hub, &space);
+            closing.closing.store(true, Ordering::SeqCst);
+            closing.disconnect();
+            assert!(closing.pending.is_empty());
+        }
+
+        #[test]
+        fn the_pacer_stops_once_its_space_or_its_server_is_gone() {
+            let (hub, space) = space();
+            let (mut gone, sender) = pacer(&hub, "gone");
+            gone.woken = true;
+            gone.run();
+            drop(sender);
+            let (mut stopped, sender) = pacer(&hub, &space);
+            stopped.pending.push_back((0, Item::Gap));
+            drop(hub);
+            stopped.run();
+            drop(sender);
+        }
+
+        #[test]
+        fn the_pacer_sends_what_is_queued_once_nothing_can_wake_it() {
+            let (hub, space) = space();
+            let (mut pacer, sender) = pacer(&hub, &space);
+            drop(sender);
+            pacer.audio(chunk(16_000, 400));
+            // Returns once the frames are sent.
+            pacer.run();
+        }
+
+        #[test]
+        fn a_message_is_spoken_once_and_what_is_not_spoken_is_ignored() {
+            let (hub, space) = space();
+            let mut voice = Voices::new(Mute).start(&hub, &space).unwrap();
+            let started = || Event::MessageStarted {
+                message: "m".into(),
+                role: Role::Assistant,
+            };
+            voice.observe(&started());
+            voice.observe(&started());
+            assert_eq!(voice.speaking.len(), 1);
+            voice.observe(&Event::TextDelta {
+                message: "other".into(),
+                text: "Hi.".into(),
+            });
+            voice.observe(&Event::MessageCompleted {
+                message: "other".into(),
+            });
+            voice.observe(&Event::Closed { reason: None });
+            assert!(voice.speaking.is_empty());
         }
     }
 }
