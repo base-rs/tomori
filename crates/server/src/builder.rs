@@ -147,7 +147,7 @@ impl Builder {
         );
         let stopped = engines.stop(Instant::now() + ENGINE_STOP);
         #[cfg(unix)]
-        let exit = command::exit_now;
+        let exit = crate::process::exit_now;
         // Elsewhere, the server waits for the engines.
         #[cfg(not(unix))]
         let exit = |_| ();
