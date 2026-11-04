@@ -10,7 +10,7 @@ Each space is bound to exactly one environment at a time. The environment is cho
 
 Arrival, outside any space, uses the Minimal grid as its waiting area (see `arrival.md`).
 
-An environment may contribute a layer of the instructions Tomori gives a space's agent, about what it presents and which tools and data sources to use (see `spaces.md`), given with the environment when it is offered. Sky and the Minimal grid contribute none yet; an environment the server no longer offers contributes none.
+An environment may contribute a layer of the instructions Tomori gives a space's agent, about what it presents and which tools and data sources to use (see `spaces.md`), given with the environment when it is offered. Sky and the Minimal grid contribute none yet; an environment the server no longer offers contributes none. A space keeps only its environment's identifier, not its layer: the server looks the layer up in the environments it offers whenever it shows the space's instructions or gives them to the agent, so that a space restored after a restart is given the same layer as one just created or changed to that environment, whatever order the server was configured in.
 
 Long-term direction, not yet requirements:
 
@@ -33,7 +33,7 @@ The space's shared state and its creation and change requests in `crates/protoco
 - Create a space and confirm that its state names its environment, that a second participant sees the same environment, and that squeezing the grip inside the space doesn't change it.
 - Test, with a server offering two environments, that an owner's change reaches everyone in the space, participants and visitors, the lobby listing and someone joining later; that the agent is given its instructions again; that a collaborator's or visitor's change, an unknown environment and a change to a closed space are refused without effect; and that the changed environment survives a restart. Test that the hand menu offers the server's environments only to an owner on a server that changes them, marking the current one, while anyone else reads the environment; and that the headset's scenery, the desktop window's and the spectator's follow the space's state when it changes.
 - Test that the server offers Sky first and the Minimal grid, and binds a space whose creator names no environment to Sky.
-- Test that an environment registered through the builder is offered, and that a space bound to it is given its layer of the instructions.
+- Test that an environment registered through the builder is offered, and, against a fake backend's recorded instruction entries, that the agent is given the `tomori-environment` entry of a space's environment: when the space is created in it, when an owner changes to it, removed when an owner changes to one with no layer, and when the space is bound again after a restart, with the environments offered before or after the kept spaces are listed again; for Tomori's own identifiers given a layer and for another project's environment alike.
 - Confirm that the creation choices offer only the environments the server lists.
 - Join a space whose environment the client doesn't know, for example with a test server that names an unknown one, and confirm that the client shows the grid and names the missing environment.
 

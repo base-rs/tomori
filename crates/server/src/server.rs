@@ -222,7 +222,7 @@ impl Server {
         self
     }
 
-    /// Offer `environments` for spaces, in order, in place of Tomori's own, Sky and the Minimal grid: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. See `design/environments.md`.
+    /// Offer `environments` for spaces, in order, in place of Tomori's own, Sky and the Minimal grid: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. It may be called before or after [`Self::with_kept_spaces`]: a space's layer of the instructions is looked up in the environments offered whenever it is shown or given to the agent, so a restored space is given the same layer as a new one. See `design/environments.md`.
     pub fn with_environments(self, environments: impl IntoIterator<Item = Environment>) -> Self {
         self.hub.set_environments(Environments::new(environments));
         self
