@@ -5284,6 +5284,10 @@ mod tests {
         instructions: HashMap<String, BTreeMap<String, Value>>,
         /// The instruction requests received, as method, session and key.
         instruction_requests: Vec<(String, String, String)>,
+        /// The agents listed for every directory, if not none.
+        agents: Option<Value>,
+        /// Each reply, interruption and agent switch received, as path and body.
+        actions: Vec<(String, Value)>,
         stopping: bool,
     }
 
@@ -5332,7 +5336,7 @@ mod tests {
             let stopped = Arc::new(AtomicBool::new(false));
             let streams = Arc::new(Mutex::new(Vec::new()));
             let authorizations = Arc::new(Mutex::new(Vec::new()));
-            let expected = basic(password);
+            let expected = (!password.is_empty()).then(|| basic(password));
             let accept = {
                 let stopped = stopped.clone();
                 let streams = streams.clone();
@@ -5351,7 +5355,7 @@ mod tests {
                                         &shared,
                                         &streams,
                                         &authorizations,
-                                        &expected,
+                                        expected.as_deref(),
                                     );
                                 });
                             }
@@ -5404,7 +5408,7 @@ mod tests {
         shared: &FakeShared,
         streams: &Mutex<Vec<std::net::TcpStream>>,
         authorizations: &Mutex<Vec<Option<String>>>,
-        expected: &str,
+        expected: Option<&str>,
     ) {
         // macOS accepted sockets inherit the listener's nonblocking mode.
         socket.set_nonblocking(false).unwrap();
@@ -5449,7 +5453,7 @@ mod tests {
                 body.len()
             );
         };
-        if authorization.as_deref() != Some(expected) {
+        if authorization.as_deref() != expected {
             respond(
                 &mut socket,
                 "401 Unauthorized",
@@ -5487,7 +5491,11 @@ mod tests {
             state.sessions.insert(id.clone(), Vec::new());
             ("200 OK", json!({ "data": fake_record(&id) }).to_string())
         } else if path.starts_with("/api/agent?") {
-            ("200 OK", r#"{"data":[]}"#.to_owned())
+            let agents = shared.state.lock().unwrap().agents.clone();
+            (
+                "200 OK",
+                json!({ "data": agents.unwrap_or_else(|| json!([])) }).to_string(),
+            )
         } else if path == "/api/session/active" {
             ("200 OK", r#"{"data":{}}"#.to_owned())
         } else if path.starts_with("/api/session?parentID=") {
@@ -5597,6 +5605,12 @@ mod tests {
                 }
                 Some(_) if path.ends_with("/form") => ("200 OK", r#"{"data":[]}"#.to_owned()),
                 Some(_) if path.ends_with("/prompt") => ("200 OK", "{}".to_owned()),
+                Some(_) if method == "POST" => {
+                    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    state.actions.push((path.clone(), body));
+                    shared.changed.notify_all();
+                    ("200 OK", "{}".to_owned())
+                }
                 Some(_) => ("200 OK", json!({ "data": fake_record(&id) }).to_string()),
             }
         } else {
@@ -5921,6 +5935,141 @@ mod tests {
             let _ = tx.send((result, std::time::Instant::now()));
         });
         rx
+    }
+
+    /// The backend as the server uses it, reaching a service at an explicit
+    /// address without a password: each session command becomes OpenCode's own
+    /// request.
+    #[test]
+    fn the_backend_passes_each_command_to_the_service() {
+        use tomori_backend::{AnswerValue, Backend, Decision, ErrorKind, Session};
+
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| {
+            state.agents = Some(json!([
+                {"id": "build", "mode": "primary"},
+                {"id": "plan", "mode": "primary"}
+            ]));
+            state.sessions.insert("existing".into(), Vec::new());
+        });
+        let service = FakeService::start(shared.clone(), "");
+        let backend = crate::OpenCode::new(crate::Config {
+            url: Some(format!("http://{}", service.address)),
+        });
+        assert_eq!(backend.name(), crate::NAME);
+        assert_eq!(
+            backend.capabilities(),
+            tomori_backend::Capabilities {
+                attach: true,
+                interrupt: true,
+                questions: true,
+                workers: true,
+                instructions: true,
+            }
+        );
+        assert_eq!(block_on(backend.sessions("/tmp")).unwrap(), []);
+
+        let session = block_on(backend.create(SessionSpec {
+            directory: "/tmp".into(),
+            title: "Commands".into(),
+        }))
+        .unwrap();
+        assert_eq!(session.id(), "s1");
+        block_on(session.snapshot()).unwrap();
+        block_on(session.send(tomori_backend::Prompt {
+            key: "k1".into(),
+            text: "Hello.".into(),
+        }))
+        .unwrap();
+        block_on(session.decide("p1", Decision::AllowOnce)).unwrap();
+        block_on(session.decide("p2", Decision::Grant { option: "0".into() })).unwrap();
+        block_on(session.decide("p3", Decision::Deny)).unwrap();
+        block_on(session.answer("f1", vec![("name".into(), AnswerValue::Text("Ada".into()))]))
+            .unwrap();
+        block_on(session.interrupt()).unwrap();
+        block_on(session.set_mode("plan")).unwrap();
+        // OpenCode accepts any agent name, so one the session does not offer is refused here.
+        let refused = block_on(session.set_mode("deploy")).unwrap_err();
+        assert_eq!(refused.kind, ErrorKind::Invalid);
+        assert_eq!(
+            shared.state.lock().unwrap().actions,
+            [
+                (
+                    "/api/session/s1/permission/p1/reply".to_owned(),
+                    json!({"decision": "once"})
+                ),
+                (
+                    "/api/session/s1/permission/p2/reply".to_owned(),
+                    json!({"decision": "always"})
+                ),
+                (
+                    "/api/session/s1/permission/p3/reply".to_owned(),
+                    json!({"decision": "reject"})
+                ),
+                (
+                    "/api/session/s1/form/f1/reply".to_owned(),
+                    json!({"answer": {"name": "Ada"}})
+                ),
+                ("/api/session/s1/interrupt".to_owned(), json!({})),
+                ("/api/session/s1/agent".to_owned(), json!({"agent": "plan"})),
+            ]
+        );
+
+        // An existing session is attached, and instruction entries of a session no space is bound to are forgotten.
+        let attached = block_on(backend.attach("existing", "/tmp")).unwrap();
+        assert_eq!(attached.id(), "existing");
+        let invalid =
+            block_on(backend.forget_instructions("gone", vec!["Tomori".into()])).unwrap_err();
+        assert_eq!(invalid.kind, ErrorKind::Invalid);
+        block_on(backend.forget_instructions("gone", vec!["tomori".into()])).unwrap();
+        assert_eq!(
+            shared.state.lock().unwrap().instruction_requests,
+            [("DELETE".to_owned(), "gone".to_owned(), "tomori".to_owned())]
+        );
+        // A session that is gone is no longer the service's to act on.
+        let unknown = block_on(backend.attach("missing", "/tmp"))
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(unknown.kind, ErrorKind::NotFound);
+
+        // Shutting down stops waiting for the service: later requests fail at once.
+        backend.shutdown();
+        let closed = block_on(backend.sessions("/tmp")).unwrap_err();
+        assert_eq!(closed.kind, ErrorKind::Unavailable);
+        assert_eq!(closed.message, SHUTTING_DOWN);
+        drop((session, attached));
+    }
+
+    /// A backend shut down before its first use never starts its connection.
+    #[test]
+    fn a_backend_shut_down_before_use_never_connects() {
+        use tomori_backend::{Backend, ErrorKind};
+
+        // Nothing listens here, so connecting would be visible as a wait.
+        let backend = crate::OpenCode::new(crate::Config {
+            url: Some("http://127.0.0.1:1".into()),
+        });
+        backend.shutdown();
+        let refused = |result: tomori_backend::Result<()>| {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Closed);
+            assert_eq!(error.message, crate::SHUT_DOWN);
+        };
+        refused(block_on(backend.sessions("/tmp")).map(drop));
+        refused(
+            block_on(backend.create(SessionSpec {
+                directory: "/tmp".into(),
+                title: "Never".into(),
+            }))
+            .map(drop),
+        );
+        refused(block_on(backend.attach("s1", "/tmp")).map(drop));
+        refused(block_on(
+            backend.forget_instructions("s1", vec!["tomori".into()]),
+        ));
+        // Shutting down again changes nothing.
+        backend.shutdown();
+        refused(block_on(backend.sessions("/tmp")).map(drop));
     }
 
     #[test]
