@@ -2883,7 +2883,7 @@ impl Conversation {
             }
             LobbyStep::Session => "A new session, or attach to an existing one.",
             LobbyStep::Environment => "Where the space takes place, for everyone in it.",
-            LobbyStep::Spaces => "",
+            LobbyStep::Spaces => unreachable!("the spaces are not a ring"),
         }
     }
 
@@ -8229,6 +8229,106 @@ mod tests {
                 state.queue = vec![entry("e1", "Bob", QueueState::Queued)];
             }));
             assert_eq!(conversation.activity(), SessionActivity::Working);
+        }
+
+        #[test]
+        fn the_lobby_says_it_is_joining_or_admits_only_paired_devices() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.listed = true;
+            conversation.join_space("s1");
+            assert!(conversation.text().contains("Joining..."));
+            assert_eq!(
+                conversation.arrival().unwrap().status.as_deref(),
+                Some("Joining...")
+            );
+            let mut conversation = lobby(ConnectionRole::Pairing);
+            let text = conversation.text();
+            assert!(text.contains("This server admits only paired device"));
+        }
+
+        #[test]
+        fn empty_rings_say_what_is_missing_and_a_problem_is_dismissed_first() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.step = LobbyStep::Backend;
+            let text = conversation.text();
+            assert!(text.contains("The server has no backends"));
+            conversation.step = LobbyStep::Directory;
+            assert!(conversation.text().contains("The server offers no folders"));
+            conversation.error = Some("A problem.".into());
+            assert!(
+                conversation
+                    .text()
+                    .ends_with("A choose | B dismiss | Y refresh")
+            );
+            // A session without a title is listed by its identifier.
+            conversation.error = None;
+            conversation.step = LobbyStep::Session;
+            conversation.sessions = vec![tomori_protocol::SessionSummary {
+                id: "ses_1".into(),
+                title: "  ".into(),
+                directory: "/tmp".into(),
+            }];
+            assert!(conversation.text().contains("ses_1"));
+        }
+
+        #[test]
+        fn the_space_panel_shows_each_state_it_can_be_in() {
+            // Its state not yet come.
+            let mut conversation = joined();
+            conversation.space = None;
+            assert_eq!(conversation.body(), ("Loading".into(), String::new()));
+            let text = conversation.text();
+            assert!(text.starts_with("SPACE\nLoading..."));
+            // Answering out loud, connecting again, and leaving.
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.voice_answers = true;
+                state.question = Some(Question {
+                    id: "q1".into(),
+                    title: "Which?".into(),
+                    text: "Which one?".into(),
+                    field: "Choice".into(),
+                    supported: true,
+                });
+            }));
+            let utterance = talking(&mut conversation);
+            conversation.apply(Event::Message(ServerMessage::Transcript {
+                utterance,
+                text: "the first".into(),
+                finished: false,
+            }));
+            assert!(conversation.text().contains("MIC ANSWER: the first"));
+            let mut conversation = joined();
+            for (state, said) in [
+                (
+                    ConnectionState::Connecting { attempt: 3 },
+                    "Connecting (attempt 3)...",
+                ),
+                (ConnectionState::Closed, "Disconnected."),
+            ] {
+                conversation.apply(Event::State(state));
+                assert!(conversation.text().contains(said));
+            }
+            let mut conversation = joined();
+            conversation.leave_hold = Some((Duration::from_millis(300), false));
+            assert!(conversation.text().contains("Leaving: keep holding B..."));
+            // The speech setting's entry, said in full.
+            let mut conversation = joined();
+            conversation.apply(space(|state| state.speech = SpeechSetting::Full));
+            conversation.refresh();
+            let text = conversation.text();
+            assert!(text.contains("Speech: full"));
+            assert!(text.contains("Replies are spoken in full."));
+        }
+
+        #[test]
+        fn how_long_ago_is_said_in_seconds_minutes_or_hours_and_queue_states_are_named() {
+            assert_eq!(age(Duration::from_secs(5)), "5s");
+            assert_eq!(age(Duration::from_secs(120)), "2m");
+            assert_eq!(age(Duration::from_secs(7_200)), "2h");
+            assert_eq!(queue_label(QueueState::Delivered), "sent");
+            assert_eq!(queue_label(QueueState::Failed), "failed");
+            assert_eq!(activity_label(Activity::Closed), "closed");
         }
     }
 }
