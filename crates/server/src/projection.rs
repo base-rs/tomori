@@ -581,4 +581,13 @@ mod tests {
         // "and" within a word does not split it.
         assert_eq!(split_list("android and red"), ["android", "red"]);
     }
+
+    #[test]
+    fn several_choices_of_a_field_taking_its_own_words_must_still_be_offered() {
+        let choices = field(FieldKind::MultipleChoice, true);
+        assert_eq!(
+            answer_value(&choices, "red and green"),
+            Err(OPTION_ERROR.to_owned())
+        );
+    }
 }

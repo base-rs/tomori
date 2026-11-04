@@ -2065,7 +2065,13 @@ mod tests {
                 .unwrap()
                 .starts_with("Could not read the fake session again")
         );
-        // A session bound as the server stops is closed.
+        // A session bound as the server stops is closed, whether or not closing fails.
+        let supervision = Supervision::new(1);
+        let session = supervision.left();
+        let restore = supervision.kept("closed", "fake", "/tmp", &session);
+        supervision.hub.stopping();
+        supervision.restore(restore, &live);
+        assert!(supervision.backend.started()[0].log().closed);
         let supervision = Supervision::new(1);
         let session = supervision.left();
         supervision.backend.fail_closing();
@@ -2457,5 +2463,27 @@ mod tests {
             served,
             "{connections} connections served after {probes} peers connected while cancelling"
         );
+    }
+
+    /// An error whose message already ends with its cause's.
+    #[derive(Debug)]
+    struct Repeating(std::io::Error);
+
+    impl std::fmt::Display for Repeating {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "writing failed: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for Repeating {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_cause_an_error_already_says_is_not_said_twice() {
+        let error = Repeating(io::Error::other("the peer reset"));
+        assert_eq!(describe(&error), "writing failed: the peer reset");
     }
 }
