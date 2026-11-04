@@ -43,6 +43,15 @@ pub struct TranscriptSink {
 }
 
 impl TranscriptSink {
+    /// A sink for `utterance` of no server, which reports nowhere.
+    #[cfg(test)]
+    pub(crate) fn nowhere(utterance: UtteranceId) -> Self {
+        Self {
+            hub: std::sync::Weak::new(),
+            utterance,
+        }
+    }
+
     pub fn utterance(&self) -> UtteranceId {
         self.utterance
     }
@@ -121,13 +130,15 @@ mod tests {
     /// A sink that outlives its server reports nowhere, rather than failing.
     #[test]
     fn a_sink_outliving_its_server_reports_nowhere() {
-        let sink = TranscriptSink {
-            hub: Weak::new(),
-            utterance: UtteranceId(7),
-        };
+        let sink = TranscriptSink::nowhere(UtteranceId(7));
         assert_eq!(sink.utterance(), UtteranceId(7));
         sink.partial("run");
         sink.finish("run the tests");
         sink.fail("the engine failed");
+    }
+
+    #[test]
+    fn the_null_transcriber_ends_only_what_it_began() {
+        NullTranscriber::new().end(UtteranceId(1));
     }
 }

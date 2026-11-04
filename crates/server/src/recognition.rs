@@ -129,3 +129,37 @@ fn text(transcript: &Transcript) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recognizer without its model.
+    struct Missing;
+
+    impl StreamingRecognizer for Missing {
+        fn open(&mut self) -> Result<Box<dyn tomori_speech::RecognitionStream>, Error> {
+            Err(Error::Unavailable("the model is missing".into()))
+        }
+    }
+
+    #[test]
+    fn audio_for_an_utterance_it_did_not_begin_is_ignored() {
+        assert!(Missing.open().is_err());
+        let transcriber = RecognitionTranscriber::new(Missing);
+        let frame = AudioFrame {
+            gate: tomori_protocol::Gate::Agent,
+            source: 0,
+            sequence: 0,
+            timestamp: 0,
+            sample_rate: RATE,
+            samples: vec![0; 160],
+        };
+        transcriber.push(UtteranceId(9), &frame);
+        transcriber.end(UtteranceId(9));
+        transcriber.cancel(UtteranceId(9));
+        let stopper = transcriber.stopper();
+        stopper.stop();
+        assert!(stopper.wait(std::time::Instant::now() + std::time::Duration::from_secs(5)));
+    }
+}

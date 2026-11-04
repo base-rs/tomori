@@ -67,19 +67,7 @@ impl Transcriber for OfflineTranscriber {
             .offline
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .begin(RATE, move |event| match event {
-                tomori_speech::TranscriptEvent::Partial(_) => {
-                    // The offline recognizer reports no partials; nothing is shown while the participant is speaking.
-                }
-                tomori_speech::TranscriptEvent::Final(text) => sink.finish(&text),
-                tomori_speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
-                tomori_speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(
-                    &format!("Nothing was sent: {error}. Say it in shorter messages."),
-                ),
-                tomori_speech::TranscriptEvent::Failed(error) => sink.fail(&format!(
-                    "Transcription failed, so nothing was sent: {error}."
-                )),
-            });
+            .begin(RATE, move |event| report(&sink, event));
         self.utterances().insert(utterance, handle);
     }
 
@@ -113,6 +101,23 @@ impl Transcriber for OfflineTranscriber {
     }
 }
 
+/// Tell `sink` of an utterance's `event`.
+fn report(sink: &TranscriptSink, event: tomori_speech::TranscriptEvent) {
+    match event {
+        tomori_speech::TranscriptEvent::Partial(_) => {
+            unreachable!("the offline recognizer reports no partials")
+        }
+        tomori_speech::TranscriptEvent::Final(text) => sink.finish(&text),
+        tomori_speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
+        tomori_speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(&format!(
+            "Nothing was sent: {error}. Say it in shorter messages."
+        )),
+        tomori_speech::TranscriptEvent::Failed(error) => sink.fail(&format!(
+            "Transcription failed, so nothing was sent: {error}."
+        )),
+    }
+}
+
 /// An [`OfflineRecognizer`] for the in-process Whisper model: it decodes each buffered clip, or segment of a long one, whole, once.
 pub struct Whisper {
     inner: tomori_speech::stt::WhisperRecognizer,
@@ -130,5 +135,68 @@ impl Whisper {
 impl OfflineRecognizer for Whisper {
     fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error> {
         self.inner.transcribe(samples)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recognizer that hears nothing.
+    struct Deaf;
+
+    impl OfflineRecognizer for Deaf {
+        fn transcribe(&mut self, _: &[i16]) -> Result<String, Error> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn each_outcome_is_told_to_the_utterance() {
+        let sink = TranscriptSink::nowhere(UtteranceId(1));
+        for event in [
+            tomori_speech::TranscriptEvent::Final("Deploy it.".into()),
+            tomori_speech::TranscriptEvent::Failed(Error::Stopped("gone".into())),
+            tomori_speech::TranscriptEvent::Failed(Error::TooLong(600)),
+            tomori_speech::TranscriptEvent::Failed(Error::Engine("bad audio".into())),
+        ] {
+            report(&sink, event);
+        }
+    }
+
+    #[test]
+    fn audio_for_an_utterance_it_did_not_begin_is_ignored() {
+        let transcriber = OfflineTranscriber::new(Deaf, None);
+        assert_eq!(Deaf.transcribe(&[]).unwrap(), "");
+        let frame = AudioFrame {
+            gate: tomori_protocol::Gate::Agent,
+            source: 0,
+            sequence: 0,
+            timestamp: 0,
+            sample_rate: RATE,
+            samples: vec![0; 160],
+        };
+        transcriber.push(UtteranceId(9), &frame);
+        transcriber.end(UtteranceId(9));
+        transcriber.cancel(UtteranceId(9));
+        let stopper = transcriber.stopper();
+        stopper.stop();
+        assert!(stopper.wait(std::time::Instant::now() + std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn whisper_transcribes_a_clip() {
+        use tomori_speech::test_models::{self, WHISPER_MODEL};
+        let config = tomori_speech::stt::WhisperConfig::named(&test_models::root(), WHISPER_MODEL);
+        test_models::with(
+            "Whisper",
+            "scripts/fetch-asr-model.sh whisper tiny.en",
+            &[&config.model],
+            || {
+                let mut whisper = Whisper::new(&config).unwrap();
+                // Whisper names silence, as "[ Silence ]", rather than saying nothing.
+                assert!(whisper.transcribe(&[0; 16_000]).is_ok());
+            },
+        );
     }
 }

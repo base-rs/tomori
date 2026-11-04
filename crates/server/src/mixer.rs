@@ -114,4 +114,12 @@ mod tests {
         mixer.remove(&1);
         assert_eq!(mixer.tick(), vec![0; SAMPLES_PER_TICK]);
     }
+
+    #[test]
+    fn a_source_pushed_again_adds_to_its_own_buffer() {
+        let mut mixer = Mixer::new();
+        mixer.push("mic", &[1; 5]);
+        mixer.push("mic", &[2; 5]);
+        assert_eq!(mixer.tick()[..10], [1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
+    }
 }
