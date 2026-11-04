@@ -648,6 +648,37 @@ impl Registration {
         Ok(())
     }
 
+    /// The workers known before a read again, of which those its listing
+    /// omits are looked up, since one may have been deleted while the stream
+    /// was down; none once observation is incomplete, as none is removed then.
+    fn known_workers(&self) -> Vec<String> {
+        if self.workers_incomplete {
+            Vec::new()
+        } else {
+            self.children.keys().cloned().collect()
+        }
+    }
+
+    /// Remove the known workers a read again found `missing`: its listing
+    /// omitted them and OpenCode answered that they do not exist. One a
+    /// lifecycle event during the read showed, which is newer evidence than
+    /// the lookup, is kept, and none is removed once observation is
+    /// incomplete.
+    fn remove_missing(
+        &mut self,
+        missing: &[String],
+        changes: &HashMap<String, (Option<WorkerState>, Option<String>)>,
+    ) {
+        if self.workers_incomplete {
+            return;
+        }
+        for id in missing {
+            if !changes.contains_key(id) {
+                self.children.remove(id);
+            }
+        }
+    }
+
     fn publish_workers(&mut self) {
         if self.workers_ready {
             self.workers_dirty = if self.workers_incomplete {
@@ -1023,6 +1054,9 @@ struct ResyncResult {
     id: String,
     registration: Arc<AtomicU64>,
     result: tomori_backend::Result<Snapshot>,
+    /// Known workers the read's listing omitted that OpenCode answered do not
+    /// exist.
+    missing: Vec<String>,
     /// The agents offered and the session's current one, if they were listed.
     modes: Option<Modes>,
 }
@@ -2332,22 +2366,46 @@ fn start_resyncs<'a, S: Timers>(
         let identity = registration.events.worker_epoch.clone();
         let current = registration.modes.clone();
         let directory = registration.directory.clone();
+        let known = registration.known_workers();
         resyncs.push(Box::pin(async move {
+            // The agents are listed alongside the read, and no longer than it.
+            let listing = local.child();
             let (result, modes) = futures_lite::future::zip(
-                bounded_snapshot(
-                    client,
-                    resolved,
-                    &id,
-                    current,
-                    &local,
-                    cancellation,
-                    timers,
-                    move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
-                ),
+                async {
+                    let reading = local.child();
+                    let result = bounded_snapshot(
+                        client,
+                        resolved,
+                        &id,
+                        current,
+                        &reading,
+                        cancellation,
+                        timers,
+                        move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
+                    )
+                    .await;
+                    listing.cancel();
+                    let missing = match &result {
+                        Ok(snapshot) => {
+                            let listed: HashSet<&str> = snapshot
+                                .workers
+                                .iter()
+                                .map(|worker| worker.id.as_str())
+                                .collect();
+                            let omitted = known
+                                .into_iter()
+                                .filter(|known| !listed.contains(known.as_str()))
+                                .collect();
+                            missing_workers(client, resolved, omitted, &local, timers).await
+                        }
+                        Err(_) => Vec::new(),
+                    };
+                    (result, missing)
+                },
                 async {
                     // Optional, like the listing at attach: a failure keeps
                     // the modes already known.
-                    let modes_cancel = local.child();
+                    let modes_cancel = listing.child();
                     futures_lite::future::race(
                         async {
                             let info = api::session_info(client, resolved, &id, &modes_cancel)
@@ -2365,14 +2423,69 @@ fn start_resyncs<'a, S: Timers>(
             )
             .await;
             local.cancel();
+            let (result, missing) = result;
             ResyncResult {
                 id,
                 registration: identity,
                 result,
+                missing,
                 modes,
             }
         }));
     }
+}
+
+/// The workers among `omitted` that OpenCode answers do not exist, looked up
+/// by identifier, at most eight at once, within [`SNAPSHOT_TIMEOUT`]. A lookup
+/// that fails, finds the worker, or does not finish in time leaves it out, as
+/// only a session OpenCode reports not found is evidence of deletion; those
+/// found missing in time are kept.
+async fn missing_workers<S: Timers>(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    omitted: Vec<String>,
+    cancellation: &Cancellation,
+    timers: &S,
+) -> Vec<String> {
+    const MAX_LOOKUPS: usize = 8;
+    if omitted.is_empty() {
+        return Vec::new();
+    }
+    let lookups = cancellation.child();
+    let looking = &lookups;
+    let missing = std::cell::RefCell::new(Vec::new());
+    futures_lite::future::race(
+        async {
+            let mut omitted = omitted.into_iter();
+            let mut running = FuturesUnordered::new();
+            loop {
+                while running.len() < MAX_LOOKUPS
+                    && let Some(id) = omitted.next()
+                {
+                    running.push(async move {
+                        let found = api::session_info(client, resolved, &id, looking).await;
+                        (id, found)
+                    });
+                }
+                match running.next().await {
+                    Some((
+                        id,
+                        Err(Failure {
+                            status: Some(404), ..
+                        }),
+                    )) => missing.borrow_mut().push(id),
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        },
+        async {
+            let _ = timers.sleep(SNAPSHOT_TIMEOUT, looking).await;
+        },
+    )
+    .await;
+    lookups.cancel();
+    missing.into_inner()
 }
 
 /// Present a session read again after reconnecting: its workers are merged,
@@ -2403,6 +2516,7 @@ fn finish_resync(
             ));
         }
         registration.merge_workers(std::mem::take(&mut snapshot.workers), &resync.changes)?;
+        registration.remove_missing(&completed.missing, &resync.changes);
         Ok(snapshot)
     });
     registration.snapshot_deletions.clear();
@@ -5764,6 +5878,8 @@ mod tests {
         /// such requests arrived.
         stalled_records: HashSet<String>,
         record_requests: usize,
+        /// Sessions whose records fail, as a service having trouble answers.
+        failing_records: HashSet<String>,
         /// Each session's message listing, if not empty.
         messages: HashMap<String, Value>,
         /// Each session's instruction entries.
@@ -6098,6 +6214,10 @@ mod tests {
                 *state.failing.get_mut(&id).unwrap() -= 1;
             }
             match state.sessions.get(&id) {
+                _ if record && state.failing_records.contains(&id) => (
+                    "500 Internal Server Error",
+                    r#"{"message":"busy"}"#.to_owned(),
+                ),
                 _ if fail => (
                     "500 Internal Server Error",
                     r#"{"message":"starting"}"#.to_owned(),
@@ -6164,7 +6284,17 @@ mod tests {
         what: &str,
         wanted: impl Fn(&Event) -> bool,
     ) -> Vec<Event> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        until_within(events, Duration::from_secs(5), what, wanted)
+    }
+
+    /// [`until`], waiting at most `limit`.
+    fn until_within(
+        events: &std::sync::mpsc::Receiver<Event>,
+        limit: Duration,
+        what: &str,
+        wanted: impl Fn(&Event) -> bool,
+    ) -> Vec<Event> {
+        let deadline = std::time::Instant::now() + limit;
         let mut seen = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -7428,6 +7558,7 @@ mod tests {
                 id: "full".into(),
                 registration: identity,
                 result: Ok(Snapshot::default()),
+                missing: Vec::new(),
                 modes: None,
             },
             Instant::now(),
@@ -7588,6 +7719,7 @@ mod tests {
                 id: "s".into(),
                 registration: identity,
                 result: Ok(Snapshot::default()),
+                missing: Vec::new(),
                 modes: Some(Modes {
                     offered: vec![mode("build"), mode("plan")],
                     current: Some("build".into()),
@@ -7710,6 +7842,7 @@ mod tests {
                     ],
                     ..Snapshot::default()
                 }),
+                missing: Vec::new(),
                 modes: None,
             },
             Instant::now(),
@@ -7851,6 +7984,7 @@ mod tests {
                 id: "s".into(),
                 registration: identity,
                 result: Ok(Snapshot::default()),
+                missing: Vec::new(),
                 modes: None,
             },
             Instant::now(),
@@ -7931,6 +8065,7 @@ mod tests {
                     }],
                     ..Snapshot::default()
                 }),
+                missing: Vec::new(),
                 modes: None,
             },
             Instant::now(),
@@ -8996,5 +9131,129 @@ mod tests {
         assert!(shown(&listed(&["A", "X", ""]), &held, 5).is_empty());
         // More ended parts than are recorded: the record is not yet complete.
         assert!(shown(&listed(&["B"]), &held, 5).is_empty());
+    }
+
+    /// A worker deleted while the event stream was down is found missing
+    /// when its session is read again: the listing omits it, and OpenCode
+    /// answers that it does not exist. An omitted worker that still exists, or
+    /// whose lookup fails, is kept.
+    #[test]
+    fn a_worker_deleted_while_disconnected_is_removed_once_verified() {
+        let shared = Arc::new(FakeShared::default());
+        let mut first = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(first.address));
+        let (commands, connection) = connect_to(&address);
+        let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Workers".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        let identity = events.identity.clone();
+        block_on(commands.reply_with(|reply| Command::Snapshot {
+            id: id.clone(),
+            identity,
+            reply,
+        }))
+        .and_then(SnapshotReply::accept)
+        .unwrap();
+        let watched = watch(&events);
+        for child in ["c1", "c2", "c3", "c4"] {
+            shared.update(|state| {
+                state.sessions.insert(child.into(), Vec::new());
+            });
+            first.send(json!({"type":"session.created","data":{"sessionID":child,"parentID":id,"title":child}}));
+        }
+        until(
+            &watched,
+            "the workers",
+            |event| matches!(event, Event::WorkersChanged { workers } if workers.len() == 4),
+        );
+
+        // Read the session again after a gap, returning its workers.
+        let gap = |service: &mut FakeService, change: &dyn Fn(&mut FakeState)| {
+            service.stop();
+            until(&watched, "the disconnection notice", |event| {
+                matches!(event, Event::Reconnecting { .. })
+            });
+            shared.update(change);
+            let next = FakeService::start(shared.clone(), "secret");
+            *address.lock().unwrap() = next.address;
+            let mut seen = until_within(
+                &watched,
+                SNAPSHOT_TIMEOUT * 3,
+                "the resynchronization",
+                |event| matches!(event, Event::Resynchronized { .. }),
+            );
+            // Workers travel on their own lane, so may come before or after it.
+            while let Ok(event) = watched.recv_timeout(Duration::from_millis(300)) {
+                seen.push(event);
+            }
+            let workers: Vec<String> = seen
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::WorkersChanged { workers } => Some(workers),
+                    _ => None,
+                })
+                .expect("the workers read again did not arrive")
+                .iter()
+                .map(|worker| worker.id.clone())
+                .collect();
+            (next, workers)
+        };
+        // While the stream is down, c1 is deleted, and c3's record will fail.
+        let (mut second, workers) = gap(&mut first, &|state| {
+            state.sessions.remove("c1");
+            state.failing_records.insert("c3".into());
+        });
+        assert_eq!(workers, ["c2", "c3", "c4"]);
+        // Then c2 is deleted, and c4's record will not be answered in time:
+        // c2, found missing in time, is still removed.
+        let (second, workers) = gap(&mut second, &|state| {
+            state.sessions.remove("c2");
+            state.stalled_records.insert("c4".into());
+        });
+        assert_eq!(workers, ["c3", "c4"]);
+        shared.update(|state| {
+            state.stalled_records.clear();
+        });
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(second);
+    }
+
+    /// A worker found missing is removed unless a lifecycle event during the
+    /// read showed it, and none is removed once observation is incomplete.
+    #[test]
+    fn only_workers_verified_missing_are_removed() {
+        let (mut registration, _events) = Registration::new();
+        for id in ["missing", "changed"] {
+            registration.children.insert(
+                id.into(),
+                Worker {
+                    id: id.into(),
+                    parent: Some("parent".into()),
+                    title: id.into(),
+                    state: WorkerState::Unknown,
+                },
+            );
+        }
+        let changes = HashMap::from([("changed".to_owned(), (Some(WorkerState::Completed), None))]);
+        let missing = ["missing".to_owned(), "changed".to_owned()];
+        assert_eq!(registration.known_workers(), ["changed", "missing"]);
+        registration.workers_incomplete = true;
+        assert!(registration.known_workers().is_empty());
+        registration.remove_missing(&missing, &changes);
+        assert_eq!(registration.children.len(), 2);
+        registration.workers_incomplete = false;
+        registration.remove_missing(&missing, &changes);
+        assert_eq!(
+            registration.children.keys().collect::<Vec<_>>(),
+            ["changed"]
+        );
     }
 }

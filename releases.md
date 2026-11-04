@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A sub-agent deleted while Tomori was reconnecting to OpenCode now leaves its space once the space is read again, rather than staying until the space is attached again. It is removed only when OpenCode confirms that it no longer exists.
+
 - An OpenCode space no longer repeats a reply that finished while it was opening. Its events wait for its initial state and follow it, except those the state already shows. Text from the OpenCode event stream with a character split between two reads, such as Japanese or an emoji, is no longer garbled. An event larger than 16 MiB now makes the backend reconnect and read each space again, rather than growing without limit.
 
 - A request OpenCode is slow to answer no longer holds up every OpenCode space. Each space's own requests still reach OpenCode in order, but other spaces keep receiving the agent's replies and sending their own, and new spaces still open. Closing a space no longer waits for its slow request.
