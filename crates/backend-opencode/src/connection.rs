@@ -123,6 +123,17 @@ const RESYNC_INTERRUPTIONS: u8 = 5;
 const MAX_RESYNC_EVENTS: usize = 512;
 /// Why a request fails when too many already wait for a connection.
 const TOO_MANY_HELD: &str = "OpenCode is not reachable and too many requests are waiting for it";
+/// Requests to OpenCode in flight at once on a connection, alongside its
+/// event stream.
+const MAX_REQUESTS: usize = 16;
+/// Commands waiting to start on an open connection, behind a request in
+/// flight for their session or the limit on requests; more are refused.
+const MAX_WAITING: usize = 256;
+/// Why a request fails when too many already wait to start.
+const TOO_MANY_WAITING: &str = "too many requests are waiting for OpenCode";
+/// How long the requests in flight when the event stream is lost may take to
+/// be answered before the backend reconnects without them.
+const IN_FLIGHT_GRACE: Duration = CONNECT_TIMEOUT;
 /// Why a request fails once the backend is shutting down.
 const SHUTTING_DOWN: &str = "the OpenCode backend is shutting down";
 /// What a session is told when the event stream is lost.
@@ -1046,8 +1057,8 @@ impl CommandReceiver {
         self.stopping.load(Ordering::Acquire)
     }
 
-    /// Finishes once the backend is shutting down, so that a command being
-    /// performed inline does not hold up shutdown.
+    /// Finishes once the backend is shutting down, so that a request in
+    /// flight does not hold up shutdown.
     async fn stopped(&self) {
         let _ = self.stop.recv().await;
     }
@@ -1245,9 +1256,9 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
                 announce = true;
             }
             Outcome::Lost(reason) => {
+                // The sessions were told when the stream was lost.
                 eprintln!("the opencode event stream {reason}; reconnecting");
                 reported = None;
-                connection_lost(&mut sessions.registrations);
                 let now = scheduler.now();
                 // A connection that is lost soon after it opens counts as a
                 // failed attempt, so a service that keeps dropping the stream
@@ -1336,6 +1347,12 @@ fn hold(sessions: &mut Sessions, command: Command) -> bool {
         Command::Shutdown => return false,
         Command::Close { id, identity } => {
             close_registration(&mut sessions.registrations, &id, &identity);
+            withdraw(
+                &mut sessions.held,
+                &identity,
+                |command| command,
+                |command| command,
+            );
         }
         command if sessions.held.len() < MAX_HELD => sessions.held.push_back(command),
         command => refuse(
@@ -1630,10 +1647,11 @@ type ResyncFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = ResyncResu
 type RestoreFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = RestoreResult> + 'a>>>;
 
 /// Open the server's global event stream, then serve it and the commands,
-/// alternating reads over the stream, command channel reads and a periodic
-/// reconciliation of each session's running state, until the backend closes or
-/// the stream ends. Commands held while no connection was open are performed
-/// first, in order, and sessions whose events were lost are read again.
+/// polling the stream, the command channel, the requests in flight, reads and
+/// a periodic reconciliation of each session's running state together, until
+/// the backend closes or the stream ends. Commands held while no connection
+/// was open are started first, in order, and sessions whose events were lost
+/// are read again.
 async fn connected<S: Timers>(
     client: &Client<'_>,
     resolved: &Resolved,
@@ -1695,96 +1713,182 @@ async fn connected<S: Timers>(
         timers,
     );
 
+    // Commands not yet started, in the order they arrived, each with whether
+    // it waited for this connection; the requests in flight; and the sessions
+    // with one in flight, whose later commands wait for it.
+    let mut waiting: VecDeque<(Command, bool)> =
+        held.drain(..).map(|command| (command, true)).collect();
+    let mut requests: RequestFutures<'_> = FuturesUnordered::new();
+    let mut busy: HashSet<String> = HashSet::new();
+    // Why the event stream was lost, while the requests in flight are
+    // answered, and until when they may be.
+    let mut lost: Option<String> = None;
+    let mut grace: Option<Instant> = None;
+    let mut grace_timer = timers.timer();
+
     let outcome = loop {
         // Once shutting down, no further command is started, held or not.
         if commands.is_stopping() {
             break Outcome::Shutdown;
         }
         retry_worker_delivery(registrations);
-        // Commands that waited for this connection are performed first, in
-        // order.
-        let (command, was_held) = match held.pop_front() {
-            Some(command) => (command, true),
-            None => (
-                futures_util::select! {
-                    command = Fused::new(commands.recv()) => match command {
-                        Ok(Command::Shutdown) | Err(_) => break Outcome::Shutdown,
-                        Ok(command) => command,
-                    },
-                    completed = Fused::new(async {
-                        if snapshots.is_empty() {
-                            std::future::pending::<Option<SnapshotResult>>().await
-                        } else {
-                            snapshots.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed {
-                            finish_snapshot(registrations, completed);
-                        }
-                        continue;
+        match &lost {
+            // A request in flight is not cut short: the loss is noticed once
+            // each has been answered.
+            Some(reason) if requests.is_empty() => break Outcome::Lost(reason.clone()),
+            Some(_) => {}
+            // Commands that waited for this connection are started first, in
+            // order, then the others as they arrive.
+            None => start_commands(
+                &mut waiting,
+                &mut busy,
+                &mut requests,
+                registrations,
+                &mut snapshots,
+                sequence,
+                client,
+                resolved,
+                cancellation,
+                timers,
+            ),
+        }
+        let reading = lost.is_none();
+        let until = grace;
+        futures_util::select! {
+            () = Fused::new(commands.stopped()) => break Outcome::Shutdown,
+            () = Fused::new(async {
+                match until {
+                    Some(until) => {
+                        let _ = timers.timer_wait_until(&mut grace_timer, until, cancellation).await;
                     }
-                    completed = Fused::new(async {
-                        if resyncs.is_empty() {
-                            std::future::pending::<Option<ResyncResult>>().await
-                        } else {
-                            resyncs.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed {
-                            finish_resync(registrations, completed, timers.now());
-                        }
-                        // A slot is free: start the next waiting session at once.
-                        start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
-                        start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
-                        continue;
+                    None => std::future::pending().await,
+                }
+            }) => {
+                // Those still unanswered are abandoned, so that one OpenCode
+                // never answers cannot keep the backend from reconnecting.
+                break Outcome::Lost(lost.clone().expect("a grace period follows a loss"));
+            }
+            command = Fused::new(commands.recv()) => match command {
+                Ok(Command::Shutdown) | Err(_) => break Outcome::Shutdown,
+                // Once the stream is lost, commands wait for the next
+                // connection, as while none is open.
+                Ok(Command::Close { id, identity }) if !reading => {
+                    close_registration(registrations, &id, &identity);
+                    withdraw(held, &identity, |command| command, |command| command);
+                }
+                Ok(command) if !reading => {
+                    if held.len() < MAX_HELD {
+                        held.push_back(command);
+                    } else {
+                        refuse(command, tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, TOO_MANY_HELD));
                     }
-                    completed = Fused::new(async {
-                        if restores.is_empty() {
-                            std::future::pending::<Option<RestoreResult>>().await
-                        } else {
-                            restores.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed {
-                            finish_restore(registrations, completed);
-                        }
-                        start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
-                        continue;
-                    }
-                    completed = Fused::new(async {
-                        if reconciliations.is_empty() {
-                            std::future::pending::<Option<ReconcileResult>>().await
-                        } else {
-                            reconciliations.next().await
-                        }
-                    }) => {
-                        if let Some(completed) = completed
-                            && let Some(registration) = registrations.get_mut(&completed.id)
-                            && Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
+                }
+                Ok(Command::Close { id, identity }) => {
+                    close_session(registrations, &mut waiting, &id, &identity);
+                }
+                Ok(command @ Command::Snapshot { .. }) => {
+                    prepare_command(command, false, registrations, &mut snapshots, sequence, client, resolved, cancellation, timers);
+                }
+                Ok(command) if waiting.len() >= MAX_WAITING => {
+                    refuse(command, tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, TOO_MANY_WAITING));
+                }
+                Ok(command) => waiting.push_back((command, false)),
+            },
+            completed = Fused::new(async {
+                if requests.is_empty() {
+                    std::future::pending::<Option<(Option<String>, Option<Completion>)>>().await
+                } else {
+                    requests.next().await
+                }
+            }) => {
+                let (session, completion) = completed.expect("a request was in flight");
+                if let Some(session) = session {
+                    busy.remove(&session);
+                }
+                if let Some(completion) = completion {
+                    complete(completion, registrations);
+                }
+            }
+            completed = Fused::new(async {
+                if snapshots.is_empty() {
+                    std::future::pending::<Option<SnapshotResult>>().await
+                } else {
+                    snapshots.next().await
+                }
+            }) => {
+                if let Some(completed) = completed {
+                    finish_snapshot(registrations, completed);
+                }
+                continue;
+            }
+            completed = Fused::new(async {
+                if resyncs.is_empty() {
+                    std::future::pending::<Option<ResyncResult>>().await
+                } else {
+                    resyncs.next().await
+                }
+            }) => {
+                if let Some(completed) = completed {
+                    finish_resync(registrations, completed, timers.now());
+                }
+                // A slot is free: start the next waiting session at once.
+                start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                continue;
+            }
+            completed = Fused::new(async {
+                if restores.is_empty() {
+                    std::future::pending::<Option<RestoreResult>>().await
+                } else {
+                    restores.next().await
+                }
+            }) => {
+                if let Some(completed) = completed {
+                    finish_restore(registrations, completed);
+                }
+                start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                continue;
+            }
+            completed = Fused::new(async {
+                if reconciliations.is_empty() {
+                    std::future::pending::<Option<ReconcileResult>>().await
+                } else {
+                    reconciliations.next().await
+                }
+            }) => {
+                if let Some(completed) = completed
+                    && let Some(registration) = registrations.get_mut(&completed.id)
+                    && Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
+                {
+                    registration.reconcile_in_flight = None;
+                    if registration.event_revision == completed.revision && registration.resync.is_none() {
+                        if let Some(modes) = completed.modes
+                            && !modes.offered.is_empty()
+                            && registration.modes.offered.is_empty()
                         {
-                            registration.reconcile_in_flight = None;
-                            if registration.event_revision == completed.revision && registration.resync.is_none() {
-                                if let Some(modes) = completed.modes
-                                    && !modes.offered.is_empty()
-                                    && registration.modes.offered.is_empty()
-                                {
-                                    registration.modes = modes;
-                                    registration.publish_modes();
-                                }
-                                if let Some(running) = completed.running {
-                                    let running = if running { RunningState::Running } else { RunningState::Idle };
-                                    registration.reconcile_running(running);
-                                }
-                            }
+                            registration.modes = modes;
+                            registration.publish_modes();
                         }
-                        continue;
+                        if let Some(running) = completed.running {
+                            let running = if running { RunningState::Running } else { RunningState::Idle };
+                            registration.reconcile_running(running);
+                        }
                     }
-                    result = Fused::new(stream.read(cancellation)) => {
-                        let frame = match result {
-                            Ok(frame) => frame,
-                            Err(error) => break Outcome::Lost(format!("failed: {error}")),
-                        };
+                }
+                continue;
+            }
+            result = Fused::new(async {
+                if reading {
+                    stream.read(cancellation).await
+                } else {
+                    std::future::pending().await
+                }
+            }) => {
+                let loss = match result {
+                    Err(error) => Some(format!("failed: {error}")),
+                    Ok(frame) => {
                         let end = frame.is_end();
+                        let mut oversized = false;
                         if let base_http::body::BodyFrame::Data { data, .. } = frame {
                             let complete = groups.push(&data);
                             for group in &complete {
@@ -1794,116 +1898,256 @@ async fn connected<S: Timers>(
                                 }
                             }
                             start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
-                            if groups.oversized() {
-                                // Dropping part of it could lose an event, so
-                                // the stream is treated as lost, and every
-                                // session is read again on the next one.
-                                break Outcome::Lost(format!("sent an event larger than {MAX_EVENT_BYTES} bytes"));
-                            }
+                            oversized = groups.oversized();
                         }
-                        if end {
-                            break Outcome::Lost("ended".to_owned());
+                        if oversized {
+                            // Dropping part of it could lose an event, so the
+                            // stream is treated as lost, and every session is
+                            // read again on the next one.
+                            Some(format!("sent an event larger than {MAX_EVENT_BYTES} bytes"))
+                        } else {
+                            end.then(|| "ended".to_owned())
                         }
+                    }
+                };
+                if let Some(reason) = loss {
+                    lose(&mut lost, &mut waiting, held, registrations, reason);
+                    // The reads in flight are abandoned with the stream; each
+                    // session is read again on the next connection.
+                    snapshots.clear();
+                    resyncs.clear();
+                    restores.clear();
+                    reconciliations.clear();
+                    grace = Some(timers.now() + IN_FLIGHT_GRACE);
+                }
+                continue;
+            }
+            // Re-check each session's running state against the server's record,
+            // so a missed idle event cannot leave a busy state — and the queue it
+            // gates — stuck. A no-op while no session is registered.
+            due = Fused::new(async {
+                if reading {
+                    timers.timer_wait_until(&mut timer, next_reconcile, cancellation).await
+                } else {
+                    std::future::pending().await
+                }
+            }) => {
+                if let Err(error) = due {
+                    break Outcome::Lost(format!("stopped: the state reconciliation timer failed: {error}"));
+                }
+                let mut ids: Vec<_> = registrations.keys().cloned().collect();
+                for id in &ids {
+                    close_abandoned_registration(registrations, id);
+                }
+                // A session read again after reconnecting reports its
+                // running state from that read.
+                // One not yet read reports it with its initial state.
+                ids.retain(|id| registrations.get(id).is_some_and(|registration| registration.resync.is_none() && registration.workers_ready));
+                ids.sort();
+                if !ids.is_empty() {
+                    let start = reconcile_offset % ids.len();
+                    ids.rotate_left(start);
+                    reconcile_offset = (start + MAX_RECONCILIATIONS) % ids.len();
+                }
+                for id in ids {
+                    let registration = registrations.get_mut(&id).expect("registered at the start of this tick");
+                    if registration.reconcile_in_flight.is_some() || reconciliations.len() >= MAX_RECONCILIATIONS {
                         continue;
                     }
-                    // Re-check each session's running state against the server's record,
-                    // so a missed idle event cannot leave a busy state — and the queue it
-                    // gates — stuck. A no-op while no session is registered.
-                    due = Fused::new(timers.timer_wait_until(&mut timer, next_reconcile, cancellation)) => {
-                        if let Err(error) = due {
-                            break Outcome::Lost(format!("stopped: the state reconciliation timer failed: {error}"));
-                        }
-                        let mut ids: Vec<_> = registrations.keys().cloned().collect();
-                        for id in &ids {
-                            close_abandoned_registration(registrations, id);
-                        }
-                        // A session read again after reconnecting reports its
-                        // running state from that read.
-                        // One not yet read reports it with its initial state.
-                        ids.retain(|id| registrations.get(id).is_some_and(|registration| registration.resync.is_none() && registration.workers_ready));
-                        ids.sort();
-                        if !ids.is_empty() {
-                            let start = reconcile_offset % ids.len();
-                            ids.rotate_left(start);
-                            reconcile_offset = (start + MAX_RECONCILIATIONS) % ids.len();
-                        }
-                        for id in ids {
-                            let registration = registrations.get_mut(&id).expect("registered at the start of this tick");
-                            if registration.reconcile_in_flight.is_some() || reconciliations.len() >= MAX_RECONCILIATIONS {
-                                continue;
-                            }
-                            let local_cancel = cancellation.child();
-                            registration.reconcile_in_flight = Some(local_cancel.clone());
-                            let identity = registration.events.worker_epoch.clone();
-                            let revision = registration.event_revision;
-                            let directory = registration.directory.clone();
-                            let current = registration.modes.current.clone();
-                            let list = registration.modes.offered.is_empty() && registration.listings > 0;
-                            if list { registration.listings -= 1; }
-                            reconciliations.push(Box::pin(async move {
-                                let (modes, running) = futures_lite::future::race(
-                                    async {
-                                        let modes = if list {
-                                            let info = current.map_or(Value::Null, |agent| serde_json::json!({"agent":agent}));
-                                            Some(modes(client, resolved, &directory, &info, &local_cancel).await)
-                                        } else { None };
-                                        let running = api::session_running(client, resolved, &id, &local_cancel, timers).await.ok().flatten();
-                                        (modes, running)
-                                    },
-                                    async {
-                                        let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
-                                        (None, None)
-                                    },
-                                ).await;
-                                local_cancel.cancel();
-                                ReconcileResult { id, registration: identity, revision, modes, running }
-                            }));
-                        }
-                        // Retry a restore whose record had no text yet.
-                    for registration in registrations.values_mut() {
-                        let retry = std::mem::take(&mut registration.restore_retry);
-                        registration.restore_due.extend(retry);
-                    }
-                    start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
-                    // Retry a session whose read again failed.
-                        start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
-                        retry_worker_delivery(registrations);
-                        next_reconcile = timers.now() + RECONCILE_INTERVAL;
-                        continue;
-                    }
-                },
-                false,
-            ),
-        };
-        // Commands are performed inline on this loop, one at a time, as they
-        // were before reconnection (#35 will isolate them). Shutdown does not
-        // wait for one: the backend's shutdown stops it, abandoning its
-        // request.
+                    let local_cancel = cancellation.child();
+                    registration.reconcile_in_flight = Some(local_cancel.clone());
+                    let identity = registration.events.worker_epoch.clone();
+                    let revision = registration.event_revision;
+                    let directory = registration.directory.clone();
+                    let current = registration.modes.current.clone();
+                    let list = registration.modes.offered.is_empty() && registration.listings > 0;
+                    if list { registration.listings -= 1; }
+                    reconciliations.push(Box::pin(async move {
+                        let (modes, running) = futures_lite::future::race(
+                            async {
+                                let modes = if list {
+                                    let info = current.map_or(Value::Null, |agent| serde_json::json!({"agent":agent}));
+                                    Some(modes(client, resolved, &directory, &info, &local_cancel).await)
+                                } else { None };
+                                let running = api::session_running(client, resolved, &id, &local_cancel, timers).await.ok().flatten();
+                                (modes, running)
+                            },
+                            async {
+                                let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
+                                (None, None)
+                            },
+                        ).await;
+                        local_cancel.cancel();
+                        ReconcileResult { id, registration: identity, revision, modes, running }
+                    }));
+                }
+                // Retry a restore whose record had no text yet.
+            for registration in registrations.values_mut() {
+                let retry = std::mem::take(&mut registration.restore_retry);
+                registration.restore_due.extend(retry);
+            }
+            start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+            // Retry a session whose read again failed.
+                start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                retry_worker_delivery(registrations);
+                next_reconcile = timers.now() + RECONCILE_INTERVAL;
+                continue;
+            }
+        }
+    };
+    // Shutdown abandons the requests in flight rather than wait for OpenCode,
+    // and the commands still waiting are refused or held with the others.
+    drop(requests);
+    for (command, _) in waiting.into_iter().rev() {
+        held.push_front(command);
+    }
+    if matches!(outcome, Outcome::Lost(_)) && lost.is_none() {
+        connection_lost(registrations);
+    }
+    cancellation.cancel();
+    outcome
+}
+
+/// The event stream was lost: every session is told at once, the requests in
+/// flight may still be answered, and the commands not started yet wait for the
+/// next connection, ahead of those held later, however many there are.
+fn lose(
+    lost: &mut Option<String>,
+    waiting: &mut VecDeque<(Command, bool)>,
+    held: &mut VecDeque<Command>,
+    registrations: &mut HashMap<String, Registration>,
+    reason: String,
+) {
+    *lost = Some(reason);
+    for (command, _) in waiting.drain(..).rev() {
+        held.push_front(command);
+    }
+    connection_lost(registrations);
+}
+
+/// Fail at once the commands in `queue` made through the registration
+/// `identity`, which has closed, rather than when they would have started.
+fn withdraw<T>(
+    queue: &mut VecDeque<T>,
+    identity: &Arc<AtomicU64>,
+    command: impl Fn(&T) -> &Command,
+    into: impl Fn(T) -> Command,
+) {
+    let mut kept = VecDeque::with_capacity(queue.len());
+    for entry in queue.drain(..) {
+        if command_registration(command(&entry)).is_some_and(|other| Arc::ptr_eq(other, identity)) {
+            refuse(
+                into(entry),
+                tomori_backend::Error::new(
+                    tomori_backend::ErrorKind::Closed,
+                    "The session registration has closed.",
+                ),
+            );
+        } else {
+            kept.push_back(entry);
+        }
+    }
+    *queue = kept;
+}
+
+/// The session a command is performed for, whose commands are performed one
+/// at a time, in the order they arrived; `None` for one that may run beside
+/// any other.
+fn command_session(command: &Command) -> Option<&str> {
+    match command {
+        Command::Attach { id, .. }
+        | Command::Prompt { id, .. }
+        | Command::Interrupt { id, .. }
+        | Command::Decide { id, .. }
+        | Command::Answer { id, .. }
+        | Command::SetMode { id, .. }
+        | Command::Instruction { id, .. }
+        | Command::ForgetInstructions { id, .. } => Some(id),
+        Command::Sessions { .. }
+        | Command::Create { .. }
+        | Command::Snapshot { .. }
+        | Command::Close { .. }
+        | Command::Shutdown => None,
+    }
+}
+
+/// The registration a command was made through, if it names one.
+fn command_registration(command: &Command) -> Option<&Arc<AtomicU64>> {
+    match command {
+        Command::Prompt { identity, .. }
+        | Command::Interrupt { identity, .. }
+        | Command::Decide { identity, .. }
+        | Command::Answer { identity, .. }
+        | Command::SetMode { identity, .. }
+        | Command::Instruction { identity, .. } => Some(identity),
+        _ => None,
+    }
+}
+
+/// Close `id`'s registration, failing at once the commands made through it
+/// that have not started, rather than when its request in flight is answered.
+fn close_session(
+    registrations: &mut HashMap<String, Registration>,
+    waiting: &mut VecDeque<(Command, bool)>,
+    id: &str,
+    identity: &Arc<AtomicU64>,
+) {
+    close_registration(registrations, id, identity);
+    withdraw(
+        waiting,
+        identity,
+        |(command, _)| command,
+        |(command, _)| command,
+    );
+}
+
+/// Start the waiting commands that can start, in order: up to
+/// [`MAX_REQUESTS`] requests are in flight, and a session's next command waits
+/// for the one in flight for it. Each request runs beside the event stream,
+/// reads and every other request, so a stalled one holds up only its own
+/// session's later commands.
+#[allow(clippy::too_many_arguments)]
+fn start_commands<'a, S: Timers>(
+    waiting: &mut VecDeque<(Command, bool)>,
+    busy: &mut HashSet<String>,
+    requests: &mut RequestFutures<'a>,
+    registrations: &mut HashMap<String, Registration>,
+    snapshots: &mut SnapshotFutures<'a>,
+    sequence: &Arc<AtomicU64>,
+    client: &'a Client<'_>,
+    resolved: &'a Resolved,
+    cancellation: &'a Cancellation,
+    timers: &'a S,
+) {
+    let mut kept = VecDeque::new();
+    while let Some((command, held)) = waiting.pop_front() {
+        let session = command_session(&command).map(str::to_owned);
+        if requests.len() >= MAX_REQUESTS
+            || session
+                .as_ref()
+                .is_some_and(|session| busy.contains(session))
+        {
+            kept.push_back((command, held));
+            continue;
+        }
         if let Some(request) = prepare_command(
             command,
-            was_held,
+            held,
             registrations,
-            &mut snapshots,
+            snapshots,
             sequence,
             client,
             resolved,
             cancellation,
             timers,
         ) {
-            // The stop is polled first, so a request is not even started once
-            // shutting down.
-            let stopped = commands.stopped();
-            match futures_util::future::select(std::pin::pin!(stopped), request).await {
-                futures_util::future::Either::Left(_) => break Outcome::Shutdown,
-                futures_util::future::Either::Right((Some(completion), _)) => {
-                    complete(completion, registrations);
-                }
-                futures_util::future::Either::Right((None, _)) => {}
+            if let Some(session) = &session {
+                busy.insert(session.clone());
             }
+            requests.push(Box::pin(async move { (session, request.await) }));
         }
-    };
-    cancellation.cancel();
-    outcome
+    }
+    *waiting = kept;
 }
 
 /// Read a session within [`SNAPSHOT_TIMEOUT`], cancelling its requests when the
@@ -3027,9 +3271,13 @@ enum Completion {
     },
 }
 
-/// A command's request to OpenCode, performed inline by the loop, and what to
-/// apply to the registrations once it has finished.
+/// A command's request to OpenCode, performed beside the loop's other work,
+/// and what to apply to the registrations once it has finished.
 type Request<'a> = Pin<Box<dyn Future<Output = Option<Completion>> + 'a>>;
+
+/// The requests in flight, each with the session it was performed for.
+type RequestFutures<'a> =
+    FuturesUnordered<Pin<Box<dyn Future<Output = (Option<String>, Option<Completion>)> + 'a>>>;
 
 /// Prepare one command. Closing and snapshots are handled at once; for the
 /// others this returns the request for the loop to perform, whose result, if
@@ -3253,8 +3501,8 @@ fn prepare_command<'a, S: Timers>(
                 None
             })
         }
-        // Commands are performed in order, so an attachment that finished first is seen here, and one that follows
-        // sets its own entries afterwards.
+        // A session's commands are performed in order, so an attachment that finished first is seen here, and one that
+        // follows sets its own entries afterwards.
         Command::ForgetInstructions { id, reply, .. } if registrations.contains_key(&id) => {
             let _ = reply.try_send(Ok(()));
             return None;
@@ -5510,6 +5758,8 @@ mod tests {
         event_requests: usize,
         /// Sessions whose prompts wait until they are removed.
         stalled_prompts: HashSet<String>,
+        /// The session and message id of each prompt, as it was received.
+        prompts: Vec<(String, String)>,
         /// Sessions whose records wait until they are removed, and how many
         /// such requests arrived.
         stalled_records: HashSet<String>,
@@ -5617,6 +5867,15 @@ mod tests {
             let data = format!("data: {event}\n\n");
             for stream in self.streams.lock().unwrap().iter_mut() {
                 let _ = write!(stream, "{:x}\r\n{}\r\n", data.len(), data);
+                let _ = stream.flush();
+            }
+        }
+
+        /// End every open event stream, as a service does that closes it.
+        fn end_streams(&self) {
+            for stream in self.streams.lock().unwrap().drain(..) {
+                let mut stream = stream;
+                let _ = write!(stream, "0\r\n\r\n");
                 let _ = stream.flush();
             }
         }
@@ -5784,6 +6043,12 @@ mod tests {
             }
         } else if let Some(id) = session {
             let mut state = shared.state.lock().unwrap();
+            if path.ends_with("/prompt") {
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let message = body["id"].as_str().unwrap_or_default().to_owned();
+                state.prompts.push((id.clone(), message));
+                shared.changed.notify_all();
+            }
             while state.stalled_prompts.contains(&id)
                 && path.ends_with("/prompt")
                 && !state.stopping
@@ -7766,7 +8031,7 @@ mod tests {
         .and_then(SnapshotReply::accept)
     }
 
-    /// Create a session against a simulated service and open it.
+    /// Create a session against a simulated service and read it.
     fn open_session(commands: &Commands) -> (String, RegistrationEvents) {
         let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
             spec: SessionSpec {
@@ -7778,6 +8043,507 @@ mod tests {
         .unwrap();
         read_snapshot(commands, &id, &events).unwrap();
         (id, events)
+    }
+
+    /// The answer on `answer`, failing the test rather than waiting forever.
+    fn answered<T>(answer: &async_channel::Receiver<T>) -> T {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(value) = answer.try_recv() {
+                return value;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no answer within 5 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Send a prompt to `id` on another thread.
+    fn prompt_in_thread(
+        commands: &Commands,
+        id: &str,
+        events: &RegistrationEvents,
+        key: &str,
+    ) -> std::sync::mpsc::Receiver<(tomori_backend::Result<()>, std::time::Instant)> {
+        let commands = commands.clone();
+        let id = id.to_owned();
+        let identity = events.identity.clone();
+        let key = key.to_owned();
+        in_thread(move || {
+            block_on(commands.reply_with(|reply| Command::Prompt {
+                id,
+                identity,
+                key,
+                text: "hello".into(),
+                reply,
+            }))
+        })
+    }
+
+    /// A command OpenCode is slow to answer holds up only the later commands
+    /// of its own session, which follow it in order; other sessions' events,
+    /// reads and commands, and new sessions, go on meanwhile, and closing the
+    /// session fails its waiting commands at once.
+    #[test]
+    fn a_stalled_command_holds_up_only_its_own_session() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let (stalled, stalled_events) = open_session(&commands);
+        let (other, other_events) = open_session(&commands);
+        let other_watch = watch(&other_events);
+        shared.update(|state| {
+            state.stalled_prompts.insert(stalled.clone());
+        });
+        let first = prompt_in_thread(&commands, &stalled, &stalled_events, "first");
+        wait_for(&shared, "the first prompt was never sent", |state| {
+            state.prompts.len() == 1
+        });
+        let second = prompt_in_thread(&commands, &stalled, &stalled_events, "second");
+
+        service.send(json!({"type":"session.execution.started","data":{"sessionID":other}}));
+        until(&other_watch, "the other session's event", |event| {
+            matches!(event, Event::Busy)
+        });
+        let reading = {
+            let commands = commands.clone();
+            let other = other.clone();
+            let events = other_events.clone();
+            in_thread(move || read_snapshot(&commands, &other, &events))
+        };
+        let (snapshot, _) = reading
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the other session's read was held up");
+        snapshot.unwrap();
+        let interrupting = {
+            let commands = commands.clone();
+            let other = other.clone();
+            let identity = other_events.identity.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Interrupt {
+                    id: other,
+                    identity,
+                    reply,
+                }))
+            })
+        };
+        let (interrupted, _) = interrupting
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the other session's command was held up");
+        interrupted.unwrap();
+        let creating = {
+            let commands = commands.clone();
+            in_thread(move || open_session(&commands).0)
+        };
+        creating
+            .recv_timeout(Duration::from_secs(2))
+            .expect("creating a session was held up");
+        // The stalled session's second prompt waits for its first.
+        assert_eq!(shared.state.lock().unwrap().prompts.len(), 1);
+
+        shared.update(|state| state.stalled_prompts.clear());
+        let (result, _) = first.recv_timeout(Duration::from_secs(3)).unwrap();
+        result.unwrap();
+        let (result, _) = second.recv_timeout(Duration::from_secs(3)).unwrap();
+        result.unwrap();
+        assert_eq!(
+            shared.state.lock().unwrap().prompts,
+            [
+                (stalled.clone(), "msg_first".to_owned()),
+                (stalled.clone(), "msg_second".to_owned())
+            ]
+        );
+
+        // Closing a session whose command is stalled fails its waiting ones
+        // at once, not when the stalled one is answered.
+        shared.update(|state| {
+            state.stalled_prompts.insert(stalled.clone());
+        });
+        let third = prompt_in_thread(&commands, &stalled, &stalled_events, "third");
+        wait_for(&shared, "the third prompt was never sent", |state| {
+            state.prompts.len() == 3
+        });
+        let fourth = prompt_in_thread(&commands, &stalled, &stalled_events, "fourth");
+        std::thread::sleep(Duration::from_millis(100));
+        commands
+            .tx()
+            .try_send(Command::Close {
+                id: stalled.clone(),
+                identity: stalled_events.identity.clone(),
+            })
+            .unwrap();
+        let (result, _) = fourth
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a closed session's waiting command was held up");
+        assert_eq!(result.unwrap_err().kind, tomori_backend::ErrorKind::Closed);
+        assert_eq!(shared.state.lock().unwrap().prompts.len(), 3);
+        shared.update(|state| state.stalled_prompts.clear());
+        let (result, _) = third.recv_timeout(Duration::from_secs(3)).unwrap();
+        result.unwrap();
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// At most [`MAX_REQUESTS`] requests are in flight, so further commands,
+    /// of any session, wait; and at most [`MAX_WAITING`] wait, so further
+    /// ones are refused at once.
+    #[test]
+    fn commands_beyond_the_limits_wait_or_are_refused() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let sessions: Vec<_> = (0..=MAX_REQUESTS)
+            .map(|_| open_session(&commands))
+            .collect();
+        shared.update(|state| {
+            for (id, _) in &sessions {
+                state.stalled_prompts.insert(id.clone());
+            }
+        });
+        let prompts: Vec<_> = sessions
+            .iter()
+            .map(|(id, events)| prompt_in_thread(&commands, id, events, "stalled"))
+            .collect();
+        wait_for(&shared, "the prompts were never sent", |state| {
+            state.prompts.len() == MAX_REQUESTS
+        });
+        let listing = {
+            let commands = commands.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Sessions {
+                    directory: "/tmp".into(),
+                    reply,
+                }))
+            })
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(shared.state.lock().unwrap().prompts.len(), MAX_REQUESTS);
+        assert!(listing.try_recv().is_err(), "the listing did not wait");
+
+        // One prompt and the listing wait; fill the rest of the places with
+        // the first session's commands, then one more is refused.
+        let (first, first_events) = &sessions[0];
+        let mut queued = Vec::new();
+        for place in 2..MAX_WAITING {
+            let (reply, answer) = async_channel::bounded(1);
+            let id = first.clone();
+            let identity = first_events.identity.clone();
+            let command = match place % 5 {
+                0 => Command::Interrupt {
+                    id,
+                    identity,
+                    reply,
+                },
+                1 => Command::Decide {
+                    id,
+                    identity,
+                    request: "p".into(),
+                    decision: "once".into(),
+                    reply,
+                },
+                2 => Command::Answer {
+                    id,
+                    identity,
+                    form: "f".into(),
+                    answer: json!({}),
+                    reply,
+                },
+                3 => Command::SetMode {
+                    id,
+                    identity,
+                    mode: "plan".into(),
+                    reply,
+                },
+                _ => Command::Instruction {
+                    id,
+                    identity,
+                    key: "k".into(),
+                    value: None,
+                    reply,
+                },
+            };
+            block_on(commands.tx().send(command)).unwrap();
+            queued.push(answer);
+        }
+        let (reply, refused) = async_channel::bounded(1);
+        block_on(commands.tx().send(Command::Sessions {
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap();
+        let refusal = answered(&refused).unwrap_err();
+        assert_eq!(refusal.message, TOO_MANY_WAITING);
+        // Closing the first session fails its waiting commands at once.
+        commands
+            .tx()
+            .try_send(Command::Close {
+                id: first.clone(),
+                identity: first_events.identity.clone(),
+            })
+            .unwrap();
+        for answer in queued {
+            let error = answered(&answer).unwrap_err();
+            assert_eq!(error.kind, tomori_backend::ErrorKind::Closed);
+        }
+
+        // Shutting down waits neither for the stalled requests nor for the
+        // commands behind them, which fail.
+        commands.shutdown();
+        let (result, _) = listing.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(result.unwrap_err().message, SHUTTING_DOWN);
+        for prompt in prompts {
+            let (result, _) = prompt.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(result.is_err());
+        }
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// Two attachments of one session made at once: the second waits for the
+    /// first, and is refused, rather than replacing it.
+    #[test]
+    fn attaching_one_session_twice_at_once_binds_it_once() {
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| {
+            state.sessions.insert("twice".into(), Vec::new());
+            state.stalled_records.insert("twice".into());
+        });
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let attach = || {
+            let commands = commands.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Attach {
+                    id: "twice".into(),
+                    directory: "/tmp".into(),
+                    reply,
+                }))
+                .map(|_| ())
+            })
+        };
+        let first = attach();
+        wait_for(&shared, "the first attachment never started", |state| {
+            state.record_requests == 1
+        });
+        let second = attach();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(shared.state.lock().unwrap().record_requests, 1);
+        shared.update(|state| {
+            state.stalled_records.clear();
+        });
+        let (first, _) = first.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (second, _) = second.recv_timeout(Duration::from_secs(3)).unwrap();
+        first.unwrap();
+        assert_eq!(second.unwrap_err().message, ALREADY_ATTACHED);
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// Once the event stream is lost, a request in flight is still answered;
+    /// commands that arrive meanwhile wait for the next connection, except a
+    /// close, which is taken at once.
+    #[test]
+    fn commands_after_the_stream_is_lost_wait_for_the_next_connection() {
+        let shared = Arc::new(FakeShared::default());
+        let mut first = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(first.address));
+        let (commands, connection) = connect_to(&address);
+        let (id, events) = open_session(&commands);
+        let watched = watch(&events);
+        let (closing, closing_events) = open_session(&commands);
+        let closing_watch = watch(&closing_events);
+        shared.update(|state| {
+            state.stalled_prompts.insert(id.clone());
+        });
+        let in_flight = prompt_in_thread(&commands, &id, &events, "in-flight");
+        wait_for(&shared, "the prompt was never sent", |state| {
+            state.prompts.len() == 1
+        });
+        // Waiting for the first, so not yet started when the stream ends.
+        let waiting = prompt_in_thread(&commands, &id, &events, "waiting");
+        std::thread::sleep(Duration::from_millis(100));
+        let requests = shared.state.lock().unwrap().event_requests;
+        shared.update(|state| state.hold_events = true);
+        first.end_streams();
+        first.stop();
+        // Each session is told at once, while the prompt is still in flight.
+        until(&watched, "the disconnection notice", |event| {
+            matches!(event, Event::Reconnecting { .. })
+        });
+        let listing = {
+            let commands = commands.clone();
+            in_thread(move || {
+                block_on(commands.reply_with(|reply| Command::Sessions {
+                    directory: "/tmp".into(),
+                    reply,
+                }))
+            })
+        };
+        let closing_prompt = prompt_in_thread(&commands, &closing, &closing_events, "closed");
+        std::thread::sleep(Duration::from_millis(100));
+        commands
+            .tx()
+            .try_send(Command::Close {
+                id: closing.clone(),
+                identity: closing_events.identity.clone(),
+            })
+            .unwrap();
+        until(&closing_watch, "the closure", |event| {
+            matches!(event, Event::Closed { reason: None })
+        });
+        // Its command waiting for the next connection fails at once.
+        let (result, _) = closing_prompt
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the closed session's held command was not refused");
+        assert_eq!(result.unwrap_err().kind, tomori_backend::ErrorKind::Closed);
+        assert!(listing.try_recv().is_err(), "the listing did not wait");
+        // As many wait as while no connection is open; more are refused.
+        let mut held = Vec::new();
+        let refused = loop {
+            let (reply, answer) = async_channel::bounded(1);
+            block_on(commands.tx().send(Command::Sessions {
+                directory: "/tmp".into(),
+                reply,
+            }))
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+            match answer.try_recv() {
+                Ok(result) => break result,
+                Err(_) => held.push(answer),
+            }
+        };
+        assert_eq!(refused.unwrap_err().message, TOO_MANY_HELD);
+        // The listing, the waiting prompt and these.
+        assert_eq!(held.len() + 2, MAX_HELD);
+        // OpenCode is back before the prompt is answered, so the next attempt,
+        // which the held listing waits for, reaches it.
+        let second = FakeService::start(shared.clone(), "secret");
+        *address.lock().unwrap() = second.address;
+        shared.update(|state| state.stalled_prompts.clear());
+        let (result, _) = in_flight.recv_timeout(Duration::from_secs(3)).unwrap();
+        result.unwrap();
+        wait_for(
+            &shared,
+            "the event stream was never requested again",
+            |state| state.event_requests > requests,
+        );
+        shared.update(|state| state.hold_events = false);
+        let (result, _) = listing.recv_timeout(Duration::from_secs(5)).unwrap();
+        result.unwrap();
+        let (result, _) = waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        result.unwrap();
+        for answer in held {
+            answered(&answer).unwrap();
+        }
+        assert_eq!(
+            shared.state.lock().unwrap().prompts,
+            [
+                (id.clone(), "msg_in-flight".to_owned()),
+                (id.clone(), "msg_waiting".to_owned())
+            ]
+        );
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(second);
+    }
+
+    /// While no connection is open, closing a session fails its commands
+    /// waiting for one at once.
+    #[test]
+    fn closing_a_session_while_disconnected_fails_its_held_commands() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let (id, events) = open_session(&commands);
+        let watched = watch(&events);
+        // The stream ends, and the next one is slow to open, so commands wait.
+        let requests = shared.state.lock().unwrap().event_requests;
+        shared.update(|state| state.hold_events = true);
+        service.end_streams();
+        until(&watched, "the disconnection notice", |event| {
+            matches!(event, Event::Reconnecting { .. })
+        });
+        wait_for(
+            &shared,
+            "the event stream was never requested again",
+            |state| state.event_requests > requests,
+        );
+        let held = prompt_in_thread(&commands, &id, &events, "held");
+        std::thread::sleep(Duration::from_millis(100));
+        commands
+            .tx()
+            .try_send(Command::Close {
+                id: id.clone(),
+                identity: events.identity.clone(),
+            })
+            .unwrap();
+        let (result, _) = held
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the closed session's held command was not refused");
+        assert_eq!(result.unwrap_err().kind, tomori_backend::ErrorKind::Closed);
+        until(&watched, "the closure", |event| {
+            matches!(event, Event::Closed { reason: None })
+        });
+        shared.update(|state| state.hold_events = false);
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// A request OpenCode never answers after the event stream is lost is
+    /// abandoned once the grace period has passed, so the backend reconnects
+    /// and the session is read again.
+    #[test]
+    fn a_request_unanswered_after_the_stream_is_lost_is_abandoned() {
+        let shared = Arc::new(FakeShared::default());
+        let mut first = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(first.address));
+        let (commands, connection) = connect_to(&address);
+        let (id, events) = open_session(&commands);
+        let watched = watch(&events);
+        shared.update(|state| {
+            state.stalled_prompts.insert(id.clone());
+        });
+        let stalled = prompt_in_thread(&commands, &id, &events, "stalled");
+        wait_for(&shared, "the prompt was never sent", |state| {
+            state.prompts.len() == 1
+        });
+        let lost = std::time::Instant::now();
+        first.end_streams();
+        first.stop();
+        let second = FakeService::start(shared.clone(), "secret");
+        *address.lock().unwrap() = second.address;
+        until(&watched, "the disconnection notice", |event| {
+            matches!(event, Event::Reconnecting { .. })
+        });
+        let (result, answered_at) = stalled
+            .recv_timeout(IN_FLIGHT_GRACE + Duration::from_secs(2))
+            .expect("the stalled prompt was never abandoned");
+        assert!(result.is_err());
+        assert!(answered_at.duration_since(lost) >= IN_FLIGHT_GRACE - Duration::from_millis(500));
+        until(&watched, "the resynchronization", |event| {
+            matches!(event, Event::Resynchronized { .. })
+        });
+        shared.update(|state| state.stalled_prompts.clear());
+        let (result, _) = prompt_in_thread(&commands, &id, &events, "after")
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        result.unwrap();
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(second);
     }
 
     /// Events that arrive before a space's initial state has been read wait
