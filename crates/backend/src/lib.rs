@@ -276,6 +276,8 @@ pub struct Snapshot {
     pub messages: Vec<SnapshotMessage>,
     pub permissions: Vec<Permission>,
     pub questions: Vec<Question>,
+    /// The session's workers, oldest first as far as the backend knows, since a snapshot too large to send drops its
+    /// oldest workers first.
     pub workers: Vec<Worker>,
     #[serde(default)]
     pub modes: Modes,
@@ -325,6 +327,8 @@ pub enum Event {
     QuestionResolved {
         id: String,
     },
+    /// Every worker the backend knows. A worker already reported keeps its place in the space, so the order matters
+    /// only for new ones, which come oldest first.
     WorkersChanged {
         workers: Vec<Worker>,
     },

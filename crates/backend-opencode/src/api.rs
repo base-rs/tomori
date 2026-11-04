@@ -952,10 +952,21 @@ pub struct SnapshotParts {
 }
 
 impl SnapshotParts {
-    /// The snapshot's workers, derived from the children.
+    /// The snapshot's workers, derived from the children, oldest first: in the
+    /// order their records say they were created, since neither the order they
+    /// were discovered in nor their identifiers say how old they are.
     pub fn workers(&self) -> Vec<tomori_backend::Worker> {
-        self.children
-            .iter()
+        let created = |child: &Value| {
+            child
+                .get("time")
+                .and_then(|time| time.get("created"))
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::INFINITY)
+        };
+        let mut children: Vec<&Value> = self.children.iter().collect();
+        children.sort_by(|a, b| created(a).total_cmp(&created(b)));
+        children
+            .into_iter()
             .filter_map(crate::wire::worker_from_session)
             .collect()
     }
@@ -1461,6 +1472,37 @@ mod tests {
                 .map_err(|failure| failure.message);
         });
         result
+    }
+
+    #[test]
+    fn snapshot_workers_are_listed_oldest_first() {
+        let created = |id: &str, time: f64| {
+            let mut record = child(id, "s");
+            record["time"]["created"] = json!(time);
+            record
+        };
+        let parts = SnapshotParts {
+            messages: Value::Null,
+            permissions: Vec::new(),
+            forms: Vec::new(),
+            // As discovered, parent by parent, and as identifiers sort: neither is the order they started.
+            children: vec![
+                created("ses_a", 30.0),
+                created("ses_c", 10.0),
+                created("ses_b", 20.5),
+                created("ses_d", 20.5),
+            ],
+            busy: None,
+            has_parent: false,
+        };
+        assert_eq!(
+            parts
+                .workers()
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ses_c", "ses_b", "ses_d", "ses_a"]
+        );
     }
 
     #[test]

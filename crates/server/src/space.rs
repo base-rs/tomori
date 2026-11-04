@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use tomori_backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
 use tomori_protocol::{
@@ -245,6 +245,27 @@ fn worker(worker: tomori_backend::Worker, session: &str) -> tomori_protocol::Wor
             From::Unknown => To::Unknown,
         },
     }
+}
+
+/// `update`, the workers a backend now lists in its own order, oldest first as far as the space has seen: those in
+/// `known`, the workers it already had, keep their places, and new ones follow in the order the backend gave, so that
+/// trimming a snapshot drops the oldest workers first. See `design/server.md`.
+fn oldest_first(
+    known: &[tomori_protocol::Worker],
+    mut update: Vec<tomori_protocol::Worker>,
+) -> Vec<tomori_protocol::Worker> {
+    let places: HashMap<&str, usize> = known
+        .iter()
+        .enumerate()
+        .map(|(place, worker)| (worker.id.as_str(), place))
+        .collect();
+    update.sort_by_key(|worker| {
+        places
+            .get(worker.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    update
 }
 
 /// Whether `message` is a reply: an assistant message the agent completed with text, not tool calls alone.
@@ -797,10 +818,11 @@ impl SpaceModel {
                 self.submitting.retain(|pending| pending.question.id != id);
             }
             Event::WorkersChanged { workers } => {
-                self.workers = workers
+                let workers = workers
                     .into_iter()
                     .map(|entry| worker(entry, &self.session))
                     .collect();
+                self.workers = oldest_first(&self.workers, workers);
                 self.workers_authoritative = true;
                 self.worker_error = None;
             }
@@ -2271,6 +2293,59 @@ mod tests {
                 tomori_protocol::WorkerState::Error,
             ]
         );
+    }
+
+    #[test]
+    fn workers_are_kept_oldest_first_and_trimming_drops_the_oldest() {
+        let backend_worker = |id: &str| tomori_backend::Worker {
+            id: id.into(),
+            parent: None,
+            title: format!("{id} {}", "t".repeat(2048)),
+            state: tomori_backend::WorkerState::Running,
+        };
+        let ids = |state: &SpaceState| -> Vec<String> {
+            state
+                .workers
+                .iter()
+                .map(|worker| worker.id.clone())
+                .collect()
+        };
+        let mut space = model();
+        // Backends list workers in their own order, such as by identifier, which need not be the order they started.
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend_worker("zulu")],
+        });
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend_worker("alpha"), backend_worker("zulu")],
+        });
+        space.apply(Event::WorkersChanged {
+            workers: vec![
+                backend_worker("alpha"),
+                backend_worker("mike"),
+                backend_worker("zulu"),
+            ],
+        });
+        assert_eq!(ids(&space.state(Vec::new())), ["zulu", "alpha", "mike"]);
+        // A deleted worker leaves its place; the rest keep theirs.
+        space.apply(Event::WorkersChanged {
+            workers: vec![backend_worker("mike"), backend_worker("zulu")],
+        });
+        assert_eq!(ids(&space.state(Vec::new())), ["zulu", "mike"]);
+
+        // Enough newer workers to exceed the snapshot budget, each sorting before the oldest.
+        let mut workers: Vec<_> = (0..200)
+            .map(|index| backend_worker(&format!("a{index:03}")))
+            .collect();
+        workers.extend([backend_worker("mike"), backend_worker("zulu")]);
+        space.apply(Event::WorkersChanged { workers });
+        let mut state = space.state(Vec::new());
+        assert_eq!(ids(&state)[..3], ["zulu", "mike", "a000"]);
+        limits::fit_state(&mut state);
+        let kept = ids(&state);
+        assert!(kept.len() < 202);
+        assert!(!kept.contains(&"zulu".to_owned()));
+        assert_eq!(kept.last().map(String::as_str), Some("a199"));
+        assert_eq!(state.workers_authoritative, Some(false));
     }
 
     #[test]

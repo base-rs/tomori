@@ -34,7 +34,7 @@ What waits to be sent on one connection is bounded too, so that a slow or carele
 
 Clients connect over the local network; a USB connection is not required. Who may connect, and what each connection may do, is described in `security.md`: credentials are carried on the HTTP request that opens a connection, a connection without them watches as a visitor by default, and the server serves only TLS whenever it accepts credentials. Sessions also run only beneath the operator's workspace roots and only a limited number at once, as described in `workspaces.md`. The server exposes no generic filesystem, shell or session-deletion operations and never sends model credentials to clients.
 
-When fitting a snapshot to its budget removes workers, the snapshot marks its worker list non-authoritative and retains or supplies a visible error, so clients do not mistake transport trimming for a worker departure.
+When fitting a snapshot to its budget removes workers, the snapshot marks its worker list non-authoritative and retains or supplies a visible error, so clients do not mistake transport trimming for a worker departure. A space keeps its workers oldest first, so that those trimmed are the oldest: a worker keeps its place from when the server first saw it, and workers first seen together, such as those found when a session is attached, are in the order the agent created them where its records say. Identifiers are opaque, so they never decide the order.
 
 ## Rationale
 
@@ -50,6 +50,7 @@ The server crate, the protocol crate, the shared client crate and network config
 - Test a client session over one connection carrying control messages, events and audio concurrently.
 - Confirm that a headset can connect over the local network without USB.
 - Test that a space or worker state a client does not know is read as unknown.
+- Test that a space keeps its workers in the order it first saw them, whatever order a backend lists them in, that the OpenCode backend lists a session's workers in the order they were created rather than by identifier, and that trimming then drops the oldest and marks the list non-authoritative.
 - Test that the attention counts are encoded in the TXT record and read back, that each malformed count reads as unknown, that they are left out entirely when turned off, and that a running server publishes a change in them unless turned off, when it publishes nothing.
 - Test that a running server is found by browsing for `_tomori._tcp`, with its protocol version and name, that its participant count excludes visitors, and that it disappears from the list when it stops. On a Quest, confirm that the server list populates on the same Wi-Fi network.
 - Over UDP, test that an isolated lost packet is recovered by error correction, that an unrecovered `agent` frame is requested again, and that playback continues without waiting for it.

@@ -793,6 +793,13 @@ impl Registration {
                 "Worker observation exceeds the supported limit.",
             ));
         }
+        // The snapshot keeps its listing's order, oldest first, for the workers
+        // it lists; others follow.
+        let listed: HashMap<String, usize> = workers
+            .iter()
+            .enumerate()
+            .map(|(index, worker)| (worker.id.clone(), index))
+            .collect();
         self.events.advance_workers();
         if self.bootstrap_epoch.is_none() {
             self.bootstrap_epoch = Some(self.events.worker_epoch.load(Ordering::Acquire));
@@ -861,6 +868,7 @@ impl Registration {
             }
         }
         *workers = self.children.values().cloned().collect();
+        workers.sort_by_key(|worker| listed.get(&worker.id).copied().unwrap_or(usize::MAX));
         if !discovering {
             self.clear_bootstrap_journals();
         }
@@ -4542,6 +4550,34 @@ mod tests {
         }];
         parent.install_workers(&mut stale).unwrap();
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_order_its_listing_gave() {
+        let (mut registration, _events) = Registration::new();
+        let worker = |id: &str| Worker {
+            id: id.into(),
+            parent: Some("parent".into()),
+            title: id.into(),
+            state: WorkerState::Running,
+        };
+        // A child created while the family was read follows those listed.
+        registration.initial_creations.insert(
+            "ses_0".into(),
+            Worker {
+                parent: Some("ses_z".into()),
+                ..worker("ses_0")
+            },
+        );
+        let mut listed = vec![worker("ses_z"), worker("ses_a")];
+        registration.install_workers(&mut listed).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ses_z", "ses_a", "ses_0"]
+        );
     }
 
     #[test]
