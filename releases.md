@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `tomori-server` no longer presents an approval or question whose identifier is longer than 1 KiB, which no client could name in its reply and which could push a space's snapshot over its budget. The space says to answer it in the agent's own interface instead, and later requests are presented as usual. An approval's "don't ask again" option with such an identifier is not offered (#50).
+- `tomori-server` no longer presents an approval or question whose identifier is longer than 1 KiB, which no client could name in its reply and which could push a space's snapshot over its budget. The space says to answer it in the agent's own interface instead, until it is answered there, and later requests are presented as usual. An approval's "don't ask again" option with such an identifier is not offered (#50).
 
 - A sub-agent deleted while Tomori was reconnecting to OpenCode now leaves its space once the space is read again, rather than staying until the space is attached again. It is removed only when OpenCode confirms that it no longer exists.
 

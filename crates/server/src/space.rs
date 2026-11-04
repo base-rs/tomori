@@ -2,6 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::hash::{BuildHasher, RandomState};
 
 use tomori_backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
 use tomori_protocol::{
@@ -67,6 +68,11 @@ pub struct SpaceModel {
     /// Requests whose decision or answers the backend accepted since it reported reconnecting. The state it reads
     /// again may predate them, so a resynchronization does not present them again.
     settled: HashSet<String>,
+    /// The requests [`Self::refuse_request`] refused and the agent has not reported resolved, by hashes of their
+    /// identifiers, which may be of any length, with the refusal the space last showed for them. The refusal clears
+    /// once every one is resolved, as when someone answers it in the agent's own interface, unless another error
+    /// has replaced it.
+    refused: Refused,
     /// Something that happened while nobody was in the space and that nobody has seen since: [`Attention::Problem`]
     /// or [`Attention::Reply`], the higher kept. Cleared by [`Self::attend`]. See `design/spaces.md`.
     unattended: Option<Attention>,
@@ -82,6 +88,22 @@ pub struct SpaceModel {
     /// The worker each waiting queue entry's speaker pointed at, by entry key, as the space knew it when the entry
     /// was queued. Told to the agent with the entry. See `design/interaction.md`.
     pointing: BTreeMap<String, PointedWorker>,
+}
+
+/// The requests a space refused for their identifiers, kept as hashes so that an identifier of any length costs the
+/// same, and the refusal shown for them; see [`SpaceModel::refuse_request`]. A collision would at worst clear the
+/// refusal early.
+#[derive(Debug, Default)]
+struct Refused {
+    ids: HashSet<u64>,
+    shown: Option<String>,
+    hasher: RandomState,
+}
+
+impl Refused {
+    fn hash(&self, id: &str) -> u64 {
+        self.hasher.hash_one(id)
+    }
 }
 
 /// A worker a participant pointed at while speaking, as the space knew it when they stopped speaking: never as their
@@ -306,6 +328,7 @@ impl SpaceModel {
             worker_error: None,
             reconnecting: None,
             settled: HashSet::new(),
+            refused: Refused::default(),
             unattended: None,
             unheard: false,
             instructions: String::new(),
@@ -395,6 +418,8 @@ impl SpaceModel {
             .map(|permission| permission.id.as_str())
             .collect();
         let settled = std::mem::take(&mut self.settled);
+        // Those still listed are refused again below; any others were answered during the gap.
+        let refused = std::mem::take(&mut self.refused.ids);
         let listed: HashSet<&str> = listed
             .into_iter()
             .filter(|id| !settled.contains(*id))
@@ -424,6 +449,9 @@ impl SpaceModel {
             if !settled.contains(&question.id) {
                 self.apply(Event::QuestionAsked(question));
             }
+        }
+        if !refused.is_empty() {
+            self.clear_refusal();
         }
         if let Some(reason) = self.reconnecting.take()
             && self.error.as_deref() == Some(reason.as_str())
@@ -477,12 +505,37 @@ impl SpaceModel {
     /// The agent made a request, `what`, whose identifier is longer than any a client may name in a reply. Nobody
     /// could answer it here, and presenting it could exceed the snapshot budget, so it is not presented; the space says
     /// so instead. See `design/server.md`.
-    fn refuse_request(&mut self, what: &str) {
-        self.error = Some(format!(
+    fn refuse_request(&mut self, what: &str, id: &str) {
+        let refusal = format!(
             "The agent asked {what} with an identifier too long for Tomori to answer; answer it in the agent's own \
              interface."
-        ));
+        );
+        let hash = self.refused.hash(id);
+        self.refused.ids.insert(hash);
+        self.error = Some(refusal.clone());
+        self.refused.shown = Some(refusal);
         self.unattended_problem();
+    }
+
+    /// The agent reported the request `id` resolved: if it was refused, and was the last refused, its refusal no
+    /// longer applies.
+    fn resolve_refused(&mut self, id: &str) {
+        if !self.refused.ids.is_empty() {
+            let hash = self.refused.hash(id);
+            if self.refused.ids.remove(&hash) {
+                self.clear_refusal();
+            }
+        }
+    }
+
+    /// Clear the refusal shown, once no refused request remains and unless another error replaced it.
+    fn clear_refusal(&mut self) {
+        if self.refused.ids.is_empty()
+            && let Some(refusal) = self.refused.shown.take()
+            && self.error.as_deref() == Some(refusal.as_str())
+        {
+            self.error = None;
+        }
     }
 
     /// Something failed while nobody was in the space.
@@ -746,7 +799,7 @@ impl SpaceModel {
             Event::PermissionRequested(permission)
                 if permission.id.len() > limits::IDENTIFIER_BYTES =>
             {
-                self.refuse_request("for an approval");
+                self.refuse_request("for an approval", &permission.id);
             }
             Event::PermissionRequested(permission) => {
                 // Parallel tool calls produce several requests; each waits its turn.
@@ -762,9 +815,10 @@ impl SpaceModel {
             Event::PermissionResolved { id } => {
                 self.approvals.retain(|pending| pending.id != id);
                 self.deciding.retain(|pending| pending.id != id);
+                self.resolve_refused(&id);
             }
             Event::QuestionAsked(question) if question.id.len() > limits::IDENTIFIER_BYTES => {
-                self.refuse_request("a question");
+                self.refuse_request("a question", &question.id);
             }
             Event::QuestionAsked(question) => {
                 let known = self
@@ -782,6 +836,7 @@ impl SpaceModel {
             Event::QuestionResolved { id } => {
                 self.questions.retain(|pending| pending.question.id != id);
                 self.submitting.retain(|pending| pending.question.id != id);
+                self.resolve_refused(&id);
             }
             Event::WorkersChanged { workers } => {
                 self.workers = workers
@@ -1728,6 +1783,63 @@ mod tests {
         let mut space = space;
         space.apply(Event::PermissionResolved { id: longest });
         assert_eq!(space.attention(), Some(Attention::Problem));
+    }
+
+    #[test]
+    fn a_refusal_clears_once_the_agent_resolves_every_request_it_refused() {
+        let question = |id: &str| tomori_backend::Question {
+            id: id.into(),
+            title: id.into(),
+            fields: Vec::new(),
+        };
+        let approval = "a".repeat(limits::IDENTIFIER_BYTES + 1);
+        let asked = "q".repeat(limits::IDENTIFIER_BYTES + 1);
+        let refusal = |what: &str| {
+            format!(
+                "The agent asked {what} with an identifier too long for Tomori to answer; answer it in the agent's \
+                 own interface."
+            )
+        };
+        let error = |space: &SpaceModel| space.state(Vec::new()).error;
+        let mut space = model();
+        space.apply(Event::PermissionRequested(permission(&approval)));
+        space.apply(Event::QuestionAsked(question(&asked)));
+        assert_eq!(error(&space), Some(refusal("a question")));
+        // Resolving another request, or one of two refused, leaves the refusal.
+        space.apply(Event::PermissionResolved { id: "other".into() });
+        space.apply(Event::PermissionResolved {
+            id: approval.clone(),
+        });
+        assert_eq!(error(&space), Some(refusal("a question")));
+        // Once someone answers the last in the agent's own interface, nothing is left to answer there.
+        space.apply(Event::QuestionResolved { id: asked.clone() });
+        assert_eq!(error(&space), None);
+
+        // An error that replaced the refusal stays when the refused request is resolved.
+        space.apply(Event::PermissionRequested(permission(&approval)));
+        space.apply(Event::Error {
+            message: "The agent failed.".into(),
+        });
+        space.apply(Event::PermissionResolved {
+            id: approval.clone(),
+        });
+        assert_eq!(error(&space).as_deref(), Some("The agent failed."));
+
+        // Read again after a gap, a refused request still listed is refused again, and one answered during the gap
+        // no longer is.
+        let resynchronized = |permissions: Vec<Permission>| Event::Resynchronized {
+            snapshot: Snapshot {
+                busy: Some(false),
+                permissions,
+                ..Snapshot::default()
+            },
+        };
+        space.apply(Event::PermissionRequested(permission(&approval)));
+        space.apply(resynchronized(vec![permission(&approval)]));
+        assert_eq!(error(&space), Some(refusal("for an approval")));
+        assert!(space.approvals.is_empty());
+        space.apply(resynchronized(Vec::new()));
+        assert_eq!(error(&space), None);
     }
 
     #[test]
