@@ -124,11 +124,13 @@ impl Microphone {
         self.flush()?;
         let utterance = utterance.into();
         self.sender
-            .send(ClientMessage::Gate { gate: Gate::Agent })?;
-        self.sender.send(ClientMessage::UtteranceBegin {
-            utterance: utterance.clone(),
-            answer,
-        })?;
+            .send(ClientMessage::Gate { gate: Gate::Agent })
+            .and_then(|()| {
+                self.sender.send(ClientMessage::UtteranceBegin {
+                    utterance: utterance.clone(),
+                    answer,
+                })
+            })?;
         self.utterance = Some(utterance);
         Ok(())
     }
@@ -264,6 +266,16 @@ mod tests {
             .collect()
     }
 
+    fn audio(items: &[Item]) -> Vec<&AudioFrame> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Audio(frame) => Some(frame),
+                Item::Control(_) => None,
+            })
+            .collect()
+    }
+
     fn controls(items: &[Item]) -> Vec<ClientMessage> {
         items
             .iter()
@@ -299,11 +311,7 @@ mod tests {
         microphone.push(&[2; 320]).unwrap();
         let items = sent(sender.outbox());
         assert_eq!(frames(&items).len(), 1);
-        let Some(Item::Audio(frame)) = items.iter().find(|item| matches!(item, Item::Audio(_)))
-        else {
-            panic!("{items:?}")
-        };
-        assert!(frame.samples.iter().all(|sample| *sample == 2));
+        assert!(audio(&items)[0].samples.iter().all(|sample| *sample == 2));
     }
 
     #[test]
@@ -324,9 +332,7 @@ mod tests {
         let items = sent(sender.outbox());
         assert_eq!(controls(&items), [ClientMessage::Gate { gate: Gate::Live }]);
         assert_eq!(frames(&items), [(Gate::Live, 0, 320), (Gate::Live, 1, 320)]);
-        let Item::Audio(second) = &items[2] else {
-            panic!("{items:?}")
-        };
+        let second = audio(&items)[1];
         assert_eq!(second.timestamp, 20_000);
         assert_eq!(second.sample_rate, 16_000);
     }
@@ -389,14 +395,12 @@ mod tests {
             .iter()
             .position(|item| matches!(item, Item::Control(ClientMessage::UtteranceEnd { .. })))
             .unwrap();
-        assert!(matches!(items[end - 1], Item::Audio(_)));
-        let Item::Audio(first) = items
+        let last_audio = items
             .iter()
-            .find(|item| matches!(item, Item::Audio(_)))
-            .unwrap()
-        else {
-            unreachable!()
-        };
+            .rposition(|item| matches!(item, Item::Audio(_)))
+            .unwrap();
+        assert_eq!(last_audio, end - 1);
+        let first = audio(&items)[0];
         // The audio discarded while off still counts on the sender's clock.
         assert_eq!(first.timestamp, 100 * 1_000_000 / 16_000);
     }
@@ -513,11 +517,54 @@ mod tests {
         microphone.push_float(&[0.5, -2.0, 2.0]).unwrap();
         microphone.end().unwrap();
         let items = sent(sender.outbox());
-        let Some(Item::Audio(frame)) = items.iter().find(|item| matches!(item, Item::Audio(_)))
-        else {
-            panic!("{items:?}")
+        assert_eq!(audio(&items)[0].samples, [16_383, -32_767, 32_767]);
+    }
+
+    #[test]
+    fn unchanged_gates_and_missing_utterances_send_nothing() {
+        let (mut microphone, sender) = microphone();
+        // Agent audio is only sent within an utterance, so the agent gate is taken as live.
+        microphone.set_gate(Gate::Agent).unwrap();
+        assert_eq!(microphone.gate(), Gate::Live);
+        microphone.set_gate(Gate::Live).unwrap();
+        microphone.end().unwrap();
+        microphone.cancel().unwrap();
+        microphone.abandon().unwrap();
+        assert_eq!(
+            sent(sender.outbox()),
+            [Item::Control(ClientMessage::Gate { gate: Gate::Live })]
+        );
+    }
+
+    #[test]
+    fn every_change_fails_once_the_client_is_closed() {
+        // A microphone in `gate`, with an utterance open if asked, and samples short of a frame if asked, whose client then closes.
+        let closed = |gate: Gate, utterance: bool, pending: bool| {
+            let (mut microphone, sender) = microphone();
+            microphone.set_gate(gate).unwrap();
+            if utterance {
+                microphone.begin("u").unwrap();
+            }
+            if pending {
+                microphone.push(&[1; 100]).unwrap();
+            }
+            sender.outbox().close();
+            microphone
         };
-        assert_eq!(frame.samples, [16_383, -32_767, 32_767]);
+        let failed = |result: Result<(), SendError>| assert_eq!(result, Err(SendError::Closed));
+
+        // Pending samples are sent before each change, and fail first.
+        failed(closed(Gate::Live, false, true).set_gate(Gate::Off));
+        failed(closed(Gate::Live, false, true).begin("v"));
+        failed(closed(Gate::Live, true, true).end());
+        failed(closed(Gate::Live, false, false).push(&[1; 320]));
+        // Without them, the change's own messages fail.
+        failed(closed(Gate::Off, false, false).set_gate(Gate::Live));
+        failed(closed(Gate::Off, false, false).begin("v"));
+        failed(closed(Gate::Off, true, false).begin("v"));
+        failed(closed(Gate::Off, true, false).end());
+        failed(closed(Gate::Off, true, false).cancel());
+        failed(closed(Gate::Off, true, false).abandon());
     }
 
     #[test]

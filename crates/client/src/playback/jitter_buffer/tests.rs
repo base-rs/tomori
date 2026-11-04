@@ -256,3 +256,24 @@ fn applies_gain() {
     buffer.mix_into(&mut output, RATE, 0.5, &mut statistics);
     assert_eq!(output, [51.0; 4]);
 }
+
+#[test]
+fn an_empty_frame_does_not_shorten_concealment() {
+    let mut statistics = PlaybackStatistics::default();
+    let mut buffer = JitterBuffer::new(RATE, options());
+    buffer.push(frame(0, 1), &mut statistics);
+    buffer.push(
+        AudioFrame {
+            samples: Vec::new(),
+            ..frame(1, 0)
+        },
+        &mut statistics,
+    );
+    buffer.push(frame(3, 3), &mut statistics);
+    // The missing frame 2 is concealed with as much silence as the last frame that had samples.
+    assert_eq!(
+        pull(&mut buffer, 12, &mut statistics),
+        [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 3.0, 3.0]
+    );
+    assert_eq!(statistics.concealed_frames, 1);
+}

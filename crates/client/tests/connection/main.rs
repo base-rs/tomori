@@ -300,20 +300,17 @@ fn retries_until_the_server_is_listening() {
     // Sent while disconnected: delivered once connected.
     client.send(join("beta")).unwrap();
     client.send(ClientMessage::ListSpaces).unwrap();
-    assert!(matches!(
-        wait_disconnected(&client),
-        Disconnect::Transport(_)
-    ));
-    let attempt = wait_for(&client, |event| {
+    let reason = wait_disconnected(&client);
+    assert!(
+        reason.to_string().starts_with("connection failed: "),
+        "{reason}"
+    );
+    wait_for(&client, |event| {
         matches!(
             event,
             Event::State(ConnectionState::Connecting { attempt }) if *attempt > 1
         )
     });
-    assert!(matches!(
-        attempt,
-        Event::State(ConnectionState::Connecting { .. })
-    ));
 
     let server = MiniServer::start(address, Mode::Normal);
     wait_connected(&client);
@@ -426,10 +423,38 @@ fn requires_welcome_first_and_only_once() {
     );
 
     let (reason, _) = raw_disconnect(Some(raw::message(&ServerMessage::Left)), TIMEOUT);
-    assert!(matches!(reason, Disconnect::Protocol(error) if error.starts_with("expected welcome")));
+    assert_eq!(
+        reason,
+        Disconnect::Protocol("expected welcome, received Left".into())
+    );
 
     let (reason, _) = raw_disconnect(Some(raw::chunk(b"not a frame")), TIMEOUT);
-    assert!(matches!(reason, Disconnect::Protocol(_)));
+    assert_eq!(
+        reason,
+        Disconnect::Protocol(format!("unknown frame kind {}", b'n'))
+    );
+
+    // A first control frame that is not a message.
+    let (reason, connected) = raw_disconnect(Some(raw::control(b"{")), TIMEOUT);
+    assert!(
+        reason
+            .to_string()
+            .starts_with("protocol error: invalid control message"),
+        "{reason}"
+    );
+    assert!(!connected);
+
+    // A later one.
+    let mut body = raw::welcome();
+    body.extend(raw::control(b"{"));
+    let (reason, connected) = raw_disconnect(Some(body), TIMEOUT);
+    assert!(
+        reason
+            .to_string()
+            .starts_with("protocol error: invalid control message"),
+        "{reason}"
+    );
+    assert!(connected);
 
     let mut twice = raw::welcome();
     twice.extend(raw::welcome());
@@ -455,13 +480,52 @@ fn reports_how_the_response_ended() {
     body.extend(raw::chunk(&[0, 9, 0, 0, 0, b'{']));
     body.extend(b"0\r\n\r\n");
     let (reason, _) = raw_disconnect(Some(body), TIMEOUT);
-    assert!(matches!(reason, Disconnect::Protocol(error) if error.contains("inside a frame")));
+    assert_eq!(
+        reason,
+        Disconnect::Protocol("connection ended inside a frame".into())
+    );
 
     // So is a malformed audio frame.
     let mut body = raw::welcome();
     body.extend(raw::chunk(&[1, 1, 0, 0, 0, 0]));
     let (reason, _) = raw_disconnect(Some(body), TIMEOUT);
-    assert!(matches!(reason, Disconnect::Protocol(error) if error.contains("audio")));
+    assert_eq!(
+        reason,
+        Disconnect::Protocol("invalid audio frame: header is truncated".into())
+    );
+}
+
+#[test]
+fn reports_the_servers_utterance_limit() {
+    let address = raw::start(Some(raw::welcome_limiting(Some(300))));
+    let client = Client::connect(options(address)).unwrap();
+    let connected = wait_for(&client, |event| {
+        matches!(event, Event::State(ConnectionState::Connected { .. }))
+    });
+    let Event::State(ConnectionState::Connected {
+        utterance_limit, ..
+    }) = connected
+    else {
+        unreachable!("wait_for returns a connected state")
+    };
+    assert_eq!(utterance_limit, Some(Duration::from_secs(300)));
+}
+
+#[test]
+fn asks_to_pair_only_when_told_to() {
+    for pairing in [false, true] {
+        let (address, heads) = raw::start_recording(Some(raw::welcome()));
+        let mut options = options(address);
+        options.pairing = pairing;
+        let client = Client::connect(options).unwrap();
+        wait_connected(&client);
+        let head = String::from_utf8(heads.recv_timeout(TIMEOUT).unwrap()).unwrap();
+        assert_eq!(
+            head.to_ascii_lowercase().contains("tomori-pairing: 1\r\n"),
+            pairing,
+            "{head}"
+        );
+    }
 }
 
 fn keepalive(interval: u64, timeout: u64) -> Keepalive {
@@ -533,7 +597,13 @@ fn reports_unresolvable_addresses() {
     let mut options = options(localhost());
     options.address = "invalid host name:1".into();
     let client = Client::connect(options).unwrap();
-    assert!(matches!(wait_disconnected(&client), Disconnect::Address(_)));
+    let reason = wait_disconnected(&client);
+    assert!(
+        reason
+            .to_string()
+            .starts_with("cannot resolve the server address: "),
+        "{reason}"
+    );
 }
 
 #[test]

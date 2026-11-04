@@ -221,10 +221,13 @@ fn batches_respect_the_size_limit() {
         outbox.send_audio(audio(sequence)).unwrap();
     }
     let frame_size = Frame::audio(&audio(0)).encode().len();
-    let Poll::Ready(Batch::Frames(bytes)) = poll(&outbox, frame_size + 1) else {
-        panic!("expected frames");
-    };
-    assert_eq!(bytes.len(), frame_size * 2);
+    // A batch stops at the first frame that takes it past the limit.
+    let mut expected = Frame::audio(&audio(0)).encode();
+    Frame::audio(&audio(1)).encode_into(&mut expected);
+    assert_eq!(
+        poll(&outbox, frame_size + 1),
+        Poll::Ready(Batch::Frames(expected))
+    );
     assert_eq!(items(&outbox), [Item::Audio(2), Item::Audio(3)]);
 }
 
@@ -238,10 +241,12 @@ fn waits_and_wakes_when_traffic_arrives() {
     assert!(outbox.poll_batch(&mut context, 1024).is_pending());
     outbox.send(ClientMessage::ListSpaces).unwrap();
     assert_eq!(counter.0.load(Ordering::SeqCst), 1);
-    assert!(matches!(
+    assert_eq!(
         outbox.poll_batch(&mut context, 1024),
-        Poll::Ready(Batch::Frames(_))
-    ));
+        Poll::Ready(Batch::Frames(
+            Frame::client(&ClientMessage::ListSpaces).encode()
+        ))
+    );
 }
 
 #[test]
@@ -381,8 +386,10 @@ fn membership_follows_the_server_unless_a_change_is_queued() {
     outbox.joined(Some("a".into()));
     assert_eq!(outbox.membership().space.as_deref(), Some("a"));
 
-    // The server left the space on the client's behalf, so a reconnection does not rejoin it.
+    // The server left the space on the client's behalf, so a reconnection does not rejoin it. Other queued messages do not stand in the way.
+    outbox.send(ClientMessage::ListSpaces).unwrap();
     outbox.joined(None);
+    assert_eq!(outbox.membership().space, None);
     outbox.disconnect();
     assert!(outbox.connect().is_empty());
 }
@@ -391,7 +398,7 @@ fn membership_follows_the_server_unless_a_change_is_queued() {
 fn keepalive_precedes_queued_traffic_and_is_not_deferred() {
     let outbox = Outbox::new(16, 64);
     // Keepalive belongs to one connection: nothing is kept while disconnected.
-    outbox.keepalive(ClientMessage::Ping { nonce: 0 });
+    outbox.ping(0);
     outbox.connect();
     assert!(poll(&outbox, 1024).is_pending());
 
@@ -399,27 +406,14 @@ fn keepalive_precedes_queued_traffic_and_is_not_deferred() {
         outbox.send_audio(audio(sequence)).unwrap();
     }
     outbox.send(answer("a")).unwrap();
-    outbox.keepalive(ClientMessage::Pong { nonce: 1 });
-    outbox.keepalive(ClientMessage::Ping { nonce: 2 });
+    outbox.pong(1);
+    outbox.ping(2);
     // Even a batch limit smaller than one frame carries every keepalive message, first.
-    let Poll::Ready(Batch::Frames(bytes)) = poll(&outbox, 1) else {
-        panic!("expected frames");
-    };
-    let mut decoder = FrameDecoder::new();
-    decoder.push(&bytes);
-    let mut messages = Vec::new();
-    while let Some(frame) = decoder.next_frame().unwrap() {
-        messages.push(frame.to_client_message().unwrap());
-    }
-    assert_eq!(
-        messages,
-        [
-            ClientMessage::Pong { nonce: 1 },
-            ClientMessage::Ping { nonce: 2 }
-        ]
-    );
+    let mut expected = Frame::client(&ClientMessage::Pong { nonce: 1 }).encode();
+    Frame::client(&ClientMessage::Ping { nonce: 2 }).encode_into(&mut expected);
+    assert_eq!(poll(&outbox, 1), Poll::Ready(Batch::Frames(expected)));
 
-    outbox.keepalive(ClientMessage::Ping { nonce: 3 });
+    outbox.ping(3);
     outbox.disconnect();
     outbox.connect();
     assert_eq!(items(&outbox), [Item::Control(answer("a"))]);
@@ -679,4 +673,55 @@ fn utterances_interrupted_by_disconnection_fail_visibly() {
     outbox.send(end("d")).unwrap();
     items(&outbox);
     assert!(outbox.disconnect().is_empty());
+}
+
+#[test]
+fn utterance_failures_say_why() {
+    assert_eq!(
+        UtteranceFailure::Disconnected.to_string(),
+        "the connection to the server was lost"
+    );
+    assert_eq!(
+        UtteranceFailure::Congested.to_string(),
+        "the connection was too slow to send the recording"
+    );
+}
+
+#[test]
+fn turning_an_opted_in_microphone_off_needs_a_new_activation() {
+    let outbox = Outbox::new(16, 64);
+    outbox.require_microphone_rearm();
+    outbox.connect();
+    assert!(outbox.arm_microphone(outbox.connection_generation()));
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    outbox.send_audio(audio(1)).unwrap();
+    assert_eq!(
+        items(&outbox),
+        [
+            Item::Control(ClientMessage::Gate { gate: Gate::Live }),
+            Item::Audio(1)
+        ]
+    );
+
+    // Turning the gate off disarms the microphone, so turning it on again sends nothing until the application activates it.
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Off })
+        .unwrap();
+    outbox
+        .send(ClientMessage::Gate { gate: Gate::Live })
+        .unwrap();
+    outbox.send_audio(audio(2)).unwrap();
+    assert_eq!(
+        items(&outbox),
+        [
+            Item::Control(ClientMessage::Gate { gate: Gate::Off }),
+            Item::Control(ClientMessage::Gate { gate: Gate::Live }),
+        ]
+    );
+    assert_eq!(outbox.dropped_audio(), 1);
+    assert!(outbox.arm_microphone(outbox.connection_generation()));
+    outbox.send_audio(audio(3)).unwrap();
+    assert_eq!(items(&outbox), [Item::Audio(3)]);
 }

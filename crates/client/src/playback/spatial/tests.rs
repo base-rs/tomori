@@ -174,7 +174,8 @@ fn rendering_delays_the_far_ear_by_the_interaural_delay() {
     };
     assert_eq!(peak(&left), 0);
     // 0.6 ms at 48 kHz is 28.8 samples, between two taps.
-    assert!((28..=30).contains(&peak(&right)), "{}", peak(&right));
+    let delayed = peak(&right);
+    assert!((28..=30).contains(&delayed), "{delayed}");
     let energy = |channel: &[f32]| channel.iter().map(|sample| sample * sample).sum::<f32>();
     assert!(energy(&left) > energy(&right));
 }
@@ -237,4 +238,12 @@ fn mono_rendering_glides_its_gain() {
     let mut output = vec![0.0; 4];
     fresh.render_mono(&[1.0; 4], Placement::CENTRE, (1.0, 0.5), &mut output);
     assert_eq!(output, [0.875, 0.75, 0.625, 0.5]);
+}
+
+#[test]
+fn a_source_at_no_finite_distance_is_centred_at_full_gain() {
+    for source in [at(f32::INFINITY, 0.0), at(f32::NAN, 0.0)] {
+        let placement = place(&listener(), source, PERSON_FLOOR, RATE, false);
+        assert_eq!(placement, Placement::CENTRE);
+    }
 }
