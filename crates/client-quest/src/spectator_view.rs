@@ -30,9 +30,7 @@ impl SpectatorView {
     pub fn render(&mut self, input: RenderInputs<'_>) {
         let frame = self.feed.poll(input.aspect);
         input.renderer.set_environment(frame.environment);
-        if input.swarm.agents.len() != frame.agents.len() {
-            *input.swarm = Swarm::new();
-        }
+        // The feed animates a swarm as large as the renderer's.
         for (agent, position) in input.swarm.agents.iter_mut().zip(&frame.agents) {
             agent.position = Vec3::from_array(*position);
         }
