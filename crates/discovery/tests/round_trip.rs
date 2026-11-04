@@ -3,7 +3,7 @@
 
 //! Advertise and browse in one process over real multicast DNS.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use tomori_discovery::{Counts, Event, advertise, browse};
@@ -110,4 +110,63 @@ fn browsers_see_updated_counts() {
             "the update to {spaces} spaces and {participants} participants was not seen"
         );
     }
+}
+
+/// Advertise on the loopback interface and browse for it in the same process. Nothing is advertised beyond this computer, though browsing still hears the servers on the network, which the tests pass over.
+#[test]
+fn finds_a_server_advertised_on_loopback_with_its_counts_and_loses_it_when_withdrawn() {
+    let instance = format!("Loopback {}", std::process::id());
+    let browser = browse().expect("browse");
+    let fingerprint = "ab".repeat(32);
+    let advertisement = advertise(
+        &instance,
+        48767,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Counts::default(),
+        Some(fingerprint.clone()),
+    )
+    .expect("advertise");
+    assert_eq!(advertisement.instance(), instance);
+    assert!(format!("{advertisement:?}").starts_with("Advertisement"));
+
+    let found = wait_for(
+        &browser,
+        Duration::from_secs(15),
+        |event| matches!(event, Event::Found(server) if server.instance == instance),
+    );
+    let Some(Event::Found(server)) = found else {
+        unreachable!("wait_for returns only the event it waits for, or None")
+    };
+    assert_eq!(server.name, instance);
+    assert_eq!(
+        server.addresses,
+        [SocketAddr::from(([127, 0, 0, 1], 48767))]
+    );
+    assert_eq!(server.protocol, Some(PROTOCOL_VERSION));
+    assert_eq!(server.fingerprint, Some(fingerprint));
+    assert_eq!((server.spaces, server.participants), (Some(0), Some(0)));
+
+    // Spaced as the server spaces its updates, so that browsers flush the previous record.
+    std::thread::sleep(Duration::from_secs(2));
+    advertisement
+        .update(Counts {
+            spaces: 1,
+            participants: 2,
+            attention: None,
+        })
+        .expect("update");
+    let updated = wait_for(
+        &browser,
+        Duration::from_secs(10),
+        |event| matches!(event, Event::Found(server) if server.instance == instance && server.participants == Some(2)),
+    );
+    assert!(updated.is_some(), "the update was not seen");
+
+    drop(advertisement);
+    let lost = wait_for(
+        &browser,
+        Duration::from_secs(10),
+        |event| matches!(event, Event::Lost { instance: lost } if *lost == instance),
+    );
+    assert!(lost.is_some(), "the withdrawn server was not lost");
 }
