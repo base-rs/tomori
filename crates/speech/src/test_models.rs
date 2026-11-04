@@ -32,6 +32,34 @@ fn root_from(root: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
+/// Run `test` if every one of `paths`, the files or directories of `model`, exists; see [`installed`].
+///
+/// # Panics
+///
+/// If a path is missing while [`REQUIRE_MODELS`] is set.
+pub fn with(model: &str, fetch: &str, paths: &[&Path], test: impl FnOnce()) {
+    with_required(
+        model,
+        fetch,
+        paths,
+        std::env::var(REQUIRE_MODELS).ok().as_deref(),
+        test,
+    );
+}
+
+/// [`with`], with the value of [`REQUIRE_MODELS`] given as `required`.
+fn with_required(
+    model: &str,
+    fetch: &str,
+    paths: &[&Path],
+    required: Option<&str>,
+    test: impl FnOnce(),
+) {
+    if installed_with(model, fetch, paths, required) {
+        test();
+    }
+}
+
 /// Whether every one of `paths`, the files or directories of `model`, which names the models the calling test needs, exists. If not, says that the test is skipped and that `fetch` fetches the models, or fails it if [`REQUIRE_MODELS`] is set.
 ///
 /// # Panics
@@ -95,6 +123,21 @@ mod tests {
                 required
             ));
         }
+    }
+
+    #[test]
+    fn runs_a_test_only_with_its_models() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut ran = false;
+        with_required("this crate", "git", &[manifest], Some("1"), || ran = true);
+        assert!(ran);
+        with_required(
+            "a model",
+            "git",
+            &[Path::new("/nonexistent/model")],
+            None,
+            || unreachable!("the model is missing"),
+        );
     }
 
     #[test]

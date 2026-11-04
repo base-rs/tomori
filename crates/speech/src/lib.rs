@@ -13,8 +13,8 @@ mod error;
 pub mod speakable;
 mod stop;
 pub mod stt;
-#[cfg(test)]
-mod test_models;
+#[cfg(any(test, feature = "test-models"))]
+pub mod test_models;
 pub mod tts;
 
 /// The Markdown parser whose events [`Block`] carries.
