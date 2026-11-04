@@ -843,7 +843,8 @@ impl Registration {
         self.install_workers(&mut snapshot.workers)?;
         if opening {
             let held = std::mem::take(&mut self.opening.events);
-            let recorded = recorded_text(snapshot, &held);
+            let recorded =
+                recorded_text(snapshot, &held, self.opening.mark.load(Ordering::Acquire));
             let held: Vec<Event> = held
                 .into_iter()
                 .enumerate()
@@ -1883,6 +1884,7 @@ async fn connected<S: Timers>(
             was_held,
             registrations,
             &mut snapshots,
+            sequence,
             client,
             resolved,
             cancellation,
@@ -1971,6 +1973,7 @@ fn finish_snapshot(registrations: &mut HashMap<String, Registration>, completed:
 fn schedule_snapshot<'a, S: Timers>(
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
+    sequence: &Arc<AtomicU64>,
     id: String,
     identity: &Arc<AtomicU64>,
     reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
@@ -2009,6 +2012,11 @@ fn schedule_snapshot<'a, S: Timers>(
     registration.snapshot_deletions_overflow = false;
     let identity = registration.events.worker_epoch.clone();
     let modes = registration.modes.clone();
+    // Which of the events held for the initial snapshot its listing must
+    // already reflect.
+    registration.opening.mark = Arc::new(AtomicU64::new(0));
+    let mark = registration.opening.mark.clone();
+    let sequence = sequence.clone();
     snapshots.push(Box::pin(async move {
         let result = bounded_snapshot(
             client,
@@ -2018,7 +2026,7 @@ fn schedule_snapshot<'a, S: Timers>(
             &local,
             cancellation,
             timers,
-            || {},
+            move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
         )
         .await;
         SnapshotResult {
@@ -2402,47 +2410,67 @@ fn shown(snapshot: &Snapshot, event: &Event) -> bool {
 
 /// The places in `held` of the text deltas whose text `snapshot` already
 /// records for a message it lists still being written. OpenCode records a
-/// message's text when the text ends, before the message itself completes,
-/// as when a tool follows it, while text still streaming is in no record. So
-/// of a message's held deltas, those whose text, run together from the first,
-/// ends its recorded text are shown; the deltas after them are not.
-fn recorded_text(snapshot: &Snapshot, held: &[(u64, Event)]) -> HashSet<usize> {
+/// message's text when the text ends, before the message itself completes, as
+/// when a tool follows it, while text still streaming is in no record. So a
+/// part of a message's text, held up to the end reported for it, is shown if
+/// that end was reported before the listing was requested, the `mark`th event,
+/// and the parts so ended match the last the snapshot records with text: each
+/// exactly, except that the first may have started before the session was
+/// registered, unless the message's start was held, so only its end was. Any
+/// doubt keeps the text, which may then repeat but is never lost.
+fn recorded_text(snapshot: &Snapshot, held: &[(u64, Event)], mark: u64) -> HashSet<usize> {
     let mut recorded = HashSet::new();
     for message in snapshot
         .messages
         .iter()
         .filter(|message| !message.completed)
     {
-        let text: String = message
+        let parts: Vec<&str> = message
             .parts
             .iter()
             .filter_map(|part| match part {
-                tomori_backend::Part::Text { text } => Some(text.as_str()),
+                tomori_backend::Part::Text { text } if !text.is_empty() => Some(text.as_str()),
                 _ => None,
             })
             .collect();
-        if text.is_empty() {
-            continue;
-        }
-        let deltas: Vec<(usize, &str)> = held
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (_, event))| match event {
+        let mut started = false;
+        // The ended parts' deltas and text, in order.
+        let mut ended: Vec<(Vec<usize>, String)> = Vec::new();
+        let mut current = (Vec::new(), String::new());
+        for (index, (sequence, event)) in held.iter().enumerate() {
+            match event {
+                Event::MessageStarted { message: id, .. } if *id == message.id => started = true,
                 Event::TextDelta { message: id, text } if *id == message.id => {
-                    Some((index, text.as_str()))
+                    current.0.push(index);
+                    current.1.push_str(text);
                 }
-                _ => None,
-            })
-            .collect();
-        let mut joined = String::new();
-        let mut shown = 0;
-        for (count, (_, delta)) in deltas.iter().enumerate() {
-            joined.push_str(delta);
-            if text.ends_with(&joined) {
-                shown = count + 1;
+                Event::MessageCompleted { message: id } if *id == message.id => {
+                    if *sequence > mark {
+                        break;
+                    }
+                    ended.push(std::mem::take(&mut current));
+                }
+                _ => {}
             }
         }
-        recorded.extend(deltas[..shown].iter().map(|(index, _)| *index));
+        let Some(first) = parts.len().checked_sub(ended.len()) else {
+            continue;
+        };
+        let shown =
+            ended
+                .iter()
+                .zip(&parts[first..])
+                .enumerate()
+                .all(|(place, ((_, text), part))| {
+                    if place == 0 && !started {
+                        part.ends_with(text.as_str())
+                    } else {
+                        part == text
+                    }
+                });
+        if shown {
+            recorded.extend(ended.into_iter().flat_map(|(indices, _)| indices));
+        }
     }
     recorded
 }
@@ -3013,6 +3041,7 @@ fn prepare_command<'a, S: Timers>(
     held: bool,
     registrations: &mut HashMap<String, Registration>,
     snapshots: &mut SnapshotFutures<'a>,
+    sequence: &Arc<AtomicU64>,
     client: &'a Client<'_>,
     resolved: &'a Resolved,
     cancellation: &'a Cancellation,
@@ -3037,6 +3066,7 @@ fn prepare_command<'a, S: Timers>(
             schedule_snapshot(
                 registrations,
                 snapshots,
+                sequence,
                 id,
                 &identity,
                 reply,
@@ -7774,7 +7804,6 @@ mod tests {
                     {"id":"done","type":"assistant","time":{"created":1,"completed":2},"content":[{"type":"text","text":"Finished."}]},
                 ]),
             );
-            state.stalled.insert("attached".into());
         });
         let service = FakeService::start(shared.clone(), "secret");
         let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
@@ -7788,11 +7817,19 @@ mod tests {
         }))
         .unwrap();
         let watched = watch(&events);
+        // The read waits for the session's record, before it asks for the
+        // messages, while the events arrive.
+        shared.update(|state| {
+            state.stalled_records.insert("attached".into());
+        });
         let reading = {
             let commands = commands.clone();
             let events = events.clone();
             in_thread(move || read_snapshot(&commands, "attached", &events))
         };
+        wait_for(&shared, "the read never started", |state| {
+            state.record_requests == 1
+        });
         let event = |kind: &str, data: Value| {
             let mut data = data;
             data["sessionID"] = json!("attached");
@@ -7847,7 +7884,7 @@ mod tests {
             matches!(event, Event::Busy)
         });
         shared.update(|state| {
-            state.stalled.remove("attached");
+            state.stalled_records.remove("attached");
         });
         let (snapshot, _) = reading.recv_timeout(Duration::from_secs(5)).unwrap();
         let snapshot = snapshot.unwrap();
@@ -8117,5 +8154,81 @@ mod tests {
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);
         drop(service);
+    }
+
+    /// Of a message listed still being written, only text whose end was
+    /// reported before its listing was requested, and which the listing
+    /// records part for part, is taken as shown.
+    #[test]
+    fn only_text_the_listing_records_is_taken_as_shown() {
+        let listed = |parts: &[&str]| Snapshot {
+            messages: vec![tomori_backend::SnapshotMessage {
+                id: "m".into(),
+                role: tomori_backend::Role::Assistant,
+                parts: parts
+                    .iter()
+                    .map(|text| tomori_backend::Part::Text {
+                        text: (*text).to_owned(),
+                    })
+                    .collect(),
+                completed: false,
+            }],
+            ..Snapshot::default()
+        };
+        let started = |sequence| {
+            (
+                sequence,
+                Event::MessageStarted {
+                    message: "m".into(),
+                    role: tomori_backend::Role::Assistant,
+                },
+            )
+        };
+        let delta = |sequence, text: &str| {
+            (
+                sequence,
+                Event::TextDelta {
+                    message: "m".into(),
+                    text: text.into(),
+                },
+            )
+        };
+        let ended = |sequence| {
+            (
+                sequence,
+                Event::MessageCompleted {
+                    message: "m".into(),
+                },
+            )
+        };
+        let shown = |snapshot: &Snapshot, held: &[(u64, Event)], mark| {
+            let mut places: Vec<_> = recorded_text(snapshot, held, mark).into_iter().collect();
+            places.sort();
+            places
+        };
+        // A part that ended after the listing was requested is kept, though
+        // an earlier part ends with the same text.
+        let held = [delta(5, "."), ended(6)];
+        assert!(shown(&listed(&["Done.", ""]), &held, 4).is_empty());
+        // Ended before, it is the latest part recorded, of which its text may
+        // be the end when the message started before registration.
+        assert_eq!(shown(&listed(&["Done."]), &held, 6), [0]);
+        // A message whose start was held had all its text held, so its
+        // recorded part must be exactly that text.
+        let held = [started(1), delta(2, "ing."), ended(3)];
+        assert!(shown(&listed(&["Looking."]), &held, 3).is_empty());
+        // Several parts are matched in order, and text still streaming is kept.
+        let held = [
+            started(1),
+            delta(2, "A"),
+            ended(3),
+            delta(4, "B"),
+            ended(5),
+            delta(6, "C"),
+        ];
+        assert_eq!(shown(&listed(&["A", "B", ""]), &held, 5), [1, 3]);
+        assert!(shown(&listed(&["A", "X", ""]), &held, 5).is_empty());
+        // More ended parts than are recorded: the record is not yet complete.
+        assert!(shown(&listed(&["B"]), &held, 5).is_empty());
     }
 }
