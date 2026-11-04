@@ -86,6 +86,11 @@ pub fn truncate(text: &str, limit: usize) -> String {
     format!("{}{TRUNCATED}", &text[..end])
 }
 
+/// The bytes taking `item` out of a JSON list saves, with the comma before or after it unless it was the last.
+fn removed<T: serde::Serialize>(item: &T, left: usize) -> usize {
+    json_len(item) + usize::from(left > 0)
+}
+
 /// The length of `value` as JSON.
 fn json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
     serde_json::to_vec(value).map_or(usize::MAX, |json| json.len())
@@ -131,7 +136,7 @@ pub fn fit_state(state: &mut SpaceState) {
     // The oldest messages first, keeping the newest.
     while size > SNAPSHOT_BUDGET && state.messages.len() > 1 {
         let message = state.messages.remove(0);
-        size -= json_len(&message) + 1;
+        size -= removed(&message, state.messages.len());
     }
     for message in &mut state.messages {
         if size <= SNAPSHOT_BUDGET {
@@ -149,7 +154,7 @@ pub fn fit_state(state: &mut SpaceState) {
         })
     {
         let entry = state.queue.remove(index);
-        size -= json_len(&entry) + 1;
+        size -= removed(&entry, state.queue.len());
     }
     // Then text written by the agent, which a malicious or broken agent could make arbitrarily long.
     let mut texts: Vec<&mut String> = Vec::new();
@@ -183,7 +188,7 @@ pub fn fit_state(state: &mut SpaceState) {
             marked_worker_truncation = true;
         }
         let worker = state.workers.remove(0);
-        size -= json_len(&worker) + 1;
+        size -= removed(&worker, state.workers.len());
     }
 }
 
@@ -223,7 +228,7 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
             .or_else(|| quiet(false))
             .unwrap_or_else(|| least_urgent(spaces));
         let space = spaces.remove(index);
-        size -= json_len(&space) + 1;
+        size -= removed(&space, spaces.len());
     }
 }
 
@@ -438,5 +443,33 @@ mod tests {
         assert!(json_len(&state) <= SNAPSHOT_BUDGET);
         assert_eq!(state.messages[0].text, "Done.");
         assert!(state.error.unwrap().ends_with(TRUNCATED));
+    }
+    #[test]
+    fn a_list_emptied_to_fit_leaves_the_snapshot_within_its_budget() {
+        let entry = |id: usize| tomori_protocol::QueueEntry {
+            id: format!("q{id}"),
+            source: 1,
+            speaker: "Ada".into(),
+            text: "x".repeat(200),
+            state: tomori_protocol::QueueState::Delivered,
+        };
+        let mut state = SpaceState {
+            messages: vec![message(0, "Done.".into())],
+            queue: (0..1000).map(entry).collect(),
+            approval: Some(tomori_protocol::Approval {
+                id: "request-1".into(),
+                title: "Bash".into(),
+                text: "y".repeat(SNAPSHOT_BUDGET),
+                options: Vec::new(),
+            }),
+            ..SpaceState::default()
+        };
+        fit_state(&mut state);
+        assert!(json_len(&state) <= SNAPSHOT_BUDGET);
+        assert!(state.queue.is_empty());
+        let approval = state.approval.unwrap();
+        assert!(approval.text.ends_with(TRUNCATED));
+        // Cut enough by the text, the title is kept.
+        assert_eq!(approval.title, "Bash");
     }
 }
