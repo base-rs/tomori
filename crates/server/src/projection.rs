@@ -536,4 +536,49 @@ mod tests {
             .collect();
         assert_eq!(ids, ["make", "extra-0", "extra-1", "extra-2"]);
     }
+
+    #[test]
+    fn an_option_that_grants_nothing_reads_as_yes() {
+        assert_eq!(grant_label(&[]), "Yes");
+    }
+
+    #[test]
+    fn tool_input_is_summarized_by_its_kind() {
+        let summary = |input: serde_json::Value| input_summary(&input);
+        assert_eq!(summary(serde_json::json!("ls -la")), "ls -la");
+        assert_eq!(summary(serde_json::json!({"depth": 2})), r#"{"depth":2}"#);
+        assert_eq!(summary(serde_json::json!(42)), "42");
+        let long = summary(serde_json::json!("x".repeat(INPUT_SUMMARY_LIMIT + 1)));
+        assert_eq!(long.chars().count(), INPUT_SUMMARY_LIMIT + 1);
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn a_field_without_a_title_is_named_by_its_key_and_options_by_their_descriptions() {
+        let mut asked = field(FieldKind::Choice, false);
+        asked.title = String::new();
+        asked.options[0].description = Some("Warm.".into());
+        let shown = question(
+            &Question {
+                id: "q".into(),
+                title: "Which?".into(),
+                fields: vec![asked],
+            },
+            &[],
+        );
+        assert!(shown.text.starts_with("1/1: colour\n"), "{}", shown.text);
+        assert!(shown.text.contains("1. Red: Warm.\n"), "{}", shown.text);
+    }
+
+    #[test]
+    fn several_choices_must_all_be_offered_and_name_one_at_least() {
+        let choices = field(FieldKind::MultipleChoice, false);
+        assert_eq!(
+            answer_value(&choices, "red and green"),
+            Err(OPTION_ERROR.to_owned())
+        );
+        assert_eq!(answer_value(&choices, "and"), Err(OPTION_ERROR.to_owned()));
+        // "and" within a word does not split it.
+        assert_eq!(split_list("android and red"), ["android", "red"]);
+    }
 }
