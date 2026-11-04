@@ -246,7 +246,8 @@ pub fn parse(source: &str) -> Vec<Block> {
             EventKind::TaskMarker(done) => {
                 builder.push(if done { "[x]" } else { "[ ]" }, Inline::Plain)
             }
-            EventKind::Html { value, .. } | EventKind::Math(value) => {
+            // GitHub's Markdown, which this parses, has no math.
+            EventKind::Html { value, .. } => {
                 let value = value.resolve(source).unwrap_or_default().to_owned();
                 builder.push(&value, Inline::Plain);
             }
@@ -363,6 +364,14 @@ mod tests {
                 (item(Some("•")), String::new()),
                 (item(Some("•")), "after".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn raw_html_on_its_own_is_a_paragraph_and_an_empty_heading_is_left_out() {
+        assert_eq!(
+            plain(&parse("<div>raw</div>\n\n#\n")),
+            [(Kind::Paragraph, "<div>raw</div>".into())]
         );
     }
 

@@ -213,12 +213,8 @@ impl Controllers {
             include_bytes!("../assets/controllers/quest-touch-plus-right.glb"),
         ];
         let meshes = std::array::from_fn(|hand| {
-            let model = controller::parse_glb(bundled[hand]).unwrap_or_else(|error| {
-                log::warn!(
-                    "Could not load bundled controller model: {error:#}; using fallback geometry"
-                );
-                fallback(hand)
-            });
+            let model = controller::parse_glb(bundled[hand])
+                .expect("the bundled controller models parse, as their test checks");
             Mesh::new(device, queue, &model, &texture_layout, &sampler)
         });
         let bone_mesh = Mesh::new(device, queue, &fallback_bone(), &texture_layout, &sampler);
@@ -326,39 +322,6 @@ fn bone_transform(a: hands::Joint, b: hands::Joint) -> Option<Mat4> {
 fn fallback_bone() -> Model {
     let mut vertices = Vec::new();
     append_box(&mut vertices, Vec3::ZERO, Vec3::ONE, [0.68, 0.62, 0.54]);
-    let count = vertices.len() as u32;
-    Model {
-        vertices,
-        parts: vec![Part {
-            start: 0,
-            count,
-            texture: None,
-        }],
-        textures: Vec::new(),
-    }
-}
-
-fn fallback(hand: usize) -> Model {
-    let mut vertices = Vec::new();
-    let side = if hand == 0 { -1.0 } else { 1.0 };
-    append_box(
-        &mut vertices,
-        Vec3::new(0.0, -0.035, 0.015),
-        Vec3::new(0.035, 0.09, 0.035),
-        [0.35, 0.4, 0.55],
-    );
-    append_box(
-        &mut vertices,
-        Vec3::new(0.0, 0.012, -0.01),
-        Vec3::new(0.055, 0.035, 0.07),
-        [0.48, 0.54, 0.65],
-    );
-    append_box(
-        &mut vertices,
-        Vec3::new(side * 0.018, 0.03, -0.025),
-        Vec3::new(0.014, 0.008, 0.014),
-        [0.15, 0.18, 0.23],
-    );
     let count = vertices.len() as u32;
     Model {
         vertices,
