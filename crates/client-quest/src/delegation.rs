@@ -552,7 +552,9 @@ impl Scene {
             let mut observed = BTreeSet::new();
             for node in &workspace.nodes {
                 // Only accept partial nodes whose observed parent chain reaches
-                // this root. Stale projections are never merged at all.
+                // this root, through this projection or through workers this
+                // root already shows, such as a parent the projection left out.
+                // Stale projections are never merged at all.
                 let mut parent = node.parent_id.as_deref();
                 let mut reaches_root = false;
                 for _ in 0..MAX_NODES {
@@ -562,9 +564,14 @@ impl Scene {
                             break;
                         }
                         Some(id) => {
-                            parent = candidates
-                                .get(id)
-                                .and_then(|next| next.parent_id.as_deref())
+                            parent = match candidates.get(id) {
+                                Some(next) => next.parent_id.as_deref(),
+                                None => self
+                                    .workers
+                                    .get(id)
+                                    .filter(|known| known.retired.is_none())
+                                    .and_then(|known| known.parent_id.as_deref()),
+                            }
                         }
                         None => break,
                     }
@@ -850,14 +857,24 @@ impl Scene {
                 worker.flight_start = worker.particles;
                 worker.scale_start = worker.particle_scales;
                 worker.orientation_start = worker.orientation;
-                worker.return_end = std::array::from_fn(|i| {
-                    sample(
-                        &self.coordinator_samples,
-                        self.coordinator_sample_count,
-                        id,
-                        i,
-                    )
-                });
+                // A nested worker returns to the station of the parent it came from, while that parent stays; one
+                // whose parent leaves too, or is not shown, returns to the coordinator.
+                let parent = worker
+                    .parent_id
+                    .as_deref()
+                    .filter(|parent| *parent != root && nodes.contains_key(parent))
+                    .and_then(|parent| self.slots.get(parent));
+                worker.return_end = match parent {
+                    Some(&slot) => [slot_position(slot); PARTICLES],
+                    None => std::array::from_fn(|i| {
+                        sample(
+                            &self.coordinator_samples,
+                            self.coordinator_sample_count,
+                            id,
+                            i,
+                        )
+                    }),
+                };
                 worker.departure_seconds =
                     flight_duration(&worker.flight_start, &worker.return_end, DEPARTURE_SECONDS);
             }
@@ -2979,6 +2996,112 @@ mod tests {
         );
         assert_ne!(missing.workers["child"].origin, CENTER);
         assert_eq!(missing.stations().len(), 1);
+    }
+
+    #[test]
+    fn a_nested_worker_returns_to_its_parent_unless_the_parent_leaves_too() {
+        let mut scene = Scene::new();
+        let coordinator = Vec3::new(0.3, 1.6, -2.4);
+        scene.set_coordinator_samples(&[coordinator.to_array()]);
+        let mut w = workspace(vec![
+            node("lead", "root"),
+            node("helper", "lead"),
+            node("second", "lead"),
+        ]);
+        settle(&mut scene, &w);
+        let lead = scene.workers["lead"].anchor;
+
+        // Deleting the helper sends it back to the lead's station, not to the coordinator.
+        w.nodes.retain(|node| node.id != "helper");
+        scene.update(Some("root"), &w, 0.0);
+        assert!(
+            scene.workers["helper"]
+                .return_end
+                .iter()
+                .all(|p| *p == lead)
+        );
+        let departure = scene.workers["helper"].departure_seconds;
+        let mut elapsed = 0.0;
+        while elapsed + 1.0 / 60.0 < departure {
+            scene.update(Some("root"), &w, 1.0 / 60.0);
+            elapsed += 1.0 / 60.0;
+        }
+        let helper = &scene.workers["helper"];
+        assert!(helper.particles.iter().all(|p| p.distance(lead) < 0.05));
+
+        // A parent leaving with its child is no destination: both return to the coordinator.
+        w.nodes.clear();
+        scene.update(Some("root"), &w, 0.0);
+        for id in ["lead", "second"] {
+            assert!(
+                scene.workers[id]
+                    .return_end
+                    .iter()
+                    .all(|p| *p == coordinator),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_projection_keeps_observed_children_of_a_parent_it_omits() {
+        let mut scene = Scene::new();
+        let complete = workspace(vec![node("parent", "root"), node("child", "parent")]);
+        settle(&mut scene, &complete);
+
+        // The snapshot budget left out the parent but kept its child, which completed and started a worker of its
+        // own. Both are observed; the omitted parent is only unknown.
+        let partial = Workspace {
+            nodes: vec![
+                Node {
+                    state: State::Completed,
+                    ..node("child", "parent")
+                },
+                node("grandchild", "child"),
+                node("stranger", "elsewhere"),
+            ],
+            truncated: true,
+            ..Default::default()
+        };
+        scene.update(Some("root"), &partial, 0.02);
+        assert_eq!(scene.workers["parent"].state, State::Unknown);
+        assert_eq!(scene.workers["child"].state, State::Completed);
+        assert_eq!(scene.workers["grandchild"].state, State::Running);
+        assert_eq!(
+            scene.workers["grandchild"].parent_id.as_deref(),
+            Some("child")
+        );
+        // A worker under a parent this space never showed is not taken into it.
+        assert!(!scene.workers.contains_key("stranger"));
+
+        let recovered = workspace(vec![
+            node("parent", "root"),
+            Node {
+                state: State::Completed,
+                ..node("child", "parent")
+            },
+            node("grandchild", "child"),
+        ]);
+        scene.update(Some("root"), &recovered, 0.02);
+        let states: BTreeMap<_, _> = scene
+            .stations()
+            .iter()
+            .map(|station| (station.id.as_str(), station.state))
+            .collect();
+        assert_eq!(
+            states,
+            BTreeMap::from([
+                ("child", State::Completed),
+                ("grandchild", State::Running),
+                ("parent", State::Running),
+            ])
+        );
+        assert!(
+            scene
+                .workers
+                .values()
+                .all(|worker| worker.retired.is_none())
+        );
     }
 
     #[test]
