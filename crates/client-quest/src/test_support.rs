@@ -62,19 +62,39 @@ pub fn participant(name: &str, server: Option<String>) -> (Conversation, Connect
 pub struct Server {
     pub server: tomori_server::test_support::TestServer,
     pub pin: tomori_security::Fingerprint,
+    /// Where the operator confirms a device's pairing code, on a server that pairs.
+    pub pairing: Option<tomori_server::Pairing>,
 }
 
 impl Server {
     pub fn start() -> Self {
+        Self::with(true, false)
+    }
+
+    /// A server that admits visitors if `visitors`, and pairs devices as owners if `pairing`.
+    pub fn with(visitors: bool, pairing: bool) -> Self {
         let certificate = tomori_security::ServerCertificate::generate();
         let pin = certificate.fingerprint();
         let config = certificate
             .server_config()
             .expect("the certificate is usable");
-        let server = tomori_server::test_support::TestServer::with_tokens(true, move |server| {
-            server.with_tls(config)
+        let (sender, handle) = std::sync::mpsc::channel();
+        let server = tomori_server::test_support::TestServer::with_tokens(visitors, move |server| {
+            let server = server.with_tls(config);
+            let server = if pairing {
+                server.with_pairing(pin)
+            } else {
+                server
+            };
+            let _ = sender.send(pairing.then(|| server.pairing()));
+            server
         });
-        Self { server, pin }
+        let pairing = handle.recv().expect("the server starts");
+        Self {
+            server,
+            pin,
+            pairing,
+        }
     }
 
     pub fn address(&self) -> String {
@@ -88,7 +108,27 @@ impl Server {
 
     /// The headset's participant named `name`, keeping nothing, connected to this server with `token`, or as a visitor without one.
     pub fn participant(&self, name: &str, token: Option<String>) -> (Conversation, Connection) {
-        let store = Store::new(None);
+        self.participant_with(name, token, Box::new(Silent))
+    }
+
+    /// [`Self::participant`], with `capture` for its microphone.
+    pub fn participant_with(
+        &self,
+        name: &str,
+        token: Option<String>,
+        capture: Box<dyn Capture>,
+    ) -> (Conversation, Connection) {
+        self.participant_kept(name, token, capture, Store::new(None))
+    }
+
+    /// [`Self::participant_with`], keeping what it keeps in `store`, which may already hold something for this server.
+    pub fn participant_kept(
+        &self,
+        name: &str,
+        token: Option<String>,
+        capture: Box<dyn Capture>,
+        store: Store,
+    ) -> (Conversation, Connection) {
         let identity = Identity::new(
             &store,
             None,
@@ -103,7 +143,7 @@ impl Server {
             identity,
             store,
             Box::new(()),
-            Box::new(Silent),
+            capture,
             Box::new(Nowhere),
             &mut conversation,
         );
@@ -175,5 +215,60 @@ impl Remote {
             }
             _ => None,
         })
+    }
+}
+
+/// A microphone that hears `samples`, once, each time it opens, then nothing until it is closed; live or for push-to-talk alike.
+pub struct Talker {
+    pub samples: Vec<i16>,
+}
+
+/// A capture thread, stopped and joined when dropped.
+struct Talking {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Talking {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.thread.take().map(std::thread::JoinHandle::join);
+    }
+}
+
+impl Capture for Talker {
+    fn open(&mut self, mut samples: Samples, _failed: Failed) -> Result<Recording, String> {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Halfway between samples, so that converting back to 16 bits gives each sample exactly.
+        let speech: Vec<f32> = self
+            .samples
+            .iter()
+            .map(|sample| (f32::from(*sample) + 0.5) / f32::from(i16::MAX))
+            .collect();
+        let stopped = stop.clone();
+        let thread = std::thread::spawn(move || {
+            for chunk in speech.chunks(320) {
+                samples(chunk);
+            }
+            while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        Ok(Recording::new(
+            16_000,
+            Talking {
+                stop,
+                thread: Some(thread),
+            },
+        ))
+    }
+
+    fn open_live(
+        &mut self,
+        samples: Samples,
+        failed: Failed,
+        _active: crate::capture::Active,
+    ) -> Result<Recording, String> {
+        self.open(samples, failed)
     }
 }

@@ -557,9 +557,9 @@ impl Speaker {
     }
 
     /// Play as `route` says: an open output that plays otherwise is closed and opened again at once. See `design/spatial-audio.md`.
-    fn reroute(&mut self, route: Route) -> Option<String> {
+    fn reroute(&mut self, route: Route) {
         if route == self.route {
-            return None;
+            return;
         }
         log::info!(
             "Speaker: playing {}",
@@ -570,10 +570,12 @@ impl Speaker {
             }
         );
         self.route = route;
-        self.output.take()?;
+        if self.output.take().is_none() {
+            return;
+        }
         self.retry_at = None;
         // What is buffered is still current: rerouting must not cut a reply short.
-        self.start(false)
+        self.start(false);
     }
 
     /// Take the new client's received audio; nothing plays until [`Self::open`].
@@ -627,18 +629,20 @@ impl Speaker {
         }
     }
 
-    /// Start opening the speaker on its own thread if it is not open and is due. Failing to open is reported later by [`Self::poll`]. Returns a failure to show, once until the speaker opens again.
-    fn open(&mut self) -> Option<String> {
+    /// Start opening the speaker on its own thread if it is not open and is due. Failing to open is reported later by [`Self::poll`].
+    fn open(&mut self) {
         if self.output.is_some() || self.retry_at.is_some_and(|at| Instant::now() < at) {
-            return None;
+            return;
         }
         // Audio queued while nothing played is stale.
-        self.start(true)
+        self.start(true);
     }
 
     /// Start the speaker thread, first discarding what was queued if `clear`.
-    fn start(&mut self, clear: bool) -> Option<String> {
-        let (player, control) = self.player.as_ref()?;
+    fn start(&mut self, clear: bool) {
+        let Some((player, control)) = self.player.as_ref() else {
+            return;
+        };
         if clear {
             control.clear();
         }
@@ -650,14 +654,13 @@ impl Speaker {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get_or_insert(error);
         });
-        match crate::playback::start(self.playback.clone(), player.clone(), failed, self.route) {
-            Ok(output) => {
-                self.output = Some(output);
-                self.retry_at = None;
-                None
-            }
-            Err(error) => self.failed(error),
-        }
+        self.output = Some(crate::playback::start(
+            self.playback.clone(),
+            player.clone(),
+            failed,
+            self.route,
+        ));
+        self.retry_at = None;
     }
 
     /// Close an output that failed to open or stopped, so that it is opened again after a while. Returns a failure to show.
@@ -768,7 +771,7 @@ impl Connection {
     }
 
     /// Route the speaker for the live microphone, and run the echo test.
-    fn listen_live(&mut self, conversation: &mut Conversation) {
+    fn listen_live(&mut self) {
         // Push-to-talk while live closes the live stream for a while, so the session stays until live audio stops or the microphone opens in another.
         let route = Route {
             communication: self
@@ -782,9 +785,7 @@ impl Connection {
                 })
                 .flatten(),
         };
-        if let Some(error) = self.speaker.reroute(route) {
-            conversation.fail(error);
-        }
+        self.speaker.reroute(route);
         let heard = std::mem::take(&mut self.voice.lock().heard);
         if let Some(test) = &mut self.echo_test {
             if !self.voice.live {
@@ -1003,9 +1004,7 @@ impl Connection {
             // After the conversation applies the welcome, which clears earlier errors, so that a failure is shown again.
             if connected {
                 self.speaker.connected();
-                if let Some(error) = self.speaker.open() {
-                    conversation.fail(error);
-                }
+                self.speaker.open();
             }
         }
         if let Some(error) = self.voice.failure() {
@@ -1021,16 +1020,18 @@ impl Connection {
             .client
             .as_ref()
             .is_some_and(|client| client.state().is_connected())
-            && let Some(error) = self.speaker.poll().or_else(|| self.speaker.open())
         {
-            conversation.fail(error);
+            if let Some(error) = self.speaker.poll() {
+                conversation.fail(error);
+            }
+            self.speaker.open();
         }
         // Silence only during push-to-talk, not while talking to the space.
         if let Some(control) = self.speaker.control() {
             control.set_silenced(self.voice.talking());
         }
         conversation.set_replaying(self.speaker.is_replaying());
-        self.listen_live(conversation);
+        self.listen_live();
         self.cue(conversation);
     }
 
@@ -2305,7 +2306,7 @@ mod tests {
         let (player, control) = Player::new(received, MixerOptions::default());
         let player = Arc::new(Mutex::new(player));
         connection.speaker.player = Some((player.clone(), control));
-        assert_eq!(connection.speaker.open(), None);
+        connection.speaker.open();
         until(|| {
             connection
                 .speaker
@@ -2451,7 +2452,7 @@ mod tests {
 
     #[test]
     fn the_echo_test_waits_for_the_speaker_to_play_as_it_should() {
-        let (mut connection, mut conversation) = feedback_connection();
+        let (mut connection, _conversation) = feedback_connection();
         let (_audio, received) = std::sync::mpsc::sync_channel(1);
         let (player, control) = Player::new(received, MixerOptions::default());
         connection.speaker.player = Some((Arc::new(Mutex::new(player)), control));
@@ -2460,9 +2461,9 @@ mod tests {
         // Live, but the speaker is not open yet: still waiting.
         connection.voice.live = true;
         connection.echo_test.as_mut().unwrap().armed = Some(Instant::now());
-        connection.listen_live(&mut conversation);
+        connection.listen_live();
         assert!(connection.echo_test.as_ref().unwrap().opened.is_none());
-        assert_eq!(connection.speaker.open(), None);
+        connection.speaker.open();
         until(|| {
             connection
                 .speaker
@@ -2471,23 +2472,23 @@ mod tests {
                 .is_some_and(Speaking::is_open)
         });
         // Open, but as media rather than in the microphone's session, which this test needs: it waits, and gives up after a while.
-        connection.listen_live(&mut conversation);
+        connection.listen_live();
         assert!(connection.echo_test.as_ref().unwrap().armed.is_some());
         connection.echo_test.as_mut().unwrap().armed = Some(Instant::now() - ECHO_WAIT);
-        connection.listen_live(&mut conversation);
+        connection.listen_live();
         let test = connection.echo_test.as_ref().unwrap();
         assert!(test.armed.is_none() && test.opened.is_none());
         // A test that needs no session starts once the speaker is open, as media.
         let test = connection.echo_test.as_mut().unwrap();
         test.routed = false;
         test.armed = Some(Instant::now());
-        connection.listen_live(&mut conversation);
+        connection.listen_live();
         let test = connection.echo_test.as_ref().unwrap();
         assert!(test.armed.is_none() && test.opened.is_some());
         assert_eq!(test.speaker, None);
         // Live audio stopping ends the test.
         connection.voice.live = false;
-        connection.listen_live(&mut conversation);
+        connection.listen_live();
         assert!(connection.echo_test.as_ref().unwrap().opened.is_none());
     }
 
@@ -2498,9 +2499,9 @@ mod tests {
             communication: Some(42),
         };
         // Nothing open: only remembered for the next open.
-        assert_eq!(speaker.reroute(route), None);
+        speaker.reroute(route);
         assert_eq!(speaker.route, route);
-        assert_eq!(speaker.reroute(route), None);
+        speaker.reroute(route);
         assert!(speaker.output.is_none());
     }
 
@@ -2512,17 +2513,17 @@ mod tests {
         let (_audio, received) = std::sync::mpsc::sync_channel(1);
         let (player, control) = Player::new(received, MixerOptions::default());
         speaker.player = Some((Arc::new(Mutex::new(player)), control));
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         until(|| opened.load(Ordering::Relaxed) == 1);
         let route = Route {
             communication: Some(42),
         };
-        assert_eq!(speaker.reroute(route), None);
+        speaker.reroute(route);
         until(|| opened.load(Ordering::Relaxed) == 2);
         until(|| speaker.output.as_ref().is_some_and(Speaking::is_open));
         // The fake opens as media, as a speaker that fell back would.
         assert_eq!(speaker.output.as_ref().unwrap().communication(), None);
-        assert_eq!(speaker.reroute(route), None);
+        speaker.reroute(route);
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(opened.load(Ordering::Relaxed), 2);
     }
@@ -2533,13 +2534,13 @@ mod tests {
         let fake = FakeSpeaker::default();
         let mut speaker = Speaker::new(Box::new(fake.clone()));
         // Nothing to play before a client is attached.
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         assert!(speaker.output.is_none());
 
         speaker.attach(&mut client);
         assert!(client.take_audio().is_none(), "the speaker took the audio");
-        assert_eq!(speaker.open(), None);
-        assert_eq!(speaker.open(), None);
+        speaker.open();
+        speaker.open();
         until(|| fake.opened.load(Ordering::Relaxed) == 1);
         assert!(speaker.output.as_ref().unwrap().is_open());
         assert_eq!(speaker.poll(), None);
@@ -2559,28 +2560,28 @@ mod tests {
         speaker.attach(&mut client);
 
         fake.refuse.store(true, Ordering::Relaxed);
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         let error = failure(&mut speaker);
         assert!(error.contains("No speaker"), "{error}");
         assert!(speaker.output.is_none());
         // Not tried again until the retry is due, and not shown again when it fails again.
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         assert!(speaker.output.is_none());
         speaker.retry_at = Some(Instant::now());
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         until(|| speaker.failure.lock().unwrap().is_some());
         assert_eq!(speaker.poll(), None);
         assert!(speaker.output.is_none());
 
         // A new welcome tries again at once, and shows the failure again.
         speaker.connected();
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         let error = failure(&mut speaker);
         assert!(error.contains("No speaker"), "{error}");
 
         fake.refuse.store(false, Ordering::Relaxed);
         speaker.retry_at = Some(Instant::now());
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         until(|| fake.opened.load(Ordering::Relaxed) == 1);
         assert_eq!(speaker.poll(), None);
 
@@ -2593,9 +2594,9 @@ mod tests {
         assert!(error.contains("unplugged"), "{error}");
         assert!(speaker.output.is_none());
         until(|| fake.closed.load(Ordering::Relaxed) == 1);
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         speaker.retry_at = Some(Instant::now());
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         until(|| fake.opened.load(Ordering::Relaxed) == 2);
         client.close();
     }
@@ -2620,7 +2621,251 @@ mod tests {
                 .unwrap();
         }
         // The fake renders as it opens, and asserts that it hears nothing.
-        assert_eq!(speaker.open(), None);
+        speaker.open();
         until(|| fake.opened.load(Ordering::Relaxed) == 1);
     }
+
+    /// Against a server, as the headset takes part in its spaces.
+    mod served {
+        use super::*;
+        use crate::test_support::{Remote, Server, Talker};
+        use tomori_server::test_support::speech;
+
+        /// Poll as the frame loop does, focused, until `done`.
+        fn until(
+            connection: &mut Connection,
+            conversation: &mut Conversation,
+            mut done: impl FnMut(&mut Connection, &mut Conversation) -> bool,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done(connection, conversation) {
+                assert!(Instant::now() < deadline, "timed out");
+                connection.poll(true, conversation);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Bea's space on `server`, with Ada, who hears `said`, in it.
+        fn in_space(server: &Server, said: &str) -> (Remote, String, Connection, Conversation) {
+            let bea = server.remote("Bea", Some(server.owner("Bea")));
+            let space = bea.create_space("Studio", || {}).id;
+            let (mut conversation, mut connection) = server.participant_with(
+                "Ada",
+                Some(server.owner("Ada")),
+                Box::new(Talker {
+                    samples: speech(said),
+                }),
+            );
+            conversation.join_space(space.clone());
+            until(&mut connection, &mut conversation, |_, conversation| {
+                conversation.joined_space().is_some()
+            });
+            (bea, space, connection, conversation)
+        }
+
+        /// The first of Ada's words Bea sees in the space, while Ada's frames run.
+        fn transcript(
+            bea: &Remote,
+            connection: &mut Connection,
+            conversation: &mut Conversation,
+        ) -> String {
+            bea.wait_for(
+                || connection.poll(true, conversation),
+                |message| match message {
+                    ServerMessage::Space { state } => state
+                        .messages
+                        .iter()
+                        .find(|message| message.text.starts_with("Ada: "))
+                        .map(|message| message.text.clone()),
+                    _ => None,
+                },
+            )
+        }
+
+        #[test]
+        fn words_said_while_x_is_held_reach_the_space() {
+            let server = Server::start();
+            let (bea, _, mut connection, mut conversation) = in_space(&server, "hello");
+            conversation.talk(true);
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection.voice.talking()
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            conversation.talk(false);
+            assert_eq!(
+                transcript(&bea, &mut connection, &mut conversation),
+                "Ada: hello"
+            );
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection.utterances.is_empty()
+            });
+        }
+
+        #[test]
+        fn the_live_microphone_is_heard_by_the_space_and_turned_off() {
+            let server = Server::start();
+            let (bea, _, mut connection, mut conversation) =
+                in_space(&server, &"a".repeat(1_000));
+            conversation.toggle_live();
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection.voice.live
+            });
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while bea.client.try_audio().is_none() {
+                assert!(Instant::now() < deadline, "timed out");
+                connection.poll(true, &mut conversation);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            conversation.toggle_live();
+            until(&mut connection, &mut conversation, |connection, _| {
+                !connection.voice.live
+            });
+        }
+    
+        fn role_becomes(
+            connection: &mut Connection,
+            conversation: &mut Conversation,
+            role: tomori_protocol::ConnectionRole,
+        ) {
+            until(connection, conversation, |_, conversation| {
+                conversation.server().is_some() && conversation.role() == role
+            });
+        }
+
+        #[test]
+        fn a_token_given_at_startup_that_the_server_refuses_is_dropped() {
+            let server = Server::start();
+            let (mut conversation, mut connection) =
+                server.participant("Ada", Some("tomori_not_a_token".into()));
+            role_becomes(
+                &mut connection,
+                &mut conversation,
+                tomori_protocol::ConnectionRole::Visitor,
+            );
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection.identity.token.is_none()
+            });
+            assert_eq!(
+                conversation.menu_model().notice.as_deref(),
+                Some("This server no longer admits this device, so it watches as a visitor.")
+            );
+        }
+
+        #[test]
+        fn a_kept_token_that_the_server_refuses_is_forgotten() {
+            let server = Server::start();
+            let store = Store::new(None);
+            store.remember_token(&server.address(), "tomori_revoked");
+            let (mut conversation, mut connection) =
+                server.participant_kept("Ada", None, Box::new(crate::test_support::Silent), store);
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection.store.credential(&server.address()).token.is_none()
+            });
+            role_becomes(
+                &mut connection,
+                &mut conversation,
+                tomori_protocol::ConnectionRole::Visitor,
+            );
+        }
+
+        #[test]
+        fn a_server_that_refuses_visitors_is_asked_to_pair_and_pairing_makes_an_owner() {
+            let server = Server::with(false, true);
+            let (mut conversation, mut connection) = server.participant("Ada", None);
+            role_becomes(
+                &mut connection,
+                &mut conversation,
+                tomori_protocol::ConnectionRole::Pairing,
+            );
+            conversation.pair();
+            let pairing = server.pairing.as_ref().unwrap();
+            let mut code = None;
+            until(&mut connection, &mut conversation, |_, _| {
+                code = pairing.pending().and_then(|pending| pending.code);
+                code.is_some()
+            });
+            let digits: String = code.unwrap().chars().filter(char::is_ascii_digit).collect();
+            assert_eq!(pairing.confirm(&digits), Ok("Ada".to_owned()));
+            role_becomes(
+                &mut connection,
+                &mut conversation,
+                tomori_protocol::ConnectionRole::Owner,
+            );
+            let kept = connection.store.credential(&server.address());
+            assert!(kept.token.is_some());
+            assert_eq!(kept.certificate, Some(server.pin.to_string()));
+        }
+
+        #[test]
+        fn a_server_that_refuses_even_to_pair_admits_only_tokens() {
+            // As a server from before pairing would: asked to pair, it refuses again.
+            let server = Server::with(false, false);
+            let (mut conversation, mut connection) = server.participant("Ada", None);
+            role_becomes(
+                &mut connection,
+                &mut conversation,
+                tomori_protocol::ConnectionRole::Pairing,
+            );
+            let reopen = connection.refused(&Disconnect::Status(401), &mut conversation);
+            assert!(reopen.is_none());
+            assert_eq!(
+                conversation.menu_model().notice.as_deref(),
+                Some("This server admits only devices with a token.")
+            );
+        }
+
+        #[test]
+        fn a_server_whose_certificate_changed_is_distrusted_and_sent_no_token() {
+            let server = Server::start();
+            let store = Store::new(None);
+            let other = tomori_security::Fingerprint::of(b"another server");
+            store.remember_certificate(&server.address(), &other.to_string());
+            let (mut conversation, mut connection) = server.participant_kept(
+                "Ada",
+                Some(server.owner("Ada")),
+                Box::new(crate::test_support::Silent),
+                store,
+            );
+            role_becomes(
+                &mut connection,
+                &mut conversation,
+                tomori_protocol::ConnectionRole::Visitor,
+            );
+            assert!(connection.link.as_ref().unwrap().distrusted);
+            // What was kept is not replaced by a server that cannot be trusted.
+            assert_eq!(
+                connection.store.credential(&server.address()).certificate,
+                Some(other.to_string())
+            );
+        }
+
+        #[test]
+        fn an_admitted_knock_keeps_the_collaborators_token_for_next_time() {
+            let server = Server::start();
+            let bea = server.remote("Bea", Some(server.owner("Bea")));
+            let space = bea.create_space("Studio", || {}).id;
+            let (mut conversation, mut connection) = server.participant("Ada", None);
+            conversation.join_space(space);
+            until(&mut connection, &mut conversation, |_, conversation| {
+                conversation.joined_space().is_some()
+            });
+            conversation.knock();
+            let knock = bea.wait_for(
+                || connection.poll(true, &mut conversation),
+                |message| match message {
+                    ServerMessage::Knocks { knocks } => knocks.first().map(|knock| knock.id.clone()),
+                    _ => None,
+                },
+            );
+            bea.send(ClientMessage::DecideKnock { knock, admit: true });
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection.store.credential(&server.address()).token.is_some()
+            });
+            assert!(connection.link.as_ref().unwrap().token.is_some());
+            // An admission never replaces a token already kept.
+            let kept = connection.store.credential(&server.address()).token;
+            connection.admitted("tomori_another".into(), server.pin);
+            assert_eq!(connection.store.credential(&server.address()).token, kept);
+        }
+}
 }

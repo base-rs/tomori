@@ -77,12 +77,7 @@ impl Speaking {
 }
 
 /// Open `playback` on its own thread. Failing to open, and failures once open, are reported through `failed`.
-pub fn start(
-    playback: Arc<dyn Playback>,
-    player: Shared,
-    failed: Failed,
-    route: Route,
-) -> Result<Speaking, String> {
+pub fn start(playback: Arc<dyn Playback>, player: Shared, failed: Failed, route: Route) -> Speaking {
     let (stop, stopped) = mpsc::channel::<()>();
     let failed: Arc<dyn Fn(String) + Send + Sync> = Arc::from(failed);
     let opened = Arc::new(AtomicBool::new(false));
@@ -105,12 +100,12 @@ pub fn start(
                 Err(error) => failed(error),
             }
         })
-        .map_err(|error| format!("Cannot start the speaker thread: {error}"))?;
-    Ok(Speaking {
+        .expect("the speaker thread starts");
+    Speaking {
         _stop: stop,
         opened,
         communication,
-    })
+    }
 }
 
 /// Render the player at `sample_rate` into `output`, mono or interleaved stereo, or silence if another stream holds it.
