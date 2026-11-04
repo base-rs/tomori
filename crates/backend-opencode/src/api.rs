@@ -439,8 +439,8 @@ impl FamilyWalk {
     /// List children, at most [`Self::MAX_IN_FLIGHT`] parents at once, until
     /// the family has been read. A parent whose children are not listed
     /// within [`Self::LISTING_TIMEOUT`] fails the walk. The future may be
-    /// dropped at any point: a later call lists again the parents whose
-    /// listing it abandoned.
+    /// dropped at any point, or fail: a later call lists again the parents
+    /// whose listing it abandoned or that failed.
     pub(crate) async fn run<'scope, S: Timers>(
         &mut self,
         client: &Client<'scope>,
@@ -480,29 +480,48 @@ impl FamilyWalk {
                 .next()
                 .await
                 .expect("a request is in flight while the loop runs");
+            // A parent whose page fails stays among those being listed, and
+            // none of its page is taken, so a later run lists it again whole.
+            self.take_page(children?)?;
             self.listing.retain(|listing| *listing != parent);
-            for child in children? {
-                let id = child
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .expect("validated child identifier");
-                if !self.seen.insert(id.to_owned()) {
-                    return Err(Failure {
-                        status: None,
-                        message: "the server returned a repeated or cyclic worker identity".into(),
-                    });
-                }
-                if self.count == MAX_TRACKED_WORKERS {
-                    return Err(Failure {
-                        status: None,
-                        message: "the worker family exceeds the worker limit".into(),
-                    });
-                }
-                add_worker_record_size(&mut self.bytes, &child)?;
-                self.pending.push_back(id.to_owned());
-                self.count += 1;
-                self.found.push(child);
-            }
+        }
+        Ok(())
+    }
+
+    /// Take a parent's page of children, all of it or, when a child repeats
+    /// one found before or the page would exceed a limit, none of it.
+    fn take_page(&mut self, children: Vec<Value>) -> Result<(), Failure> {
+        let id = |child: &Value| -> String {
+            child
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("validated child identifier")
+                .to_owned()
+        };
+        // A page's identifiers are distinct, as its listing checks.
+        if children.iter().any(|child| self.seen.contains(&id(child))) {
+            return Err(Failure {
+                status: None,
+                message: "the server returned a repeated or cyclic worker identity".into(),
+            });
+        }
+        if self.count + children.len() > MAX_TRACKED_WORKERS {
+            return Err(Failure {
+                status: None,
+                message: "the worker family exceeds the worker limit".into(),
+            });
+        }
+        let mut bytes = self.bytes;
+        for child in &children {
+            add_worker_record_size(&mut bytes, child)?;
+        }
+        self.bytes = bytes;
+        self.count += children.len();
+        for child in children {
+            let id = id(&child);
+            self.seen.insert(id.clone());
+            self.pending.push_back(id);
+            self.found.push(child);
         }
         Ok(())
     }
@@ -1600,7 +1619,10 @@ mod tests {
     #[test]
     fn a_family_walk_is_held_to_the_worker_limit_across_its_runs() {
         with_client(
-            service(|_, _| page(vec![child("c1", "s")], Value::Null)),
+            service(|_, path| match path.contains("parentID=s&") {
+                true => page(vec![child("c1", "s")], Value::Null),
+                false => page(Vec::new(), Value::Null),
+            }),
             async |client, resolved, cancellation, timers| {
                 let mut walk = FamilyWalk::new("s");
                 walk.count = MAX_TRACKED_WORKERS;
@@ -1608,6 +1630,63 @@ mod tests {
                     failed(walk.run(client, resolved, cancellation, timers).await).1,
                     "the worker family exceeds the worker limit"
                 );
+                // None of the page that would exceed it was taken, and its
+                // parent is listed again when the walk goes on.
+                assert!(walk.take_found().is_empty());
+                walk.count = 0;
+                walk.run(client, resolved, cancellation, timers)
+                    .await
+                    .unwrap();
+                assert_eq!(walk.take_found(), [child("c1", "s")]);
+
+                // Likewise for the size of the records found.
+                let mut walk = FamilyWalk::new("s");
+                walk.bytes = MAX_WORKER_SNAPSHOT_BYTES;
+                assert_eq!(
+                    failed(walk.run(client, resolved, cancellation, timers).await).1,
+                    "the worker family exceeds the supported snapshot size"
+                );
+                assert!(walk.take_found().is_empty());
+            },
+        );
+    }
+
+    /// A walk whose listing of a parent's children failed lists them again
+    /// when it goes on, and finds each descendant once.
+    #[test]
+    fn a_failed_family_walk_goes_on_with_the_listing_that_failed() {
+        static C1_LISTINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        with_client(
+            service(|_, path| {
+                let parent = path
+                    .split_once("parentID=")
+                    .unwrap()
+                    .1
+                    .split('&')
+                    .next()
+                    .unwrap();
+                match parent {
+                    "s" => page(vec![child("c1", "s"), child("c2", "s")], Value::Null),
+                    "c1" if C1_LISTINGS.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 => (
+                        "500 Internal Server Error",
+                        r#"{"message":"busy"}"#.to_owned(),
+                    ),
+                    "c1" => page(vec![child("g1", "c1")], Value::Null),
+                    _ => page(Vec::new(), Value::Null),
+                }
+            }),
+            async |client, resolved, cancellation, timers| {
+                let mut walk = FamilyWalk::new("s");
+                assert_eq!(
+                    failed(walk.run(client, resolved, cancellation, timers).await).1,
+                    "busy"
+                );
+                assert_eq!(walk.take_found(), [child("c1", "s"), child("c2", "s")]);
+                walk.run(client, resolved, cancellation, timers)
+                    .await
+                    .unwrap();
+                assert_eq!(walk.take_found(), [child("g1", "c1")]);
+                assert_eq!(C1_LISTINGS.load(std::sync::atomic::Ordering::Acquire), 2);
             },
         );
     }
