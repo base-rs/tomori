@@ -59,7 +59,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
 pollster = "0.4"
-# A server on a loopback port, with a scripted backend, for the tests that take part in its spaces.
+# A server on a loopback port, with a scripted backend, for the tests that take part in its spaces, and the backend's events to script it with.
+tomori-backend = { version = "0.1.0", path = "../backend" }
 tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
 tomori-environment-sky = { version = "0.1.0", path = "../environment-sky", features = ["test-gpu"] }
 

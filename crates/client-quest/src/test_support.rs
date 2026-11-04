@@ -11,6 +11,11 @@ use crate::{
     playback::{self, Output, Playback, Route, Shared},
 };
 
+/// Evaluate every log line's arguments, from now on in this test binary, so that what each would say is exercised; nothing is written, as no logger is installed.
+pub fn log_everything() {
+    log::set_max_level(log::LevelFilter::Trace);
+}
+
 /// A microphone that opens at 16 kHz and hears nothing.
 pub struct Silent;
 
@@ -79,16 +84,17 @@ impl Server {
             .server_config()
             .expect("the certificate is usable");
         let (sender, handle) = std::sync::mpsc::channel();
-        let server = tomori_server::test_support::TestServer::with_tokens(visitors, move |server| {
-            let server = server.with_tls(config);
-            let server = if pairing {
-                server.with_pairing(pin)
-            } else {
+        let server =
+            tomori_server::test_support::TestServer::with_tokens(visitors, move |server| {
+                let server = server.with_tls(config);
+                let server = if pairing {
+                    server.with_pairing(pin)
+                } else {
+                    server
+                };
+                let _ = sender.send(pairing.then(|| server.pairing()));
                 server
-            };
-            let _ = sender.send(pairing.then(|| server.pairing()));
-            server
-        });
+            });
         let pairing = handle.recv().expect("the server starts");
         Self {
             server,
@@ -195,6 +201,20 @@ impl Remote {
         }
     }
 
+    /// The first snapshot of a space that `select` chooses, waiting for it while `meanwhile` runs.
+    pub fn space<T>(
+        &self,
+        meanwhile: impl FnMut(),
+        mut select: impl FnMut(&tomori_protocol::SpaceState) -> Option<T>,
+    ) -> T {
+        self.wait_for(meanwhile, |message| {
+            let tomori_protocol::ServerMessage::Space { state } = message else {
+                return None;
+            };
+            select(state)
+        })
+    }
+
     /// Create a space with the scripted backend, and wait for its first snapshot.
     pub fn create_space(
         &self,
@@ -209,11 +229,8 @@ impl Remote {
             environment: None,
             instructions: None,
         });
-        self.wait_for(meanwhile, |message| match message {
-            tomori_protocol::ServerMessage::Space { state } if state.title == title => {
-                Some((**state).clone())
-            }
-            _ => None,
+        self.space(meanwhile, |state| {
+            (state.title == title).then(|| state.clone())
         })
     }
 }

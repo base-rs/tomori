@@ -77,7 +77,12 @@ impl Speaking {
 }
 
 /// Open `playback` on its own thread. Failing to open, and failures once open, are reported through `failed`.
-pub fn start(playback: Arc<dyn Playback>, player: Shared, failed: Failed, route: Route) -> Speaking {
+pub fn start(
+    playback: Arc<dyn Playback>,
+    player: Shared,
+    failed: Failed,
+    route: Route,
+) -> Speaking {
     let (stop, stopped) = mpsc::channel::<()>();
     let failed: Arc<dyn Fn(String) + Send + Sync> = Arc::from(failed);
     let opened = Arc::new(AtomicBool::new(false));
