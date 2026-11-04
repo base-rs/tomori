@@ -112,3 +112,14 @@ fn the_pipewire_source_stops_when_gstreamer_does() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("GStreamer exited"));
 }
+
+#[test]
+fn discover_lists_the_spaces_on_a_server_given_to_it() {
+    let server = tomori_server::test_support::TestServer::start();
+    let mut ada = server.connect("ada", "Ada");
+    let space = ada.create_space("Studio");
+    let output = tomori(&["discover", "--server", &server.address.to_string()], None);
+    assert!(output.status.success());
+    assert!(stdout(&output).contains(&format!("{:<12} Studio", space.id)));
+    assert!(stderr(&output).contains("Join one with:"));
+}

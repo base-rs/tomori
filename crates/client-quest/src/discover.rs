@@ -25,24 +25,32 @@ pub fn run(server: Option<String>) -> anyhow::Result<()> {
     let browser = discovery::browse().map(|browser| move |timeout| browser.recv_timeout(timeout));
     let servers = found(browser, BROWSE_FOR);
     print!("{}", servers_text(&servers));
-    match server {
-        Some(address) => list_spaces(&address, SPACES_TIMEOUT).map(|spaces| {
-            print!("{}", spaces_text(&spaces));
-            if !spaces.is_empty() {
-                eprintln!("Join one with: tomori --spectator --server ADDRESS --space SPACE_ID");
-            }
-        }),
+    let listed = server
+        .map(|address| list_spaces(&address, SPACES_TIMEOUT))
+        .transpose();
+    listed.map(|spaces| report(&servers, spaces.as_deref()))
+}
+
+/// Print `spaces`, if they were listed, and say what to do next.
+fn report(servers: &discovery::Servers, spaces: Option<&[SpaceSummary]>) {
+    if let Some(spaces) = spaces {
+        print!("{}", spaces_text(spaces));
+    }
+    if let Some(hint) = hint(servers, spaces) {
+        eprintln!("{hint}");
+    }
+}
+
+/// What to do next, after finding `servers` and, if a server was given, its `spaces`.
+fn hint(servers: &discovery::Servers, spaces: Option<&[SpaceSummary]>) -> Option<&'static str> {
+    match spaces {
+        Some([]) => None,
+        Some(_) => Some("Join one with: tomori --spectator --server ADDRESS --space SPACE_ID"),
+        None if servers.compatible().is_empty() => {
+            Some("No servers found. Start a server, or pass one: tomori discover --server ADDRESS")
+        }
         None => {
-            if servers.compatible().is_empty() {
-                eprintln!(
-                    "No servers found. Start a server, or pass one: tomori discover --server ADDRESS"
-                );
-            } else {
-                eprintln!(
-                    "To list the spaces on one of these, pass it: tomori discover --server ADDRESS"
-                );
-            }
-            Ok(())
+            Some("To list the spaces on one of these, pass it: tomori discover --server ADDRESS")
         }
     }
 }
@@ -293,5 +301,45 @@ mod tests {
             .is_none()
         );
         assert!(!connected);
+        assert!(
+            answer(
+                Event::Message(ServerMessage::Left),
+                &mut connected,
+                "host:1"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_next_step_is_suggested() {
+        let none = discovery::Servers::new();
+        let mut some = discovery::Servers::new();
+        some.apply(discovery::Event::Found(server(
+            "Studio",
+            tomori_protocol::PROTOCOL_VERSION,
+            vec![],
+        )));
+        assert!(hint(&none, None).unwrap().starts_with("No servers found."));
+        assert!(hint(&some, None).unwrap().starts_with("To list the spaces"));
+        assert_eq!(hint(&some, Some(&[])), None);
+        let space = SpaceSummary {
+            id: "s1".into(),
+            title: "Studio".into(),
+            backend: "fake".into(),
+            directory: "/tmp".into(),
+            environment: String::new(),
+            activity: tomori_protocol::Activity::Idle,
+            participants: 0,
+            attention: None,
+            attention_age: None,
+        };
+        assert!(
+            hint(&some, Some(&[space.clone()]))
+                .unwrap()
+                .starts_with("Join one")
+        );
+        report(&some, Some(&[space]));
+        report(&none, None);
     }
 }
