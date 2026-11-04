@@ -3542,6 +3542,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomori-example-server"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "futures-lite",
+ "tomori-backend",
+ "tomori-protocol",
+ "tomori-server",
+]
+
+[[package]]
 name = "tomori-protocol"
 version = "0.1.0"
 dependencies = [

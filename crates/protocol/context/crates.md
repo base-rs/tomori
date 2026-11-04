@@ -15,7 +15,7 @@ The crates share one version and are released together, so depend on the same ve
 | `tomori-backend` | The backend-neutral interface between the server and coding agents: implement `Backend` and `Session` to drive another agent. |
 | `tomori-backend-opencode` | The backend that drives OpenCode sessions on a running `opencode serve`. |
 | `tomori-speech` | Streaming speech recognition, speakable text selection and synthesis, through prebuilt sherpa-onnx libraries. |
-| `tomori-server` | The server, as the `tomori-server` executable and a library. Its interface for registering environments, data sources and tools is planned and not stable yet. |
+| `tomori-server` | The server, as the `tomori-server` executable and the library it is built from, whose builder registers backends and environments of another project's own. See its Building a Tomori Server guide. |
 
 ## Unpublished crates
 
@@ -27,6 +27,6 @@ The crates share one version and are released together, so depend on the same ve
 - **A client of an existing server:** depend on `tomori-client` and `tomori-protocol`. The client presents tokens and pins certificates, and re-exports discovery; the application supplies the token, and stores the certificate fingerprint to pin.
 - **Another implementation of the protocol, in Rust:** depend on `tomori-protocol` alone, and follow its framing, versioning and keepalive rules.
 - **A backend for another agent:** depend on `tomori-backend`, and report structured events rather than text for display or speech.
-- **A server:** run `tomori-server`. Building a customized server as a library is not supported yet.
+- **A server:** run `tomori-server`, or build one of your own on its library, registering your own backends and environments through `tomori_server::Server::builder`; its Building a Tomori Server guide explains how. Its interface is not stable yet.
 
 The design documents in the [Tomori repository](https://github.com/ioquatix/tomori/tree/main/design) state the requirements these crates follow, such as `server.md` for the connection and `security.md` for authentication.

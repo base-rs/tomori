@@ -1,0 +1,19 @@
+[package]
+name = "tomori-example-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "An example of a server built on tomori-server, offering a placeholder backend and environment of its own"
+repository.workspace = true
+license.workspace = true
+# An example for downstream projects to follow, not a crate to depend on.
+publish = false
+
+[dependencies]
+async-channel = "2"
+tomori-backend = { version = "0.1.0", path = "../../crates/backend" }
+tomori-server = { version = "0.1.0", path = "../../crates/server" }
+
+[dev-dependencies]
+futures-lite = "2"
+tomori-protocol = { version = "0.1.0", path = "../../crates/protocol" }

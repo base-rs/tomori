@@ -3,13 +3,10 @@
 
 //! The set of agent backends this server can bind spaces to.
 //!
-//! Backends are concrete types from separate crates. To add one: add a variant to [`AnyBackend`] and [`AnySession`] (behind a Cargo feature if it is optional), a `From` conversion for each, and an arm to the `dispatch!` macro below. Nothing else in the server names a concrete backend.
+//! A backend is any [`Backend`], from this repository, such as OpenCode's, or from another crate: [`Backends::with`] holds each behind one type, [`AnyBackend`], whose sessions are [`AnySession`]s. Nothing else in the server names a concrete backend.
 
-// Built without any backend, the backend enums are empty and every match on them is vacuous.
-#![cfg_attr(
-    not(any(feature = "fake", feature = "opencode")),
-    allow(unused_variables, unused_mut, unreachable_code)
-)]
+use std::future::Future;
+use std::pin::Pin;
 
 use tomori_backend::{
     AnswerValue, Backend, Capabilities, Decision, Event, Prompt, Result, Session, SessionSpec,
@@ -17,70 +14,132 @@ use tomori_backend::{
 };
 use tomori_protocol::BackendInfo;
 
-#[cfg(feature = "fake")]
-use crate::fake::{FakeBackend, FakeSession};
+/// A backend's or session's future, boxed so that backends of different types can be held alike.
+type Boxed<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-#[cfg(feature = "opencode")]
-use tomori_backend_opencode::{OpenCode, OpenCodeSession};
-
-/// One of the backends compiled into this server.
-pub enum AnyBackend {
-    #[cfg(feature = "fake")]
-    Fake(FakeBackend),
-
-    #[cfg(feature = "opencode")]
-    OpenCode(OpenCode),
+/// [`Backend`], with its futures boxed and its sessions held as [`AnySession`], so that it can be a trait object.
+trait DynamicBackend: Send + Sync {
+    fn name(&self) -> &str;
+    fn capabilities(&self) -> Capabilities;
+    fn sessions<'a>(&'a self, directory: &'a str) -> Boxed<'a, Vec<SessionSummary>>;
+    fn create(&self, spec: SessionSpec) -> Boxed<'_, AnySession>;
+    fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession>;
+    fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()>;
+    fn shutdown(&self);
 }
 
-/// A session of one of the backends compiled into this server.
-// One session is held per space, so the variant size difference is not worth an allocation.
-#[allow(clippy::large_enum_variant)]
-pub enum AnySession {
-    #[cfg(feature = "fake")]
-    Fake(FakeSession),
+impl<B: Backend> DynamicBackend for B {
+    fn name(&self) -> &str {
+        Backend::name(self)
+    }
 
-    #[cfg(feature = "opencode")]
-    OpenCode(OpenCodeSession),
-}
+    fn capabilities(&self) -> Capabilities {
+        Backend::capabilities(self)
+    }
 
-/// Forward a method call to the concrete value inside an [`AnyBackend`] or [`AnySession`].
-macro_rules! dispatch {
-    ($value:expr, $inner:ident => $call:expr) => {
-        match *$value {
-            #[cfg(feature = "fake")]
-            Self::Fake(ref $inner) => $call,
+    fn sessions<'a>(&'a self, directory: &'a str) -> Boxed<'a, Vec<SessionSummary>> {
+        Box::pin(Backend::sessions(self, directory))
+    }
 
-            #[cfg(feature = "opencode")]
-            Self::OpenCode(ref $inner) => $call,
-        }
-    };
-}
+    fn create(&self, spec: SessionSpec) -> Boxed<'_, AnySession> {
+        let created = Backend::create(self, spec);
+        Box::pin(async move { created.await.map(AnySession::new) })
+    }
 
-#[cfg(feature = "fake")]
-impl From<FakeBackend> for AnyBackend {
-    fn from(backend: FakeBackend) -> Self {
-        Self::Fake(backend)
+    fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession> {
+        let attached = Backend::attach(self, id, directory);
+        Box::pin(async move { attached.await.map(AnySession::new) })
+    }
+
+    fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()> {
+        Box::pin(Backend::forget_instructions(self, id, keys))
+    }
+
+    fn shutdown(&self) {
+        Backend::shutdown(self)
     }
 }
 
-#[cfg(feature = "fake")]
-impl From<FakeSession> for AnySession {
-    fn from(session: FakeSession) -> Self {
-        Self::Fake(session)
+/// [`Session`], with its futures boxed, so that it can be a trait object.
+trait DynamicSession: Send + Sync {
+    fn id(&self) -> String;
+    fn next_event(&self) -> Boxed<'_, Event>;
+    fn snapshot(&self) -> Boxed<'_, Snapshot>;
+    fn send(&self, prompt: Prompt) -> Boxed<'_, ()>;
+    fn decide<'a>(&'a self, permission: &'a str, decision: Decision) -> Boxed<'a, ()>;
+    fn answer<'a>(
+        &'a self,
+        question: &'a str,
+        answers: Vec<(String, AnswerValue)>,
+    ) -> Boxed<'a, ()>;
+    fn set_mode<'a>(&'a self, mode: &'a str) -> Boxed<'a, ()>;
+    fn set_instruction<'a>(&'a self, key: &'a str, value: Option<&'a str>) -> Boxed<'a, ()>;
+    fn interrupt(&self) -> Boxed<'_, ()>;
+    fn close(&self) -> Boxed<'_, ()>;
+}
+
+impl<S: Session> DynamicSession for S {
+    fn id(&self) -> String {
+        Session::id(self)
+    }
+
+    fn next_event(&self) -> Boxed<'_, Event> {
+        Box::pin(Session::next_event(self))
+    }
+
+    fn snapshot(&self) -> Boxed<'_, Snapshot> {
+        Box::pin(Session::snapshot(self))
+    }
+
+    fn send(&self, prompt: Prompt) -> Boxed<'_, ()> {
+        Box::pin(Session::send(self, prompt))
+    }
+
+    fn decide<'a>(&'a self, permission: &'a str, decision: Decision) -> Boxed<'a, ()> {
+        Box::pin(Session::decide(self, permission, decision))
+    }
+
+    fn answer<'a>(
+        &'a self,
+        question: &'a str,
+        answers: Vec<(String, AnswerValue)>,
+    ) -> Boxed<'a, ()> {
+        Box::pin(Session::answer(self, question, answers))
+    }
+
+    fn set_mode<'a>(&'a self, mode: &'a str) -> Boxed<'a, ()> {
+        Box::pin(Session::set_mode(self, mode))
+    }
+
+    fn set_instruction<'a>(&'a self, key: &'a str, value: Option<&'a str>) -> Boxed<'a, ()> {
+        Box::pin(Session::set_instruction(self, key, value))
+    }
+
+    fn interrupt(&self) -> Boxed<'_, ()> {
+        Box::pin(Session::interrupt(self))
+    }
+
+    fn close(&self) -> Boxed<'_, ()> {
+        Box::pin(Session::close(self))
     }
 }
 
-#[cfg(feature = "opencode")]
-impl From<OpenCode> for AnyBackend {
-    fn from(backend: OpenCode) -> Self {
-        Self::OpenCode(backend)
+/// One of the backends this server offers, of whatever type.
+pub struct AnyBackend(Box<dyn DynamicBackend>);
+
+/// A session of one of the backends this server offers.
+pub struct AnySession(Box<dyn DynamicSession>);
+
+impl AnyBackend {
+    /// Hold `backend` as any other.
+    pub(crate) fn new(backend: impl Backend + 'static) -> Self {
+        Self(Box::new(backend))
     }
 }
 
-#[cfg(feature = "opencode")]
-impl From<OpenCodeSession> for AnySession {
-    fn from(session: OpenCodeSession) -> Self {
-        Self::OpenCode(session)
+impl AnySession {
+    fn new(session: impl Session) -> Self {
+        Self(Box::new(session))
     }
 }
 
@@ -88,73 +147,73 @@ impl Backend for AnyBackend {
     type Session = AnySession;
 
     fn name(&self) -> &str {
-        dispatch!(self, backend => backend.name())
+        self.0.name()
     }
 
     fn capabilities(&self) -> Capabilities {
-        dispatch!(self, backend => backend.capabilities())
+        self.0.capabilities()
     }
 
     async fn sessions(&self, directory: &str) -> Result<Vec<SessionSummary>> {
-        dispatch!(self, backend => backend.sessions(directory).await)
+        self.0.sessions(directory).await
     }
 
     async fn create(&self, spec: SessionSpec) -> Result<AnySession> {
-        dispatch!(self, backend => backend.create(spec).await.map(AnySession::from))
+        self.0.create(spec).await
     }
 
     async fn attach(&self, id: &str, directory: &str) -> Result<AnySession> {
-        dispatch!(self, backend => backend.attach(id, directory).await.map(AnySession::from))
+        self.0.attach(id, directory).await
     }
 
     async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {
-        dispatch!(self, backend => backend.forget_instructions(id, keys).await)
+        self.0.forget_instructions(id, keys).await
     }
 
     fn shutdown(&self) {
-        dispatch!(self, backend => backend.shutdown())
+        self.0.shutdown()
     }
 }
 
 impl Session for AnySession {
     fn id(&self) -> String {
-        dispatch!(self, session => session.id())
+        self.0.id()
     }
 
     async fn next_event(&self) -> Result<Event> {
-        dispatch!(self, session => session.next_event().await)
+        self.0.next_event().await
     }
 
     async fn snapshot(&self) -> Result<Snapshot> {
-        dispatch!(self, session => session.snapshot().await)
+        self.0.snapshot().await
     }
 
     async fn send(&self, prompt: Prompt) -> Result<()> {
-        dispatch!(self, session => session.send(prompt).await)
+        self.0.send(prompt).await
     }
 
     async fn decide(&self, permission: &str, decision: Decision) -> Result<()> {
-        dispatch!(self, session => session.decide(permission, decision).await)
+        self.0.decide(permission, decision).await
     }
 
     async fn answer(&self, question: &str, answers: Vec<(String, AnswerValue)>) -> Result<()> {
-        dispatch!(self, session => session.answer(question, answers).await)
+        self.0.answer(question, answers).await
     }
 
     async fn set_mode(&self, mode: &str) -> Result<()> {
-        dispatch!(self, session => session.set_mode(mode).await)
+        self.0.set_mode(mode).await
     }
 
     async fn set_instruction(&self, key: &str, value: Option<&str>) -> Result<()> {
-        dispatch!(self, session => session.set_instruction(key, value).await)
+        self.0.set_instruction(key, value).await
     }
 
     async fn interrupt(&self) -> Result<()> {
-        dispatch!(self, session => session.interrupt().await)
+        self.0.interrupt().await
     }
 
     async fn close(&self) -> Result<()> {
-        dispatch!(self, session => session.close().await)
+        self.0.close().await
     }
 }
 
@@ -169,25 +228,32 @@ impl Backends {
         Self::default()
     }
 
-    /// Add a backend. A later backend with the same name is never selected.
-    pub fn with(mut self, backend: impl Into<AnyBackend>) -> Self {
-        self.backends.push(backend.into());
+    /// Add `backend`, of any type. A later backend with the same name is never selected.
+    pub fn with(self, backend: impl Backend + 'static) -> Self {
+        self.with_any(AnyBackend::new(backend))
+    }
+
+    /// Add a backend already held as any other.
+    pub(crate) fn with_any(mut self, backend: AnyBackend) -> Self {
+        self.backends.push(backend);
         self
     }
 
     pub fn get(&self, name: &str) -> Option<&AnyBackend> {
-        self.backends.iter().find(|backend| backend.name() == name)
+        self.backends
+            .iter()
+            .find(|backend| Backend::name(*backend) == name)
     }
 
     /// Tell every backend that the server is shutting down; see [`Backend::shutdown`].
     pub fn shutdown(&self) {
         for backend in &self.backends {
-            backend.shutdown();
+            Backend::shutdown(backend);
         }
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.backends.iter().map(|backend| backend.name())
+        self.backends.iter().map(Backend::name)
     }
 
     /// The backends, for a client to show: their name and whether existing sessions can be attached.
@@ -195,9 +261,36 @@ impl Backends {
         self.backends
             .iter()
             .map(|backend| BackendInfo {
-                name: backend.name().to_owned(),
-                attach: backend.capabilities().attach,
+                name: Backend::name(backend).to_owned(),
+                attach: Backend::capabilities(backend).attach,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_lite::future::block_on;
+
+    use super::*;
+    use crate::fake::FakeBackend;
+
+    #[test]
+    fn a_backend_of_any_type_is_driven_through_its_sessions() {
+        let fake = FakeBackend::new();
+        let backends = Backends::new().with(fake.clone());
+        let backend = backends.get("fake").expect("offered by its name");
+        assert_eq!(backends.names().collect::<Vec<_>>(), ["fake"]);
+        block_on(async {
+            // Named in full, since every backend is also a trait object here.
+            let spec = SessionSpec {
+                directory: "/srv".into(),
+                title: "Notes".into(),
+            };
+            let session = Backend::create(backend, spec).await.unwrap();
+            Session::interrupt(&session).await.unwrap();
+            assert_eq!(Session::next_event(&session).await.unwrap(), Event::Idle);
+            assert_eq!(fake.started()[0].log().interrupts, 1);
+        });
     }
 }

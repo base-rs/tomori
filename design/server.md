@@ -4,7 +4,7 @@ This describes the target design for the Rust server that replaces `bridge/`, an
 
 ## Requirement
 
-The PC server is a Rust program built on `base-http-server`. It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed.
+The PC server is a Rust program built on `base-http-server`. It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed. The `tomori-server` executable is the default build of the `tomori-server` library's builder, on which other projects build servers of their own (see `builders.md`).
 
 Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above. Both ends detect a silent peer as described in `connection-liveness.md`.
 

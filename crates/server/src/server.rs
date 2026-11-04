@@ -28,6 +28,7 @@ use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT, Watch};
 use crate::application::Application;
 use crate::backends::{AnySession, Backends};
 use crate::door::Door;
+use crate::environments::{Environment, Environments};
 use crate::hub::{CreateRequest, Hub, Job, Restore, SpaceCommand};
 use crate::transcriber::Transcriber;
 use crate::voice::{Voice, Voices};
@@ -218,6 +219,12 @@ impl Server {
     pub fn with_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {
         self.hub.set_roots(roots.to_protocol());
         self.roots = Some(roots);
+        self
+    }
+
+    /// Offer `environments` for spaces, in order, in place of Tomori's own, Sky and the Minimal grid: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. See `design/environments.md`.
+    pub fn with_environments(self, environments: impl IntoIterator<Item = Environment>) -> Self {
+        self.hub.set_environments(Environments::new(environments));
         self
     }
 
