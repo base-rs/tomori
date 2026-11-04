@@ -247,9 +247,8 @@ mod tests {
             &mut self,
             _cancellation: &Cancellation,
         ) -> Result<BodyFrame<Vec<u8>>, Self::Error> {
-            if self.reads.fetch_add(1, Ordering::Relaxed) >= FLOOD_LIMIT {
-                std::future::pending::<()>().await;
-            }
+            let reads = self.reads.fetch_add(1, Ordering::Relaxed);
+            assert!(reads < FLOOD_LIMIT, "the connection never yielded");
             Ok(BodyFrame::Data {
                 data: self.message.clone(),
                 end: false,
@@ -306,18 +305,141 @@ mod tests {
         let (mut body, reads) = flooded(&ClientMessage::Ping { nonce: 1 });
         let mut outputs = 0;
         loop {
-            match poll_read(&mut body) {
-                Poll::Ready(Ok(BodyFrame::Data { .. })) => outputs += 1,
-                Poll::Pending => break,
-                other => panic!("unexpected read: {other:?}"),
-            }
+            let Poll::Ready(result) = poll_read(&mut body) else {
+                break;
+            };
+            let Ok(BodyFrame::Data { .. }) = result else {
+                unreachable!("each ping is answered with data, not {result:?}");
+            };
+            outputs += 1;
             assert!(outputs <= INPUT_READS_PER_YIELD, "never yielded");
         }
         assert!(outputs > 0);
+        // Closing the response closes the request.
+        body.close(None);
+        assert!(body.finished);
         let applied = reads.load(Ordering::Relaxed);
         assert!(
             (INPUT_READS_PER_YIELD..=MOST_READS_BEFORE_YIELDING).contains(&applied),
             "{applied} reads before yielding"
         );
+    }
+
+    /// A request body that returns `frames` in turn, each after a wait if `waits`, then waits for ever.
+    struct Script {
+        frames: std::collections::VecDeque<Result<BodyFrame<Vec<u8>>, std::io::Error>>,
+        waits: bool,
+    }
+
+    impl ReadableBody for Script {
+        type Data = Vec<u8>;
+        type Error = std::io::Error;
+
+        fn close(&mut self, _error: Option<Self::Error>) {
+            self.frames.clear();
+        }
+
+        async fn read(
+            &mut self,
+            _cancellation: &Cancellation,
+        ) -> Result<BodyFrame<Vec<u8>>, Self::Error> {
+            if self.waits {
+                futures_lite::future::yield_now().await;
+            }
+            match self.frames.pop_front() {
+                Some(frame) => frame,
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    fn data(bytes: &[u8]) -> Result<BodyFrame<Vec<u8>>, std::io::Error> {
+        Ok(BodyFrame::Data {
+            data: bytes.to_vec(),
+            end: false,
+        })
+    }
+
+    fn scripted(
+        frames: Vec<Result<BodyFrame<Vec<u8>>, std::io::Error>>,
+        waits: bool,
+    ) -> ConnectionBody<Script> {
+        let (jobs, _) = async_channel::unbounded();
+        let hub = Hub::new(
+            Backends::new(),
+            Arc::new(NullTranscriber::new()),
+            jobs,
+            Vec::new(),
+            SpaceSlots::new(DEFAULT_MAX_SPACES),
+        );
+        let request = Script {
+            frames: frames.into(),
+            waits,
+        };
+        ConnectionBody::new(hub, request, Cancellation::new(), Access::open())
+            .expect("an open server admits the connection")
+    }
+
+    fn read(body: &mut ConnectionBody<Script>) -> Result<BodyFrame<Vec<u8>>, BodyError> {
+        futures_lite::future::block_on(body.read(&Cancellation::new()))
+    }
+
+    #[test]
+    fn input_that_is_not_a_frame_or_ends_inside_one_fails_the_connection() {
+        // A kind byte no frame has, read at once or after a wait.
+        for waits in [false, true] {
+            let mut body = scripted(vec![data(&[9, 0, 0, 0, 0])], waits);
+            assert!(read(&mut body).is_err());
+        }
+        // The upload ends with half a frame.
+        let mut body = scripted(
+            vec![Ok(BodyFrame::Data {
+                data: vec![0, 9],
+                end: true,
+            })],
+            false,
+        );
+        assert!(read(&mut body).is_err());
+        // The request cannot be read.
+        let mut body = scripted(vec![Err(std::io::Error::other("reset"))], false);
+        assert!(read(&mut body).is_err());
+    }
+
+    #[test]
+    fn a_response_closed_ends_at_once_and_never_has_trailers() {
+        let mut body = scripted(Vec::new(), false);
+        assert!(!body.may_have_trailers());
+        body.close(None);
+        let Ok(BodyFrame::End) = read(&mut body) else {
+            unreachable!("a closed response ends");
+        };
+    }
+
+    #[test]
+    fn a_space_rendered_for_a_connection_in_no_space_is_nothing() {
+        let mut body = scripted(Vec::new(), false);
+        body.outbox.space();
+        let mut output = Vec::new();
+        assert!(body.drain(&mut output));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn a_message_too_large_to_send_is_replaced_by_an_error_saying_so() {
+        let mut output = Vec::new();
+        encode(
+            &ServerMessage::Error {
+                error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
+                space: None,
+            },
+            &mut output,
+        );
+        let mut decoder = tomori_protocol::FrameDecoder::new();
+        decoder.push(&output);
+        let frame = decoder.next_frame().unwrap().unwrap();
+        let Ok(ServerMessage::Error { error, .. }) = frame.to_server_message() else {
+            unreachable!("the replacement is an error");
+        };
+        assert_eq!(error, "A message from the server was too large to send.");
     }
 }
