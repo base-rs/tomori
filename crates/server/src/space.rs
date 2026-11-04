@@ -2439,8 +2439,17 @@ mod tests {
         assert_eq!(state.workers_authoritative, Some(false));
         assert_eq!(ids(&state), ["older", "newer"]);
         assert_eq!(state.error.as_deref(), Some("Still finding workers."));
+        // One that omits a worker, deleted meanwhile, is still incomplete, so
+        // clients do not show it leaving until the list is authoritative.
+        space.apply(Event::WorkersPartial {
+            workers: found(&["older"]),
+            message: "Still finding workers.".into(),
+        });
+        let state = space.state(Vec::new());
+        assert_eq!(state.workers_authoritative, Some(false));
+        assert_eq!(ids(&state), ["older"]);
         space.apply(Event::WorkersChanged {
-            workers: found(&["older", "newer", "newest"]),
+            workers: found(&["older", "newest"]),
         });
         let state = space.state(Vec::new());
         assert_eq!(state.workers_authoritative, Some(true));
