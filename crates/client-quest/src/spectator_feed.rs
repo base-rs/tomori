@@ -157,26 +157,27 @@ impl Feed {
         // The presence hook writes each relayed presence into the shared map.
         let presence = Arc::new(Mutex::new(BTreeMap::new()));
         let hook = presence.clone();
-        connection.watch_presence(move |message| {
-            if let ServerMessage::Presence {
+        connection.watch_presence(move |message| match message {
+            ServerMessage::Presence {
                 source,
                 head,
                 left,
                 right,
                 hands,
-            } = message
-                && let Ok(mut map) = hook.lock()
-            {
-                map.insert(
-                    *source,
-                    ParticipantPresence {
-                        head: *head,
-                        left: *left,
-                        right: *right,
-                        hands: hands.as_deref().copied(),
-                    },
-                );
+            } => {
+                hook.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        *source,
+                        ParticipantPresence {
+                            head: *head,
+                            left: *left,
+                            right: *right,
+                            hands: hands.as_deref().copied(),
+                        },
+                    );
             }
+            _ => unreachable!("the connection hands its presence hook only presence"),
         });
 
         Self {
@@ -373,10 +374,8 @@ impl Feed {
     fn caption_text(&self, following: &Option<String>) -> String {
         match self.conversation.mode() {
             Mode::Servers => "SPECTATOR\nConnecting to server...".to_string(),
-            Mode::Lobby => match following {
-                Some(name) => format!("SPECTATOR\nWaiting for {name}..."),
-                None => "SPECTATOR\nJoining space...".to_string(),
-            },
+            // Who to follow is chosen only once in the space.
+            Mode::Lobby => "SPECTATOR\nJoining space...".to_string(),
             Mode::Space => match following {
                 Some(name) => format!("SPECTATOR\nFollowing {name}"),
                 None => "SPECTATOR\nIn space, waiting for a participant...".to_string(),

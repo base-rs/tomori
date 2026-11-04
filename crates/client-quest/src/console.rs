@@ -148,9 +148,9 @@ fn serve(
                 {
                     conversation.instruct(text);
                     poll(conversation);
-                    if let Some(notice) = conversation.menu_model().notice {
-                        say!(out, "({notice})");
-                    }
+                    // Instructing always says what happened.
+                    let notice = conversation.menu_model().notice.unwrap_or_default();
+                    say!(out, "({notice})");
                     continue;
                 }
                 // Changing the space's environment, as an owner; the rest of the line is its identifier.
@@ -548,6 +548,14 @@ mod tests {
             out.contains("(Removing this space's instructions.)"),
             "{out}"
         );
+        conversation.apply(space(|state| {
+            state.instructions = Some(AgentInstructions {
+                tomori: "Converse.".into(),
+                ..Default::default()
+            })
+        }));
+        let (out, _) = session(&mut conversation, &["i"]);
+        assert!(out.contains("  This space's: none\n"), "{out}");
     }
 
     #[test]
