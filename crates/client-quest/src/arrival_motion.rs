@@ -598,6 +598,72 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_track_with_no_duration_jumps_once_its_delay_is_over() {
+        let mut track = Track::at(0.0_f32);
+        track.retarget(0.0, 1.0, None, 1.0, 0.0);
+        assert_eq!(track.value(0.5), 0.0);
+        assert_eq!(track.value(1.5), 1.0);
+    }
+
+    #[test]
+    fn one_ring_replaces_another_after_a_moment_and_folds_back_into_the_create_object() {
+        let mut motion = Motion::default();
+        let mut now = settle(&mut motion, &lobby(), 0.0);
+        now = settle(&mut motion, &backends(), now);
+        let directories = Scene::layout(&lobby_view(Some(ring(
+            Step::Directory,
+            &[Key::Directory("/tmp".into())],
+        ))));
+        motion.update(&directories, now);
+        let replacing = motion.scene(now + FRAME);
+        assert!(replacing.object(&Key::Directory("/tmp".into())).is_none());
+        now = settle(&mut motion, &directories, now);
+        motion.update(&lobby(), now);
+        let folding = motion.scene(now + RING);
+        assert!(folding.object(&Key::Directory("/tmp".into())).is_none());
+    }
+
+    #[test]
+    fn an_entered_space_keeps_growing_its_environment_frame_after_frame() {
+        let mut motion = Motion::default();
+        let mut now = settle(&mut motion, &lobby(), 0.0);
+        now = settle(&mut motion, &joining("one"), now);
+        now = settle(&mut motion, &entered("one"), now);
+        let radius = motion.scenery(now).reveal.map(|sphere| sphere.radius);
+        motion.update(&entered("one"), now + FRAME);
+        assert_eq!(
+            motion
+                .scenery(now + FRAME)
+                .reveal
+                .map(|sphere| sphere.radius),
+            radius
+        );
+    }
+
+    #[test]
+    fn a_space_gone_from_the_list_shrinks_where_it_is() {
+        let mut motion = Motion::default();
+        let now = settle(&mut motion, &lobby(), 0.0);
+        let fewer = Scene::layout(&View {
+            items: lobby_view(None)
+                .items
+                .into_iter()
+                .filter(|item| item.key != Key::Space("two".into()))
+                .collect(),
+            ..lobby_view(None)
+        });
+        let before = motion
+            .scene(now)
+            .object(&Key::Space("two".into()))
+            .unwrap()
+            .position;
+        motion.update(&fewer, now);
+        let leaving = motion.scene(now + SETTLE / 2.0);
+        let two = leaving.object(&Key::Space("two".into())).unwrap();
+        assert!(two.position.distance(before) < 1e-3 && two.presence < 1.0);
+    }
+
     fn servers() -> Scene {
         Scene::layout(&View {
             heading: "Choose a server".into(),
@@ -888,11 +954,7 @@ mod tests {
         let mut last = 0.0;
         let mut folding = std::collections::HashMap::new();
         for scene in &scenes {
-            let server = scene
-                .object(&key)
-                .or_else(|| scene.object(&Key::Connected("c:1".into())))
-                .unwrap()
-                .position;
+            let server = scene.object(&key).unwrap().position;
             let distance = server.distance(CENTRE);
             assert!(distance >= last - 1e-5);
             last = distance;
@@ -947,18 +1009,9 @@ mod tests {
         for expected in forward.iter().rev() {
             let scene = motion.scene(now);
             for object in &expected.objects {
-                let actual = scene.object(&object.key);
-                match actual {
-                    Some(actual) => {
-                        assert!(
-                            actual.position.distance(object.position) < 1e-3,
-                            "{:?}",
-                            object.key
-                        );
-                        assert!((actual.presence - object.presence).abs() < 1e-3);
-                    }
-                    None => assert!(object.presence < 1e-3),
-                }
+                let actual = scene.object(&object.key).unwrap();
+                assert!(actual.position.distance(object.position) < 1e-3);
+                assert!((actual.presence - object.presence).abs() < 1e-3);
             }
             now += FRAME;
             motion.update(&lobby(), now);
@@ -1123,11 +1176,7 @@ mod tests {
         // Spaces only just appearing can't be chosen yet; once settled they can.
         let one = Key::Space("one".into());
         let appearing = motion.scene(now + SERVER * 0.5);
-        assert!(
-            appearing
-                .object(&one)
-                .is_none_or(|object| object.presence < 0.5)
-        );
+        assert!(appearing.object(&one).is_none());
         let settled = motion.scene(now + SERVER);
         assert_eq!(
             choose(&settled, settled.object(&one).unwrap().position),
