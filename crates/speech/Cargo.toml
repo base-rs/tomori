@@ -11,6 +11,8 @@ keywords = ["tomori", "speech", "asr", "tts", "sherpa-onnx"]
 categories = ["multimedia::audio", "accessibility"]
 
 [features]
+# The model finder, for the tests of other crates that run the models; see src/test_models.rs.
+test-models = []
 # Link sherpa-onnx and ONNX Runtime as shared libraries from `SHERPA_ONNX_LIB_DIR`, such as the CUDA build, instead of the static CPU libraries downloaded by default.
 shared = ["sherpa-onnx/shared"]
 
