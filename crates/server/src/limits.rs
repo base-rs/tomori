@@ -455,7 +455,13 @@ mod tests {
         };
         let mut state = SpaceState {
             messages: vec![message(0, "Done.".into())],
-            queue: (0..1000).map(entry).collect(),
+            // Input still waiting is kept.
+            queue: std::iter::once(tomori_protocol::QueueEntry {
+                state: tomori_protocol::QueueState::Queued,
+                ..entry(1000)
+            })
+            .chain((0..1000).map(entry))
+            .collect(),
             approval: Some(tomori_protocol::Approval {
                 id: "request-1".into(),
                 title: "Bash".into(),
@@ -466,7 +472,7 @@ mod tests {
         };
         fit_state(&mut state);
         assert!(json_len(&state) <= SNAPSHOT_BUDGET);
-        assert!(state.queue.is_empty());
+        assert_eq!(state.queue.len(), 1);
         let approval = state.approval.unwrap();
         assert!(approval.text.ends_with(TRUNCATED));
         // Cut enough by the text, the title is kept.
@@ -483,10 +489,13 @@ mod tests {
     fn a_long_directory_is_cut_between_characters() {
         let mut spaces = listing(400);
         for space in &mut spaces {
-            space.directory = format!("/{}", "é".repeat(DIRECTORY_BYTES / 2 - 1));
+            space.directory = format!("/{}", "日".repeat(DIRECTORY_BYTES / 3 - 1));
         }
+        // A short directory is kept whole.
+        spaces[0].directory = "/short".into();
         fit_spaces(&mut spaces);
-        assert!(spaces[0].directory.starts_with('…'));
+        assert_eq!(spaces[0].directory, "/short");
+        assert!(spaces[1].directory.starts_with('…'));
         assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
     }
 
