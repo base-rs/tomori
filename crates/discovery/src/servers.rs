@@ -78,7 +78,9 @@ mod tests {
     #[test]
     fn keeps_compatible_and_incompatible_servers_apart() {
         let mut servers = Servers::new();
+        assert!(servers.is_empty());
         assert!(servers.apply(Event::Found(server("b", "Beta", PROTOCOL_VERSION))));
+        assert!(!servers.is_empty());
         assert!(servers.apply(Event::Found(server("a", "Alpha", PROTOCOL_VERSION))));
         assert!(servers.apply(Event::Incompatible(server(
             "old",

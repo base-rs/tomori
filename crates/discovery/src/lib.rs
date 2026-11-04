@@ -108,3 +108,14 @@ impl From<mdns_sd::Error> for Error {
         Self(error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_say_they_are_from_multicast_dns() {
+        let error = Error::from(mdns_sd::Error::Msg("no interface to send on".into()));
+        assert_eq!(error.to_string(), "multicast DNS: no interface to send on");
+    }
+}

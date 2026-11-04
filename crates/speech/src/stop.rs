@@ -87,15 +87,34 @@ mod tests {
     use std::{thread, time::Duration};
 
     #[test]
+    fn a_panic_is_described_by_its_message_whatever_its_type() {
+        let caught = |panic: Box<dyn FnOnce() + Send + std::panic::UnwindSafe>| {
+            panic_message(&*std::panic::catch_unwind(panic).unwrap_err())
+        };
+        assert_eq!(caught(Box::new(|| panic!("a literal"))), "a literal");
+        assert_eq!(
+            caught(Box::new(|| panic!("formatted {}", 7))),
+            "formatted 7"
+        );
+        assert_eq!(
+            caught(Box::new(|| std::panic::panic_any(7_u32))),
+            "unknown panic"
+        );
+    }
+
+    #[test]
     fn waits_for_the_thread_to_exit() {
         let exited = Exited::default();
-        let stopper = Stopper::new(|| {}, exited.clone());
+        let (asked, stopping) = std::sync::mpsc::channel();
+        let stopper = Stopper::new(move || asked.send(()).unwrap(), exited.clone());
         assert!(!stopper.wait(Instant::now() + Duration::from_millis(20)));
         let guard = exited.guard();
+        // The engine's thread exits once it is asked to stop.
         let thread = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
+            stopping.recv().unwrap();
             drop(guard);
         });
+        stopper.stop();
         assert!(stopper.wait(Instant::now() + Duration::from_secs(5)));
         thread.join().unwrap();
     }

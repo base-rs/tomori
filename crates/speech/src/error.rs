@@ -46,3 +46,55 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_error_says_what_went_wrong() {
+        for (error, message) in [
+            (
+                Error::Unavailable("install the model".into()),
+                "speech engine unavailable: install the model".to_owned(),
+            ),
+            (
+                Error::Stopped("it panicked".into()),
+                "speech engine stopped: it panicked".to_owned(),
+            ),
+            (
+                Error::Engine("bad input".into()),
+                "speech engine error: bad input".to_owned(),
+            ),
+            (
+                Error::Behind,
+                format!(
+                    "speech recognition fell more than {} seconds behind the audio",
+                    crate::stt::BACKLOG / crate::stt::RATE as usize
+                ),
+            ),
+            (
+                Error::TooLong(300),
+                "the speech was longer than 5 minutes, the most that is transcribed at once"
+                    .to_owned(),
+            ),
+            (
+                Error::TooLong(60),
+                "the speech was longer than 1 minute, the most that is transcribed at once"
+                    .to_owned(),
+            ),
+            (
+                Error::TooLong(90),
+                "the speech was longer than 90 seconds, the most that is transcribed at once"
+                    .to_owned(),
+            ),
+            (
+                Error::TooLong(1),
+                "the speech was longer than 1 second, the most that is transcribed at once"
+                    .to_owned(),
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+        }
+    }
+}
