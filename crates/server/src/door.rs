@@ -23,6 +23,14 @@ pub enum Door {
     },
 }
 
+/// Revoke the token `id` from `store`, saying so if the store could not be written. Returns whether a token was revoked.
+pub(crate) fn revoke(store: &TokenStore, id: &str) -> bool {
+    store.revoke(id).unwrap_or_else(|error| {
+        log::warn!("Could not revoke token {id}: {error}.");
+        false
+    })
+}
+
 /// The token store as an authenticator in the chain.
 struct Tokens(Arc<TokenStore>);
 
@@ -94,6 +102,40 @@ mod tests {
         Credentials {
             token: Some(token.to_owned()),
         }
+    }
+
+    /// Authenticates everyone as the principal of a token that is no longer issued, as the store does for a token revoked after it authenticated.
+    struct Revoked;
+
+    impl Authenticator for Revoked {
+        fn authenticate(&self, _: &Credentials) -> Verdict {
+            Verdict::Authenticated(tomori_security::Principal {
+                id: "token:revoked".to_owned(),
+                name: "Revoked".to_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_token_revoked_after_it_authenticated_admits_nothing() {
+        let (store, directory) = store("revoked");
+        let door = Door::Tokens {
+            chain: Chain::new().with(Revoked),
+            store,
+            visitors: true,
+        };
+        assert_eq!(door.admit(&token("anything"), false), None);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_revoked_is_said_not_to_be() {
+        let (store, directory) = store("unrevoked");
+        let (entry, _) = store.issue("Ada", Granted::Owner).unwrap();
+        std::fs::create_dir(directory.join("tokens.tmp")).unwrap();
+        assert!(!revoke(&store, &entry.id));
+        assert_eq!(store.entries().len(), 1);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
