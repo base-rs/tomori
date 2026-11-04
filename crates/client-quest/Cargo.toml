@@ -53,6 +53,10 @@ winit = "0.30"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
+
 [dev-dependencies]
 pollster = "0.4"
 tomori-environment-sky = { version = "0.1.0", path = "../environment-sky", features = ["test-gpu"] }

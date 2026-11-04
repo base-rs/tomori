@@ -53,7 +53,10 @@ pub fn run(spectator: bool, pipewire: bool, feed: Option<Feed>) -> Result<()> {
     }
 }
 
-/// A window's Vulkan surface and device, configured for sRGB output with vsync, as every desktop window uses them.
+/// The backends a desktop window draws with: Vulkan, and Metal on macOS, which has no Vulkan driver of its own.
+const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::METAL);
+
+/// A window's surface and device, configured for sRGB output with vsync, as every desktop window uses them.
 pub(crate) struct WindowGpu {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
@@ -65,7 +68,7 @@ pub(crate) struct WindowGpu {
 impl WindowGpu {
     pub(crate) async fn new(window: Arc<Window>) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: BACKENDS,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let size = window.inner_size();
@@ -76,7 +79,7 @@ impl WindowGpu {
                 ..Default::default()
             })
             .await
-            .context("finding a desktop Vulkan adapter")?;
+            .context("finding a desktop Vulkan or Metal adapter")?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("desktop device"),
