@@ -241,11 +241,6 @@ pub enum MenuKey {
     WristCue,
 }
 
-/// Whether choosing `key` does something: not a row that is only read, nor the wrist's cue.
-pub fn choosable(key: &MenuKey) -> bool {
-    !matches!(key, MenuKey::Text(_) | MenuKey::Cue | MenuKey::WristCue)
-}
-
 /// How an item of the hand menu looks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MenuKind {
