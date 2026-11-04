@@ -44,6 +44,8 @@ pub struct FakeBackend {
 struct FakeShared {
     manual: AtomicBool,
     snapshot_failure: Arc<AtomicBool>,
+    /// Closing a session fails, once it has closed; see [`FakeBackend::fail_closing`].
+    closing_failure: Arc<AtomicBool>,
     /// While set, session creation waits; see [`FakeBackend::hold_creation`].
     held: AtomicBool,
     released: event_listener::Event,
@@ -79,6 +81,11 @@ impl FakeBackend {
     /// Simulate an unavailable initial session snapshot.
     pub fn fail_snapshots(&self, fail: bool) {
         self.shared.snapshot_failure.store(fail, Ordering::SeqCst);
+    }
+
+    /// Make closing sessions fail once they have closed, as an agent that does not answer would.
+    pub fn fail_closing(&self) {
+        self.shared.closing_failure.store(true, Ordering::SeqCst);
     }
 
     /// Take no instructions, as a backend without [`Capabilities::instructions`].
@@ -152,11 +159,12 @@ impl FakeBackend {
         let session = FakeSession {
             handle: handle.clone(),
             inner: Arc::new(FakeSessionInner {
-                id: format!("fake-{number}"),
+                id: Mutex::new(format!("fake-{number}")),
                 title: title.to_owned(),
                 directory: directory.to_owned(),
                 manual: self.shared.manual.load(Ordering::SeqCst),
                 snapshot_failure: self.shared.snapshot_failure.clone(),
+                closing_failure: self.shared.closing_failure.clone(),
                 commands_held: self.shared.commands_held.clone(),
                 commands_released: self.shared.commands_released.clone(),
                 instruction_failure: self.shared.instruction_failure.clone(),
@@ -214,7 +222,7 @@ impl Backend for FakeBackend {
         if let Some(session) = self
             .started()
             .into_iter()
-            .find(|session| session.inner.id == id)
+            .find(|session| session.id() == id)
         {
             // Bound again: its entries are the new binding's.
             if session.inner.bound.lock().unwrap().is_some() {
@@ -239,7 +247,7 @@ impl Backend for FakeBackend {
             .iter()
             .filter(|session| session.inner.directory == directory)
             .map(|session| SessionSummary {
-                id: session.inner.id.clone(),
+                id: session.id(),
                 title: session.inner.title.clone(),
                 directory: session.inner.directory.clone(),
             })
@@ -258,7 +266,7 @@ impl Backend for FakeBackend {
         let session = self
             .started()
             .into_iter()
-            .find(|session| session.inner.id == id)
+            .find(|session| session.id() == id)
             .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("no fake session {id}")))?;
         let mut bound = session.inner.bound.lock().unwrap();
         if bound.is_some() {
@@ -316,7 +324,9 @@ struct FakeOutbound {
 }
 
 struct FakeSessionInner {
-    id: String,
+    /// The agent may name its session anew; see [`FakeSession::rename`].
+    id: Mutex<String>,
+    closing_failure: Arc<AtomicBool>,
     title: String,
     directory: String,
     manual: bool,
@@ -413,7 +423,7 @@ impl FakeSession {
     /// Start a new assistant message and return its identifier. Follow with [`delta`](Self::delta) and a [`Event::MessageCompleted`].
     pub fn start_message(&self) -> String {
         let number = self.inner.next_message.fetch_add(1, Ordering::SeqCst) + 1;
-        let message = format!("{}-reply-{number}", self.inner.id);
+        let message = format!("{}-reply-{number}", self.id());
         self.emit(Event::MessageStarted {
             message: message.clone(),
             role: Role::Assistant,
@@ -440,6 +450,11 @@ impl FakeSession {
         self.inner.log.lock().unwrap().clone()
     }
 
+    /// Name the session anew, as an agent may once it starts.
+    pub fn rename(&self, id: &str) {
+        *self.inner.id.lock().unwrap() = id.to_owned();
+    }
+
     pub fn is_busy(&self) -> bool {
         self.inner.busy.load(Ordering::SeqCst)
     }
@@ -447,7 +462,7 @@ impl FakeSession {
 
 impl Session for FakeSession {
     fn id(&self) -> String {
-        self.inner.id.clone()
+        self.inner.id.lock().unwrap().clone()
     }
 
     async fn next_event(&self) -> Result<Event> {
@@ -616,6 +631,12 @@ impl Session for FakeSession {
         }
         outbound.current = None;
         *bound = None;
+        if self.inner.closing_failure.load(Ordering::SeqCst) {
+            return Err(Error::new(
+                ErrorKind::Unavailable,
+                "the fake agent did not answer",
+            ));
+        }
         Ok(())
     }
 }
@@ -700,10 +721,7 @@ mod tests {
         let message = session.start_message();
         while session.handle.receiver.try_recv().is_ok() {}
         session.delta(&message, "");
-        assert!(
-            !std::iter::from_fn(|| session.handle.receiver.try_recv().ok())
-                .any(|event| matches!(event, Event::TextDelta { .. }))
-        );
+        assert!(session.handle.receiver.try_recv().is_err());
     }
 
     #[test]
