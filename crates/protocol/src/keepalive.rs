@@ -26,3 +26,15 @@ impl Default for Keepalive {
         Self::DEFAULT
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_pings_after_five_seconds_and_gives_up_after_fifteen() {
+        assert_eq!(Keepalive::default(), Keepalive::DEFAULT);
+        assert_eq!(Keepalive::DEFAULT.interval, Duration::from_secs(5));
+        assert_eq!(Keepalive::DEFAULT.timeout, Duration::from_secs(15));
+    }
+}
