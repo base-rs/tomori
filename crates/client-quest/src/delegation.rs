@@ -215,16 +215,19 @@ impl Workspace {
     ///
     /// Workers beyond the node limit, and any with an out-of-contract identifier, are omitted and the projection marked truncated, so the scene treats it as partial rather than removing what it cannot see. A space error marks it partial in the same way, and state that is not `current` marks it stale. Cycles and duplicate identifiers are left for [`Workspace::valid`] to reject.
     pub fn from_space(space: &tomori_protocol::SpaceState, current: bool) -> Self {
-        let mut truncated = false;
-        let mut nodes = Vec::with_capacity(space.workers.len().min(MAX_NODES));
-        for worker in &space.workers {
-            if nodes.len() == MAX_NODES
-                || !valid_id(&worker.id)
-                || worker.parent.as_deref().is_some_and(|id| !valid_id(id))
-            {
-                truncated = true;
-                continue;
-            }
+        let in_contract = |worker: &&tomori_protocol::Worker| {
+            valid_id(&worker.id) && worker.parent.as_deref().is_none_or(valid_id)
+        };
+        let valid = space.workers.iter().filter(in_contract).count();
+        let truncated = valid < space.workers.len() || valid > MAX_NODES;
+        let mut nodes = Vec::with_capacity(valid.min(MAX_NODES));
+        // The server lists workers oldest first; beyond the node limit, the newest are kept, as the server keeps them.
+        for worker in space
+            .workers
+            .iter()
+            .filter(in_contract)
+            .skip(valid.saturating_sub(MAX_NODES))
+        {
             nodes.push(Node {
                 id: worker.id.clone(),
                 parent_id: Some(worker.parent.clone().unwrap_or_else(|| space.id.clone())),
@@ -3778,11 +3781,16 @@ mod space_tests {
         list.insert(0, worker("", None, WorkerState::Running));
         let long = "p".repeat(MAX_ID_BYTES + 1);
         list.insert(1, worker("bad-parent", Some(&long), WorkerState::Running));
-        list[2].title = "t".repeat(400);
+        list.last_mut().unwrap().title = "t".repeat(400);
         let workspace = Workspace::from_space(&space(list.clone()), true);
         assert_eq!(workspace.nodes.len(), MAX_NODES);
-        assert_eq!(workspace.nodes[0].id, "w0");
-        assert_eq!(workspace.nodes[0].title.chars().count(), 160);
+        // The server lists the oldest first; the newest are kept.
+        assert_eq!(workspace.nodes[0].id, "w3");
+        assert_eq!(
+            workspace.nodes[MAX_NODES - 1].id,
+            format!("w{}", MAX_NODES + 2)
+        );
+        assert_eq!(workspace.nodes[MAX_NODES - 1].title.chars().count(), 160);
         assert!(workspace.truncated);
         assert!(workspace.valid());
 
