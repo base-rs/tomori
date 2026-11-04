@@ -457,4 +457,84 @@ mod tests {
         assert!(canvas.mesh().is_empty());
         assert_eq!(canvas.plain(), " ");
     }
+
+    #[test]
+    fn a_panel_cuts_a_mesh_too_large_for_it_and_draws_nothing_when_empty() {
+        crate::test_support::log_everything();
+        tomori_environment_sky::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let pipeline = Pipeline::new(&gpu.device, format, 1);
+            let mut panel = Panel::new(&gpu.device, &pipeline, 12);
+            let mut canvas = Canvas::new(8, 0.001);
+            let mut row = Row::new(vec![('#', Style::plain([1.0; 4])); 8]);
+            row.background = Some([0.2, 0.2, 0.2, 1.0]);
+            canvas.rows.push(row);
+            assert!(canvas.mesh().len() > 12);
+            panel.set(&gpu.queue, &canvas);
+            assert_eq!(panel.count, 12);
+            // The same canvas again changes nothing.
+            panel.set(&gpu.queue, &canvas);
+            let mut empty = Canvas::new(1, 1.0);
+            empty.background = [0.0; 4];
+            panel.set(&gpu.queue, &empty);
+            assert_eq!(panel.count, 0);
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("panel test"),
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&Default::default());
+            let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("panel test depth"),
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let depth = depth.create_view(&Default::default());
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("panel test"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                pipeline.set(&mut pass);
+                panel.draw(&mut pass, 0);
+            }
+            gpu.queue.submit([encoder.finish()]);
+        });
+    }
 }
