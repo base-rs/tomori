@@ -80,11 +80,15 @@ fn an_owner_changes_the_environment_for_everyone_in_the_space() {
                 .any(|message| message.text.contains("hello"))
         );
     }
+    // Cal, in the lobby, is listed the space again, in its new environment; the listing from before still names Sky.
     cal.wait_for(|message| match message {
-        ServerMessage::Spaces { spaces } => spaces
-            .iter()
-            .any(|listed| listed.id == space.id && listed.environment == "minimal")
-            .then_some(()),
+        ServerMessage::Spaces { spaces }
+            if spaces
+                .iter()
+                .any(|listed| listed.id == space.id && listed.environment == "minimal") =>
+        {
+            Some(())
+        }
         _ => None,
     });
     // Someone joining later arrives in it.
