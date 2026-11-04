@@ -279,6 +279,11 @@ pub struct Snapshot {
     /// The session's workers, oldest first as far as the backend knows, since a snapshot too large to send drops its
     /// oldest workers first.
     pub workers: Vec<Worker>,
+    /// Why `workers` may not be every worker the session has, such as while the backend is still discovering them; `None`
+    /// when they are. A worker it omits has then not departed: the rest follow as [`Event::WorkersPartial`] and
+    /// [`Event::WorkersChanged`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_incomplete: Option<String>,
     #[serde(default)]
     pub modes: Modes,
 }
@@ -332,6 +337,12 @@ pub enum Event {
     WorkersChanged {
         workers: Vec<Worker>,
     },
+    /// Every worker the backend knows, as for [`Event::WorkersChanged`], while it knows that they may not be all the
+    /// session has, such as while it is still discovering them: omissions must not imply deletion. `message` says why.
+    WorkersPartial {
+        workers: Vec<Worker>,
+        message: String,
+    },
     /// Worker observation became incomplete; omissions must not imply deletion.
     WorkersUnavailable {
         message: String,
@@ -358,8 +369,8 @@ pub enum Event {
     /// The backend lost events, such as when its connection to the agent dropped, and has read the session again.
     /// The snapshot replaces the conversation, running state, modes and pending requests, as when the session was
     /// first opened; requests the snapshot does not list are no longer pending. Events reported after this one follow
-    /// it. Its `workers` are not used: workers keep travelling as [`Event::WorkersChanged`] and
-    /// [`Event::WorkersUnavailable`], so a resynchronization never retires one.
+    /// it. Its `workers` are not used: workers keep travelling as [`Event::WorkersChanged`],
+    /// [`Event::WorkersPartial`] and [`Event::WorkersUnavailable`], so a resynchronization never retires one.
     Resynchronized {
         snapshot: Snapshot,
     },
