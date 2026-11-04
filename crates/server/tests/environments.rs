@@ -3,31 +3,10 @@
 
 //! Changing a space's environment after it is created. See `design/environments.md`.
 
-use std::sync::Arc;
-
 use tomori_backend::Event;
-use tomori_protocol::{Activity, ClientMessage, EnvironmentInfo, ServerMessage, SpaceState};
+use tomori_protocol::{Activity, ClientMessage, ServerMessage, SpaceState};
 use tomori_security::Grant;
-use tomori_server::Server;
-use tomori_server::fake::FakeBackend;
-use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
-
-/// Sky, and a second environment for a space to change to, since this build offers only Sky.
-fn offered() -> Vec<EnvironmentInfo> {
-    ["sky", "minimal"]
-        .into_iter()
-        .map(|id| EnvironmentInfo {
-            id: id.into(),
-            label: id.into(),
-        })
-        .collect()
-}
-
-fn server() -> TestServer {
-    TestServer::with_server(FakeBackend::new(), |backends| {
-        Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(offered())
-    })
-}
+use tomori_server::test_support::{TestClient, TestServer, eventually};
 
 fn join(client: &mut TestClient, id: &str) -> SpaceState {
     client.send(&ClientMessage::Join {
@@ -44,7 +23,7 @@ fn change(client: &mut TestClient, environment: &str) {
 
 #[test]
 fn an_owner_changes_the_environment_for_everyone_in_the_space() {
-    let server = server();
+    let server = TestServer::start();
     let mut ada = server.connect("ada", "Ada");
     // Outside a space there is nothing to change.
     change(&mut ada, "minimal");
@@ -118,7 +97,7 @@ fn an_owner_changes_the_environment_for_everyone_in_the_space() {
 
 #[test]
 fn only_owners_change_a_space_s_environment() {
-    let server = TestServer::with_tokens(true, |server| server.with_environments(offered()));
+    let server = TestServer::with_tokens(true, |server| server);
     let (_, token) = server.issue("Ada", Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &token);
     let space = ada.create_space("Owned");
