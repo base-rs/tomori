@@ -1,11 +1,11 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Size limits that keep every server frame within [`protocol::MAX_FRAME_BYTES`]. See `design/server.md`.
+//! Size limits that keep every server frame within [`tomori_protocol::MAX_FRAME_BYTES`]. See `design/server.md`.
 //!
 //! Strings supplied by clients are bounded when they arrive, and rejected with an error that does not repeat them. Space snapshots and the lobby listing are then trimmed to a byte budget when they are rendered, because they also carry text produced by the agent.
 
-use protocol::{SpaceState, SpaceSummary};
+use tomori_protocol::{SpaceState, SpaceSummary};
 
 /// Longest participant identity in `Hello`, in bytes.
 pub const PARTICIPANT_BYTES: usize = 128;
@@ -55,10 +55,10 @@ pub const INSTRUCTIONS_BYTES: usize = 4096;
 /// Longest error text sent to a client, in bytes. Longer errors are cut.
 pub const ERROR_BYTES: usize = 512;
 
-/// The most bytes of JSON in one space snapshot or lobby listing: a quarter of [`protocol::MAX_FRAME_BYTES`].
+/// The most bytes of JSON in one space snapshot or lobby listing: a quarter of [`tomori_protocol::MAX_FRAME_BYTES`].
 ///
 /// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries are dropped, then approval and question text, their titles and the space error are cut, and then workers are dropped. What remains is bounded by the input limits above, [`FIELD_BYTES`], the mode limits, the approval option limits and the connection limit, and stays below the frame limit even in the worst case. Agent identifiers for approvals and questions are not cut, because clients name them in their replies.
-pub const SNAPSHOT_BUDGET: usize = protocol::MAX_FRAME_BYTES / 4;
+pub const SNAPSHOT_BUDGET: usize = tomori_protocol::MAX_FRAME_BYTES / 4;
 
 /// Appended to text that was cut to fit.
 pub const TRUNCATED: &str = "… [truncated]";
@@ -141,7 +141,7 @@ pub fn fit_state(state: &mut SpaceState) {
         && let Some(index) = state.queue.iter().position(|entry| {
             matches!(
                 entry.state,
-                protocol::QueueState::Delivered | protocol::QueueState::Failed
+                tomori_protocol::QueueState::Delivered | tomori_protocol::QueueState::Failed
             )
         })
     {
@@ -216,7 +216,7 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
         let quiet = |closed: bool| {
             spaces.iter().position(|space| {
                 space.attention.is_none()
-                    && (!closed || space.activity == protocol::Activity::Closed)
+                    && (!closed || space.activity == tomori_protocol::Activity::Closed)
             })
         };
         let index = quiet(true)
@@ -229,11 +229,11 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
 
 /// The index of the space that least needs attention: the lowest level, then the one that has needed it for the least time.
 fn least_urgent(spaces: &[SpaceSummary]) -> usize {
-    let rank = |attention: Option<protocol::Attention>| match attention {
-        Some(protocol::Attention::Input) => 0,
-        Some(protocol::Attention::Problem) => 1,
-        Some(protocol::Attention::Reply) => 2,
-        Some(protocol::Attention::Unknown) | None => 3,
+    let rank = |attention: Option<tomori_protocol::Attention>| match attention {
+        Some(tomori_protocol::Attention::Input) => 0,
+        Some(tomori_protocol::Attention::Problem) => 1,
+        Some(tomori_protocol::Attention::Reply) => 2,
+        Some(tomori_protocol::Attention::Unknown) | None => 3,
     };
     spaces
         .iter()
@@ -251,7 +251,7 @@ fn least_urgent(spaces: &[SpaceSummary]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{Message, Role};
+    use tomori_protocol::{Message, Role};
 
     fn message(id: usize, text: String) -> Message {
         Message {
@@ -300,12 +300,12 @@ mod tests {
 
     #[test]
     fn a_trimmed_worker_list_is_marked_partial_without_overwriting_an_error() {
-        let workers: Vec<protocol::Worker> = (0..2000)
-            .map(|index| protocol::Worker {
+        let workers: Vec<tomori_protocol::Worker> = (0..2000)
+            .map(|index| tomori_protocol::Worker {
                 id: format!("worker-{index}"),
                 parent: None,
                 title: "x".repeat(200),
-                state: protocol::WorkerState::Running,
+                state: tomori_protocol::WorkerState::Running,
             })
             .collect();
         for error in [None, Some("Unrelated error".to_owned())] {
@@ -337,7 +337,7 @@ mod tests {
                 backend: "fake".into(),
                 directory: "/d".repeat(DIRECTORY_BYTES / 2),
                 environment: "sky".into(),
-                activity: protocol::Activity::Idle,
+                activity: tomori_protocol::Activity::Idle,
                 participants: 0,
                 attention: None,
                 attention_age: None,
@@ -357,7 +357,7 @@ mod tests {
         // Beyond that, closed spaces are left out, then the oldest spaces.
         let mut spaces = listing(2000);
         for space in spaces.iter_mut().skip(1000).step_by(2) {
-            space.activity = protocol::Activity::Closed;
+            space.activity = tomori_protocol::Activity::Closed;
         }
         fit_spaces(&mut spaces);
         assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn a_trimmed_listing_keeps_the_spaces_needing_attention_longest() {
-        use protocol::Attention;
+        use tomori_protocol::Attention;
         let mut spaces = listing(2000);
         let mark = |space: &mut SpaceSummary, attention, age| {
             space.attention = Some(attention);
@@ -379,9 +379,9 @@ mod tests {
         mark(&mut spaces[0], Attention::Reply, 900);
         mark(&mut spaces[1], Attention::Input, 30);
         mark(&mut spaces[2], Attention::Problem, 10);
-        spaces[2].activity = protocol::Activity::Closed;
+        spaces[2].activity = tomori_protocol::Activity::Closed;
         for space in spaces.iter_mut().skip(1000).step_by(2) {
-            space.activity = protocol::Activity::Closed;
+            space.activity = tomori_protocol::Activity::Closed;
         }
         fit_spaces(&mut spaces);
         assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);

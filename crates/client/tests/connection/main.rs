@@ -7,9 +7,9 @@ mod server;
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
-use client::{Backoff, Client, ConnectionState, Disconnect, Event, Keepalive, Options};
-use protocol::{AudioFrame, ClientMessage, Gate, ServerMessage};
 use server::{ECHO_SOURCE, MiniServer, Mode, Received};
+use tomori_client::{Backoff, Client, ConnectionState, Disconnect, Event, Keepalive, Options};
+use tomori_protocol::{AudioFrame, ClientMessage, Gate, ServerMessage};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -205,7 +205,7 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
 
     assert_eq!(
         client.sender().membership(),
-        client::Membership {
+        tomori_client::Membership {
             space: Some("alpha".into()),
             gate: Gate::Agent
         }
@@ -357,7 +357,7 @@ fn closing_delivers_queued_control_messages() {
     assert_eq!(sender.state(), ConnectionState::Closed);
     assert_eq!(
         sender.send(ClientMessage::ListSpaces),
-        Err(client::SendError::Closed)
+        Err(tomori_client::SendError::Closed)
     );
     let received = server.received(1);
     assert!(received.ends_with(&[
@@ -372,7 +372,7 @@ fn reports_incompatible_servers() {
     let client = Client::connect(options(server.address)).unwrap();
     assert!(matches!(
         wait_disconnected(&client),
-        Disconnect::Protocol(error) if error.contains(&format!("protocol {}", protocol::PROTOCOL_VERSION + 1))
+        Disconnect::Protocol(error) if error.contains(&format!("protocol {}", tomori_protocol::PROTOCOL_VERSION + 1))
     ));
 
     let server = MiniServer::start(localhost(), Mode::Unavailable);

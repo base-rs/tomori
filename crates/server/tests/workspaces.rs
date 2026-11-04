@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::Event;
-use protocol::{ClientMessage, ServerMessage};
-use server::fake::FakeBackend;
-use server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber};
-use server::{DIRECTORY_UNAVAILABLE, Server, WorkspaceRoots};
+use tomori_backend::Event;
+use tomori_protocol::{ClientMessage, ServerMessage};
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber};
+use tomori_server::{DIRECTORY_UNAVAILABLE, Server, WorkspaceRoots};
 
 /// A directory removed when dropped.
 struct Scratch(PathBuf);
@@ -216,7 +216,7 @@ fn a_refused_directory_holds_no_place_while_it_is_checked() {
     let mut ada = server.connect("ada", "Ada");
     let missing = format!("{}/missing", root.to_str().unwrap());
     // Sent together, so the refused requests are still being checked when the allowed one arrives. Fewer missing paths than the limit on running checks, which would refuse the allowed one too.
-    for _ in 0..server::MAX_RESOLVING / 2 {
+    for _ in 0..tomori_server::MAX_RESOLVING / 2 {
         create(&mut ada, "Refused", "/", None);
         create(&mut ada, "Refused", &missing, None);
     }

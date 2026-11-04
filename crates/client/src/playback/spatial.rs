@@ -38,7 +38,7 @@ pub struct Listener {
 pub struct Scene {
     /// Without a listener every source plays centred, at the reference distance.
     pub listener: Option<Listener>,
-    /// Each source by number, such as a participant or [`protocol::AGENT_SOURCE`], and where it is. A source not listed plays centred.
+    /// Each source by number, such as a participant or [`tomori_protocol::AGENT_SOURCE`], and where it is. A source not listed plays centred.
     pub sources: Vec<(u32, Position)>,
     /// Pan nothing, for people who hear with one ear: distance still changes loudness, but both ears hear the same.
     pub mono: bool,

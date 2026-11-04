@@ -290,7 +290,7 @@ struct Participant {
     head: Head,
     focused: bool,
     visible: bool,
-    engagement: client::engagement::Tracker,
+    engagement: tomori_client::engagement::Tracker,
     microphone_requested: bool,
     menu_open: bool,
     /// Whether the right wrist's transcript is turned up, with T.
@@ -306,7 +306,7 @@ struct Participant {
 
 impl Participant {
     fn new(mut conversation: Conversation, connection: Connection) -> Self {
-        let engagement = client::engagement::Tracker::new();
+        let engagement = tomori_client::engagement::Tracker::new();
         conversation.set_engagement(engagement.engagement());
         Self {
             conversation,
@@ -357,7 +357,7 @@ impl Participant {
 
     /// A focused window has input, an unfocused one is only seen, and a hidden one is neither; a desktop has no sensor for being worn.
     fn report_engagement(&mut self) {
-        use client::engagement::Focus;
+        use tomori_client::engagement::Focus;
         let focus = match (self.visible, self.focused) {
             (false, _) => Focus::Hidden,
             (true, true) => Focus::Focused,

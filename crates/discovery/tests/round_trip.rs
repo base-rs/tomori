@@ -6,12 +6,12 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use discovery::{Counts, Event, advertise, browse};
-use protocol::PROTOCOL_VERSION;
+use tomori_discovery::{Counts, Event, advertise, browse};
+use tomori_protocol::PROTOCOL_VERSION;
 
 /// Wait for the first event matching `predicate`, ignoring other servers on the network.
 fn wait_for(
-    browser: &discovery::Browser,
+    browser: &tomori_discovery::Browser,
     timeout: Duration,
     predicate: impl Fn(&Event) -> bool,
 ) -> Option<Event> {

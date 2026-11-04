@@ -28,7 +28,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use backend::{Event, Modes, SessionSpec, SessionSummary, Snapshot, Worker, WorkerState};
 use base_http::body::ReadableBody;
 use base_http_client::{Client, Endpoint};
 use base_scheduler::{
@@ -41,6 +40,7 @@ use futures_lite::StreamExt;
 use futures_lite::future::block_on;
 use futures_util::stream::FuturesUnordered;
 use serde_json::Value;
+use tomori_backend::{Event, Modes, SessionSpec, SessionSummary, Snapshot, Worker, WorkerState};
 
 use crate::api::{self, Failure};
 use crate::endpoint::Resolved;
@@ -76,7 +76,7 @@ fn bounded_worker_title(title: &str) -> String {
 
 /// Refuse listed workers whose identities exceed the supported size, and bound
 /// their titles.
-fn validate_workers(workers: &mut [Worker]) -> backend::Result<()> {
+fn validate_workers(workers: &mut [Worker]) -> tomori_backend::Result<()> {
     for worker in workers.iter_mut() {
         if worker.id.is_empty()
             || worker.id.len() > MAX_WORKER_ID_BYTES
@@ -85,8 +85,8 @@ fn validate_workers(workers: &mut [Worker]) -> backend::Result<()> {
                 .as_ref()
                 .is_some_and(|parent| parent.is_empty() || parent.len() > MAX_WORKER_ID_BYTES)
         {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "A worker identity exceeds the supported size.",
             ));
         }
@@ -597,7 +597,7 @@ impl Registration {
         &mut self,
         mut workers: Vec<Worker>,
         changes: &HashMap<String, (Option<WorkerState>, Option<String>)>,
-    ) -> backend::Result<()> {
+    ) -> tomori_backend::Result<()> {
         if self.workers_incomplete {
             return Ok(());
         }
@@ -724,10 +724,10 @@ impl Registration {
 
     /// Install a snapshot without losing lifecycle events already observed
     /// before the initial consumer started.
-    fn install_workers(&mut self, workers: &mut Vec<Worker>) -> backend::Result<()> {
+    fn install_workers(&mut self, workers: &mut Vec<Worker>) -> tomori_backend::Result<()> {
         if self.workers_incomplete {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "Worker observation exceeds the supported limit.",
             ));
         }
@@ -742,8 +742,8 @@ impl Registration {
             })
             .count();
         if self.children.len().saturating_add(additional) > api::MAX_TRACKED_WORKERS {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "Worker observation exceeds the supported limit.",
             ));
         }
@@ -797,8 +797,8 @@ impl Registration {
                         continue;
                     }
                     if self.children.len() == api::MAX_TRACKED_WORKERS {
-                        return Err(backend::Error::new(
-                            backend::ErrorKind::Unavailable,
+                        return Err(tomori_backend::Error::new(
+                            tomori_backend::ErrorKind::Unavailable,
                             "Worker observation exceeds the supported limit.",
                         ));
                     }
@@ -825,59 +825,59 @@ impl Registration {
 
 /// One command for the thread, carrying the channel to answer it on.
 ///
-/// Every reply channel carries a `backend::Error`, not an `api::Failure`: the
+/// Every reply channel carries a `tomori_backend::Error`, not an `api::Failure`: the
 /// thread maps failures to the neutral error before answering.
 pub enum Command {
     Sessions {
         directory: String,
-        reply: async_channel::Sender<backend::Result<Vec<SessionSummary>>>,
+        reply: async_channel::Sender<tomori_backend::Result<Vec<SessionSummary>>>,
     },
     Create {
         spec: SessionSpec,
-        reply: async_channel::Sender<backend::Result<(String, RegistrationEvents)>>,
+        reply: async_channel::Sender<tomori_backend::Result<(String, RegistrationEvents)>>,
     },
     Attach {
         id: String,
         directory: String,
-        reply: async_channel::Sender<backend::Result<RegistrationEvents>>,
+        reply: async_channel::Sender<tomori_backend::Result<RegistrationEvents>>,
     },
     Snapshot {
         id: String,
         identity: Arc<AtomicU64>,
-        reply: async_channel::Sender<backend::Result<SnapshotReply>>,
+        reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
     },
     Prompt {
         id: String,
         identity: Arc<AtomicU64>,
         key: String,
         text: String,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     Interrupt {
         id: String,
         identity: Arc<AtomicU64>,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     Decide {
         id: String,
         identity: Arc<AtomicU64>,
         request: String,
         decision: String,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     Answer {
         id: String,
         identity: Arc<AtomicU64>,
         form: String,
         answer: Value,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     /// Choose the agent for `id`'s later prompts.
     SetMode {
         id: String,
         identity: Arc<AtomicU64>,
         mode: String,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     /// Set `id`'s instruction entry `key` to `value`, or remove it when `value` is `None`.
     Instruction {
@@ -885,14 +885,14 @@ pub enum Command {
         identity: Arc<AtomicU64>,
         key: String,
         value: Option<String>,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     /// Remove the instruction entries `keys` from the session `id`, unless it is attached when this is performed:
     /// then a space was bound to it again, and the entries are that space's.
     ForgetInstructions {
         id: String,
         keys: Vec<String>,
-        reply: async_channel::Sender<backend::Result<()>>,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     /// Close `id`'s registration without deleting its OpenCode session.
     Close {
@@ -907,8 +907,8 @@ pub enum Command {
 struct SnapshotResult {
     id: String,
     registration: Arc<AtomicU64>,
-    reply: async_channel::Sender<backend::Result<SnapshotReply>>,
-    result: backend::Result<Snapshot>,
+    reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
+    result: tomori_backend::Result<Snapshot>,
 }
 
 /// A snapshot's worker epoch becomes authoritative only when its recipient
@@ -922,23 +922,23 @@ pub(crate) struct SnapshotReply {
 }
 
 impl SnapshotReply {
-    pub(crate) fn accept(self) -> backend::Result<Snapshot> {
+    pub(crate) fn accept(self) -> tomori_backend::Result<Snapshot> {
         if self.ordinary_incomplete.load(Ordering::Acquire) {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "Session events were lost while reading the initial state.",
             ));
         }
         if self.worker_incomplete.load(Ordering::Acquire) {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "Worker observation exceeds the supported limit.",
             ));
         }
         let previous = self.watermark.fetch_max(self.epoch, Ordering::AcqRel);
         if self.epoch < previous {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "A newer session snapshot was already accepted.",
             ));
         }
@@ -951,7 +951,7 @@ struct RestoreResult {
     id: String,
     registration: Arc<AtomicU64>,
     /// The wanted messages whose text the record has.
-    messages: Vec<backend::SnapshotMessage>,
+    messages: Vec<tomori_backend::SnapshotMessage>,
     /// The wanted messages it has no text for yet, or all of them if the read
     /// failed.
     unrecorded: Vec<String>,
@@ -960,7 +960,7 @@ struct RestoreResult {
 struct ResyncResult {
     id: String,
     registration: Arc<AtomicU64>,
-    result: backend::Result<Snapshot>,
+    result: tomori_backend::Result<Snapshot>,
     /// The agents offered and the session's current one, if they were listed.
     modes: Option<Modes>,
 }
@@ -1049,32 +1049,40 @@ impl Commands {
     /// command's own outcome, not a double wrap.
     pub async fn reply_with<T: Send + 'static>(
         &self,
-        build: impl FnOnce(async_channel::Sender<std::result::Result<T, backend::Error>>) -> Command,
-    ) -> std::result::Result<T, backend::Error> {
+        build: impl FnOnce(
+            async_channel::Sender<std::result::Result<T, tomori_backend::Error>>,
+        ) -> Command,
+    ) -> std::result::Result<T, tomori_backend::Error> {
         if self.stopping.load(Ordering::Acquire) {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 SHUTTING_DOWN,
             ));
         }
         let (reply, waiting) = async_channel::bounded(1);
         let command = build(reply);
         self.tx.send(command).await.map_err(|_| {
-            backend::Error::new(backend::ErrorKind::Unavailable, "the connection has closed")
+            tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
+                "the connection has closed",
+            )
         })?;
         waiting.recv().await.map_err(|_| {
-            backend::Error::new(backend::ErrorKind::Unavailable, "the connection has closed")
+            tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
+                "the connection has closed",
+            )
         })?
     }
 }
 
-fn map_failure(failure: Failure) -> backend::Error {
+fn map_failure(failure: Failure) -> tomori_backend::Error {
     let kind = match failure.status {
-        Some(404) => backend::ErrorKind::NotFound,
-        Some(status) if (400..500).contains(&status) => backend::ErrorKind::Invalid,
-        _ => backend::ErrorKind::Unavailable,
+        Some(404) => tomori_backend::ErrorKind::NotFound,
+        Some(status) if (400..500).contains(&status) => tomori_backend::ErrorKind::Invalid,
+        _ => tomori_backend::ErrorKind::Unavailable,
     };
-    backend::Error::new(kind, failure.message)
+    tomori_backend::Error::new(kind, failure.message)
 }
 
 /// How the backend finds the OpenCode service. It is called before every
@@ -1175,7 +1183,10 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
                 for command in sessions.held.drain(..) {
                     refuse(
                         command,
-                        backend::Error::new(backend::ErrorKind::Unavailable, message.clone()),
+                        tomori_backend::Error::new(
+                            tomori_backend::ErrorKind::Unavailable,
+                            message.clone(),
+                        ),
                     );
                 }
                 attempt_at = started + delay;
@@ -1207,7 +1218,8 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
             .events
             .close_with(Some("the connection ended".to_owned()));
     }
-    let shutting_down = || backend::Error::new(backend::ErrorKind::Unavailable, SHUTTING_DOWN);
+    let shutting_down =
+        || tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, SHUTTING_DOWN);
     for command in sessions.held.drain(..) {
         refuse(command, shutting_down());
     }
@@ -1219,7 +1231,7 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
 }
 
 /// Answer `command` with `error` without performing it.
-fn refuse(command: Command, error: backend::Error) {
+fn refuse(command: Command, error: tomori_backend::Error) {
     match command {
         Command::Sessions { reply, .. } => {
             let _ = reply.try_send(Err(error));
@@ -1277,7 +1289,7 @@ fn hold(sessions: &mut Sessions, command: Command) -> bool {
         command if sessions.held.len() < MAX_HELD => sessions.held.push_back(command),
         command => refuse(
             command,
-            backend::Error::new(backend::ErrorKind::Unavailable, TOO_MANY_HELD),
+            tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, TOO_MANY_HELD),
         ),
     }
     true
@@ -1662,7 +1674,7 @@ async fn connected<S: Timers>(
                                     let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
                                     let result = completed.result.and_then(|mut snapshot| {
                                         if overflow {
-                                            return Err(backend::Error::new(backend::ErrorKind::Unavailable, "Too many sessions were deleted during the snapshot; please retry."));
+                                            return Err(tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, "Too many sessions were deleted during the snapshot; please retry."));
                                         }
                                         registration.install_workers(&mut snapshot.workers)?;
                                         Ok(registration.events.snapshot_reply(snapshot))
@@ -1670,7 +1682,7 @@ async fn connected<S: Timers>(
                                     registration.snapshot_deletions.clear();
                                     result
                                 }
-                                _ => Err(backend::Error::new(backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
+                                _ => Err(tomori_backend::Error::new(tomori_backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
                             };
                             let _ = completed.reply.try_send(result);
                         }
@@ -1866,7 +1878,7 @@ async fn bounded_snapshot<S: Timers>(
     cancellation: &Cancellation,
     timers: &S,
     on_messages: impl FnOnce(),
-) -> backend::Result<Snapshot> {
+) -> tomori_backend::Result<Snapshot> {
     let result = futures_lite::future::race(
         async {
             snapshot(client, resolved, id, modes, local, timers, on_messages)
@@ -1875,8 +1887,8 @@ async fn bounded_snapshot<S: Timers>(
         },
         async {
             let timer = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
-            Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 format!("Snapshot timed out or was cancelled: {timer:?}"),
             ))
         },
@@ -1893,7 +1905,7 @@ fn schedule_snapshot<'a, S: Timers>(
     snapshots: &mut SnapshotFutures<'a>,
     id: String,
     identity: &Arc<AtomicU64>,
-    reply: async_channel::Sender<backend::Result<SnapshotReply>>,
+    reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
     client: &'a Client<'_>,
     resolved: &'a Resolved,
     cancellation: &'a Cancellation,
@@ -1903,22 +1915,22 @@ fn schedule_snapshot<'a, S: Timers>(
         .get_mut(&id)
         .filter(|registration| Arc::ptr_eq(&registration.events.worker_epoch, identity))
     else {
-        let _ = reply.try_send(Err(backend::Error::new(
-            backend::ErrorKind::Closed,
+        let _ = reply.try_send(Err(tomori_backend::Error::new(
+            tomori_backend::ErrorKind::Closed,
             "The session is not registered.",
         )));
         return;
     };
     if registration.resync.is_some() {
-        let _ = reply.try_send(Err(backend::Error::new(
-            backend::ErrorKind::Unavailable,
+        let _ = reply.try_send(Err(tomori_backend::Error::new(
+            tomori_backend::ErrorKind::Unavailable,
             "The session is being read again after reconnecting to OpenCode; please retry.",
         )));
         return;
     }
     if registration.snapshot_in_flight.is_some() || snapshots.len() >= MAX_SNAPSHOTS {
-        let _ = reply.try_send(Err(backend::Error::new(
-            backend::ErrorKind::Unavailable,
+        let _ = reply.try_send(Err(tomori_backend::Error::new(
+            tomori_backend::ErrorKind::Unavailable,
             "A session snapshot is already running or the snapshot limit was reached; please retry.",
         )));
         return;
@@ -2065,8 +2077,8 @@ fn finish_resync(
     let mut resync = registration.resync.take().unwrap_or_default();
     let result = completed.result.and_then(|mut snapshot| {
         if overflow || resync.changes_overflow {
-            return Err(backend::Error::new(
-                backend::ErrorKind::Unavailable,
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
                 "too many workers changed while it was read",
             ));
         }
@@ -2127,7 +2139,7 @@ fn finish_resync(
                     .messages
                     .iter()
                     .filter(|message| {
-                        !message.completed && message.role == backend::Role::Assistant
+                        !message.completed && message.role == tomori_backend::Role::Assistant
                     })
                     .map(|message| message.id.clone()),
             );
@@ -2149,7 +2161,7 @@ fn finish_resync(
                 registration.resync = Some(resync);
                 return;
             }
-            if error.kind == backend::ErrorKind::NotFound {
+            if error.kind == tomori_backend::ErrorKind::NotFound {
                 "the OpenCode session no longer exists".to_owned()
             } else {
                 format!(
@@ -2212,7 +2224,7 @@ fn start_restores<'a, S: Timers>(
                     wanted.contains(&message.id)
                         && (message.completed
                             || message.parts.iter().any(|part| {
-                                matches!(part, backend::Part::Text { text } if !text.is_empty())
+                                matches!(part, tomori_backend::Part::Text { text } if !text.is_empty())
                             }))
                 })
                 .collect();
@@ -2289,7 +2301,7 @@ fn reflected(snapshot: &Snapshot, event: &Event) -> bool {
             .iter()
             .flat_map(|message| &message.parts)
             .find_map(|part| match part {
-                backend::Part::Tool {
+                tomori_backend::Part::Tool {
                     id: tool, finished, ..
                 } if tool == id => Some(*finished),
                 _ => None,
@@ -2731,7 +2743,7 @@ fn owns_registration(
     registrations: &HashMap<String, Registration>,
     id: &str,
     identity: &Arc<AtomicU64>,
-    reply: &async_channel::Sender<backend::Result<()>>,
+    reply: &async_channel::Sender<tomori_backend::Result<()>>,
 ) -> bool {
     if registrations
         .get(id)
@@ -2739,8 +2751,8 @@ fn owns_registration(
     {
         true
     } else {
-        let _ = reply.try_send(Err(backend::Error::new(
-            backend::ErrorKind::Closed,
+        let _ = reply.try_send(Err(tomori_backend::Error::new(
+            tomori_backend::ErrorKind::Closed,
             "The session registration has closed.",
         )));
         false
@@ -2781,13 +2793,13 @@ enum Completion {
         id: String,
         directory: String,
         modes: Modes,
-        reply: async_channel::Sender<backend::Result<(String, RegistrationEvents)>>,
+        reply: async_channel::Sender<tomori_backend::Result<(String, RegistrationEvents)>>,
     },
     Attached {
         id: String,
         directory: String,
         modes: Modes,
-        reply: async_channel::Sender<backend::Result<RegistrationEvents>>,
+        reply: async_channel::Sender<tomori_backend::Result<RegistrationEvents>>,
     },
     /// Agents listed for a session that offered none.
     Listed {
@@ -2870,8 +2882,8 @@ fn prepare_command<'a, S: Timers>(
                 }
             };
             let Some(id) = info.get("id").and_then(Value::as_str).map(str::to_owned) else {
-                let _ = reply.try_send(Err(backend::Error::new(
-                    backend::ErrorKind::Unavailable,
+                let _ = reply.try_send(Err(tomori_backend::Error::new(
+                    tomori_backend::ErrorKind::Unavailable,
                     "the server did not return the new session's id",
                 )));
                 return None;
@@ -2891,8 +2903,8 @@ fn prepare_command<'a, S: Timers>(
         } => {
             close_abandoned_registration(registrations, &id);
             if registrations.contains_key(&id) {
-                let _ = reply.try_send(Err(backend::Error::new(
-                    backend::ErrorKind::Unavailable,
+                let _ = reply.try_send(Err(tomori_backend::Error::new(
+                    tomori_backend::ErrorKind::Unavailable,
                     ALREADY_ATTACHED,
                 )));
                 return None;
@@ -2911,8 +2923,8 @@ fn prepare_command<'a, S: Timers>(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if session_directory != directory {
-                    let _ = reply.try_send(Err(backend::Error::new(
-                        backend::ErrorKind::NotFound,
+                    let _ = reply.try_send(Err(tomori_backend::Error::new(
+                        tomori_backend::ErrorKind::NotFound,
                         "the session is not in that directory",
                     )));
                     return None;
@@ -3077,8 +3089,8 @@ fn prepare_command<'a, S: Timers>(
                         .await
                         .map_err(map_failure)
                 } else {
-                    Err(backend::Error::new(
-                        backend::ErrorKind::Invalid,
+                    Err(tomori_backend::Error::new(
+                        tomori_backend::ErrorKind::Invalid,
                         format!("the session does not offer the {mode} agent"),
                     ))
                 };
@@ -3116,8 +3128,8 @@ fn complete(completion: Completion, registrations: &mut HashMap<String, Registra
         } => {
             close_abandoned_registration(registrations, &id);
             if registrations.contains_key(&id) {
-                let _ = reply.try_send(Err(backend::Error::new(
-                    backend::ErrorKind::Unavailable,
+                let _ = reply.try_send(Err(tomori_backend::Error::new(
+                    tomori_backend::ErrorKind::Unavailable,
                     "The server returned a session that is already attached.",
                 )));
             } else {
@@ -3134,8 +3146,8 @@ fn complete(completion: Completion, registrations: &mut HashMap<String, Registra
             // Another attachment of the same session may have finished first.
             close_abandoned_registration(registrations, &id);
             if registrations.contains_key(&id) {
-                let _ = reply.try_send(Err(backend::Error::new(
-                    backend::ErrorKind::Unavailable,
+                let _ = reply.try_send(Err(tomori_backend::Error::new(
+                    tomori_backend::ErrorKind::Unavailable,
                     ALREADY_ATTACHED,
                 )));
             } else {
@@ -3219,7 +3231,7 @@ async fn snapshot<S: Timers>(
 }
 
 /// The session's message list as snapshot messages.
-fn snapshot_messages(value: &Value) -> Vec<backend::SnapshotMessage> {
+fn snapshot_messages(value: &Value) -> Vec<tomori_backend::SnapshotMessage> {
     let Some(messages) = value
         .get("data")
         .and_then(Value::as_array)
@@ -3230,43 +3242,43 @@ fn snapshot_messages(value: &Value) -> Vec<backend::SnapshotMessage> {
     messages.iter().filter_map(snapshot_message).collect()
 }
 
-fn snapshot_message(value: &Value) -> Option<backend::SnapshotMessage> {
+fn snapshot_message(value: &Value) -> Option<tomori_backend::SnapshotMessage> {
     let id = value.get("id")?.as_str()?.to_owned();
     let role = match value.get("type")?.as_str()? {
-        "user" => backend::Role::User,
-        "assistant" => backend::Role::Assistant,
+        "user" => tomori_backend::Role::User,
+        "assistant" => tomori_backend::Role::Assistant,
         _ => return None,
     };
     let parts = match role {
-        backend::Role::User => vec![backend::Part::Text {
+        tomori_backend::Role::User => vec![tomori_backend::Part::Text {
             text: value
                 .get("text")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
         }],
-        backend::Role::Assistant => value
+        tomori_backend::Role::Assistant => value
             .get("content")
             .and_then(Value::as_array)
             .map(|content| {
                 content
                     .iter()
                     .filter_map(|part| match part.get("type")?.as_str()? {
-                        "text" => Some(backend::Part::Text {
+                        "text" => Some(tomori_backend::Part::Text {
                             text: part
                                 .get("text")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_owned(),
                         }),
-                        "reasoning" => Some(backend::Part::Reasoning {
+                        "reasoning" => Some(tomori_backend::Part::Reasoning {
                             text: part
                                 .get("text")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_owned(),
                         }),
-                        "tool" => Some(backend::Part::Tool {
+                        "tool" => Some(tomori_backend::Part::Tool {
                             id: part
                                 .get("id")
                                 .and_then(Value::as_str)
@@ -3291,18 +3303,18 @@ fn snapshot_message(value: &Value) -> Option<backend::SnapshotMessage> {
                         }),
                         _ => None,
                     })
-                    .collect::<Vec<backend::Part>>()
+                    .collect::<Vec<tomori_backend::Part>>()
             })
             .unwrap_or_default(),
     };
     let completed = match role {
-        backend::Role::User => true,
-        backend::Role::Assistant => value
+        tomori_backend::Role::User => true,
+        tomori_backend::Role::Assistant => value
             .get("time")
             .and_then(|time| time.get("completed"))
             .is_some(),
     };
-    Some(backend::SnapshotMessage {
+    Some(tomori_backend::SnapshotMessage {
         id,
         role,
         parts,
@@ -3313,10 +3325,10 @@ fn snapshot_message(value: &Value) -> Option<backend::SnapshotMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use backend::WorkerState;
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+    use tomori_backend::WorkerState;
 
     #[test]
     fn subagent_sessions_are_not_offered_for_attachment() {
@@ -3509,7 +3521,7 @@ mod tests {
 
     #[test]
     fn ordinary_event_loss_after_snapshot_is_reported_without_draining_stale_events() {
-        use backend::Session;
+        use tomori_backend::Session;
         let (events, receiver) = Events::new();
         events.snapshot_reply(Snapshot::default()).accept().unwrap();
         for _ in 0..1024 {
@@ -3521,7 +3533,7 @@ mod tests {
         let (commands, _receiver) = Commands::new();
         let session = crate::session::OpenCodeSession::new("parent".into(), receiver, commands);
         assert!(
-            matches!(block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Unavailable)
+            matches!(block_on(session.next_event()), Err(error) if error.kind == tomori_backend::ErrorKind::Unavailable)
         );
     }
 
@@ -3694,7 +3706,7 @@ mod tests {
 
     #[test]
     fn session_consumer_skips_a_superseded_worker_event() {
-        use backend::Session;
+        use tomori_backend::Session;
         let (events, rx) = Events::new();
         let (commands, _receiver) = Commands::new();
         let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
@@ -3707,7 +3719,7 @@ mod tests {
 
     #[test]
     fn a_closed_session_does_not_deliver_later_events() {
-        use backend::Session;
+        use tomori_backend::Session;
         let (events, rx) = Events::new();
         let (commands, _receiver) = Commands::new();
         let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
@@ -3718,13 +3730,13 @@ mod tests {
             Ok(Event::Closed { .. })
         ));
         assert!(
-            matches!(block_on(session.next_event()), Err(error) if error.kind == backend::ErrorKind::Closed)
+            matches!(block_on(session.next_event()), Err(error) if error.kind == tomori_backend::ErrorKind::Closed)
         );
     }
 
     #[test]
     fn closing_a_session_is_nonblocking_and_identity_scoped() {
-        use backend::Session;
+        use tomori_backend::Session;
         let (_registration, rx) = Registration::new();
         let expected = rx.identity.clone();
         let (commands, receiver) = Commands::new();
@@ -3744,7 +3756,7 @@ mod tests {
 
     #[test]
     fn closing_a_session_does_not_wait_for_a_full_command_queue() {
-        use backend::Session;
+        use tomori_backend::Session;
         let (_registration, rx) = Registration::new();
         let identity = rx.identity.clone();
         let (commands, _receiver) = Commands::new();
@@ -3761,7 +3773,7 @@ mod tests {
         }
         let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
         assert!(
-            matches!(block_on(session.close()), Err(error) if error.kind == backend::ErrorKind::Unavailable)
+            matches!(block_on(session.close()), Err(error) if error.kind == tomori_backend::ErrorKind::Unavailable)
         );
     }
 
@@ -4938,7 +4950,9 @@ mod tests {
                     reply,
                 },
             }));
-            assert!(matches!(result, Err(error) if error.kind == backend::ErrorKind::Closed));
+            assert!(
+                matches!(result, Err(error) if error.kind == tomori_backend::ErrorKind::Closed)
+            );
         }
         let (slow_reply, slow_wait) = async_channel::bounded(1);
         commands
@@ -5748,7 +5762,7 @@ mod tests {
         let Err(refused) = create() else {
             panic!("a session was created while OpenCode was down");
         };
-        assert_eq!(refused.kind, backend::ErrorKind::Unavailable);
+        assert_eq!(refused.kind, tomori_backend::ErrorKind::Unavailable);
         assert!(started.elapsed() < Duration::from_secs(3), "{refused:?}");
 
         // During the gap s1 raised a permission, s3 was deleted, and reading
@@ -5773,7 +5787,7 @@ mod tests {
             match create() {
                 Ok(created) => break created,
                 Err(error) if std::time::Instant::now() < deadline => {
-                    assert_eq!(error.kind, backend::ErrorKind::Unavailable);
+                    assert_eq!(error.kind, tomori_backend::ErrorKind::Unavailable);
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 Err(error) => panic!("creating after recovery failed: {error:?}"),
@@ -5911,7 +5925,7 @@ mod tests {
 
     #[test]
     fn instruction_entries_are_set_and_removed_across_a_reconnect() {
-        use backend::Session;
+        use tomori_backend::Session;
 
         let shared = Arc::new(FakeShared::default());
         let mut first = FakeService::start(shared.clone(), "secret");
@@ -5964,7 +5978,7 @@ mod tests {
         // A key OpenCode would refuse is refused without asking it.
         let requests = shared.state.lock().unwrap().instruction_requests.len();
         let refused = block_on(session.set_instruction("Tomori/space", Some("x"))).unwrap_err();
-        assert_eq!(refused.kind, backend::ErrorKind::Invalid);
+        assert_eq!(refused.kind, tomori_backend::ErrorKind::Invalid);
         assert_eq!(
             shared.state.lock().unwrap().instruction_requests.len(),
             requests
@@ -6020,7 +6034,7 @@ mod tests {
         });
         let gone_session = crate::OpenCodeSession::new(gone.clone(), gone_events, commands.clone());
         let missing = block_on(gone_session.set_instruction("tomori", Some("x"))).unwrap_err();
-        assert_eq!(missing.kind, backend::ErrorKind::NotFound);
+        assert_eq!(missing.kind, tomori_backend::ErrorKind::NotFound);
         block_on(gone_session.close()).unwrap();
 
         // A session attached when forgetting is performed keeps its entries: a space was bound to it again.
@@ -6060,7 +6074,7 @@ mod tests {
                 .unwrap()
                 .instruction_requests
                 .iter()
-                .all(|(_, _, key)| backend::valid_instruction_key(key))
+                .all(|(_, _, key)| tomori_backend::valid_instruction_key(key))
         );
 
         drop(session);
@@ -6361,7 +6375,7 @@ mod tests {
         assert!(message.completed);
         assert_eq!(
             message.parts,
-            [backend::Part::Text {
+            [tomori_backend::Part::Text {
                 text: recorded.into()
             }]
         );
@@ -6453,7 +6467,7 @@ mod tests {
         assert_eq!(refused.message, TOO_MANY_HELD);
         assert!(!hold(&mut sessions, Command::Shutdown));
         // Whether a held request's caller has given up.
-        let (reply, receiver) = async_channel::bounded::<backend::Result<()>>(1);
+        let (reply, receiver) = async_channel::bounded::<tomori_backend::Result<()>>(1);
         let command = Command::Interrupt {
             id: "s".into(),
             identity: Arc::new(AtomicU64::new(0)),
@@ -6503,7 +6517,7 @@ mod tests {
             reply,
         }))
         .expect_err("listing succeeded against a failing service");
-        assert_eq!(refused.kind, backend::ErrorKind::Unavailable);
+        assert_eq!(refused.kind, tomori_backend::ErrorKind::Unavailable);
         std::thread::sleep(Duration::from_secs(2));
         // 250 ms doubling allows four attempts in two seconds (at 0, 0.25,
         // 0.75 and 1.75 s); a tight loop would make thousands.
@@ -6804,7 +6818,7 @@ mod tests {
                 .to_string(),
             &mut registrations,
         );
-        let mode = |id: &str| backend::Mode {
+        let mode = |id: &str| tomori_backend::Mode {
             id: id.into(),
             name: id.into(),
             description: None,
@@ -6927,22 +6941,22 @@ mod tests {
                 registration: identity,
                 result: Ok(Snapshot {
                     messages: vec![
-                        backend::SnapshotMessage {
+                        tomori_backend::SnapshotMessage {
                             id: "done".into(),
-                            role: backend::Role::Assistant,
-                            parts: vec![backend::Part::Text {
+                            role: tomori_backend::Role::Assistant,
+                            parts: vec![tomori_backend::Part::Text {
                                 text: "Finished.".into(),
                             }],
                             completed: true,
                         },
-                        backend::SnapshotMessage {
+                        tomori_backend::SnapshotMessage {
                             id: "live".into(),
-                            role: backend::Role::Assistant,
+                            role: tomori_backend::Role::Assistant,
                             parts: vec![
-                                backend::Part::Text {
+                                tomori_backend::Part::Text {
                                     text: String::new(),
                                 },
-                                backend::Part::Tool {
+                                tomori_backend::Part::Tool {
                                     id: "t1".into(),
                                     tool: "bash".into(),
                                     input: Value::Null,
@@ -7027,10 +7041,10 @@ mod tests {
         registration.restore_in_flight = true;
         registration.restore_reading = std::mem::take(&mut registration.restore_due);
         let identity = registrations["s"].events.worker_epoch.clone();
-        let restored = backend::SnapshotMessage {
+        let restored = tomori_backend::SnapshotMessage {
             id: "p".into(),
-            role: backend::Role::Assistant,
-            parts: vec![backend::Part::Text {
+            role: tomori_backend::Role::Assistant,
+            parts: vec![tomori_backend::Part::Text {
                 text: "All of it".into(),
             }],
             completed: false,
@@ -7165,10 +7179,10 @@ mod tests {
                 id: "parent".into(),
                 registration: identity.clone(),
                 result: Ok(Snapshot {
-                    messages: vec![backend::SnapshotMessage {
+                    messages: vec![tomori_backend::SnapshotMessage {
                         id: "m".into(),
-                        role: backend::Role::Assistant,
-                        parts: vec![backend::Part::Text {
+                        role: tomori_backend::Role::Assistant,
+                        parts: vec![tomori_backend::Part::Text {
                             text: String::new(),
                         }],
                         completed: false,

@@ -5,11 +5,11 @@
 //!
 //! `tomori discover` browses for servers the way the headset's server list does
 //! ([`discovery::browse`]), and, when given a server, lists the spaces on it the
-//! way the lobby does (connect and [`protocol::ClientMessage::ListSpaces`]). The
+//! way the lobby does (connect and [`tomori_protocol::ClientMessage::ListSpaces`]). The
 //! address and space ids it prints are what `--server` and the spectator take.
-use client::{Client, Event, Options, discovery};
-use protocol::{ClientMessage, ServerMessage, SpaceSummary};
 use std::time::{Duration, Instant};
+use tomori_client::{Client, Event, Options, discovery};
+use tomori_protocol::{ClientMessage, ServerMessage, SpaceSummary};
 
 /// How long to listen for servers before printing the list.
 const BROWSE_FOR: Duration = Duration::from_secs(4);
@@ -77,7 +77,7 @@ fn print_servers(servers: &discovery::Servers) {
         println!(
             "  {name:<24} (protocol {:?}, this build is {})",
             server.protocol,
-            protocol::PROTOCOL_VERSION,
+            tomori_protocol::PROTOCOL_VERSION,
             name = server.name
         );
     }
@@ -87,7 +87,7 @@ fn print_servers(servers: &discovery::Servers) {
 fn list_spaces(address: &str) -> anyhow::Result<()> {
     let mut options = Options::new(address, "discover", "discover");
     // Listing needs no token: it connects as a visitor, over TLS to a server that admits by token, or plain HTTP to one in `--auth open` mode.
-    options.transport = client::Transport::Automatic { pin: None };
+    options.transport = tomori_client::Transport::Automatic { pin: None };
     let client = Client::connect(options)?;
     // The connection thread sends Hello and reconnects; only the space list is wanted.
     if let Err(error) = client.send(ClientMessage::ListSpaces) {

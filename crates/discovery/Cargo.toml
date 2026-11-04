@@ -1,5 +1,5 @@
 [package]
-name = "discovery"
+name = "tomori-discovery"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -10,4 +10,4 @@ publish = false
 
 [dependencies]
 mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
-protocol = { path = "../protocol" }
+tomori-protocol = { path = "../protocol" }

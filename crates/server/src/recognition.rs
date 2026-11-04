@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
-use protocol::AudioFrame;
-use speech::stt::{RATE, Transcript};
-use speech::{Error, Recognition, Stopper, StreamingRecognizer, TranscriptEvent, Utterance};
+use tomori_protocol::AudioFrame;
+use tomori_speech::stt::{RATE, Transcript};
+use tomori_speech::{Error, Recognition, Stopper, StreamingRecognizer, TranscriptEvent, Utterance};
 
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 

@@ -17,7 +17,7 @@ use base_http_server::Handler;
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::NativeScheduler;
 use futures_lite::future::block_on;
-use protocol::{
+use tomori_protocol::{
     AudioFrame, CONNECT_PATH, ClientMessage, Frame, FrameDecoder, FrameKind, PROTOCOL_VERSION,
     ServerMessage, SpaceState,
 };
@@ -136,7 +136,7 @@ impl<B: ReadableBody> Session<B> {
                             protocol,
                             server: "mini".into(),
                             source: self.connection,
-                            role: protocol::ConnectionRole::Owner,
+                            role: tomori_protocol::ConnectionRole::Owner,
                             backends: vec![],
                             roots: vec![],
                             environments: vec![],

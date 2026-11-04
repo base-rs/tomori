@@ -5,7 +5,7 @@
 //!
 //! A server [`advertise`]s an instance of the service type [`SERVICE_TYPE`] (`_tomori._tcp`) with these TXT keys:
 //!
-//! - `protocol=<u32>`: the [`protocol::PROTOCOL_VERSION`] the server speaks.
+//! - `protocol=<u32>`: the [`tomori_protocol::PROTOCOL_VERSION`] the server speaks.
 //! - `name=<display name>`: the name to show in a server list. The DNS-SD instance name normally equals it, but the instance may be renamed (`Name (2)`) to resolve a conflict on the network.
 //! - `spaces=<u32>`: how many spaces the server lists, closed ones included.
 //! - `participants=<u32>`: how many participants are connected, whether in a space or in the lobby.
@@ -21,7 +21,7 @@
 //!
 //! # Android and Meta Quest
 //!
-//! Android drops incoming multicast packets on Wi-Fi unless an application holds a `WifiManager.MulticastLock`, and Quest is Android. Without the lock, [`browse`] starts without error but never receives a response, so the server list stays empty. A native Quest client (`client-quest`) that uses this crate must:
+//! Android drops incoming multicast packets on Wi-Fi unless an application holds a `WifiManager.MulticastLock`, and Quest is Android. Without the lock, [`browse`] starts without error but never receives a response, so the server list stays empty. A native Quest client (`tomori-quest`) that uses this crate must:
 //!
 //! 1. Declare these permissions in the manifest. Both are "normal" permissions, granted at install time, with no runtime prompt:
 //!
@@ -48,7 +48,7 @@
 //!
 //! 3. Browse only while the server list is visible, and drop the [`Browser`] once a server is chosen; the connection itself is plain unicast TCP and does not need the lock.
 //!
-//! The alternative is the platform's `android.net.nsd.NsdManager` (`discoverServices("_tomori._tcp", PROTOCOL_DNS_SD, listener)`), which uses the system mDNS daemon and needs no multicast lock. It is callback-based, so a native client would need `NsdManager.DiscoveryListener` and `ResolveListener` implementations in Java or Kotlin (the `client-quest` crate's `cargo apk` build has no Java sources today), discovered services must each be resolved to obtain addresses and TXT records, and before API 34 `resolveService` handles only one request at a time and `NsdServiceInfo` carries a single address. It would also duplicate the protocol filtering done here. The multicast lock keeps discovery in this crate, identical on every platform, for a few JNI calls, so it is the recommended approach; `MulticastLock` in `crates/client-quest/src/android.rs` implements it.
+//! The alternative is the platform's `android.net.nsd.NsdManager` (`discoverServices("_tomori._tcp", PROTOCOL_DNS_SD, listener)`), which uses the system mDNS daemon and needs no multicast lock. It is callback-based, so a native client would need `NsdManager.DiscoveryListener` and `ResolveListener` implementations in Java or Kotlin (the `tomori-quest` crate's `cargo apk` build has no Java sources today), discovered services must each be resolved to obtain addresses and TXT records, and before API 34 `resolveService` handles only one request at a time and `NsdServiceInfo` carries a single address. It would also duplicate the protocol filtering done here. The multicast lock keeps discovery in this crate, identical on every platform, for a few JNI calls, so it is the recommended approach; `MulticastLock` in `crates/client-quest/src/android.rs` implements it.
 //!
 //! Advertising from Android is not needed: headsets are clients.
 

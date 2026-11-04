@@ -8,8 +8,8 @@
 pub mod engagement;
 pub mod playback;
 
-/// Finding servers on the local network with Bonjour: [`discovery::browse`] yields servers to list, and [`discovery::Server::address`] gives the address for [`Options::new`]. On Android, hold a Wi-Fi multicast lock while browsing; see the [`discovery`] crate documentation.
-pub use discovery;
+/// Finding servers on the local network with Bonjour: [`tomori_discovery::browse`] yields servers to list, and [`tomori_discovery::Server::address`] gives the address for [`Options::new`]. On Android, hold a Wi-Fi multicast lock while browsing; see the [`tomori_discovery`] crate documentation.
+pub use tomori_discovery as discovery;
 
 mod backoff;
 mod client;
@@ -28,5 +28,5 @@ pub use events::Events;
 pub use microphone::Microphone;
 pub use options::{Options, Transport};
 pub use outbox::{FailedUtterance, Membership, SendError, UtteranceFailure};
-pub use protocol::Keepalive;
-pub use security::Fingerprint;
+pub use tomori_protocol::Keepalive;
+pub use tomori_security::Fingerprint;

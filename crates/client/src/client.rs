@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 
 use base_scheduler::Cancellation;
 use base_scheduler_native::{NativeOptions, NativeScheduler};
-use protocol::{AudioFrame, ClientMessage};
+use tomori_protocol::{AudioFrame, ClientMessage};
 
 use crate::outbox::{FailedUtterance, Membership, Outbox};
 use crate::{ConnectionState, Event, Events, Options, SendError, session};
@@ -71,7 +71,7 @@ impl Sender {
         Ok(())
     }
 
-    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`protocol::Gate::Off`] are ignored. When [`Options::microphone_rearm_on_disconnect`] is set, audio is also dropped after a disconnect until explicitly rearmed.
+    /// Queue a microphone frame. Live audio is dropped while disconnected and, when the link is congested, the oldest queued frames are dropped first. `Agent` frames of an open utterance are never dropped individually; see [`Options::outgoing_utterance_limit`]. Frames with [`tomori_protocol::Gate::Off`] are ignored. When [`Options::microphone_rearm_on_disconnect`] is set, audio is also dropped after a disconnect until explicitly rearmed.
     pub fn send_audio(&self, frame: AudioFrame) -> Result<(), SendError> {
         self.send_audio_for(frame, None)
     }

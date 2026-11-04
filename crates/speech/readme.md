@@ -59,7 +59,7 @@ From the repository root:
 bash scripts/fetch-sherpa-onnx.sh # .tools/sherpa-onnx: the native libraries, checked against a pinned SHA-256 (20 MB)
 bash scripts/fetch-asr-model.sh   # .tools/asr: sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8 (130 MB) and sherpa-onnx-online-punct-en-2024-08-06 (30 MB)
 bash scripts/fetch-tts-model.sh   # .tools/tts/kokoro-multi-lang-v1_0 (380 MB)
-cargo run -p server --bin tomori-server -- --speech-root .
+cargo run -p tomori-server --bin tomori-server -- --speech-root .
 ```
 
 `TransducerConfig::from_root`, `PunctuationConfig::from_root`, `KokoroConfig::from_root`, `WhisperConfig::from_root` and `SileroVadConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) and the Silero voice activity detector (`silero_vad.onnx`, 0.6 MB, checked against the digest the release publishes), for `--speech-backend offline` and the benchmark. Without the detector, the offline backend splits long utterances by loudness alone, and the server says so when it starts.
@@ -89,7 +89,7 @@ The GPU build of sherpa-onnx is published only as shared libraries. To use it:
 
    ```bash
    SHERPA_ONNX_LIB_DIR=$PWD/.tools/sherpa-onnx/sherpa-onnx-v1.13.8-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu/lib \
-   	cargo build --release -p server --features speech-shared
+   	cargo build --release -p tomori-server --features speech-shared
    ```
 
    The build script sets an rpath to that directory, so keep the libraries there, or put them on `LD_LIBRARY_PATH`.
@@ -100,8 +100,8 @@ The CUDA path has not been tested yet. Kokoro and the punctuation model always r
 ## Tests
 
 ```bash
-cargo test -p speech
-cargo test -p speech -- --ignored   # the real engines, with the models installed
+cargo test -p tomori-speech
+cargo test -p tomori-speech -- --ignored   # the real engines, with the models installed
 ```
 
 The ignored tests use the models under the repository root. To use models installed elsewhere, set `TOMORI_SPEECH_ROOT` to the directory holding their `.tools/`.
@@ -116,7 +116,7 @@ The ignored tests use the models under the repository root. To use models instal
 Streaming models are fed in real time, in 100 ms frames, as the server receives them. The real-time factor is measured by decoding each clip again, directly, as fast as possible. With `--punctuation`, final transcripts are punctuated as the server punctuates them, in both passes, so the real-time factor includes punctuation, and the time each punctuation takes is reported. Word errors ignore case and punctuation.
 
 ```bash
-cargo run --release -p speech --example recognition_benchmark -- --root . \
+cargo run --release -p tomori-speech --example recognition_benchmark -- --root . \
 	--model .tools/asr/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8 --whisper
 ```
 

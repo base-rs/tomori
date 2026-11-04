@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use client::playback::spatial::{Listener, Position, Scene};
-use protocol::{AGENT_SOURCE, Pose};
+use tomori_client::playback::spatial::{Listener, Position, Scene};
+use tomori_protocol::{AGENT_SOURCE, Pose};
 
 use crate::arrival::HOME;
 

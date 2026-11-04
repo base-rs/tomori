@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use protocol::{AGENT_SOURCE, AudioFrame, Gate, REPLAY_SOURCE};
+use tomori_protocol::{AGENT_SOURCE, AudioFrame, Gate, REPLAY_SOURCE};
 
 use super::spatial::{self, Ears, Placement, Scene};
 use super::{Bank, Duck, Earcon, JitterBuffer, JitterOptions, Limiter, PlaybackStatistics};
@@ -244,7 +244,7 @@ impl Mixer {
         self.options.sample_rate
     }
 
-    /// Ignore audio from this participant number: a client never hears its own microphone. Set from [`protocol::ServerMessage::Welcome`].
+    /// Ignore audio from this participant number: a client never hears its own microphone. Set from [`tomori_protocol::ServerMessage::Welcome`].
     pub fn set_local_source(&mut self, source: Option<u32>) {
         self.local_source = source;
         if let Some(source) = source {
@@ -278,7 +278,7 @@ impl Mixer {
         self.sources.keys().copied()
     }
 
-    /// Discard all buffered audio. The application owns the mixer, so it calls this when the audio it hears changes context: on [`protocol::ServerMessage::Left`], before joining a different space, and after reconnecting. Sound cues keep playing: they are this client's own, such as the click as it leaves a space.
+    /// Discard all buffered audio. The application owns the mixer, so it calls this when the audio it hears changes context: on [`tomori_protocol::ServerMessage::Left`], before joining a different space, and after reconnecting. Sound cues keep playing: they are this client's own, such as the click as it leaves a space.
     pub fn clear(&mut self) {
         self.sources.clear();
     }

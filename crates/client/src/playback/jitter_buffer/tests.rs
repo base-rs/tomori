@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use protocol::Gate;
+use tomori_protocol::Gate;
 
 const RATE: u32 = 1_000;
 

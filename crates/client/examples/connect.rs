@@ -4,9 +4,9 @@
 //! Connect to a Tomori server and print what it sends.
 //!
 //! ```text
-//! cargo run -p client --example connect -- 192.168.1.10:8765 [name]
-//! cargo run -p client --example connect -- - [name]
-//! cargo run -p client --example connect
+//! cargo run -p tomori-client --example connect -- 192.168.1.10:8765 [name]
+//! cargo run -p tomori-client --example connect -- - [name]
+//! cargo run -p tomori-client --example connect
 //! ```
 //!
 //! Without an address, or with `-`, it browses for servers advertised with Bonjour, lists them and asks which one to join.
@@ -26,9 +26,9 @@ use std::io::BufRead;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use client::discovery::{self, Servers};
-use client::{Client, Event, Options, Sender};
-use protocol::{ClientMessage, Decision, Gate, ServerMessage};
+use tomori_client::discovery::{self, Servers};
+use tomori_client::{Client, Event, Options, Sender};
+use tomori_protocol::{ClientMessage, Decision, Gate, ServerMessage};
 
 const COMMANDS: &str = "commands: list, create <backend> <directory> [title], join <space>, leave, gate off|live|agent, allow <request>, deny <request>, grant <request> <option>, quit";
 
@@ -163,7 +163,7 @@ fn choose() -> std::io::Result<Option<String>> {
             eprintln!(
                 "  -  {} (protocol {protocol}; this client speaks {}, so it is unavailable)",
                 server.name,
-                protocol::PROTOCOL_VERSION
+                tomori_protocol::PROTOCOL_VERSION
             );
         }
         if compatible.is_empty() {
@@ -212,7 +212,7 @@ fn main() -> std::io::Result<()> {
         format!("console-{:016x}", hasher.finish())
     };
     let mut options = Options::new(address, participant, name);
-    options.transport = client::Transport::Automatic { pin: None };
+    options.transport = tomori_client::Transport::Automatic { pin: None };
     options.token = std::env::var("TOMORI_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());

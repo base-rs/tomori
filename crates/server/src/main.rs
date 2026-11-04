@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
-use protocol::Keepalive;
-use server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
+use tomori_protocol::Keepalive;
+use tomori_server::{Backends, NullTranscriber, Server, Transcriber, WorkspaceRoots};
 
 const USAGE: &str = "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
                      [--speech-provider NAME] [--name NAME] [--no-advertise] [--no-advertise-attention]
@@ -109,9 +109,9 @@ struct Arguments {
     state_directory: Option<PathBuf>,
 }
 
-/// The state directory from the environment; see [`server::auth_command::default_state_directory`].
+/// The state directory from the environment; see [`tomori_server::auth_command::default_state_directory`].
 fn default_state_directory() -> Option<PathBuf> {
-    server::auth_command::default_state_directory(
+    tomori_server::auth_command::default_state_directory(
         std::env::var("XDG_STATE_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
@@ -130,7 +130,7 @@ fn seconds(flag: &str, value: Option<String>) -> Result<Duration, String> {
 
 fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, String> {
     let mut parsed = Arguments {
-        bind: SocketAddr::from(([0, 0, 0, 0], protocol::DEFAULT_PORT)),
+        bind: SocketAddr::from(([0, 0, 0, 0], tomori_protocol::DEFAULT_PORT)),
         backends: Vec::new(),
         opencode_url: None,
 
@@ -144,10 +144,10 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         keepalive: Keepalive::DEFAULT,
         request_timeout: None,
         workspace_roots: Vec::new(),
-        max_spaces: server::DEFAULT_MAX_SPACES,
+        max_spaces: tomori_server::DEFAULT_MAX_SPACES,
         open: false,
         visitors: true,
-        max_visitors: server::DEFAULT_MAX_VISITORS,
+        max_visitors: tomori_server::DEFAULT_MAX_VISITORS,
         state_directory: None,
     };
     while let Some(argument) = arguments.next() {
@@ -316,7 +316,7 @@ fn state_directory(arguments: &Arguments) -> Result<PathBuf, String> {
 /// Keep spaces across restarts in the state directory, and list again those kept there. A record that cannot be read stops the server from starting, rather than losing every space and the admissions to them. See `design/spaces.md`.
 fn keep_spaces(server: Server, arguments: &Arguments) -> Result<Server, String> {
     let state = state_directory(arguments)?;
-    let store = server::kept::SpaceStore::open(&state).map_err(|error| {
+    let store = tomori_server::kept::SpaceStore::open(&state).map_err(|error| {
         format!(
             "Could not open the spaces kept in {}: {error}.",
             state.display()
@@ -341,7 +341,7 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
         return Ok((server, None));
     }
     let state = state_directory(arguments)?;
-    let store = security::TokenStore::open(&state).map_err(|error| {
+    let store = tomori_security::TokenStore::open(&state).map_err(|error| {
         format!(
             "Could not open the token store in {}: {error}.",
             state.display()
@@ -350,7 +350,7 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
     let owners = store
         .entries()
         .iter()
-        .filter(|entry| entry.grant == security::Grant::Owner)
+        .filter(|entry| entry.grant == tomori_security::Grant::Owner)
         .count();
     eprintln!(
         "Admitting holders of this server's tokens ({owners} owner tokens, in {}){}.",
@@ -369,12 +369,13 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
             "No owner token is issued yet: run `tomori-server auth mint --owner --name NAME`."
         );
     }
-    let certificate = security::ServerCertificate::load_or_create(&state).map_err(|error| {
-        format!(
-            "Could not load or create the server's certificate in {}: {error}.",
-            state.display()
-        )
-    })?;
+    let certificate =
+        tomori_security::ServerCertificate::load_or_create(&state).map_err(|error| {
+            format!(
+                "Could not load or create the server's certificate in {}: {error}.",
+                state.display()
+            )
+        })?;
     let config = certificate
         .server_config()
         .map_err(|error| format!("The server's certificate cannot be used: {error}."))?;
@@ -386,11 +387,11 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
         .with_tls(config)
         .with_pairing(certificate.fingerprint())
         .with_pairing_prompt(|event| match event {
-            server::PairingEvent::Began { name } => eprintln!("{name:?} began pairing."),
-            server::PairingEvent::Waiting { name, code } => eprintln!(
+            tomori_server::PairingEvent::Began { name } => eprintln!("{name:?} began pairing."),
+            tomori_server::PairingEvent::Waiting { name, code } => eprintln!(
                 "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
             ),
-            server::PairingEvent::Paused => eprintln!(
+            tomori_server::PairingEvent::Paused => eprintln!(
                 "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again."
             ),
         });
@@ -399,7 +400,7 @@ fn admission(server: Server, arguments: &Arguments) -> Result<(Server, Option<St
 }
 
 /// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches. See `design/security.md`.
-fn confirm_pairings_on_console(pairing: server::Pairing) {
+fn confirm_pairings_on_console(pairing: tomori_server::Pairing) {
     use std::io::BufRead;
     let reading = std::thread::Builder::new()
         .name("tomori-console".into())
@@ -418,7 +419,7 @@ fn confirm_pairings_on_console(pairing: server::Pairing) {
                 } else if line.eq_ignore_ascii_case("decline") {
                     pairing.decline();
                     eprintln!("Declined the pairing.");
-                } else if let Some(code) = security::pairing::typed(line) {
+                } else if let Some(code) = tomori_security::pairing::typed(line) {
                     match pairing.confirm(&code) {
                         Ok(name) => eprintln!("Paired {name:?} as an owner."),
                         Err(error) => eprintln!("{error}"),
@@ -444,21 +445,21 @@ fn host_name() -> String {
 }
 
 /// The running advertisement, if any, which the server updates as its counts change.
-type Advertised = Arc<Mutex<Option<discovery::Advertisement>>>;
+type Advertised = Arc<Mutex<Option<tomori_discovery::Advertisement>>>;
 
 /// Advertise the bound `address`, with the server's current `counts` and its certificate's `fingerprint` if it serves TLS, unless turned off. A failure is reported but does not stop the server, which remains reachable by address.
 fn advertise(
     arguments: &Arguments,
     address: SocketAddr,
-    counts: discovery::Counts,
+    counts: tomori_discovery::Counts,
     fingerprint: Option<String>,
-) -> Option<discovery::Advertisement> {
+) -> Option<tomori_discovery::Advertisement> {
     if !arguments.advertise {
         eprintln!("Bonjour: not advertising (--no-advertise).");
         return None;
     }
     let name = arguments.name.clone().unwrap_or_else(host_name);
-    match discovery::advertise(&name, address.port(), address.ip(), counts, fingerprint) {
+    match tomori_discovery::advertise(&name, address.port(), address.ip(), counts, fingerprint) {
         Ok(advertisement) => {
             eprintln!(
                 "Bonjour: advertising {:?} as _tomori._tcp on port {}.",
@@ -475,16 +476,18 @@ fn advertise(
 }
 
 #[cfg_attr(not(feature = "opencode"), allow(unused_variables))]
-fn backend(name: &str, arguments: &Arguments) -> Result<server::AnyBackend, String> {
+fn backend(name: &str, arguments: &Arguments) -> Result<tomori_server::AnyBackend, String> {
     match name {
         #[cfg(feature = "fake")]
-        "fake" => Ok(server::fake::FakeBackend::new().into()),
+        "fake" => Ok(tomori_server::fake::FakeBackend::new().into()),
 
         #[cfg(feature = "opencode")]
-        "opencode" => Ok(backend_opencode::OpenCode::new(backend_opencode::Config {
-            url: arguments.opencode_url.clone(),
-        })
-        .into()),
+        "opencode" => Ok(
+            tomori_backend_opencode::OpenCode::new(tomori_backend_opencode::Config {
+                url: arguments.opencode_url.clone(),
+            })
+            .into(),
+        ),
         #[cfg(not(feature = "opencode"))]
         "opencode" => {
             Err("the opencode backend needs a server built with the opencode feature".to_owned())
@@ -508,7 +511,7 @@ const ENGINE_STOP: Duration = Duration::from_secs(3);
 #[derive(Default)]
 struct Engines {
     #[cfg(feature = "speech")]
-    stoppers: Vec<speech::Stopper>,
+    stoppers: Vec<tomori_speech::Stopper>,
 }
 
 impl Engines {
@@ -554,7 +557,7 @@ fn streaming_transcriber(
     provider: &str,
     engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
-    use speech::stt::{TransducerConfig, TransducerRecognizer};
+    use tomori_speech::stt::{TransducerConfig, TransducerRecognizer};
 
     let mut config = TransducerConfig::from_root(root);
     config.provider = provider.to_owned();
@@ -564,7 +567,8 @@ fn streaming_transcriber(
                 "Speech recognition: streaming transducer from {} ({provider}).",
                 config.model.display()
             );
-            let transcriber = server::RecognitionTranscriber::new(punctuated(recognizer, root));
+            let transcriber =
+                tomori_server::RecognitionTranscriber::new(punctuated(recognizer, root));
             engines.stoppers.push(transcriber.stopper());
             Arc::new(transcriber)
         }
@@ -586,11 +590,11 @@ fn offline_transcriber(
     provider: &str,
     engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
-    use speech::stt::{SileroVad, SileroVadConfig, WhisperConfig};
+    use tomori_speech::stt::{SileroVad, SileroVadConfig, WhisperConfig};
 
     let mut config = WhisperConfig::from_root(root);
     config.provider = provider.to_owned();
-    let recognizer = match server::offline::Whisper::new(&config) {
+    let recognizer = match tomori_server::offline::Whisper::new(&config) {
         Ok(recognizer) => recognizer,
         Err(error) => {
             eprintln!(
@@ -604,11 +608,11 @@ fn offline_transcriber(
     eprintln!(
         "Speech recognition: offline whole-clip model from {} ({provider}), for utterances of up to {} minutes.",
         config.model.display(),
-        speech::stt::MAX_UTTERANCE / speech::stt::RATE as usize / 60
+        tomori_speech::stt::MAX_UTTERANCE / tomori_speech::stt::RATE as usize / 60
     );
     let vad = SileroVadConfig::from_root(root);
-    let segment = speech::stt::MAX_SEGMENT / speech::stt::RATE as usize;
-    let voice: Option<Box<dyn speech::stt::VoiceActivity>> = match SileroVad::new(&vad) {
+    let segment = tomori_speech::stt::MAX_SEGMENT / tomori_speech::stt::RATE as usize;
+    let voice: Option<Box<dyn tomori_speech::stt::VoiceActivity>> = match SileroVad::new(&vad) {
         Ok(voice) => {
             eprintln!(
                 "Pauses in utterances longer than {segment} seconds: Silero voice activity detector from {} (cpu).",
@@ -623,7 +627,7 @@ fn offline_transcriber(
             None
         }
     };
-    let transcriber = server::OfflineTranscriber::new(recognizer, voice);
+    let transcriber = tomori_server::OfflineTranscriber::new(recognizer, voice);
     engines.stoppers.push(transcriber.stopper());
     Ok(Arc::new(transcriber))
 }
@@ -631,10 +635,10 @@ fn offline_transcriber(
 /// `recognizer` with its final transcripts punctuated by the model from `root`, or as it is if that model cannot load.
 #[cfg(feature = "speech")]
 fn punctuated(
-    recognizer: impl speech::StreamingRecognizer + 'static,
+    recognizer: impl tomori_speech::StreamingRecognizer + 'static,
     root: &Path,
-) -> Box<dyn speech::StreamingRecognizer> {
-    use speech::stt::{CnnBilstmPunctuator, Punctuated, PunctuationConfig};
+) -> Box<dyn tomori_speech::StreamingRecognizer> {
+    use tomori_speech::stt::{CnnBilstmPunctuator, Punctuated, PunctuationConfig};
 
     let config = PunctuationConfig::from_root(root);
     match CnnBilstmPunctuator::new(&config) {
@@ -679,7 +683,7 @@ fn synthesis(
     segmentation: &str,
     engines: &mut Engines,
 ) -> Server {
-    use speech::tts::{KokoroConfig, KokoroSynthesizer};
+    use tomori_speech::tts::{KokoroConfig, KokoroSynthesizer};
 
     let Some(root) = root else {
         eprintln!("Speech synthesis: off (no --speech-root); replies are not spoken.");
@@ -694,8 +698,8 @@ fn synthesis(
             );
             engines.stoppers.push(synthesizer.stopper());
             let mode = match segmentation {
-                "sentence" => server::SpeechMode::Sentence,
-                _ => server::SpeechMode::Block,
+                "sentence" => tomori_server::SpeechMode::Sentence,
+                _ => tomori_server::SpeechMode::Block,
             };
             let server = server.with_synthesizer(synthesizer);
             server.with_voice_mode(mode)
@@ -724,7 +728,7 @@ fn main() -> ExitCode {
     let mut command = std::env::args().skip(1).peekable();
     if command.peek().map(String::as_str) == Some("auth") {
         command.next();
-        return match server::auth_command::run(command, default_state_directory()) {
+        return match tomori_server::auth_command::run(command, default_state_directory()) {
             Ok(output) => {
                 print!("{output}");
                 ExitCode::SUCCESS
@@ -834,7 +838,7 @@ fn main() -> ExitCode {
             .ok()
     };
     let result = block_on(async {
-        let listener = server::bind(&scheduler, arguments.bind, &cancellation)
+        let listener = tomori_server::bind(&scheduler, arguments.bind, &cancellation)
             .await
             .map_err(|error| format!("Could not listen on {}: {error}", arguments.bind))?;
         let address = scheduler
@@ -1001,8 +1005,8 @@ mod tests {
     fn workspace_roots_and_the_space_limit_are_configurable() {
         let parsed = arguments(&[]).unwrap();
         assert!(parsed.workspace_roots.is_empty());
-        assert_eq!(parsed.max_spaces, server::DEFAULT_MAX_SPACES);
-        assert_eq!(server::DEFAULT_MAX_SPACES, 8);
+        assert_eq!(parsed.max_spaces, tomori_server::DEFAULT_MAX_SPACES);
+        assert_eq!(tomori_server::DEFAULT_MAX_SPACES, 8);
 
         let parsed = arguments(&[
             "--workspace-root",
@@ -1025,7 +1029,7 @@ mod tests {
         let parsed = arguments(&[]).unwrap();
         assert!(!parsed.open);
         assert!(parsed.visitors);
-        assert_eq!(parsed.max_visitors, server::DEFAULT_MAX_VISITORS);
+        assert_eq!(parsed.max_visitors, tomori_server::DEFAULT_MAX_VISITORS);
         assert_eq!(parsed.state_directory, None);
         let parsed = arguments(&[
             "--auth",

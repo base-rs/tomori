@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::{Event, Session};
-use protocol::{ClientMessage, ConnectionRole, ServerMessage, SpaceSummary};
-use security::Grant;
-use server::fake::FakeBackend;
-use server::kept::{KeptSpace, SPACES_FILE, SpaceStore};
-use server::test_support::{TestServer, TextTranscriber};
-use server::{RESTORING, Server};
+use tomori_backend::{Event, Session};
+use tomori_protocol::{ClientMessage, ConnectionRole, ServerMessage, SpaceSummary};
+use tomori_security::Grant;
+use tomori_server::fake::FakeBackend;
+use tomori_server::kept::{KeptSpace, SPACES_FILE, SpaceStore};
+use tomori_server::test_support::{TestServer, TextTranscriber};
+use tomori_server::{RESTORING, Server};
 
 /// A state directory of its own, removed when dropped.
 struct State(PathBuf);
@@ -43,7 +43,7 @@ impl Drop for State {
 fn start(
     backend: &FakeBackend,
     state: &Path,
-    tokens: Option<Arc<security::TokenStore>>,
+    tokens: Option<Arc<tomori_security::TokenStore>>,
 ) -> TestServer {
     let store = Arc::new(SpaceStore::open(state).expect("the spaces open"));
     let issuing = tokens.clone();
@@ -63,7 +63,7 @@ fn start(
 
 /// Wait until the latest session was sent `text`.
 fn delivered(backend: &FakeBackend, text: &str) {
-    let deadline = std::time::Instant::now() + server::test_support::TIMEOUT;
+    let deadline = std::time::Instant::now() + tomori_server::test_support::TIMEOUT;
     while !backend
         .started()
         .last()
@@ -81,7 +81,7 @@ fn delivered(backend: &FakeBackend, text: &str) {
     }
 }
 
-fn listed(client: &server::test_support::TestClient, id: &str) -> SpaceSummary {
+fn listed(client: &tomori_server::test_support::TestClient, id: &str) -> SpaceSummary {
     client.wait_for(|message| match message {
         ServerMessage::Spaces { spaces } => spaces.iter().find(|space| space.id == id).cloned(),
         _ => None,
@@ -99,7 +99,7 @@ fn spaces_survive_a_restart() {
         backend.started()[0].emit(Event::Closed {
             reason: Some("The agent finished.".into()),
         });
-        ada.space(|space| space.id == ended && space.activity == protocol::Activity::Closed);
+        ada.space(|space| space.id == ended && space.activity == tomori_protocol::Activity::Closed);
         let studio = ada.create_space("Studio");
         ada.send(&ClientMessage::SetAttribution { enabled: false });
         ada.space(|space| space.id == studio.id && !space.attribution);
@@ -142,7 +142,7 @@ fn spaces_survive_a_restart() {
     assert_eq!(restored.directory, studio.directory);
     assert_eq!(restored.environment, studio.environment);
     assert!(!restored.attribution);
-    assert_ne!(restored.activity, protocol::Activity::Closed);
+    assert_ne!(restored.activity, tomori_protocol::Activity::Closed);
     assert!(restored.queue.is_empty());
     let session = backend.started().last().unwrap().id();
     assert_eq!(
@@ -154,7 +154,7 @@ fn spaces_survive_a_restart() {
     // The closed space is listed closed, with its reason, and is not bound again.
     ada.send(&ClientMessage::Leave);
     let summary = listed(&ada, &ended);
-    assert_eq!(summary.activity, protocol::Activity::Closed);
+    assert_eq!(summary.activity, tomori_protocol::Activity::Closed);
     // New spaces never reuse a kept identifier.
     let fresh = ada.create_space("Fresh").id;
     assert!(fresh != studio.id && fresh != ended);
@@ -176,7 +176,7 @@ fn a_space_s_instructions_are_kept_and_given_again_after_a_restart() {
             instructions: Some("Mind the docs.".into()),
         });
         let id = ada.space(|space| space.title == "Docs").id;
-        let deadline = std::time::Instant::now() + server::test_support::TIMEOUT;
+        let deadline = std::time::Instant::now() + tomori_server::test_support::TIMEOUT;
         while backend.started()[0].log().instructions.len() < 3 {
             assert!(std::time::Instant::now() < deadline, "never given");
             std::thread::sleep(Duration::from_millis(10));
@@ -198,7 +198,7 @@ fn a_space_s_instructions_are_kept_and_given_again_after_a_restart() {
         Some("Mind the docs.".to_owned())
     );
     // Bound again, the session is given every layer again.
-    let deadline = std::time::Instant::now() + server::test_support::TIMEOUT;
+    let deadline = std::time::Instant::now() + tomori_server::test_support::TIMEOUT;
     while session.log().instructions.len() < given * 2 {
         assert!(std::time::Instant::now() < deadline, "not given again");
         std::thread::sleep(Duration::from_millis(10));
@@ -248,7 +248,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         ServerMessage::Spaces { spaces } => (spaces.len() == 2
             && spaces
                 .iter()
-                .all(|space| space.activity == protocol::Activity::Closed))
+                .all(|space| space.activity == tomori_protocol::Activity::Closed))
         .then(|| assert!(spaces.iter().all(|space| space.attention.is_none()))),
         _ => None,
     });
@@ -260,8 +260,8 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
         ),
     ] {
         ada.send(&ClientMessage::Join { space: id.into() });
-        let space =
-            ada.space(|space| space.id == id && space.activity == protocol::Activity::Closed);
+        let space = ada
+            .space(|space| space.id == id && space.activity == tomori_protocol::Activity::Closed);
         assert!(
             space.error.as_deref().unwrap().starts_with(reason),
             "{:?}",
@@ -287,9 +287,11 @@ fn only_a_space_chosen_brief_is_brief_after_a_restart() {
         let mut ada = server.connect("ada", "Ada");
         let brief = ada.create_space("Brief").id;
         ada.send(&ClientMessage::SetSpeech {
-            speech: protocol::SpeechSetting::Brief,
+            speech: tomori_protocol::SpeechSetting::Brief,
         });
-        ada.space(|space| space.id == brief && space.speech == protocol::SpeechSetting::Brief);
+        ada.space(|space| {
+            space.id == brief && space.speech == tomori_protocol::SpeechSetting::Brief
+        });
         let full = ada.create_space("Full").id;
         (brief, full)
     };
@@ -303,8 +305,8 @@ fn only_a_space_chosen_brief_is_brief_after_a_restart() {
     let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
     for (id, speech) in [
-        (&brief, protocol::SpeechSetting::Brief),
-        (&full, protocol::SpeechSetting::Full),
+        (&brief, tomori_protocol::SpeechSetting::Brief),
+        (&full, tomori_protocol::SpeechSetting::Full),
     ] {
         ada.send(&ClientMessage::Join { space: id.clone() });
         let restored = ada.space(|space| &space.id == id && space.error.is_none());
@@ -342,7 +344,7 @@ fn a_space_kept_before_its_speech_was_stored_speaks_in_full() {
         space: "space-old-1".into(),
     });
     let space = ada.space(|space| space.id == "space-old-1");
-    assert_eq!(space.speech, protocol::SpeechSetting::Full);
+    assert_eq!(space.speech, tomori_protocol::SpeechSetting::Full);
 }
 
 #[test]
@@ -372,7 +374,7 @@ fn a_restored_space_is_listed_while_it_is_bound_again() {
 #[test]
 fn a_collaborator_admitted_to_a_kept_space_stays_admitted() {
     let state = State::new("collaborator");
-    let tokens = Arc::new(security::TokenStore::open(&state.0).unwrap());
+    let tokens = Arc::new(tomori_security::TokenStore::open(&state.0).unwrap());
     let backend = FakeBackend::new();
     let (studio, token) = {
         let server = start(&backend, &state.0, Some(tokens.clone()));
@@ -416,24 +418,26 @@ fn a_forgotten_closed_space_is_not_kept() {
     let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
     let mut ids = Vec::new();
-    for index in 0..=server::CLOSED_SPACES {
+    for index in 0..=tomori_server::CLOSED_SPACES {
         let id = ada.create_space(&format!("Space {index}")).id;
         backend.started()[index].emit(Event::Closed { reason: None });
-        ada.space(|space| space.id == id && space.activity == protocol::Activity::Closed);
+        ada.space(|space| space.id == id && space.activity == tomori_protocol::Activity::Closed);
         ids.push(id);
     }
     // Leaving the last lets it be forgotten in its turn; the first, least recently closed, is forgotten now.
     ada.send(&ClientMessage::Leave);
     ada.wait_for(|message| match message {
-        ServerMessage::Spaces { spaces } => (spaces.len() == server::CLOSED_SPACES).then_some(()),
+        ServerMessage::Spaces { spaces } => {
+            (spaces.len() == tomori_server::CLOSED_SPACES).then_some(())
+        }
         _ => None,
     });
     drop(ada);
     drop(server);
     let kept: Vec<String> = state.kept().into_iter().map(|space| space.id).collect();
-    assert_eq!(kept.len(), server::CLOSED_SPACES);
+    assert_eq!(kept.len(), tomori_server::CLOSED_SPACES);
     assert!(!kept.contains(&ids[0]));
-    assert!(kept.contains(&ids[server::CLOSED_SPACES]));
+    assert!(kept.contains(&ids[tomori_server::CLOSED_SPACES]));
 }
 
 #[test]
@@ -451,7 +455,7 @@ fn a_space_not_bound_again_for_a_passing_reason_is_tried_at_the_next_start() {
         ada.send(&ClientMessage::Join {
             space: studio.clone(),
         });
-        let space = ada.space(|space| space.activity == protocol::Activity::Closed);
+        let space = ada.space(|space| space.activity == tomori_protocol::Activity::Closed);
         assert!(
             space
                 .error
@@ -480,14 +484,18 @@ fn the_least_recently_closed_space_is_still_forgotten_first_after_a_restart() {
         let second = ada.create_space("Second").id;
         // The second space, which Ada is in, closes first.
         backend.started()[1].emit(Event::Closed { reason: None });
-        ada.space(|space| space.id == second && space.activity == protocol::Activity::Closed);
+        ada.space(|space| {
+            space.id == second && space.activity == tomori_protocol::Activity::Closed
+        });
         ada.send(&ClientMessage::Leave);
         listed(&ada, &second);
         backend.started()[0].emit(Event::Closed { reason: None });
         ada.wait_for(|message| match message {
             ServerMessage::Spaces { spaces } => spaces
                 .iter()
-                .any(|space| space.id == first && space.activity == protocol::Activity::Closed)
+                .any(|space| {
+                    space.id == first && space.activity == tomori_protocol::Activity::Closed
+                })
                 .then_some(()),
             _ => None,
         });
@@ -495,18 +503,18 @@ fn the_least_recently_closed_space_is_still_forgotten_first_after_a_restart() {
     };
     let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
-    for index in 1..server::CLOSED_SPACES {
+    for index in 1..tomori_server::CLOSED_SPACES {
         let id = ada.create_space(&format!("Space {index}")).id;
         backend
             .started()
             .last()
             .unwrap()
             .emit(Event::Closed { reason: None });
-        ada.space(|space| space.id == id && space.activity == protocol::Activity::Closed);
+        ada.space(|space| space.id == id && space.activity == tomori_protocol::Activity::Closed);
     }
     ada.send(&ClientMessage::Leave);
     let spaces = ada.wait_for(|message| match message {
-        ServerMessage::Spaces { spaces } if spaces.len() == server::CLOSED_SPACES => {
+        ServerMessage::Spaces { spaces } if spaces.len() == tomori_server::CLOSED_SPACES => {
             Some(spaces.clone())
         }
         _ => None,

@@ -6,7 +6,7 @@ use std::sync::mpsc::{RecvError, RecvTimeoutError, TryRecvError};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use protocol::ServerMessage;
+use tomori_protocol::ServerMessage;
 
 use crate::Event;
 
@@ -119,7 +119,7 @@ impl Events {
 mod tests {
     use super::*;
     use crate::ConnectionState;
-    use protocol::Pose;
+    use tomori_protocol::Pose;
 
     fn presence(source: u32, x: f32) -> Event {
         Event::Message(ServerMessage::Presence {

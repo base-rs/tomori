@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
-use protocol::{
+use tomori_protocol::{
     AudioFrame, ClientMessage, Frame, FrameDecoder, FrameKind, Gate, PROTOCOL_VERSION, Pointed,
     ServerMessage, SpaceState,
 };
@@ -40,7 +40,7 @@ pub fn eventually<T>(mut check: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// A transcriber that reads each sample as a Unicode scalar value, so tests can "speak" exact text. See [`speech`].
+/// A transcriber that reads each sample as a Unicode scalar value, so tests can "speak" exact text. See [`tomori_speech`].
 #[derive(Default)]
 pub struct TextTranscriber {
     utterances: Mutex<HashMap<UtteranceId, (TranscriptSink, String)>>,
@@ -95,7 +95,7 @@ pub struct TestServer {
     pub address: SocketAddr,
     pub backend: FakeBackend,
     /// The token store, for a server that admits by tokens; see [`TestServer::with_tokens`].
-    pub tokens: Option<Arc<security::TokenStore>>,
+    pub tokens: Option<Arc<tomori_security::TokenStore>>,
     /// The token store's temporary directory, removed when the server is dropped.
     state: Option<std::path::PathBuf>,
     cancellation: Cancellation,
@@ -120,7 +120,8 @@ impl TestServer {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&state);
-        let store = Arc::new(security::TokenStore::open(&state).expect("the token store opens"));
+        let store =
+            Arc::new(tomori_security::TokenStore::open(&state).expect("the token store opens"));
         let tokens = store.clone();
         let mut server = Self::with_server(FakeBackend::new(), move |backends| {
             configure(
@@ -134,7 +135,11 @@ impl TestServer {
     }
 
     /// Issue a token granting `grant`, as `tomori-server auth mint` does.
-    pub fn issue(&self, name: &str, grant: security::Grant) -> (security::Entry, String) {
+    pub fn issue(
+        &self,
+        name: &str,
+        grant: tomori_security::Grant,
+    ) -> (tomori_security::Entry, String) {
         self.tokens
             .as_ref()
             .expect("the server admits by tokens")
@@ -145,7 +150,7 @@ impl TestServer {
     /// Revoke a token as `tomori-server auth revoke` does, from another process's view of the token store, which the server notices when it next reads the store.
     pub fn revoke_elsewhere(&self, id: &str) -> bool {
         let state = self.state.as_ref().expect("the server admits by tokens");
-        security::TokenStore::open(state)
+        tomori_security::TokenStore::open(state)
             .expect("the token store opens")
             .revoke(id)
             .expect("the token store is written")
@@ -171,8 +176,8 @@ impl TestServer {
         write!(
             stream,
             "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nContent-Length: 0\r\nConnection: close\r\n{fields}\r\n",
-            protocol::CONNECT_PATH,
-            protocol::CONTENT_TYPE
+            tomori_protocol::CONNECT_PATH,
+            tomori_protocol::CONTENT_TYPE
         )
         .unwrap();
         let mut response = String::new();
@@ -289,7 +294,7 @@ pub struct TestClient {
     /// The audio source number assigned in the welcome.
     pub source: u32,
     /// The role named in the welcome.
-    pub role: protocol::ConnectionRole,
+    pub role: tomori_protocol::ConnectionRole,
     sequence: u32,
 }
 
@@ -310,8 +315,8 @@ impl TestClient {
         write!(
             stream,
             "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\n{fields}\r\n",
-            protocol::CONNECT_PATH,
-            protocol::CONTENT_TYPE
+            tomori_protocol::CONNECT_PATH,
+            tomori_protocol::CONTENT_TYPE
         )
         .unwrap();
         let (message_sender, messages) = channel();
@@ -352,7 +357,7 @@ impl TestClient {
             messages,
             audio,
             source: 0,
-            role: protocol::ConnectionRole::Unknown,
+            role: tomori_protocol::ConnectionRole::Unknown,
             sequence: 0,
         }
     }

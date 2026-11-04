@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::SyncSender;
 
-use protocol::{AGENT_SOURCE, Gate, REPLAY_SOURCE};
+use tomori_protocol::{AGENT_SOURCE, Gate, REPLAY_SOURCE};
 
 use super::*;
 use crate::playback::JitterOptions;

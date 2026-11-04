@@ -9,7 +9,7 @@ use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_scheduler::Cancellation;
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
-use protocol::{Frame, FrameDecoder, ServerMessage};
+use tomori_protocol::{Frame, FrameDecoder, ServerMessage};
 
 use crate::access::Access;
 use crate::hub::{ConnectionId, Hub, Output};
@@ -218,7 +218,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll, Waker};
 
-    use protocol::ClientMessage;
+    use tomori_protocol::ClientMessage;
 
     use super::*;
     use crate::transcriber::NullTranscriber;

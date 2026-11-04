@@ -6,11 +6,11 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use backend::{Event, Session, Snapshot};
-use protocol::{ClientMessage, ServerMessage, SpaceState};
-use security::Grant;
-use server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
-use server::test_support::{TIMEOUT, TestClient, TestServer};
+use tomori_backend::{Event, Session, Snapshot};
+use tomori_protocol::{ClientMessage, ServerMessage, SpaceState};
+use tomori_security::Grant;
+use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer};
 
 const KEYS: [&str; 3] = ["tomori", "tomori-environment", "tomori-space"];
 
@@ -299,7 +299,7 @@ fn a_forgotten_space_s_entries_are_removed_unless_another_space_is_bound_to_its_
     let mut ada = server.connect("ada", "Ada");
     let close = |ada: &TestClient, session: &FakeSession, id: &str| {
         session.emit(Event::Closed { reason: None });
-        ada.space(|space| space.id == id && space.activity == protocol::Activity::Closed);
+        ada.space(|space| space.id == id && space.activity == tomori_protocol::Activity::Closed);
     };
     let first = create(&mut ada, "First", Some("Mind the docs.")).id;
     let first_session = server.backend.started()[0].clone();
@@ -326,7 +326,7 @@ fn a_forgotten_space_s_entries_are_removed_unless_another_space_is_bound_to_its_
         |session| session.instructions() == entries(Some("Mind the tests.")),
     );
     // Closing more spaces forgets the least recently closed, the first and second.
-    for index in 0..server::CLOSED_SPACES {
+    for index in 0..tomori_server::CLOSED_SPACES {
         let id = create(&mut ada, &format!("Filler {index}"), None).id;
         let session = server.backend.started().last().unwrap().clone();
         close(&ada, &session, &id);

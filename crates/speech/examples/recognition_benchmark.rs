@@ -4,7 +4,7 @@
 //! Compares speech recognizers on English clips: accuracy, time to first partial, real-time factor and CPU use.
 //!
 //! ```sh
-//! cargo run --release -p speech --example recognition_benchmark -- --root . [--model DIRECTORY]... [--whisper] [--punctuation]
+//! cargo run --release -p tomori-speech --example recognition_benchmark -- --root . [--model DIRECTORY]... [--whisper] [--punctuation]
 //! ```
 //!
 //! Clips are the LibriSpeech test wavs shipped with the default streaming model, and sentences synthesized with Kokoro in four voices. Each streaming model is fed 100 ms frames in real time through [`Recognition`], as push-to-talk delivers them, and then again as fast as it can decode. Whisper, which cannot stream, decodes each whole clip; its first partial is estimated as a 1 second refresh interval, as a windowed re-decoding scheme would use, plus the time to decode that first second.
@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use speech::{
+use tomori_speech::{
     Error, Recognition, StreamingRecognizer, Synthesizer, TranscriptEvent,
     stt::{
         CnnBilstmPunctuator, Punctuated, PunctuationConfig, Punctuator, RATE, Resampler,
@@ -272,7 +272,7 @@ fn run(recognition: &mut Recognition, clip: &Clip) -> (Option<f64>, f64, String)
 
 /// Decode `clip` with `recognizer` directly, as fast as it can, and return the final text.
 ///
-/// This bypasses [`Recognition`], which fails an utterance whose audio arrives more than [`speech::stt::BACKLOG`] ahead of decoding.
+/// This bypasses [`Recognition`], which fails an utterance whose audio arrives more than [`tomori_speech::stt::BACKLOG`] ahead of decoding.
 fn decode_at_once(recognizer: &mut dyn StreamingRecognizer, clip: &Clip) -> String {
     let mut stream = recognizer.open().expect("open a stream");
     for frame in clip.audio.chunks(FRAME) {

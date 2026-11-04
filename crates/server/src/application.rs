@@ -8,7 +8,7 @@ use base_http::body::{BodyError, BodyFrame, ReadableBody};
 use base_http::{Fields, InterimHandler, InterimResponses, Method, Request, Response, Status};
 use base_http_server::Handler;
 use base_scheduler::Cancellation;
-use security::Credentials;
+use tomori_security::Credentials;
 
 use crate::access::Grant;
 use crate::connection::ConnectionBody;
@@ -84,8 +84,11 @@ fn redirect<B: ReadableBody>(location: &str, cookie: Option<String>) -> Response
 fn token_cookie(token: Option<&str>) -> String {
     let attributes = "Path=/; Secure; HttpOnly; SameSite=Strict";
     match token {
-        Some(token) => format!("{}={token}; {attributes}", security::TOKEN_COOKIE),
-        None => format!("{}=; {attributes}; Max-Age=0", security::TOKEN_COOKIE),
+        Some(token) => format!("{}={token}; {attributes}", tomori_security::TOKEN_COOKIE),
+        None => format!(
+            "{}=; {attributes}; Max-Age=0",
+            tomori_security::TOKEN_COOKIE
+        ),
     }
 }
 
@@ -373,7 +376,7 @@ impl Handler for Application {
         let get = request.method == Method::GET;
         let post = request.method == Method::POST;
         Ok(match path {
-            protocol::CONNECT_PATH if post => {
+            tomori_protocol::CONNECT_PATH if post => {
                 // Credentials are checked before the connection reaches the hub; every refusal gets the same reply. See `design/security.md`.
                 // A device without credentials may ask to pair on a server that refuses visitors; see `design/security.md`.
                 let to_pair = request
@@ -402,7 +405,7 @@ impl Handler for Application {
                 ) {
                     Some(body) => response(
                         Status::OK,
-                        protocol::CONTENT_TYPE,
+                        tomori_protocol::CONTENT_TYPE,
                         ResponseBody::Connection(body),
                     ),
                     None => response(
@@ -440,10 +443,10 @@ impl Handler for Application {
                 ResponseBody::fixed(format!(
                     "{{\"status\":\"ok\",\"server\":\"{}\",\"protocol\":{}}}\n",
                     crate::SERVER_NAME,
-                    protocol::PROTOCOL_VERSION
+                    tomori_protocol::PROTOCOL_VERSION
                 )),
             ),
-            protocol::CONNECT_PATH
+            tomori_protocol::CONNECT_PATH
             | "/health"
             | pages::STATUS_PATH
             | pages::SIGN_IN_PATH

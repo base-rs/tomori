@@ -1,16 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The platform speaker, which plays other participants and the agent's speech through the client's [`client::playback::Player`]. See `design/live-audio.md`.
+//! The platform speaker, which plays other participants and the agent's speech through the client's [`tomori_client::playback::Player`]. See `design/live-audio.md`.
 //!
 //! The output stream stays open while connected. It opens and closes on its own thread, so that the frame does not wait for the device. Its callback renders the player at the device rate; [`crate::connection::Connection`] controls the player and silences it while push-to-talk records.
 
-use client::playback::{Layout, Player};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
+use tomori_client::playback::{Layout, Player};
 
 /// Told, from any thread, why the output stopped.
 pub type Failed = Box<dyn Fn(String) + Send + Sync>;
@@ -238,13 +238,13 @@ mod desktop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use client::playback::{MixerOptions, spatial::Listener};
-    use protocol::{AudioFrame, Gate};
+    use tomori_client::playback::{MixerOptions, spatial::Listener};
+    use tomori_protocol::{AudioFrame, Gate};
 
     fn player() -> (
         std::sync::mpsc::SyncSender<AudioFrame>,
         Shared,
-        client::playback::PlayerControl,
+        tomori_client::playback::PlayerControl,
     ) {
         let (sender, audio) = mpsc::sync_channel(8);
         let (player, control) = Player::new(audio, MixerOptions::default());

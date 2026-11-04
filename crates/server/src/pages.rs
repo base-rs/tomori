@@ -5,8 +5,8 @@
 
 use std::fmt::Write;
 
-use protocol::{Activity, ConnectionRole};
-use security::{Entry, Grant};
+use tomori_protocol::{Activity, ConnectionRole};
+use tomori_security::{Entry, Grant};
 
 use crate::hub::{PairingView, Status};
 

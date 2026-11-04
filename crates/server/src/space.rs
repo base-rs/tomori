@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-use backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
-use protocol::{
+use tomori_backend::{AnswerValue, Event, Modes, Part, Permission, Prompt, Snapshot};
+use tomori_protocol::{
     Activity, Attention, Participant, QueueState, SpaceState, SpaceSummary, SpeechSetting,
 };
 
@@ -51,7 +51,7 @@ pub struct SpaceModel {
     questions: VecDeque<PendingQuestion>,
     /// Questions whose answers have been sent to the backend but not yet confirmed.
     submitting: Vec<PendingQuestion>,
-    workers: Vec<protocol::Worker>,
+    workers: Vec<tomori_protocol::Worker>,
     workers_authoritative: bool,
     attribution: bool,
     /// How much of each reply is spoken; see `design/speech.md`.
@@ -118,9 +118,9 @@ fn one_line(text: &str, limit: usize) -> String {
 fn pointing_context(
     backend: &str,
     pointed: &PointedWorker,
-    workers: &[protocol::Worker],
+    workers: &[tomori_protocol::Worker],
 ) -> String {
-    use protocol::WorkerState;
+    use tomori_protocol::WorkerState;
     let title = one_line(&pointed.title, POINTED_TITLE_CHARS);
     let session = one_line(&pointed.id, limits::SESSION_BYTES);
     let backend = one_line(backend, limits::NAME_BYTES);
@@ -147,7 +147,7 @@ fn pointing_context(
 #[derive(Debug)]
 struct MessageModel {
     id: String,
-    role: protocol::Role,
+    role: tomori_protocol::Role,
     text: String,
     tools: Vec<ToolModel>,
     completed: bool,
@@ -162,7 +162,7 @@ struct ToolModel {
 
 #[derive(Clone, Debug)]
 struct PendingQuestion {
-    question: backend::Question,
+    question: tomori_backend::Question,
     answers: Vec<(String, AnswerValue)>,
 }
 
@@ -194,15 +194,15 @@ impl MessageModel {
     }
 }
 
-fn role(role: backend::Role) -> protocol::Role {
+fn role(role: tomori_backend::Role) -> tomori_protocol::Role {
     match role {
-        backend::Role::User => protocol::Role::User,
-        backend::Role::Assistant => protocol::Role::Assistant,
+        tomori_backend::Role::User => tomori_protocol::Role::User,
+        tomori_backend::Role::Assistant => tomori_protocol::Role::Assistant,
     }
 }
 
 /// A snapshot message as the space shows it: its text parts joined, and its tool calls.
-fn message_model(message: backend::SnapshotMessage) -> MessageModel {
+fn message_model(message: tomori_backend::SnapshotMessage) -> MessageModel {
     let mut text = Vec::new();
     let mut tools = Vec::new();
     for part in message.parts {
@@ -228,10 +228,10 @@ fn message_model(message: backend::SnapshotMessage) -> MessageModel {
 }
 
 /// Project a backend worker. A worker whose parent is the space's own session is reported without a parent, so clients need not know the backend's session identifier.
-fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
-    use backend::WorkerState as From;
-    use protocol::WorkerState as To;
-    protocol::Worker {
+fn worker(worker: tomori_backend::Worker, session: &str) -> tomori_protocol::Worker {
+    use tomori_backend::WorkerState as From;
+    use tomori_protocol::WorkerState as To;
+    tomori_protocol::Worker {
         id: worker.id,
         parent: worker.parent.filter(|parent| parent != session),
         title: worker.title,
@@ -249,7 +249,7 @@ fn worker(worker: backend::Worker, session: &str) -> protocol::Worker {
 
 /// Whether `message` is a reply: an assistant message the agent completed with text, not tool calls alone.
 fn is_reply(message: &MessageModel) -> bool {
-    message.role == protocol::Role::Assistant
+    message.role == tomori_protocol::Role::Assistant
         && message.completed
         && !message.text.trim().is_empty()
 }
@@ -325,7 +325,7 @@ impl SpaceModel {
     }
 
     /// Replace the conversation with a snapshot's messages.
-    fn load_messages(&mut self, messages: Vec<backend::SnapshotMessage>) {
+    fn load_messages(&mut self, messages: Vec<tomori_backend::SnapshotMessage>) {
         self.messages.clear();
         self.user_messages.clear();
         for message in messages {
@@ -549,7 +549,7 @@ impl SpaceModel {
     }
 
     /// The instruction layers in effect, or `None` when the backend takes none.
-    pub fn instructions(&self) -> Option<protocol::AgentInstructions> {
+    pub fn instructions(&self) -> Option<tomori_protocol::AgentInstructions> {
         self.takes_instructions.then(|| {
             crate::instructions::layers(
                 &self.environment,
@@ -623,13 +623,13 @@ impl SpaceModel {
 
     /// The offered modes as shared, bounded so that a misbehaving agent cannot fill the snapshot: a mode whose
     /// identifier no client could send back is left out, and names and descriptions are cut.
-    fn shown_modes(&self) -> Vec<protocol::Mode> {
+    fn shown_modes(&self) -> Vec<tomori_protocol::Mode> {
         self.modes
             .offered
             .iter()
             .filter(|mode| mode.id.len() <= limits::IDENTIFIER_BYTES)
             .take(limits::MODES)
-            .map(|mode| protocol::Mode {
+            .map(|mode| tomori_protocol::Mode {
                 id: mode.id.clone(),
                 name: limits::truncate(&mode.name, limits::MODE_NAME_BYTES),
                 description: mode.description.as_deref().map(|description| {
@@ -665,7 +665,7 @@ impl SpaceModel {
             None => {
                 self.push_message(MessageModel {
                     id: id.to_owned(),
-                    role: protocol::Role::Assistant,
+                    role: tomori_protocol::Role::Assistant,
                     text: String::new(),
                     tools: Vec::new(),
                     completed: false,
@@ -686,10 +686,10 @@ impl SpaceModel {
             }
             Event::Delivered { key } => self.delivered(&key),
             Event::MessageStarted { message, role } => match role {
-                backend::Role::User => {
+                tomori_backend::Role::User => {
                     self.user_messages.insert(message);
                 }
-                backend::Role::Assistant => {
+                tomori_backend::Role::Assistant => {
                     self.message(&message);
                 }
             },
@@ -861,9 +861,10 @@ impl SpaceModel {
                 for worker in &mut self.workers {
                     if matches!(
                         worker.state,
-                        protocol::WorkerState::Running | protocol::WorkerState::Waiting
+                        tomori_protocol::WorkerState::Running
+                            | tomori_protocol::WorkerState::Waiting
                     ) {
-                        worker.state = protocol::WorkerState::Stopped;
+                        worker.state = tomori_protocol::WorkerState::Stopped;
                     }
                 }
             }
@@ -970,7 +971,7 @@ impl SpaceModel {
         self.busy = Some(true);
         self.push_message(MessageModel {
             id: prompt.key,
-            role: protocol::Role::User,
+            role: tomori_protocol::Role::User,
             text: prompt.text,
             tools: Vec::new(),
             completed: true,
@@ -1123,7 +1124,7 @@ impl SpaceModel {
                 .iter()
                 .filter_map(|message| {
                     let text = message.display();
-                    (!text.is_empty()).then(|| protocol::Message {
+                    (!text.is_empty()).then(|| tomori_protocol::Message {
                         id: message.id.clone(),
                         role: message.role,
                         text,
@@ -1241,7 +1242,7 @@ mod tests {
         let mut space = model();
         assert_eq!(space.state(Vec::new()).mode, None);
         assert!(!space.offers_mode("plan"));
-        let mode = |id: String, name: String| backend::Mode {
+        let mode = |id: String, name: String| tomori_backend::Mode {
             id,
             name,
             description: Some("d".repeat(1000)),
@@ -1283,7 +1284,7 @@ mod tests {
         space.apply(Event::Busy);
         space.apply(Event::MessageStarted {
             message: message.into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: message.into(),
@@ -1308,7 +1309,7 @@ mod tests {
         space.apply(Event::Busy);
         space.apply(Event::MessageStarted {
             message: "m2".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: "m2".into(),
@@ -1338,7 +1339,7 @@ mod tests {
         space.apply(Event::Busy);
         space.apply(Event::MessageStarted {
             message: "tools".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::ToolStarted {
             message: "tools".into(),
@@ -1356,7 +1357,7 @@ mod tests {
         space.apply(Event::Busy);
         space.apply(Event::MessageStarted {
             message: "m".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: "m".into(),
@@ -1371,10 +1372,10 @@ mod tests {
         assert_eq!(space.attention(), None);
     }
 
-    fn assistant(id: &str, text: &str, completed: bool) -> backend::SnapshotMessage {
-        backend::SnapshotMessage {
+    fn assistant(id: &str, text: &str, completed: bool) -> tomori_backend::SnapshotMessage {
+        tomori_backend::SnapshotMessage {
             id: id.into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
             parts: vec![Part::Text { text: text.into() }],
             completed,
         }
@@ -1398,7 +1399,7 @@ mod tests {
         space.apply(Event::Busy);
         space.apply(Event::MessageStarted {
             message: "m".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: "m".into(),
@@ -1430,7 +1431,7 @@ mod tests {
         space.apply(Event::Busy);
         space.apply(Event::MessageStarted {
             message: "r".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(reconnecting());
         space.apply(resynchronized(Some(true), vec![assistant("r", "", false)]));
@@ -1637,7 +1638,7 @@ mod tests {
 
     #[test]
     fn initial_snapshot_keeps_all_pending_permissions_and_questions() {
-        let question = |id: &str| backend::Question {
+        let question = |id: &str| tomori_backend::Question {
             id: id.into(),
             title: id.into(),
             fields: Vec::new(),
@@ -1672,7 +1673,7 @@ mod tests {
 
     #[test]
     fn a_resynchronization_replaces_the_conversation_and_reconciles_requests() {
-        let question = |id: &str| backend::Question {
+        let question = |id: &str| tomori_backend::Question {
             id: id.into(),
             title: id.into(),
             fields: Vec::new(),
@@ -1680,18 +1681,18 @@ mod tests {
         let mut space = model();
         space.apply(Event::MessageStarted {
             message: "partial".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: "partial".into(),
             text: "Half a".into(),
         });
         space.apply(Event::WorkersChanged {
-            workers: vec![backend::Worker {
+            workers: vec![tomori_backend::Worker {
                 id: "worker".into(),
                 parent: None,
                 title: "Worker".into(),
-                state: backend::WorkerState::Running,
+                state: tomori_backend::WorkerState::Running,
             }],
         });
         // "kept" waits with a partial answer; "resolved" was answered during
@@ -1716,9 +1717,9 @@ mod tests {
         space.apply(Event::Resynchronized {
             snapshot: Snapshot {
                 busy: Some(true),
-                messages: vec![backend::SnapshotMessage {
+                messages: vec![tomori_backend::SnapshotMessage {
                     id: "partial".into(),
-                    role: backend::Role::Assistant,
+                    role: tomori_backend::Role::Assistant,
                     parts: vec![Part::Text {
                         text: "Half a reply, finished during the gap.".into(),
                     }],
@@ -1797,9 +1798,9 @@ mod tests {
         // A tool start repeated after the state it was read with is not added twice.
         space.apply(Event::Resynchronized {
             snapshot: Snapshot {
-                messages: vec![backend::SnapshotMessage {
+                messages: vec![tomori_backend::SnapshotMessage {
                     id: "m".into(),
-                    role: backend::Role::Assistant,
+                    role: tomori_backend::Role::Assistant,
                     parts: vec![Part::Tool {
                         id: "t".into(),
                         tool: "bash".into(),
@@ -1828,7 +1829,7 @@ mod tests {
 
     #[test]
     fn a_request_settled_while_reconnecting_is_not_presented_again() {
-        let question = |id: &str| backend::Question {
+        let question = |id: &str| tomori_backend::Question {
             id: id.into(),
             title: id.into(),
             fields: Vec::new(),
@@ -1881,7 +1882,7 @@ mod tests {
         let mut space = model();
         space.apply(Event::MessageStarted {
             message: "p".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: "p".into(),
@@ -1892,9 +1893,9 @@ mod tests {
         });
         // Read again while "p" is still being written: the agent keeps no text
         // for it yet, so the listing has an empty text part.
-        let listed = |text: &str, completed: bool| backend::SnapshotMessage {
+        let listed = |text: &str, completed: bool| tomori_backend::SnapshotMessage {
             id: "p".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
             parts: vec![Part::Text { text: text.into() }],
             completed,
         };
@@ -1933,7 +1934,7 @@ mod tests {
             error: Some("no".into()),
         });
         space.apply(Event::MessageRestored {
-            message: backend::SnapshotMessage {
+            message: tomori_backend::SnapshotMessage {
                 parts: vec![
                     Part::Text {
                         text: "Before the gap. During it. After.".into(),
@@ -1959,7 +1960,7 @@ mod tests {
         assert_eq!(space.messages[0].text, "Other");
         // A restored message the space does not hold is ignored.
         space.apply(Event::MessageRestored {
-            message: backend::SnapshotMessage {
+            message: tomori_backend::SnapshotMessage {
                 id: "unknown".into(),
                 ..listed("x", true)
             },
@@ -1971,11 +1972,11 @@ mod tests {
     fn only_offered_options_can_be_granted() {
         let mut space = model();
         let mut offering = permission("p1");
-        offering.options.push(backend::PermissionOption {
+        offering.options.push(tomori_backend::PermissionOption {
             id: "suggestions".into(),
-            grants: vec![backend::Grant::Mode {
+            grants: vec![tomori_backend::Grant::Mode {
                 mode: "acceptEdits".into(),
-                scope: backend::GrantScope::Session,
+                scope: tomori_backend::GrantScope::Session,
             }],
         });
         space.apply(Event::PermissionRequested(offering));
@@ -1984,7 +1985,7 @@ mod tests {
         let approval = space.state(Vec::new()).approval.unwrap();
         assert_eq!(
             approval.options,
-            vec![protocol::ApprovalOption {
+            vec![tomori_protocol::ApprovalOption {
                 id: "suggestions".into(),
                 label: "Yes, allow all edits during this session".into(),
             }]
@@ -2048,8 +2049,8 @@ mod tests {
         assert!(space.next_prompt().is_none());
     }
 
-    fn backend_worker(id: &str, state: backend::WorkerState) -> backend::Worker {
-        backend::Worker {
+    fn backend_worker(id: &str, state: tomori_backend::WorkerState) -> tomori_backend::Worker {
+        tomori_backend::Worker {
             id: id.into(),
             parent: None,
             title: id.into(),
@@ -2061,11 +2062,11 @@ mod tests {
     fn a_pointed_worker_reaches_the_agent_as_the_space_describes_it() {
         let mut space = model();
         space.apply(Event::WorkersChanged {
-            workers: vec![backend::Worker {
+            workers: vec![tomori_backend::Worker {
                 id: "ses_review".into(),
                 parent: None,
                 title: "Review commit \"2657a52\"\nnow".into(),
-                state: backend::WorkerState::Running,
+                state: tomori_backend::WorkerState::Running,
             }],
         });
         assert!(space.enqueue_pointing(
@@ -2082,11 +2083,11 @@ mod tests {
         );
         // The worker finishes before the words are delivered: the agent hears how it is now, quoted on one line.
         space.apply(Event::WorkersChanged {
-            workers: vec![backend::Worker {
+            workers: vec![tomori_backend::Worker {
                 id: "ses_review".into(),
                 parent: None,
                 title: "Review commit \"2657a52\"\nnow".into(),
-                state: backend::WorkerState::Completed,
+                state: tomori_backend::WorkerState::Completed,
             }],
         });
         assert_eq!(
@@ -2099,7 +2100,10 @@ mod tests {
     fn unknown_and_departed_workers_are_not_described_from_the_client() {
         let mut space = model();
         space.apply(Event::WorkersChanged {
-            workers: vec![backend_worker("ses_1", backend::WorkerState::Running)],
+            workers: vec![backend_worker(
+                "ses_1",
+                tomori_backend::WorkerState::Running,
+            )],
         });
         // A worker the space never had resolves to nothing, whatever the client claims.
         assert_eq!(space.pointed_worker("ses_forged"), None);
@@ -2120,7 +2124,10 @@ mod tests {
         space.apply(Event::Idle);
         // A cancelled entry forgets its pointing, and a later entry without pointing has none.
         space.apply(Event::WorkersChanged {
-            workers: vec![backend_worker("ses_1", backend::WorkerState::Running)],
+            workers: vec![backend_worker(
+                "ses_1",
+                tomori_backend::WorkerState::Running,
+            )],
         });
         space.enqueue_pointing(
             "c".into(),
@@ -2152,10 +2159,10 @@ mod tests {
         let mut space = model();
         space.apply(Event::WorkersChanged {
             workers: vec![
-                backend_worker("running", backend::WorkerState::Running),
-                backend_worker("waiting", backend::WorkerState::Waiting),
-                backend_worker("completed", backend::WorkerState::Completed),
-                backend_worker("failed", backend::WorkerState::Error),
+                backend_worker("running", tomori_backend::WorkerState::Running),
+                backend_worker("waiting", tomori_backend::WorkerState::Waiting),
+                backend_worker("completed", tomori_backend::WorkerState::Completed),
+                backend_worker("failed", tomori_backend::WorkerState::Error),
             ],
         });
         space.apply(Event::Closed {
@@ -2170,10 +2177,10 @@ mod tests {
         assert_eq!(
             states,
             vec![
-                protocol::WorkerState::Stopped,
-                protocol::WorkerState::Stopped,
-                protocol::WorkerState::Completed,
-                protocol::WorkerState::Error,
+                tomori_protocol::WorkerState::Stopped,
+                tomori_protocol::WorkerState::Stopped,
+                tomori_protocol::WorkerState::Completed,
+                tomori_protocol::WorkerState::Error,
             ]
         );
     }
@@ -2212,7 +2219,7 @@ mod tests {
         let mut space = model();
         space.apply(Event::MessageStarted {
             message: "m".into(),
-            role: backend::Role::Assistant,
+            role: tomori_backend::Role::Assistant,
         });
         space.apply(Event::TextDelta {
             message: "m".into(),
@@ -2241,7 +2248,7 @@ mod tests {
         space.sent("a", Ok(()));
         space.apply(Event::MessageStarted {
             message: "u".into(),
-            role: backend::Role::User,
+            role: tomori_backend::Role::User,
         });
         space.apply(Event::TextDelta {
             message: "u".into(),
@@ -2252,7 +2259,7 @@ mod tests {
         });
         let state = space.state(Vec::new());
         assert_eq!(state.messages.len(), 1);
-        assert_eq!(state.messages[0].role, protocol::Role::User);
+        assert_eq!(state.messages[0].role, tomori_protocol::Role::User);
         assert_eq!(state.queue[0].state, QueueState::Delivered);
     }
 

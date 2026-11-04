@@ -3,16 +3,18 @@
 
 //! A [`Transcriber`] that buffers each utterance and decodes it whole, once, with the offline recognizer. See `design/speech.md`.
 //!
-//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so nothing is shown while the participant is still speaking, and the transcript arrives a couple of seconds after they let go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`speech::stt::MAX_UTTERANCE`].
+//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so nothing is shown while the participant is still speaking, and the transcript arrives a couple of seconds after they let go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`tomori_speech::stt::MAX_UTTERANCE`].
 
 use std::{
     collections::HashMap,
     sync::{Mutex, PoisonError},
 };
 
-use protocol::AudioFrame;
-use speech::stt::{OfflineRecognition, OfflineRecognizer, OfflineUtterance, RATE, VoiceActivity};
-use speech::{Error, Stopper};
+use tomori_protocol::AudioFrame;
+use tomori_speech::stt::{
+    OfflineRecognition, OfflineRecognizer, OfflineUtterance, RATE, VoiceActivity,
+};
+use tomori_speech::{Error, Stopper};
 
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 
@@ -66,15 +68,15 @@ impl Transcriber for OfflineTranscriber {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .begin(RATE, move |event| match event {
-                speech::TranscriptEvent::Partial(_) => {
+                tomori_speech::TranscriptEvent::Partial(_) => {
                     // The offline recognizer reports no partials; nothing is shown while the participant is speaking.
                 }
-                speech::TranscriptEvent::Final(text) => sink.finish(&text),
-                speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
-                speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(&format!(
-                    "Nothing was sent: {error}. Say it in shorter messages."
-                )),
-                speech::TranscriptEvent::Failed(error) => sink.fail(&format!(
+                tomori_speech::TranscriptEvent::Final(text) => sink.finish(&text),
+                tomori_speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
+                tomori_speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(
+                    &format!("Nothing was sent: {error}. Say it in shorter messages."),
+                ),
+                tomori_speech::TranscriptEvent::Failed(error) => sink.fail(&format!(
                     "Transcription failed, so nothing was sent: {error}."
                 )),
             });
@@ -103,24 +105,24 @@ impl Transcriber for OfflineTranscriber {
         }
     }
 
-    /// The whole clip is buffered, up to [`speech::stt::MAX_UTTERANCE`].
+    /// The whole clip is buffered, up to [`tomori_speech::stt::MAX_UTTERANCE`].
     fn utterance_limit(&self) -> Option<std::time::Duration> {
         Some(std::time::Duration::from_secs(
-            (speech::stt::MAX_UTTERANCE / RATE as usize) as u64,
+            (tomori_speech::stt::MAX_UTTERANCE / RATE as usize) as u64,
         ))
     }
 }
 
 /// An [`OfflineRecognizer`] for the in-process Whisper model: it decodes each buffered clip, or segment of a long one, whole, once.
 pub struct Whisper {
-    inner: speech::stt::WhisperRecognizer,
+    inner: tomori_speech::stt::WhisperRecognizer,
 }
 
 impl Whisper {
     /// Load the Whisper model from `config`.
-    pub fn new(config: &speech::stt::WhisperConfig) -> Result<Self, Error> {
+    pub fn new(config: &tomori_speech::stt::WhisperConfig) -> Result<Self, Error> {
         Ok(Self {
-            inner: speech::stt::WhisperRecognizer::new(config)?,
+            inner: tomori_speech::stt::WhisperRecognizer::new(config)?,
         })
     }
 }

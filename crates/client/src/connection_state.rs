@@ -4,7 +4,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use protocol::ServerMessage;
+use tomori_protocol::ServerMessage;
 
 use crate::FailedUtterance;
 
@@ -19,7 +19,7 @@ pub enum Disconnect {
     Status(u16),
     /// The server sent something that violates the protocol, including an incompatible version.
     Protocol(String),
-    /// Connecting or the server's Welcome took too long, or an established connection received nothing for [`protocol::Keepalive::timeout`].
+    /// Connecting or the server's Welcome took too long, or an established connection received nothing for [`tomori_protocol::Keepalive::timeout`].
     Timeout,
     /// The server presented a different certificate from the one pinned, with this fingerprint. Nothing was sent to it.
     Certificate(String),
@@ -56,16 +56,16 @@ pub enum ConnectionState {
         /// This client's participant number, which other clients see as the audio frame source.
         source: u32,
         server: String,
-        /// What this connection may do in the lobby. A [`protocol::ServerMessage::Role`] follows whenever it changes. See `design/security.md`.
-        role: protocol::ConnectionRole,
+        /// What this connection may do in the lobby. A [`tomori_protocol::ServerMessage::Role`] follows whenever it changes. See `design/security.md`.
+        role: tomori_protocol::ConnectionRole,
         /// The fingerprint of the server's TLS certificate, to pin from then on, or `None` over plain HTTP.
-        certificate: Option<security::Fingerprint>,
+        certificate: Option<tomori_security::Fingerprint>,
         /// The server's backends, so the client shows only actions each supports. Empty unless this connection is an owner.
-        backends: Vec<protocol::BackendInfo>,
+        backends: Vec<tomori_protocol::BackendInfo>,
         /// The directories a space may run in, so the client can choose one without typing a path.
-        roots: Vec<protocol::WorkspaceRoot>,
+        roots: Vec<tomori_protocol::WorkspaceRoot>,
         /// The environments a space may be bound to, so the client can choose one when creating a space.
-        environments: Vec<protocol::EnvironmentInfo>,
+        environments: Vec<tomori_protocol::EnvironmentInfo>,
         /// The longest utterance the server's speech recognition takes, when it has a limit, so that recording can warn before it.
         utterance_limit: Option<Duration>,
     },
@@ -122,7 +122,7 @@ mod tests {
             ConnectionState::Connected {
                 source: 1,
                 server: "s".into(),
-                role: protocol::ConnectionRole::Owner,
+                role: tomori_protocol::ConnectionRole::Owner,
                 certificate: None,
                 backends: vec![],
                 roots: vec![],

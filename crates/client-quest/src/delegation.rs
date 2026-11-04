@@ -174,7 +174,7 @@ pub struct Workers {
     current: bool,
     error: Option<String>,
     workers_authoritative: Option<bool>,
-    workers: Vec<protocol::Worker>,
+    workers: Vec<tomori_protocol::Worker>,
     workspace: Workspace,
 }
 
@@ -182,7 +182,7 @@ impl Workers {
     /// Follow the joined space and whether its state is current, as given by `Conversation::joined_space`, or `None` outside a space. The workspace is derived again only when the space, its workers, its error or currency change.
     pub fn update(
         &mut self,
-        space: Option<(&protocol::SpaceState, bool)>,
+        space: Option<(&tomori_protocol::SpaceState, bool)>,
     ) -> (Option<&str>, &Workspace) {
         match space {
             None => {
@@ -214,7 +214,7 @@ impl Workspace {
     /// The projection of `space`'s workers under the root named by its identifier, for [`Scene::update`].
     ///
     /// Workers beyond the node limit, and any with an out-of-contract identifier, are omitted and the projection marked truncated, so the scene treats it as partial rather than removing what it cannot see. A space error marks it partial in the same way, and state that is not `current` marks it stale. Cycles and duplicate identifiers are left for [`Workspace::valid`] to reject.
-    pub fn from_space(space: &protocol::SpaceState, current: bool) -> Self {
+    pub fn from_space(space: &tomori_protocol::SpaceState, current: bool) -> Self {
         let mut truncated = false;
         let mut nodes = Vec::with_capacity(space.workers.len().min(MAX_NODES));
         for worker in &space.workers {
@@ -230,13 +230,13 @@ impl Workspace {
                 parent_id: Some(worker.parent.clone().unwrap_or_else(|| space.id.clone())),
                 title: worker.title.chars().take(160).collect(),
                 state: match worker.state {
-                    protocol::WorkerState::Running => State::Running,
-                    protocol::WorkerState::Waiting => State::Waiting,
-                    protocol::WorkerState::Idle => State::Idle,
-                    protocol::WorkerState::Completed => State::Completed,
-                    protocol::WorkerState::Error => State::Error,
-                    protocol::WorkerState::Stopped => State::Stopped,
-                    protocol::WorkerState::Unknown => State::Unknown,
+                    tomori_protocol::WorkerState::Running => State::Running,
+                    tomori_protocol::WorkerState::Waiting => State::Waiting,
+                    tomori_protocol::WorkerState::Idle => State::Idle,
+                    tomori_protocol::WorkerState::Completed => State::Completed,
+                    tomori_protocol::WorkerState::Error => State::Error,
+                    tomori_protocol::WorkerState::Stopped => State::Stopped,
+                    tomori_protocol::WorkerState::Unknown => State::Unknown,
                 },
             });
         }
@@ -3377,7 +3377,7 @@ mod tests {
 #[cfg(test)]
 mod space_tests {
     use super::*;
-    use protocol::{SpaceState, Worker as SpaceWorker, WorkerState};
+    use tomori_protocol::{SpaceState, Worker as SpaceWorker, WorkerState};
 
     const SPACE: &str = "space-1";
 

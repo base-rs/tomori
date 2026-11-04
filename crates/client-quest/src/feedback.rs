@@ -6,8 +6,8 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use client::playback::{Direction, Earcon};
 use serde::{Deserialize, Serialize};
+use tomori_client::playback::{Direction, Earcon};
 
 /// At most one hover tick in this time, so that sweeping across several targets does not chatter.
 pub const HOVER_INTERVAL: Duration = Duration::from_millis(80);

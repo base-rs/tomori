@@ -2,10 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use protocol::{FrameDecoder, FrameKind, Pose};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Wake;
+use tomori_protocol::{FrameDecoder, FrameKind, Pose};
 
 #[derive(Debug, PartialEq)]
 enum Item {

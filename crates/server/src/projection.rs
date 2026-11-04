@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use backend::{AnswerValue, Field, FieldKind, Grant, GrantScope, Permission, Question};
+use tomori_backend::{AnswerValue, Field, FieldKind, Grant, GrantScope, Permission, Question};
 
 use crate::limits;
 
@@ -17,7 +17,7 @@ const NUMBERS: [&str; 11] = [
 ];
 
 /// The title and text of a pending tool permission.
-pub fn approval(permission: &Permission) -> protocol::Approval {
+pub fn approval(permission: &Permission) -> tomori_protocol::Approval {
     let mut text = String::new();
     if let Some(description) = permission
         .description
@@ -33,7 +33,7 @@ pub fn approval(permission: &Permission) -> protocol::Approval {
         text.push('\n');
     }
     text.push_str("\nA: allow once. B: deny.");
-    protocol::Approval {
+    tomori_protocol::Approval {
         id: permission.id.clone(),
         title: permission.tool.clone(),
         text,
@@ -48,12 +48,12 @@ const OPTION_COUNT_LIMIT: usize = 4;
 const OPTION_LABEL_LIMIT: usize = 400;
 
 /// The standing options participants may choose for `permission`. Only these can be granted.
-pub fn options(permission: &Permission) -> Vec<protocol::ApprovalOption> {
+pub fn options(permission: &Permission) -> Vec<tomori_protocol::ApprovalOption> {
     permission
         .options
         .iter()
         .filter(|option| !option.grants.is_empty())
-        .map(|option| protocol::ApprovalOption {
+        .map(|option| tomori_protocol::ApprovalOption {
             id: option.id.clone(),
             label: grant_label(&option.grants),
         })
@@ -178,7 +178,10 @@ pub fn current_field<'a>(
 }
 
 /// The prompt for the current field of a partially answered question.
-pub fn question(question: &Question, answers: &[(String, AnswerValue)]) -> protocol::Question {
+pub fn question(
+    question: &Question,
+    answers: &[(String, AnswerValue)],
+) -> tomori_protocol::Question {
     let supported = supported(question);
     let field = current_field(question, answers);
     let text = match field {
@@ -214,7 +217,7 @@ pub fn question(question: &Question, answers: &[(String, AnswerValue)]) -> proto
         _ => "Complete this question outside Tomori; it has fields that cannot be answered here."
             .to_owned(),
     };
-    protocol::Question {
+    tomori_protocol::Question {
         id: question.id.clone(),
         title: question.title.clone(),
         text,
@@ -347,7 +350,7 @@ fn option_label(field: &Field, text: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use backend::FieldOption;
+    use tomori_backend::FieldOption;
 
     fn field(kind: FieldKind, custom: bool) -> Field {
         Field {
@@ -455,7 +458,7 @@ mod tests {
 
     #[test]
     fn grant_labels_name_what_is_granted_and_where() {
-        use backend::{Grant, GrantScope};
+        use tomori_backend::{Grant, GrantScope};
 
         let rule = |content: Option<&str>, scope| Grant::Rule {
             tool: "Bash".into(),
@@ -497,7 +500,7 @@ mod tests {
 
     #[test]
     fn options_that_cannot_be_described_are_not_offered() {
-        use backend::{Grant, GrantScope, PermissionOption};
+        use tomori_backend::{Grant, GrantScope, PermissionOption};
 
         let option = |id: &str, content: &str| PermissionOption {
             id: id.into(),

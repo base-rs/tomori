@@ -107,7 +107,7 @@ impl WorkspaceRoots {
     }
 
     /// The roots, as sent to a client in `Welcome`: each canonical path with a short label, its final component, for choosing without typing a path. A root whose name is not UTF-8 is omitted.
-    pub fn to_protocol(&self) -> Vec<protocol::WorkspaceRoot> {
+    pub fn to_protocol(&self) -> Vec<tomori_protocol::WorkspaceRoot> {
         self.roots
             .iter()
             .filter_map(|root| {
@@ -116,7 +116,7 @@ impl WorkspaceRoots {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or(path);
-                    protocol::WorkspaceRoot {
+                    tomori_protocol::WorkspaceRoot {
                         path: path.to_owned(),
                         label: label.to_owned(),
                     }

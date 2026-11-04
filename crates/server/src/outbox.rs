@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use event_listener::{Event, EventListener};
-use protocol::ServerMessage;
+use tomori_protocol::ServerMessage;
 
 /// Participant audio frames waiting for one connection. Older frames are dropped beyond this, so playback stays real time.
 const AUDIO_LIMIT: usize = 32;
@@ -350,7 +350,7 @@ mod tests {
     fn presence(source: u32, x: f32) -> ServerMessage {
         ServerMessage::Presence {
             source,
-            head: protocol::Pose {
+            head: tomori_protocol::Pose {
                 position: [x, 0.0, 0.0],
                 orientation: [0.0, 0.0, 0.0, 1.0],
             },

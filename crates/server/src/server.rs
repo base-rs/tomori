@@ -9,7 +9,6 @@ use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
 
-use backend::{Backend, Event, Session, SessionSpec};
 use base_endpoint::tls::TlsAcceptor;
 use base_endpoint::tls::rustls::RustlsAcceptor;
 use base_http_server::{Error, Statistics};
@@ -18,11 +17,12 @@ use base_scheduler::{
     SocketClose, SocketListen, SocketOpen, SocketReuseAddress, SocketSetOption,
     SocketStreamReading, SocketStreamWriting, SocketType, Timers,
 };
-use discovery::Counts;
 use futures_lite::future::zip;
 use futures_util::future::{Either, select};
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use protocol::Keepalive;
+use tomori_backend::{Backend, Event, Session, SessionSpec};
+use tomori_discovery::Counts;
+use tomori_protocol::Keepalive;
 
 use crate::admission::{Admission, Admitted, DEFAULT_REQUEST_TIMEOUT, Watch};
 use crate::application::Application;
@@ -111,7 +111,7 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// How long cancelled connections may take to finish once serving ends, before they are abandoned so that shutdown completes. See `design/server.md`.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The shortest time between two advertised counts, and between starting to serve and the first. Changes in between are coalesced, so a burst of connections or spaces is advertised once, with the counts at its end. Each update is a multicast announcement, and browsers only replace a TXT record they have held for a second (see [`discovery::Advertisement::update`]), so updates must be at least that far apart. See `design/server.md`.
+/// The shortest time between two advertised counts, and between starting to serve and the first. Changes in between are coalesced, so a burst of connections or spaces is advertised once, with the counts at its end. Each update is a multicast announcement, and browsers only replace a TXT record they have held for a second (see [`tomori_discovery::Advertisement::update`]), so updates must be at least that far apart. See `design/server.md`.
 pub const COUNTS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Open a listening TCP socket.
@@ -162,7 +162,7 @@ impl Server {
         }
     }
 
-    /// Serve only TLS, with `config`, such as from [`security::ServerCertificate::server_config`]. A handshake that has not completed within the request timeout is closed, as a request head would be. See `design/security.md`.
+    /// Serve only TLS, with `config`, such as from [`tomori_security::ServerCertificate::server_config`]. A handshake that has not completed within the request timeout is closed, as a request head would be. See `design/security.md`.
     pub fn with_tls(mut self, config: Arc<rustls::ServerConfig>) -> Self {
         self.tls = Some(config);
         self.hub.set_encrypted(true);
@@ -225,7 +225,7 @@ impl Server {
     }
 
     /// Admit holders of the tokens in `store` as what each grants, and anyone without credentials as a visitor if `visitors`, or not at all. Without this, everyone is an owner, as with `tomori-server --auth open`. See `design/security.md`.
-    pub fn with_tokens(mut self, store: Arc<security::TokenStore>, visitors: bool) -> Self {
+    pub fn with_tokens(mut self, store: Arc<tomori_security::TokenStore>, visitors: bool) -> Self {
         self.hub.set_tokens(store.clone());
         self.application.set_door(Door::tokens(store, visitors));
         self
@@ -236,7 +236,7 @@ impl Server {
     /// # Panics
     ///
     /// Without a token store from [`Self::with_tokens`], since pairing issues tokens.
-    pub fn with_pairing(self, fingerprint: security::Fingerprint) -> Self {
+    pub fn with_pairing(self, fingerprint: tomori_security::Fingerprint) -> Self {
         let tokens = self
             .application
             .door()
@@ -315,7 +315,10 @@ impl Server {
 
     /// Speak each space's assistant replies with `synthesizer`, shared by every space. Without one, spaces are silent.
     #[cfg(feature = "speech")]
-    pub fn with_synthesizer(mut self, synthesizer: impl speech::Synthesizer + 'static) -> Self {
+    pub fn with_synthesizer(
+        mut self,
+        synthesizer: impl tomori_speech::Synthesizer + 'static,
+    ) -> Self {
         self.voices = Voices::new(synthesizer);
         self
     }
@@ -684,7 +687,7 @@ impl Server {
         }
         // A collaborator token outlives no space: one whose space is gone is revoked.
         for entry in store.entries() {
-            if let security::Grant::Collaborator { space } = &entry.grant
+            if let tomori_security::Grant::Collaborator { space } = &entry.grant
                 && !self.hub.has_space(space)
             {
                 log::info!("Revoking token {}, whose space {space} is gone.", entry.id);
@@ -1083,7 +1086,7 @@ async fn run_restored<S: Timers>(
             // Only the agent saying that the session is gone closes the space for good; it may be unreachable for now.
             let lasting = matches!(
                 error.kind,
-                backend::ErrorKind::NotFound | backend::ErrorKind::Invalid
+                tomori_backend::ErrorKind::NotFound | tomori_backend::ErrorKind::Invalid
             );
             hub.restore_failed(
                 &id,

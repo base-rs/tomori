@@ -6,15 +6,15 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use protocol::{
+use tomori_protocol::{
     AGENT_SOURCE, AudioFrame, ClientMessage, Engagement, Gate, QueueState, REPLAY_SOURCE,
     ServerMessage, SpeechSetting,
 };
-use server::fake::FakeBackend;
-use server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
-use server::{RecognitionTranscriber, Server};
-use speech::stt::{RATE, Transcript};
-use speech::{AudioChunk, Error, RecognitionStream, StreamingRecognizer, Synthesizer};
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
+use tomori_server::{RecognitionTranscriber, Server};
+use tomori_speech::stt::{RATE, Transcript};
+use tomori_speech::{AudioChunk, Error, RecognitionStream, StreamingRecognizer, Synthesizer};
 
 /// Words the fake recognizer knows. Each is "spoken" as [`WORD_SAMPLES`] samples of `BASE + index`.
 const VOCABULARY: &[&str] = &["run", "the", "tests", "please", "fail", "crash"];
@@ -183,7 +183,7 @@ fn speaking_server_sentence(backend: FakeBackend, synthesizer: FakeSynthesizer) 
     TestServer::with_server(backend, move |backends| {
         Server::new(backends, Arc::new(TextTranscriber::default()))
             .with_synthesizer(synthesizer)
-            .with_voice_mode(server::SpeechMode::Sentence)
+            .with_voice_mode(tomori_server::SpeechMode::Sentence)
     })
 }
 
@@ -326,13 +326,17 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
 }
 
 /// Wait for a message from the server through a real client.
-fn receive<T>(client: &client::Client, mut select: impl FnMut(ServerMessage) -> Option<T>) -> T {
+fn receive<T>(
+    client: &tomori_client::Client,
+    mut select: impl FnMut(ServerMessage) -> Option<T>,
+) -> T {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .expect("the message arrives in time");
-        if let client::Event::Message(message) = client.events().recv_timeout(remaining).unwrap()
+        if let tomori_client::Event::Message(message) =
+            client.events().recv_timeout(remaining).unwrap()
             && let Some(value) = select(message)
         {
             return value;
@@ -343,7 +347,7 @@ fn receive<T>(client: &client::Client, mut select: impl FnMut(ServerMessage) -> 
 #[test]
 fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
     let server = recognizing_server(FakeBackend::manual());
-    let ada = client::Client::connect(client::Options::new(
+    let ada = tomori_client::Client::connect(tomori_client::Options::new(
         server.address.to_string(),
         "ada",
         "Ada",
@@ -352,7 +356,7 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
     ada.sender()
         .send(ClientMessage::CreateSpace {
             title: "Microphone".into(),
-            backend: server::fake::FAKE_BACKEND_NAME.into(),
+            backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
             directory: "/tmp".into(),
             session: None,
             environment: None,
@@ -367,7 +371,7 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
     bob.send(&ClientMessage::Join { space });
     bob.space(|state| state.participants.len() == 2);
 
-    let mut microphone = client::Microphone::new(ada.sender(), RATE);
+    let mut microphone = tomori_client::Microphone::new(ada.sender(), RATE);
     // Audio before pressing is not sent, and capture delivers buffers that are not whole frames.
     microphone.push(&spoken(&["fail"])).unwrap();
     microphone.begin("launch-1").unwrap();
@@ -403,7 +407,7 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
 #[test]
 fn live_audio_reaches_the_space_without_addressing_the_agent_and_resumes_after_x() {
     let server = recognizing_server(FakeBackend::manual());
-    let ada = client::Client::connect(client::Options::new(
+    let ada = tomori_client::Client::connect(tomori_client::Options::new(
         server.address.to_string(),
         "ada",
         "Ada",
@@ -412,7 +416,7 @@ fn live_audio_reaches_the_space_without_addressing_the_agent_and_resumes_after_x
     ada.sender()
         .send(ClientMessage::CreateSpace {
             title: "Live microphone".into(),
-            backend: server::fake::FAKE_BACKEND_NAME.into(),
+            backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
             directory: "/tmp".into(),
             session: None,
             environment: None,
@@ -427,7 +431,7 @@ fn live_audio_reaches_the_space_without_addressing_the_agent_and_resumes_after_x
     bob.send(&ClientMessage::Join { space });
     bob.space(|state| state.participants.len() == 2);
 
-    let mut microphone = client::Microphone::new(ada.sender(), RATE);
+    let mut microphone = tomori_client::Microphone::new(ada.sender(), RATE);
     microphone.set_gate(Gate::Live).unwrap();
     microphone.push(&vec![42; FRAME_SAMPLES]).unwrap();
     let live = bob.next_audio(Duration::from_secs(5)).expect("live audio");
@@ -731,7 +735,7 @@ fn a_streamed_markdown_reply_is_spoken_to_every_participant_without_code() {
     let (mut ada, bob) = pair(&server);
 
     ada.say("u1", "how do I run it?");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let started = Instant::now();
     let message = session.stream(&[
@@ -777,7 +781,7 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
     let (mut ada, mut bob) = pair(&server);
 
     ada.say("u1", "tell me a story");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let sentences = [
         "Once upon a time there was a server.",
@@ -811,10 +815,10 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         &message,
         &format!("{} {} {}", sentences[1], sentences[2], sentences[3]),
     );
-    session.emit(backend::Event::MessageCompleted {
+    session.emit(tomori_backend::Event::MessageCompleted {
         message: message.clone(),
     });
-    session.emit(backend::Event::Idle);
+    session.emit(tomori_backend::Event::Idle);
 
     let frames = words(&sentences) * FRAMES_PER_WORD;
     let rest = hear(&bob, frames - 1);
@@ -848,7 +852,7 @@ fn a_participant_who_joins_mid_reply_hears_the_rest() {
     let mut ada = server.connect("ada", "Ada");
     let space = ada.create_space("Late").id;
     ada.say("u1", "go on");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let sentence =
         "This sentence is long enough that somebody can join while it is still being spoken aloud.";
@@ -881,7 +885,7 @@ fn a_participant_hears_the_reply_to_their_question_but_never_their_own_audio() {
     // Ada talks to the agent and to Bob, and keeps her microphone open while the reply plays.
     ada.send_audio(Gate::Live, vec![5; 320]);
     ada.say("u1", "what next?");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let sentence = "Run the tests now.";
     session.stream(&[sentence]);
@@ -912,20 +916,20 @@ fn a_participant_hears_the_reply_to_their_question_but_never_their_own_audio() {
 #[test]
 fn the_client_player_plays_the_spoken_reply() {
     let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
-    let mut ada = client::Client::connect(client::Options::new(
+    let mut ada = tomori_client::Client::connect(tomori_client::Options::new(
         server.address.to_string(),
         "ada",
         "Ada",
     ))
     .unwrap();
-    let (mut player, _control) = client::playback::Player::new(
+    let (mut player, _control) = tomori_client::playback::Player::new(
         ada.take_audio().unwrap(),
-        client::playback::MixerOptions::default(),
+        tomori_client::playback::MixerOptions::default(),
     );
     ada.sender()
         .send(ClientMessage::CreateSpace {
             title: "Playback".into(),
-            backend: server::fake::FAKE_BACKEND_NAME.into(),
+            backend: tomori_server::fake::FAKE_BACKEND_NAME.into(),
             directory: "/tmp".into(),
             session: None,
             environment: None,
@@ -940,7 +944,7 @@ fn the_client_player_plays_the_spoken_reply() {
     bob.send(&ClientMessage::Join { space });
     bob.space(|state| state.participants.len() == 2);
     bob.say("u1", "say something");
-    bob.space(|state| state.activity == protocol::Activity::Running);
+    bob.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     session.stream(&["Something."]);
 
@@ -949,7 +953,7 @@ fn the_client_player_plays_the_spoken_reply() {
     let mut output = [0_i16; 480];
     loop {
         assert!(Instant::now() < deadline, "the reply never played");
-        player.render(48_000, client::playback::Layout::Mono, &mut output);
+        player.render(48_000, tomori_client::playback::Layout::Mono, &mut output);
         // Bob's push-to-talk is relayed too; the fake synthesizer's samples are all 100.
         if output.contains(&100) {
             break;
@@ -966,7 +970,7 @@ fn a_crashed_synthesizer_is_reported_once_as_unavailable() {
     let (mut ada, mut bob) = pair(&server);
 
     ada.say("u1", "speak up");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     session.stream(&["This will crash. Then this is not spoken. Nor is this.\n"]);
     for client in [&mut ada, &mut bob] {
@@ -1001,13 +1005,13 @@ fn a_synthesizer_crash_in_one_space_disables_speech_in_every_space() {
     bob.create_space("Other");
 
     ada.say("u1", "speak up");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     server.backend.started()[0].stream(&["This will crash.\n"]);
     while ada.next_message(Duration::from_millis(500)).is_some() {}
 
     // Bob's space shares the crashed synthesizer, so it reports speech as unavailable instead of using it again.
     bob.say("u2", "and you?");
-    bob.space(|state| state.activity == protocol::Activity::Running);
+    bob.space(|state| state.activity == tomori_protocol::Activity::Running);
     server.backend.started()[1].stream(&["Then this is not spoken.\n"]);
     let mut errors = Vec::new();
     while let Some(message) = bob.next_message(Duration::from_millis(500)) {
@@ -1031,7 +1035,7 @@ struct FakeOfflineRecognizer {
     clips: Arc<Mutex<Vec<usize>>>,
 }
 
-impl speech::stt::OfflineRecognizer for FakeOfflineRecognizer {
+impl tomori_speech::stt::OfflineRecognizer for FakeOfflineRecognizer {
     fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error> {
         self.clips.lock().unwrap().push(samples.len());
         Ok(format!("{} seconds.", samples.len() / RATE as usize))
@@ -1042,7 +1046,7 @@ fn offline_server(backend: FakeBackend, recognizer: FakeOfflineRecognizer) -> Te
     TestServer::with_server(backend, move |backends| {
         Server::new(
             backends,
-            Arc::new(server::OfflineTranscriber::new(recognizer, None)),
+            Arc::new(tomori_server::OfflineTranscriber::new(recognizer, None)),
         )
     })
 }
@@ -1076,9 +1080,9 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
     assert_eq!(
         *recognizer.clips.lock().unwrap(),
         vec![
-            speech::stt::MAX_SEGMENT,
-            speech::stt::MAX_SEGMENT,
-            65 * RATE as usize - 2 * speech::stt::MAX_SEGMENT
+            tomori_speech::stt::MAX_SEGMENT,
+            tomori_speech::stt::MAX_SEGMENT,
+            65 * RATE as usize - 2 * tomori_speech::stt::MAX_SEGMENT
         ]
     );
 }
@@ -1094,7 +1098,10 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
         answer: None,
     });
     // One second more than the limit; the failure arrives before the utterance ends.
-    speak_steadily(&mut ada, speech::stt::MAX_UTTERANCE / RATE as usize + 1);
+    speak_steadily(
+        &mut ada,
+        tomori_speech::stt::MAX_UTTERANCE / RATE as usize + 1,
+    );
     let error = failure(&mut ada, "u1");
     assert_eq!(
         error,
@@ -1149,7 +1156,7 @@ fn a_reply_spoken_while_nobody_listened_is_heard_from_its_start_on_joining_or_re
     let mut ada = server.connect("ada", "Ada");
     let space = ada.create_space("Away").id;
     ada.say("u1", "go on");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     // Ada takes the headset off before the reply, and everyone sees that she is away.
     report(&mut ada, Engagement::Away);
     ada.space(|state| {
@@ -1214,7 +1221,7 @@ fn taking_the_headset_off_mid_reply_replays_that_reply_from_its_start_on_return(
             .all(|participant| participant.engagement == Some(Engagement::Engaged))
     });
     ada.say("u1", "tell me everything");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let sentence = "This reply goes on for quite a while so that somebody can take their headset off, wait a moment with it on the desk, and put it back on again well before the reply has ended, which is exactly the situation this test is about.";
     session.stream(&[sentence]);
@@ -1280,7 +1287,7 @@ fn a_replay_plays_the_latest_reply_to_the_participant_who_asked_only() {
     assert_eq!(ada.error(), "There is no spoken reply to play again yet.");
 
     ada.say("u1", "status?");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let sentence = "All green.";
     session.stream(&[sentence]);
@@ -1325,7 +1332,7 @@ fn a_new_space_speaks_replies_in_full_and_brief_speech_the_start_of_them() {
     let created = ada.create_space("Speech");
     assert_eq!(created.speech, SpeechSetting::Full);
     ada.say("u1", "explain");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let paragraph = |subject: &str| {
         format!(
@@ -1344,7 +1351,7 @@ fn a_new_space_speaks_replies_in_full_and_brief_speech_the_start_of_them() {
     });
     ada.space(|state| state.speech == SpeechSetting::Brief);
     ada.say("u2", "again, briefly");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     session.stream(&[&reply]);
     let spoken = synthesized(&synthesizer, 6);
     assert_eq!(
@@ -1364,17 +1371,19 @@ fn a_new_space_speaks_replies_in_full_and_brief_speech_the_start_of_them() {
 
 #[test]
 fn a_visitor_hears_replies_live_but_is_never_caught_up_and_cannot_replay() {
-    let server = server::test_support::TestServer::with_tokens(true, |server| {
+    let server = tomori_server::test_support::TestServer::with_tokens(true, |server| {
         server.with_synthesizer(FakeSynthesizer::default())
     });
-    let (_, token) = server.issue("Ada", security::Grant::Owner);
+    let (_, token) = server.issue("Ada", tomori_security::Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &token);
     let space = ada.create_space("Studio").id;
     report(&mut ada, Engagement::Away);
     ada.space(|state| state.participants[0].engagement == Some(Engagement::Away));
     // The automatic fake agent echoes each prompt, which is spoken while Ada is away.
     ada.say("u1", "hello there");
-    ada.space(|state| state.activity == protocol::Activity::Idle && !state.messages.is_empty());
+    ada.space(|state| {
+        state.activity == tomori_protocol::Activity::Idle && !state.messages.is_empty()
+    });
     assert!(ada.next_audio(Duration::from_millis(500)).is_none());
 
     let mut vic = server.connect("vic", "Vic");
@@ -1406,7 +1415,7 @@ fn a_later_reply_stops_a_replay_and_is_heard_live_from_its_start() {
     report(&mut ada, Engagement::Engaged);
     report(&mut bob, Engagement::Engaged);
     ada.say("u1", "first");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     let first = "This first reply goes on for long enough that a second reply can start while it is being played again to Ada.";
     session.stream(&[first]);
@@ -1422,7 +1431,7 @@ fn a_later_reply_stops_a_replay_and_is_heard_live_from_its_start() {
         .expect("the replay starts");
     assert_eq!(replayed.source, REPLAY_SOURCE);
     bob.say("u2", "second");
-    bob.space(|state| state.activity == protocol::Activity::Running);
+    bob.space(|state| state.activity == tomori_protocol::Activity::Running);
     let second = "A short second reply.";
     session.stream(&[second]);
     let second_frames = words(&[second]) * FRAMES_PER_WORD;
@@ -1450,7 +1459,7 @@ fn engagement_is_shared_and_forgotten_with_the_connection_and_the_speech_setting
     let server = speaking_server(FakeBackend::manual(), FakeSynthesizer::default());
     let (mut ada, mut bob) = pair(&server);
     let source = ada.source;
-    let engagement = |state: &protocol::SpaceState| {
+    let engagement = |state: &tomori_protocol::SpaceState| {
         state
             .participants
             .iter()
@@ -1490,10 +1499,10 @@ fn being_away_neither_raises_nor_clears_attention() {
     // not unheard for attention, and she hears it from the catch-up instead.
     report(&mut ada, Engagement::Away);
     ada.say("u1", "go on");
-    ada.space(|state| state.activity == protocol::Activity::Running);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Running);
     let session = server.backend.started()[0].clone();
     session.stream(&["Done, and nothing else to report."]);
-    ada.space(|state| state.activity == protocol::Activity::Idle);
+    ada.space(|state| state.activity == tomori_protocol::Activity::Idle);
     assert_eq!(attention(&mut bob), None);
     // Putting the headset back on plays the reply, and changes no attention.
     report(&mut ada, Engagement::Engaged);

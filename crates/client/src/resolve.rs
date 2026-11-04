@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Poll, Waker};
 
-use protocol::DEFAULT_PORT;
+use tomori_protocol::DEFAULT_PORT;
 
 use crate::Disconnect;
 

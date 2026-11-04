@@ -3,7 +3,7 @@
 
 //! Outgoing microphone audio. See `design/live-audio.md` and `design/speech.md`.
 
-use protocol::{AudioFrame, ClientMessage, Gate};
+use tomori_protocol::{AudioFrame, ClientMessage, Gate};
 
 use crate::{SendError, Sender};
 
@@ -116,7 +116,7 @@ impl Microphone {
     pub fn begin_answer(
         &mut self,
         utterance: impl Into<String>,
-        answer: Option<protocol::AnswerTarget>,
+        answer: Option<tomori_protocol::AnswerTarget>,
     ) -> Result<(), SendError> {
         if self.utterance.is_some() {
             self.cancel()?;
@@ -139,7 +139,10 @@ impl Microphone {
     }
 
     /// Finish push-to-talk as [`Self::end`] does, telling the server what the participant pointed at while they spoke, when given, so that it reaches the agent with their words.
-    pub fn end_pointing(&mut self, pointed: Option<protocol::Pointed>) -> Result<(), SendError> {
+    pub fn end_pointing(
+        &mut self,
+        pointed: Option<tomori_protocol::Pointed>,
+    ) -> Result<(), SendError> {
         if self.utterance.is_none() {
             return Ok(());
         }
@@ -225,8 +228,8 @@ impl Microphone {
 mod tests {
     use super::*;
     use crate::outbox::{Batch, Outbox};
-    use protocol::{FrameDecoder, FrameKind};
     use std::task::{Context, Poll, Waker};
+    use tomori_protocol::{FrameDecoder, FrameKind};
 
     #[derive(Debug, PartialEq)]
     enum Item {
@@ -332,7 +335,7 @@ mod tests {
     fn an_utterance_ends_with_what_was_pointed_at() {
         let (mut microphone, sender) = microphone();
         microphone.begin("u1").unwrap();
-        let pointed = protocol::Pointed::Worker {
+        let pointed = tomori_protocol::Pointed::Worker {
             worker: "ses_1".into(),
         };
         microphone.end_pointing(Some(pointed.clone())).unwrap();

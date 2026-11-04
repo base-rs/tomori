@@ -61,5 +61,5 @@ pub use workspace::{
     DEFAULT_MAX_SPACES, DIRECTORY_UNAVAILABLE, MAX_RESOLVING, Unavailable, WorkspaceRoots,
 };
 
-/// The server name reported in [`protocol::ServerMessage::Welcome`].
+/// The server name reported in [`tomori_protocol::ServerMessage::Welcome`].
 pub const SERVER_NAME: &str = "tomori";

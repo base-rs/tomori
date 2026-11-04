@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use backend::{AnswerValue, Decision, ErrorKind, Event, Prompt, Result, Session, Snapshot};
+use tomori_backend::{AnswerValue, Decision, ErrorKind, Event, Prompt, Result, Session, Snapshot};
 
 use crate::connection::{Command, Commands, RegistrationEvents};
 use crate::wire;
@@ -51,7 +51,7 @@ impl Session for OpenCodeSession {
         async move {
             loop {
                 if inner.closed.load(Ordering::Acquire) {
-                    return Err(backend::Error::new(
+                    return Err(tomori_backend::Error::new(
                         ErrorKind::Closed,
                         "the session has closed",
                     ));
@@ -62,7 +62,7 @@ impl Session for OpenCodeSession {
                     } else {
                         ErrorKind::Unavailable
                     };
-                    backend::Error::new(kind, error.to_string())
+                    tomori_backend::Error::new(kind, error.to_string())
                 })?;
                 let Some(event) = queued.into_current() else {
                     continue;
@@ -187,8 +187,8 @@ impl Session for OpenCodeSession {
         let key = key.to_owned();
         let value = value.map(str::to_owned);
         async move {
-            if !backend::valid_instruction_key(&key) {
-                return Err(backend::Error::new(
+            if !tomori_backend::valid_instruction_key(&key) {
+                return Err(tomori_backend::Error::new(
                     ErrorKind::Invalid,
                     format!("{key:?} cannot name an instruction entry"),
                 ));
@@ -233,7 +233,7 @@ impl Session for OpenCodeSession {
                 .tx()
                 .try_send(Command::Close { id, identity })
                 .map_err(|_| {
-                    backend::Error::new(
+                    tomori_backend::Error::new(
                         ErrorKind::Unavailable,
                         "the connection could not close the registration",
                     )

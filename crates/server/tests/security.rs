@@ -5,9 +5,9 @@
 
 use std::time::Duration;
 
-use protocol::{ClientMessage, ConnectionRole, Gate, Pose, ServerMessage, SpaceState};
-use security::Grant;
-use server::test_support::{TIMEOUT, TestClient, TestServer, speech};
+use tomori_protocol::{ClientMessage, ConnectionRole, Gate, Pose, ServerMessage, SpaceState};
+use tomori_security::Grant;
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer, speech};
 
 /// The role in the next role message.
 fn role(client: &TestClient) -> ConnectionRole {
@@ -17,7 +17,7 @@ fn role(client: &TestClient) -> ConnectionRole {
     })
 }
 
-fn spaces(client: &mut TestClient) -> Vec<protocol::SpaceSummary> {
+fn spaces(client: &mut TestClient) -> Vec<tomori_protocol::SpaceSummary> {
     client.send(&ClientMessage::ListSpaces);
     client.wait_for(|message| match message {
         ServerMessage::Spaces { spaces } => Some(spaces.clone()),
@@ -27,7 +27,7 @@ fn spaces(client: &mut TestClient) -> Vec<protocol::SpaceSummary> {
 
 fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
     client.send(&ClientMessage::Hello {
-        protocol: protocol::PROTOCOL_VERSION,
+        protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: participant.into(),
         name: participant.into(),
     });
@@ -101,7 +101,7 @@ fn refused_credentials_get_the_same_reply_whatever_the_reason() {
     let server = TestServer::with_tokens(true, |server| server);
     let (entry, revoked) = server.issue("Gone", Grant::Owner);
     server.tokens.as_ref().unwrap().revoke(&entry.id).unwrap();
-    let unknown = security::generate_token();
+    let unknown = tomori_security::generate_token();
     let replies: Vec<(u16, String)> = [
         format!("Bearer {unknown}"),
         format!("Bearer {revoked}"),
@@ -301,9 +301,9 @@ fn an_owners_identity_without_their_token_is_someone_else() {
 
 /// A server that admits by tokens and serves only TLS, with a new certificate.
 fn tls_server(
-    configure: impl FnOnce(server::Server) -> server::Server + Send + 'static,
-) -> (TestServer, security::Fingerprint) {
-    let certificate = security::ServerCertificate::generate();
+    configure: impl FnOnce(tomori_server::Server) -> tomori_server::Server + Send + 'static,
+) -> (TestServer, tomori_security::Fingerprint) {
+    let certificate = tomori_security::ServerCertificate::generate();
     let fingerprint = certificate.fingerprint();
     let config = certificate.server_config().unwrap();
     (
@@ -315,12 +315,12 @@ fn tls_server(
 /// `GET /health` over TLS, pinning `expected`: the status line, or the TLS error.
 fn health_over_tls(
     address: std::net::SocketAddr,
-    expected: security::Fingerprint,
+    expected: tomori_security::Fingerprint,
 ) -> Result<String, std::io::Error> {
     use std::io::{BufRead, BufReader, Write};
-    let pinned = security::Pinned::new(Some(expected));
+    let pinned = tomori_security::Pinned::new(Some(expected));
     let connection = rustls::ClientConnection::new(
-        security::client_config(pinned),
+        tomori_security::client_config(pinned),
         rustls::pki_types::ServerName::try_from("tomori").unwrap(),
     )
     .unwrap();
@@ -340,7 +340,7 @@ fn a_server_with_tls_serves_only_tls_with_its_certificate() {
             .starts_with("HTTP/1.1 200")
     );
     // A client pinning another certificate refuses the handshake.
-    let other = security::ServerCertificate::generate().fingerprint();
+    let other = tomori_security::ServerCertificate::generate().fingerprint();
     assert!(health_over_tls(server.address, other).is_err());
     // Plain HTTP is not served.
     use std::io::{Read, Write};
@@ -368,15 +368,15 @@ fn a_stalled_handshake_is_closed_after_the_request_timeout() {
 
 /// The first connection state of `client` that `select` accepts.
 fn state<T>(
-    client: &client::Client,
-    mut select: impl FnMut(&client::ConnectionState) -> Option<T>,
+    client: &tomori_client::Client,
+    mut select: impl FnMut(&tomori_client::ConnectionState) -> Option<T>,
 ) -> T {
     let deadline = std::time::Instant::now() + TIMEOUT * 2;
     loop {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .expect("the state arrives in time");
-        if let client::Event::State(state) = client.events().recv_timeout(remaining).unwrap()
+        if let tomori_client::Event::State(state) = client.events().recv_timeout(remaining).unwrap()
             && let Some(value) = select(&state)
         {
             return value;
@@ -386,18 +386,20 @@ fn state<T>(
 
 fn client_with(
     server: &TestServer,
-    transport: client::Transport,
+    transport: tomori_client::Transport,
     token: Option<String>,
-) -> client::Client {
-    let mut options = client::Options::new(server.address.to_string(), "ada", "Ada");
+) -> tomori_client::Client {
+    let mut options = tomori_client::Options::new(server.address.to_string(), "ada", "Ada");
     options.transport = transport;
     options.token = token;
-    client::Client::connect(options).unwrap()
+    tomori_client::Client::connect(options).unwrap()
 }
 
-fn connected(client: &client::Client) -> (ConnectionRole, Option<security::Fingerprint>) {
+fn connected(
+    client: &tomori_client::Client,
+) -> (ConnectionRole, Option<tomori_security::Fingerprint>) {
     state(client, |state| match state {
-        client::ConnectionState::Connected {
+        tomori_client::ConnectionState::Connected {
             role, certificate, ..
         } => Some((*role, *certificate)),
         _ => None,
@@ -412,7 +414,7 @@ fn the_client_presents_its_token_over_tls_to_the_pinned_certificate() {
     // Pinned, with a token: an owner.
     let pinned = client_with(
         &server,
-        client::Transport::Tls {
+        tomori_client::Transport::Tls {
             pin: Some(fingerprint),
         },
         Some(token.clone()),
@@ -426,7 +428,7 @@ fn the_client_presents_its_token_over_tls_to_the_pinned_certificate() {
     // Nothing pinned yet: the certificate presented is accepted and reported, to pin from then on.
     let first = client_with(
         &server,
-        client::Transport::Automatic { pin: None },
+        tomori_client::Transport::Automatic { pin: None },
         Some(token.clone()),
     );
     assert_eq!(
@@ -436,19 +438,19 @@ fn the_client_presents_its_token_over_tls_to_the_pinned_certificate() {
     first.close();
 
     // Another certificate pinned: nothing is sent, and the change is reported.
-    let other = security::ServerCertificate::generate().fingerprint();
+    let other = tomori_security::ServerCertificate::generate().fingerprint();
     let changed = client_with(
         &server,
-        client::Transport::Tls { pin: Some(other) },
+        tomori_client::Transport::Tls { pin: Some(other) },
         Some(token),
     );
     let reason = state(&changed, |state| match state {
-        client::ConnectionState::Disconnected { reason, .. } => Some(reason.clone()),
+        tomori_client::ConnectionState::Disconnected { reason, .. } => Some(reason.clone()),
         _ => None,
     });
     assert_eq!(
         reason,
-        client::Disconnect::Certificate(fingerprint.to_string())
+        tomori_client::Disconnect::Certificate(fingerprint.to_string())
     );
     changed.close();
 }
@@ -458,8 +460,8 @@ fn an_automatic_client_falls_back_to_plain_http_without_its_token() {
     let server = TestServer::start();
     let client = client_with(
         &server,
-        client::Transport::Automatic { pin: None },
-        Some(security::generate_token()),
+        tomori_client::Transport::Automatic { pin: None },
+        Some(tomori_security::generate_token()),
     );
     assert_eq!(connected(&client), (ConnectionRole::Owner, None));
     client.close();
@@ -470,16 +472,16 @@ fn a_refused_token_is_reported_as_unauthorized() {
     let (server, fingerprint) = tls_server(|server| server);
     let client = client_with(
         &server,
-        client::Transport::Tls {
+        tomori_client::Transport::Tls {
             pin: Some(fingerprint),
         },
-        Some(security::generate_token()),
+        Some(tomori_security::generate_token()),
     );
     let reason = state(&client, |state| match state {
-        client::ConnectionState::Disconnected { reason, .. } => Some(reason.clone()),
+        tomori_client::ConnectionState::Disconnected { reason, .. } => Some(reason.clone()),
         _ => None,
     });
-    assert_eq!(reason, client::Disconnect::Status(401));
+    assert_eq!(reason, tomori_client::Disconnect::Status(401));
     client.close();
 }
 
@@ -703,11 +705,11 @@ fn an_automatic_client_never_sends_its_token_over_plain_http() {
             let _ = sender.send(buffer);
         }
     });
-    let token = security::generate_token();
-    let mut options = client::Options::new(address.to_string(), "ada", "Ada");
-    options.transport = client::Transport::Automatic { pin: None };
+    let token = tomori_security::generate_token();
+    let mut options = tomori_client::Options::new(address.to_string(), "ada", "Ada");
+    options.transport = tomori_client::Transport::Automatic { pin: None };
     options.token = Some(token.clone());
-    let client = client::Client::connect(options).unwrap();
+    let client = tomori_client::Client::connect(options).unwrap();
 
     // First a TLS handshake, which the listener does not answer, then plain HTTP without the token.
     let handshake = received.recv_timeout(TIMEOUT).unwrap();

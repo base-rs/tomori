@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 
-use protocol::{Frame, ServerMessage};
+use tomori_protocol::{Frame, ServerMessage};
 
 /// Encode `data` as one HTTP/1.1 chunk.
 pub fn chunk(data: &[u8]) -> Vec<u8> {
@@ -22,10 +22,10 @@ pub fn message(message: &ServerMessage) -> Vec<u8> {
 
 pub fn welcome() -> Vec<u8> {
     message(&ServerMessage::Welcome {
-        protocol: protocol::PROTOCOL_VERSION,
+        protocol: tomori_protocol::PROTOCOL_VERSION,
         server: "mini".into(),
         source: 1,
-        role: protocol::ConnectionRole::Owner,
+        role: tomori_protocol::ConnectionRole::Owner,
         backends: vec![],
         roots: vec![],
         environments: vec![],

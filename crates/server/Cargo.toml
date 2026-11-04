@@ -1,5 +1,5 @@
 [package]
-name = "server"
+name = "tomori-server"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -61,39 +61,39 @@ default = ["fake", "opencode", "speech"]
 # A scripted in-memory backend for tests and for manual testing without an agent.
 fake = []
 # OpenCode, driven over the HTTP and SSE APIs of a running `opencode serve` process.
-opencode = ["dep:backend-opencode"]
+opencode = ["dep:tomori-backend-opencode"]
 # Speech recognition and synthesis with the speech crate's in-process sherpa-onnx engines.
-speech = ["dep:speech"]
+speech = ["dep:tomori-speech"]
 # Link the speech engines from the shared sherpa-onnx libraries in `SHERPA_ONNX_LIB_DIR`, such as its CUDA build, for `--speech-provider cuda`; see crates/speech/readme.md.
-speech-shared = ["speech", "speech/shared"]
+speech-shared = ["speech", "tomori-speech/shared"]
 
 [dependencies]
 async-channel = "2"
-backend = { path = "../backend" }
-backend-opencode = { path = "../backend-opencode", optional = true }
+tomori-backend = { path = "../backend" }
+tomori-backend-opencode = { path = "../backend-opencode", optional = true }
 base-http = "0.2.0"
 base-endpoint = { version = "0.1.0", features = ["rustls"] }
 base-http-server = { version = "0.2.0", features = ["rustls"] }
 base-scheduler = "0.3.0"
 base-scheduler-native = "0.3.1"
-discovery = { path = "../discovery" }
+tomori-discovery = { path = "../discovery" }
 env_logger = "0.11"
 event-listener = "5"
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
 gethostname = "1.1"
 log = "0.4"
-protocol = { path = "../protocol" }
+tomori-protocol = { path = "../protocol" }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
-security = { path = "../security", features = ["issue"] }
+tomori-security = { path = "../security", features = ["issue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-speech = { path = "../speech", optional = true }
+tomori-speech = { path = "../speech", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
-security = { path = "../security", features = ["issue"] }
-client = { path = "../client" }
+tomori-security = { path = "../security", features = ["issue"] }
+tomori-client = { path = "../client" }

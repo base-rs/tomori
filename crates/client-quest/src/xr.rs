@@ -220,7 +220,7 @@ pub fn run(
     // In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
     let mut panel = crate::panel_anchor::PanelAnchor::default();
     // Whether the headset is worn and Tomori has input, reported to the server; see `design/spaces.md`.
-    let mut engagement = client::engagement::Tracker::new();
+    let mut engagement = tomori_client::engagement::Tracker::new();
     conversation.set_engagement(engagement.engagement());
     // The controllers vibrate as things change, and the ray ticks as it enters a target; see `design/interaction.md`.
     connection.feedback().set_haptics(true);
@@ -255,9 +255,9 @@ pub fn run(
                     }
                     focused = state == xr::SessionState::FOCUSED;
                     let focus = match state {
-                        xr::SessionState::FOCUSED => client::engagement::Focus::Focused,
-                        xr::SessionState::VISIBLE => client::engagement::Focus::Visible,
-                        _ => client::engagement::Focus::Hidden,
+                        xr::SessionState::FOCUSED => tomori_client::engagement::Focus::Focused,
+                        xr::SessionState::VISIBLE => tomori_client::engagement::Focus::Visible,
+                        _ => tomori_client::engagement::Focus::Hidden,
                     };
                     if let Some(changed) = engagement.set_focus(focus) {
                         log::info!("Engagement: {changed:?}, as the session is {state:?}");

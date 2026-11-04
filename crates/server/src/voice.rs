@@ -3,9 +3,9 @@
 
 //! The agent speech stream of each space. See `design/speech.md` and `design/live-audio.md`.
 //!
-//! A space's driver feeds every backend event to its [`Voice`]. Each assistant message's text deltas pass through a [`speech::Speakable`], and the closed document-level blocks are queued, in order, as segments on the space's one [`speech::Speech`]. A [`SpeechMode`] decides how a closed block is split into segments: one per block, its sentences joined, so the voice keeps the paragraph's cadence (the default); or one per sentence, so a long block starts speaking while it is still streaming. Nothing participants do stops, pauses or skips queued speech.
+//! A space's driver feeds every backend event to its [`Voice`]. Each assistant message's text deltas pass through a [`tomori_speech::Speakable`], and the closed document-level blocks are queued, in order, as segments on the space's one [`tomori_speech::Speech`]. A [`SpeechMode`] decides how a closed block is split into segments: one per block, its sentences joined, so the voice keeps the paragraph's cadence (the default); or one per sentence, so a long block starts speaking while it is still streaming. Nothing participants do stops, pauses or skips queued speech.
 //!
-//! Synthesis runs ahead of playback on the speech crate's thread. A pacer thread per space announces each segment with [`protocol::ServerMessage::Speech`] and then sends its audio as 20 ms [`protocol::AudioFrame`]s from [`protocol::AGENT_SOURCE`] at the rate it plays, slightly ahead, to whoever in the space hears live speech at that moment. A breath of silence follows each segment, so that back-to-back blocks do not run together. Only that thread touches the hub, and only briefly to queue each frame.
+//! Synthesis runs ahead of playback on the speech crate's thread. A pacer thread per space announces each segment with [`tomori_protocol::ServerMessage::Speech`] and then sends its audio as 20 ms [`tomori_protocol::AudioFrame`]s from [`tomori_protocol::AGENT_SOURCE`] at the rate it plays, slightly ahead, to whoever in the space hears live speech at that moment. A breath of silence follows each segment, so that back-to-back blocks do not run together. Only that thread touches the hub, and only briefly to queue each frame.
 //!
 //! The hub keeps what is sent, numbered by reply, one reply per agent turn, so that a participant who missed it hears it from its start; see [`crate::retention`]. The same pacer thread paces those catch-ups and replays, woken when one starts.
 //!
@@ -72,7 +72,7 @@ pub(crate) use disabled::{Voice, Voices};
 mod disabled {
     use std::sync::Arc;
 
-    use backend::Event;
+    use tomori_backend::Event;
 
     use crate::hub::Hub;
 
@@ -105,9 +105,9 @@ mod enabled {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use backend::{Event, Role};
-    use protocol::{AGENT_SOURCE, AudioFrame, Gate, ServerMessage, SpeechSetting};
-    use speech::{
+    use tomori_backend::{Event, Role};
+    use tomori_protocol::{AGENT_SOURCE, AudioFrame, Gate, ServerMessage, SpeechSetting};
+    use tomori_speech::{
         AudioChunk, Block, Error, Speakable, SpeakableOptions, Speech, SpeechEvent, Synthesizer,
     };
 
@@ -591,7 +591,7 @@ mod enabled {
                 SpeechEvent::Failed { error, .. } => {
                     self.flush();
                     self.announcing = None;
-                    if matches!(error, speech::Error::Stopped(_)) {
+                    if matches!(error, tomori_speech::Error::Stopped(_)) {
                         // Synthesis stays stopped until the server restarts, so say so once rather than for every sentence.
                         if !self.stopped {
                             self.stopped = true;

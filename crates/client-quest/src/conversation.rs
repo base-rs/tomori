@@ -3,7 +3,7 @@
 
 //! The panel's conversation with a Tomori server: choosing a server, the lobby, then the joined space.
 //!
-//! This is pure state. It applies [`client::Event`]s and controller input, and queues [`Action`]s for [`crate::connection::Connection`] to carry out, so nothing here touches the network.
+//! This is pure state. It applies [`tomori_client::Event`]s and controller input, and queues [`Action`]s for [`crate::connection::Connection`] to carry out, so nothing here touches the network.
 use crate::{
     arrival,
     caption::{COLUMNS, ROWS, wrapped_lines},
@@ -11,15 +11,15 @@ use crate::{
     interaction::SessionActivity,
     server_choice::{self, Choice},
 };
-use client::{ConnectionState, Event, UtteranceFailure};
-use protocol::{
+#[cfg(any(not(target_os = "android"), test))]
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tomori_client::{ConnectionState, Event, UtteranceFailure};
+use tomori_protocol::{
     Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, Engagement, EnvironmentInfo,
     QueueState, Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, SpeechSetting,
     WorkspaceRoot,
 };
-#[cfg(any(not(target_os = "android"), test))]
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BODY_ROWS: usize = ROWS - 4;
 
@@ -58,10 +58,10 @@ pub enum Action {
     Rescan,
     Send(ClientMessage),
     /// Open the microphone and send what it hears to the agent as this utterance, or as the answer to the presented question's field, when given.
-    BeginUtterance(String, u64, Option<protocol::AnswerTarget>),
+    BeginUtterance(String, u64, Option<tomori_protocol::AnswerTarget>),
     /// Close the microphone and finish the utterance, for the server to transcribe, with what the participant pointed
     /// at while speaking.
-    EndUtterance(Option<protocol::Pointed>),
+    EndUtterance(Option<tomori_protocol::Pointed>),
     /// Close the microphone and abandon the utterance.
     CancelUtterance,
     /// Close the microphone and forget the utterance, which the server has already ended.
@@ -72,12 +72,12 @@ pub enum Action {
     /// Pairing gave this device an owner token for the server, to keep with the certificate the pairing connection presented, and connect with. See `design/security.md`.
     Paired {
         token: String,
-        certificate: client::Fingerprint,
+        certificate: tomori_client::Fingerprint,
     },
     /// A knock admitted this device to its space as a collaborator: a token to keep for the server with its certificate. The connection is already a collaborator's.
     Admitted {
         token: String,
-        certificate: client::Fingerprint,
+        certificate: tomori_client::Fingerprint,
     },
     /// Mute or unmute agent speech locally, live or played again.
     SetAgentMuted(bool),
@@ -89,7 +89,7 @@ pub enum Action {
 #[derive(Clone, Debug, PartialEq)]
 enum Pairing {
     /// Committed to this value, waiting for the server's.
-    Committed(security::pairing::Nonce, Instant),
+    Committed(tomori_security::pairing::Nonce, Instant),
     /// Both sides have the code, written for reading, which waits to be confirmed on the server.
     Waiting(String, Instant),
 }
@@ -194,12 +194,12 @@ pub struct Conversation {
     /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
     role: ConnectionRole,
     /// The fingerprint of the server's certificate on this connection, over TLS, which the pairing code is derived from.
-    certificate: Option<client::Fingerprint>,
+    certificate: Option<tomori_client::Fingerprint>,
     pairing: Option<Pairing>,
     /// The knocks waiting on the space, while this participant is in it.
-    knocks: Vec<protocol::KnockRequest>,
+    knocks: Vec<tomori_protocol::KnockRequest>,
     /// What became of this visitor's knock on the space, if they knocked.
-    knock: Option<protocol::KnockState>,
+    knock: Option<tomori_protocol::KnockState>,
     name: String,
     mode: Mode,
     servers: Vec<Choice>,
@@ -647,14 +647,15 @@ impl Conversation {
             ServerMessage::KnockState { state } => {
                 self.notice = Some(
                     match state {
-                        protocol::KnockState::Pending => {
+                        tomori_protocol::KnockState::Pending => {
                             "You knocked; waiting for someone to let you in."
                         }
-                        protocol::KnockState::Declined => "Your knock was declined.",
-                        protocol::KnockState::Expired => "Nobody answered your knock in time.",
-                        protocol::KnockState::Withdrawn | protocol::KnockState::Unknown => {
-                            "Your knock was withdrawn."
+                        tomori_protocol::KnockState::Declined => "Your knock was declined.",
+                        tomori_protocol::KnockState::Expired => {
+                            "Nobody answered your knock in time."
                         }
+                        tomori_protocol::KnockState::Withdrawn
+                        | tomori_protocol::KnockState::Unknown => "Your knock was withdrawn.",
                     }
                     .into(),
                 );
@@ -662,7 +663,7 @@ impl Conversation {
             }
             // Only an answer to this device's own knock, so that a server cannot hand it a token unasked.
             ServerMessage::Admitted { token }
-                if self.knock == Some(protocol::KnockState::Pending) =>
+                if self.knock == Some(tomori_protocol::KnockState::Pending) =>
             {
                 self.knock = None;
                 if let Some(certificate) = self.certificate {
@@ -1055,10 +1056,10 @@ impl Conversation {
         let space = &self.spaces[arrival::most_urgent(&self.spaces)?];
         let title = &space.title;
         Some(match space.attention? {
-            protocol::Attention::Input => format!("{title} needs you"),
-            protocol::Attention::Problem => format!("{title} has a problem"),
-            protocol::Attention::Reply => format!("{title} has a new reply"),
-            protocol::Attention::Unknown => format!("{title} needs attention"),
+            tomori_protocol::Attention::Input => format!("{title} needs you"),
+            tomori_protocol::Attention::Problem => format!("{title} has a problem"),
+            tomori_protocol::Attention::Reply => format!("{title} has a new reply"),
+            tomori_protocol::Attention::Unknown => format!("{title} needs attention"),
         })
     }
 
@@ -1266,7 +1267,7 @@ impl Conversation {
     }
 
     /// The knocks waiting on the space, for a participant to admit or decline.
-    pub fn knocks(&self) -> &[protocol::KnockRequest] {
+    pub fn knocks(&self) -> &[tomori_protocol::KnockRequest] {
         if self.role.participates() {
             &self.knocks
         } else {
@@ -1275,7 +1276,7 @@ impl Conversation {
     }
 
     /// What became of this visitor's knock, if they knocked.
-    pub fn knock_state(&self) -> Option<protocol::KnockState> {
+    pub fn knock_state(&self) -> Option<tomori_protocol::KnockState> {
         self.knock
     }
 
@@ -1284,7 +1285,7 @@ impl Conversation {
         self.mode == Mode::Space
             && self.space.is_some()
             && self.role == ConnectionRole::Visitor
-            && self.knock != Some(protocol::KnockState::Pending)
+            && self.knock != Some(tomori_protocol::KnockState::Pending)
     }
 
     /// Knock on the space this visitor is watching, to ask to take part. See `design/security.md`.
@@ -1319,7 +1320,7 @@ impl Conversation {
         if !self.pairable() {
             return;
         }
-        let device = security::pairing::Nonce::generate();
+        let device = tomori_security::pairing::Nonce::generate();
         self.actions.push(Action::Send(ClientMessage::PairBegin {
             commitment: device.commitment(),
         }));
@@ -1336,15 +1337,18 @@ impl Conversation {
         let (Some(Pairing::Committed(device, began)), Some(certificate), Some(server)) = (
             self.pairing.clone(),
             self.certificate,
-            security::pairing::Nonce::parse(nonce),
+            tomori_security::pairing::Nonce::parse(nonce),
         ) else {
             return;
         };
         self.actions.push(Action::Send(ClientMessage::PairReveal {
             nonce: device.to_hex(),
         }));
-        let code =
-            security::pairing::display(&security::pairing::code(certificate, device, server));
+        let code = tomori_security::pairing::display(&tomori_security::pairing::code(
+            certificate,
+            device,
+            server,
+        ));
         self.notice = Some(format!("Pairing code {code}: confirm it on the server."));
         self.pairing = Some(Pairing::Waiting(code, began));
     }
@@ -1555,7 +1559,7 @@ impl Conversation {
     }
 
     /// The pending approval that a press would decide, if any.
-    fn approval(&self) -> Option<&protocol::Approval> {
+    fn approval(&self) -> Option<&tomori_protocol::Approval> {
         self.space
             .as_ref()
             .and_then(|space| space.approval.as_ref())
@@ -1619,7 +1623,7 @@ impl Conversation {
     }
 
     /// The entries still waiting in the queue, oldest first, which any participant may cancel.
-    fn waiting(&self) -> Vec<&protocol::QueueEntry> {
+    fn waiting(&self) -> Vec<&tomori_protocol::QueueEntry> {
         self.space
             .as_ref()
             .map(|space| {
@@ -2300,7 +2304,7 @@ impl Conversation {
                 self.actions.push(Action::EndUtterance(
                     pointed
                         .filter(|_| !answering)
-                        .map(|worker| protocol::Pointed::Worker { worker }),
+                        .map(|worker| tomori_protocol::Pointed::Worker { worker }),
                 ));
                 self.talk = Some(Talk::Sending {
                     utterance,
@@ -2331,10 +2335,12 @@ impl Conversation {
         self.outcome = None;
         // A problem shown stays until it is dismissed or replaced; see `design/interaction.md`.
         self.notice = None;
-        let answer = self.answerable().map(|question| protocol::AnswerTarget {
-            question: question.id.clone(),
-            field: question.field.clone(),
-        });
+        let answer = self
+            .answerable()
+            .map(|question| tomori_protocol::AnswerTarget {
+                question: question.id.clone(),
+                field: question.field.clone(),
+            });
         let answering = answer.is_some();
         self.actions.push(Action::BeginUtterance(
             utterance.clone(),
@@ -2381,7 +2387,7 @@ impl Conversation {
     }
 
     /// The presented question, when this participant can answer it by voice: Tomori supports it, and the server says it routes spoken answers. See `design/spaces.md`.
-    fn answerable(&self) -> Option<&protocol::Question> {
+    fn answerable(&self) -> Option<&tomori_protocol::Question> {
         let space = self.space.as_ref().filter(|_| self.role.participates())?;
         space
             .question
@@ -3248,12 +3254,12 @@ impl Conversation {
         let Some(space) = &self.space else {
             return Vec::new();
         };
-        let entries: Vec<&protocol::QueueEntry> = space
+        let entries: Vec<&tomori_protocol::QueueEntry> = space
             .queue
             .iter()
             .filter(|entry| matches!(entry.state, QueueState::Queued | QueueState::Sending))
             .collect();
-        let line = |entry: &protocol::QueueEntry| {
+        let line = |entry: &tomori_protocol::QueueEntry| {
             let cancelling = self
                 .cancelling
                 .as_ref()
@@ -3586,7 +3592,7 @@ fn with_environment(mut create: ClientMessage, chosen: Option<String>) -> Client
 /// An entry of the space's list, opened with Y.
 #[derive(Clone, Debug, PartialEq)]
 enum MenuItem {
-    Mode(protocol::Mode),
+    Mode(tomori_protocol::Mode),
     Speech(SpeechSetting),
 }
 
@@ -3679,10 +3685,10 @@ fn paginate(text: &str, rows: usize) -> Vec<Vec<String>> {
 mod tests {
     use super::*;
     use crate::server_choice::{Source, USB};
-    use protocol::{
+    use std::time::Duration;
+    use tomori_protocol::{
         AgentInstructions, Approval, ApprovalOption, Message, Participant, Question, QueueEntry,
     };
-    use std::time::Duration;
 
     const SPACE: &str = "space-1";
 
@@ -3918,7 +3924,12 @@ mod tests {
     }
 
     /// A space listed as needing `attention` for `age` seconds.
-    fn needing(id: &str, title: &str, attention: protocol::Attention, age: u32) -> SpaceSummary {
+    fn needing(
+        id: &str,
+        title: &str,
+        attention: tomori_protocol::Attention,
+        age: u32,
+    ) -> SpaceSummary {
         SpaceSummary {
             attention: Some(attention),
             attention_age: Some(age),
@@ -3961,7 +3972,7 @@ mod tests {
             arrival::Kind::Server {
                 source: Source::Discovered,
                 available: true,
-                attention: Some(protocol::Attention::Input),
+                attention: Some(tomori_protocol::Attention::Input),
             }
         );
         assert_eq!(
@@ -4002,8 +4013,8 @@ mod tests {
             &mut conversation,
             vec![
                 summary("idle", "Idle"),
-                needing("reply", "Notes", protocol::Attention::Reply, 600),
-                needing("deploy", "Deploy", protocol::Attention::Input, 30),
+                needing("reply", "Notes", tomori_protocol::Attention::Reply, 600),
+                needing("deploy", "Deploy", tomori_protocol::Attention::Input, 30),
             ],
         );
         assert_eq!(
@@ -4055,7 +4066,7 @@ mod tests {
             &mut conversation,
             vec![
                 summary(SPACE, "Tomori"),
-                needing("notes", "Notes", protocol::Attention::Reply, 5),
+                needing("notes", "Notes", tomori_protocol::Attention::Reply, 5),
             ],
         );
         assert_eq!(
@@ -4083,7 +4094,12 @@ mod tests {
         assert!(sent(&mut conversation).is_empty());
         listed(
             &mut conversation,
-            vec![needing(SPACE, "Tomori", protocol::Attention::Input, 5)],
+            vec![needing(
+                SPACE,
+                "Tomori",
+                tomori_protocol::Attention::Input,
+                5,
+            )],
         );
         assert_eq!(
             sent(&mut conversation),
@@ -4136,7 +4152,7 @@ mod tests {
             &mut conversation,
             vec![
                 summary(SPACE, "Tomori"),
-                needing("notes", "Notes", protocol::Attention::Reply, 5),
+                needing("notes", "Notes", tomori_protocol::Attention::Reply, 5),
             ],
         );
         conversation.take_actions();
@@ -4159,7 +4175,12 @@ mod tests {
         conversation.take_actions();
         listed(
             &mut conversation,
-            vec![needing("deploy", "Deploy", protocol::Attention::Input, 1)],
+            vec![needing(
+                "deploy",
+                "Deploy",
+                tomori_protocol::Attention::Input,
+                1,
+            )],
         );
         conversation.take_actions();
         conversation.apply(refused("deploy"));
@@ -4187,7 +4208,7 @@ mod tests {
             &mut conversation,
             vec![
                 summary("idle", "Idle"),
-                needing("deploy", "Deploy", protocol::Attention::Input, 1),
+                needing("deploy", "Deploy", tomori_protocol::Attention::Input, 1),
             ],
         );
         assert!(sent(&mut conversation).is_empty());
@@ -4208,10 +4229,10 @@ mod tests {
         let mut conversation = in_lobby(backends(), roots());
         let spaces = vec![
             summary("idle", "Idle"),
-            needing("notes", "Notes", protocol::Attention::Reply, 900),
-            needing("broken", "Broken", protocol::Attention::Problem, 10),
-            needing("deploy", "Deploy", protocol::Attention::Input, 20),
-            needing("tests", "Tests", protocol::Attention::Input, 120),
+            needing("notes", "Notes", tomori_protocol::Attention::Reply, 900),
+            needing("broken", "Broken", tomori_protocol::Attention::Problem, 10),
+            needing("deploy", "Deploy", tomori_protocol::Attention::Input, 20),
+            needing("tests", "Tests", tomori_protocol::Attention::Input, 120),
         ];
         listed(&mut conversation, spaces.clone());
         let view = conversation.arrival().unwrap();
@@ -4238,7 +4259,7 @@ mod tests {
         assert!(matches!(
             view.items[2].kind,
             arrival::Kind::Space {
-                attention: Some(protocol::Attention::Problem),
+                attention: Some(tomori_protocol::Attention::Problem),
                 ..
             }
         ));
@@ -4300,12 +4321,12 @@ mod tests {
     fn sessions() -> Event {
         Event::Message(ServerMessage::Sessions {
             sessions: vec![
-                protocol::SessionSummary {
+                tomori_protocol::SessionSummary {
                     id: "ses_1".into(),
                     title: "Tomori opencode support".into(),
                     directory: "/work/tomori".into(),
                 },
-                protocol::SessionSummary {
+                tomori_protocol::SessionSummary {
                     id: "ses_2".into(),
                     title: "Other work".into(),
                     directory: "/work/tomori".into(),
@@ -4347,7 +4368,10 @@ mod tests {
     }
 
     /// Connected over TLS with `certificate`, as `role`, in the lobby.
-    fn connected_securely(role: ConnectionRole, certificate: client::Fingerprint) -> Conversation {
+    fn connected_securely(
+        role: ConnectionRole,
+        certificate: tomori_client::Fingerprint,
+    ) -> Conversation {
         let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
@@ -4376,8 +4400,8 @@ mod tests {
 
     #[test]
     fn a_visitor_pairs_with_a_code_derived_from_the_certificate() {
-        use security::pairing::{Nonce, code, display};
-        let certificate = client::Fingerprint::of(b"server certificate");
+        use tomori_security::pairing::{Nonce, code, display};
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
         assert_eq!(pairing_label(&conversation).as_deref(), Some("Pair"));
 
@@ -4417,7 +4441,7 @@ mod tests {
 
     #[test]
     fn the_device_gives_up_on_a_pairing_left_unconfirmed() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
         conversation.choose_object(&arrival::Key::Pair);
         conversation.take_actions();
@@ -4436,7 +4460,7 @@ mod tests {
 
     #[test]
     fn a_failed_or_cancelled_pairing_starts_over() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
         conversation.choose_object(&arrival::Key::Pair);
         conversation.take_actions();
@@ -4456,14 +4480,14 @@ mod tests {
         assert_eq!(sent(&mut conversation), [ClientMessage::PairCancel]);
         // A value from a server that was not asked is ignored.
         conversation.apply(Event::Message(ServerMessage::PairNonce {
-            nonce: security::pairing::Nonce::generate().to_hex(),
+            nonce: tomori_security::pairing::Nonce::generate().to_hex(),
         }));
         assert!(conversation.take_actions().is_empty());
     }
 
     #[test]
     fn pairing_is_offered_over_tls_to_anyone_but_an_owner() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         assert!(pairing_label(&connected_securely(ConnectionRole::Owner, certificate)).is_none());
         assert!(
             pairing_label(&connected_securely(
@@ -4482,7 +4506,7 @@ mod tests {
 
     #[test]
     fn a_connection_admitted_only_to_pair_lists_no_spaces() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = Conversation::new("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
@@ -4507,7 +4531,7 @@ mod tests {
 
     #[test]
     fn a_visitor_knocks_and_is_admitted() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
         // Not in a space: nothing to knock on.
         assert!(!conversation.can_knock());
@@ -4517,11 +4541,11 @@ mod tests {
         conversation.knock();
         assert_eq!(sent(&mut conversation), [ClientMessage::Knock]);
         conversation.apply(Event::Message(ServerMessage::KnockState {
-            state: protocol::KnockState::Pending,
+            state: tomori_protocol::KnockState::Pending,
         }));
         assert_eq!(
             conversation.knock_state(),
-            Some(protocol::KnockState::Pending)
+            Some(tomori_protocol::KnockState::Pending)
         );
         assert!(!conversation.can_knock());
         assert!(
@@ -4548,7 +4572,7 @@ mod tests {
 
     #[test]
     fn an_admission_this_device_did_not_ask_for_is_ignored() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
         conversation.apply(space(|_| {}));
         conversation.take_actions();
@@ -4560,11 +4584,11 @@ mod tests {
 
     #[test]
     fn a_participant_sees_and_answers_knocks_only_while_taking_part() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Owner, certificate);
         conversation.apply(space(|_| {}));
         conversation.take_actions();
-        let vic = protocol::KnockRequest {
+        let vic = tomori_protocol::KnockRequest {
             id: "knock-1".into(),
             name: "Vic".into(),
         };
@@ -4585,7 +4609,7 @@ mod tests {
         assert!(conversation.knocks().is_empty());
         let mut visitor = connected_securely(ConnectionRole::Visitor, certificate);
         visitor.apply(Event::Message(ServerMessage::Knocks {
-            knocks: vec![protocol::KnockRequest {
+            knocks: vec![tomori_protocol::KnockRequest {
                 id: "knock-2".into(),
                 name: "Wes".into(),
             }],
@@ -4597,16 +4621,22 @@ mod tests {
 
     #[test]
     fn a_declined_knock_is_said_and_may_be_tried_again() {
-        let certificate = client::Fingerprint::of(b"server certificate");
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
         let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
         conversation.apply(space(|_| {}));
         for (state, said) in [
-            (protocol::KnockState::Declined, "Your knock was declined."),
             (
-                protocol::KnockState::Expired,
+                tomori_protocol::KnockState::Declined,
+                "Your knock was declined.",
+            ),
+            (
+                tomori_protocol::KnockState::Expired,
                 "Nobody answered your knock in time.",
             ),
-            (protocol::KnockState::Withdrawn, "Your knock was withdrawn."),
+            (
+                tomori_protocol::KnockState::Withdrawn,
+                "Your knock was withdrawn.",
+            ),
         ] {
             conversation.apply(Event::Message(ServerMessage::KnockState { state }));
             assert_eq!(conversation.status().as_deref(), Some(said));
@@ -5313,7 +5343,7 @@ mod tests {
 
         let mut conversation = joined(|_| {});
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Timeout,
+            reason: tomori_client::Disconnect::Timeout,
             retry_in: Duration::from_secs(2),
         }));
         assert_eq!(conversation.activity(), SessionActivity::Unavailable);
@@ -5325,11 +5355,11 @@ mod tests {
     fn the_joined_space_is_current_only_while_connected_and_gone_after_leaving() {
         assert!(Conversation::new("Ada").joined_space().is_none());
         let mut conversation = joined(|state| {
-            state.workers = vec![protocol::Worker {
+            state.workers = vec![tomori_protocol::Worker {
                 id: "w".into(),
                 parent: None,
                 title: "Explore".into(),
-                state: protocol::WorkerState::Running,
+                state: tomori_protocol::WorkerState::Running,
             }]
         });
         let (space, current) = conversation.joined_space().unwrap();
@@ -5338,7 +5368,7 @@ mod tests {
             (SPACE, 1, true)
         );
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Timeout,
+            reason: tomori_client::Disconnect::Timeout,
             retry_in: Duration::from_secs(2),
         }));
         assert!(!conversation.joined_space().unwrap().1);
@@ -5380,11 +5410,11 @@ mod tests {
             state.speech = SpeechSetting::Brief;
             state.voice_answers = true;
             state.question = Some(question());
-            state.workers = vec![protocol::Worker {
+            state.workers = vec![tomori_protocol::Worker {
                 id: "worker-1".into(),
                 parent: None,
                 title: "Run the tests".into(),
-                state: protocol::WorkerState::Running,
+                state: tomori_protocol::WorkerState::Running,
             }];
         });
         let text = conversation.text();
@@ -5466,7 +5496,7 @@ mod tests {
         conversation.refresh();
         conversation.apply(space(|state| {
             state.queue = queue();
-            state.modes = vec![protocol::Mode {
+            state.modes = vec![tomori_protocol::Mode {
                 id: "plan".into(),
                 name: "Plan".into(),
                 description: None,
@@ -5540,7 +5570,7 @@ mod tests {
         let mut conversation = joined(|state| {
             state.speech = SpeechSetting::Brief;
             state.modes = (1..=6)
-                .map(|index| protocol::Mode {
+                .map(|index| tomori_protocol::Mode {
                     id: format!("m{index}"),
                     name: format!("Mode {index}"),
                     description: Some(format!(
@@ -5573,7 +5603,7 @@ mod tests {
     fn a_problem_in_a_space_survives_y_and_a_reconnect() {
         let mut conversation = joined(|_| {});
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Timeout,
+            reason: tomori_client::Disconnect::Timeout,
             retry_in: Duration::from_secs(1),
         }));
         conversation.apply(Event::Message(ServerMessage::Error {
@@ -5635,7 +5665,7 @@ mod tests {
             state.messages = vec![message("m1", Role::Assistant, "Hello")];
         });
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Closed,
+            reason: tomori_client::Disconnect::Closed,
             retry_in: Duration::from_secs(1),
         }));
         conversation.apply(Event::State(ConnectionState::Connecting { attempt: 2 }));
@@ -5657,7 +5687,7 @@ mod tests {
     fn a_space_lost_while_reconnecting_returns_to_the_lobby() {
         let mut conversation = joined(|_| {});
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Closed,
+            reason: tomori_client::Disconnect::Closed,
             retry_in: Duration::from_secs(1),
         }));
         conversation.apply(connected());
@@ -5704,7 +5734,7 @@ mod tests {
     fn another_error_while_rejoining_stays_in_the_space() {
         let mut conversation = joined(|_| {});
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Closed,
+            reason: tomori_client::Disconnect::Closed,
             retry_in: Duration::from_secs(1),
         }));
         conversation.apply(connected());
@@ -6062,7 +6092,7 @@ mod tests {
                 ("plan", "Plan"),
                 ("auto", "Auto"),
             ]
-            .map(|(id, name)| protocol::Mode {
+            .map(|(id, name)| tomori_protocol::Mode {
                 id: id.into(),
                 name: name.into(),
                 description: (id == "auto").then(|| "Decides for itself.".into()),
@@ -6209,11 +6239,11 @@ mod tests {
 
     #[test]
     fn the_worker_pointed_at_while_talking_is_sent_with_the_words() {
-        let worker = |id: &str, title: &str| protocol::Worker {
+        let worker = |id: &str, title: &str| tomori_protocol::Worker {
             id: id.into(),
             parent: None,
             title: title.into(),
-            state: protocol::WorkerState::Running,
+            state: tomori_protocol::WorkerState::Running,
         };
         let mut conversation = joined(|space| {
             space.workers = vec![
@@ -6221,8 +6251,9 @@ mod tests {
                 worker("ses_b", "Run the tests"),
             ]
         });
-        let sent =
-            |id: &str| Action::EndUtterance(Some(protocol::Pointed::Worker { worker: id.into() }));
+        let sent = |id: &str| {
+            Action::EndUtterance(Some(tomori_protocol::Pointed::Worker { worker: id.into() }))
+        };
 
         // Pointed at as X is pressed, then away before letting go: the worker is kept.
         conversation.point_at(Some("ses_a"));
@@ -7169,7 +7200,7 @@ mod tests {
         );
 
         let utterance = press(&mut conversation);
-        conversation.apply(Event::UtteranceFailed(client::FailedUtterance {
+        conversation.apply(Event::UtteranceFailed(tomori_client::FailedUtterance {
             utterance,
             failure: UtteranceFailure::Congested,
         }));
@@ -7197,7 +7228,7 @@ mod tests {
 
         press(&mut conversation);
         conversation.apply(Event::State(ConnectionState::Disconnected {
-            reason: client::Disconnect::Timeout,
+            reason: tomori_client::Disconnect::Timeout,
             retry_in: Duration::from_secs(1),
         }));
         assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);

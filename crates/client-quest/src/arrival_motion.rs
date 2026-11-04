@@ -608,7 +608,7 @@ mod tests {
         item(
             Key::Space(id.into()),
             Kind::Space {
-                activity: protocol::Activity::Idle,
+                activity: tomori_protocol::Activity::Idle,
                 participants: 0,
                 hue: crate::arrival::hue(id),
                 attention: None,

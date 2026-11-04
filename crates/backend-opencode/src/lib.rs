@@ -13,7 +13,9 @@
 
 use std::sync::Mutex;
 
-use backend::{Backend, Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummary};
+use tomori_backend::{
+    Backend, Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummary,
+};
 
 mod api;
 mod connection;
@@ -135,7 +137,10 @@ impl Backend for OpenCode {
     }
 
     async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {
-        if let Some(key) = keys.iter().find(|key| !backend::valid_instruction_key(key)) {
+        if let Some(key) = keys
+            .iter()
+            .find(|key| !tomori_backend::valid_instruction_key(key))
+        {
             return Err(Error::new(
                 ErrorKind::Invalid,
                 format!("{key:?} cannot name an instruction entry"),

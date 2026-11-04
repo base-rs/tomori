@@ -9,11 +9,11 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use backend::{
+use base_scheduler::Cancellation;
+use tomori_backend::{
     AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Permission,
     Prompt, Question, Result, Role, Session, SessionSpec, SessionSummary, Snapshot,
 };
-use base_scheduler::Cancellation;
 
 /// The backend name used in `CreateSpace` requests.
 pub const FAKE_BACKEND_NAME: &str = "fake";
@@ -567,7 +567,7 @@ impl Session for FakeSession {
 
     async fn set_instruction(&self, key: &str, value: Option<&str>) -> Result<()> {
         let _binding = self.current_binding()?;
-        if !backend::valid_instruction_key(key) {
+        if !tomori_backend::valid_instruction_key(key) {
             return Err(Error::new(ErrorKind::Invalid, "not an instruction key"));
         }
         self.inner
