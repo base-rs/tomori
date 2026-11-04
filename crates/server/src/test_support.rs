@@ -44,6 +44,18 @@ pub fn eventually<T>(mut check: impl FnMut() -> Option<T>) -> T {
 #[derive(Default)]
 pub struct TextTranscriber {
     utterances: Mutex<HashMap<UtteranceId, (TranscriptSink, String)>>,
+    /// The longest utterance it takes, if it limits them.
+    limit: Option<Duration>,
+}
+
+impl TextTranscriber {
+    /// A transcriber that takes utterances of up to `limit`.
+    pub fn limited(limit: Duration) -> Self {
+        Self {
+            limit: Some(limit),
+            ..Self::default()
+        }
+    }
 }
 
 /// Samples that [`TextTranscriber`] transcribes as `text`.
@@ -87,6 +99,10 @@ impl Transcriber for TextTranscriber {
 
     fn cancel(&self, utterance: UtteranceId) {
         self.utterances.lock().unwrap().remove(&utterance);
+    }
+
+    fn utterance_limit(&self) -> Option<Duration> {
+        self.limit
     }
 }
 
@@ -227,9 +243,10 @@ impl TestServer {
                     sender
                         .send(scheduler.socket_local_address(&listener).unwrap())
                         .unwrap();
-                    if let Err(error) = server.run(&scheduler, listener, &cancellation).await {
-                        panic!("the server failed: {error}");
-                    }
+                    server
+                        .run(&scheduler, listener, &cancellation)
+                        .await
+                        .expect("the server runs until it is cancelled");
                 });
                 block_on(scheduler.shutdown());
             })
@@ -274,12 +291,10 @@ impl TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        if let Some(thread) = self.thread.take() {
-            let result = thread.join();
-            if !std::thread::panicking() {
-                result.expect("the server thread exits cleanly");
-            }
-        }
+        let thread = self.thread.take().expect("joined only here");
+        // Not panicking again when a failing test drops the server.
+        let joined = thread.join().is_ok() | std::thread::panicking();
+        assert!(joined, "the server thread exits cleanly");
         if let Some(state) = self.state.take() {
             let _ = std::fs::remove_dir_all(state);
         }
@@ -368,9 +383,12 @@ impl TestClient {
             participant: participant.to_owned(),
             name: name.to_owned(),
         });
-        (self.source, self.role) = self.wait_for(|message| match message {
-            ServerMessage::Welcome { source, role, .. } => Some((*source, *role)),
-            _ => None,
+        // The welcome is the first reply to hello.
+        (self.source, self.role) = self.wait_for(|message| {
+            let ServerMessage::Welcome { source, role, .. } = message else {
+                unreachable!("the welcome comes first, not {message:?}");
+            };
+            Some((*source, *role))
         });
     }
 
@@ -507,7 +525,11 @@ fn read_chunk(reader: &mut impl BufRead) -> Option<Vec<u8>> {
     if reader.read_line(&mut line).ok()? == 0 {
         return None;
     }
-    let size = line.trim_end().split(';').next()?;
+    let size = line
+        .trim_end()
+        .split(';')
+        .next()
+        .expect("a split yields at least one piece");
     let size = usize::from_str_radix(size, 16).ok()?;
     if size == 0 {
         return None;
@@ -516,4 +538,58 @@ fn read_chunk(reader: &mut impl BufRead) -> Option<Vec<u8>> {
     reader.read_exact(&mut chunk).ok()?;
     chunk.truncate(size);
     Some(chunk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eventually_checks_again_until_there_is_a_value() {
+        let mut checks = 0;
+        let value = eventually(|| {
+            checks += 1;
+            (checks == 2).then_some(checks)
+        });
+        assert_eq!(value, 2);
+    }
+
+    #[test]
+    fn the_text_transcriber_ignores_utterances_it_did_not_begin() {
+        let transcriber = TextTranscriber::default();
+        let frame = AudioFrame {
+            gate: tomori_protocol::Gate::Agent,
+            source: 0,
+            sequence: 0,
+            timestamp: 0,
+            sample_rate: 16_000,
+            samples: speech("hi"),
+        };
+        transcriber.push(UtteranceId(1), &frame);
+        transcriber.end(UtteranceId(1));
+        assert!(transcriber.utterances.lock().unwrap().is_empty());
+    }
+
+    /// A connection that fails as it is read.
+    struct Reset;
+
+    impl std::io::Read for Reset {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+    }
+
+    #[test]
+    fn a_chunk_ends_with_its_body_or_its_connection() {
+        assert_eq!(
+            read_chunk(&mut "2;x=y\r\nab\r\n".as_bytes()),
+            Some(b"ab".to_vec())
+        );
+        assert_eq!(read_chunk(&mut "0\r\n\r\n".as_bytes()), None);
+        assert_eq!(read_chunk(&mut "".as_bytes()), None);
+        assert_eq!(read_chunk(&mut "z\r\n".as_bytes()), None);
+        // Cut off, or reset.
+        assert_eq!(read_chunk(&mut "5\r\nab".as_bytes()), None);
+        assert_eq!(read_chunk(&mut std::io::BufReader::new(Reset)), None);
+    }
 }
