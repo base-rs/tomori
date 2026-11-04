@@ -113,3 +113,21 @@ impl Transcriber for NullTranscriber {
         self.sinks.lock().unwrap().remove(&utterance);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sink that outlives its server reports nowhere, rather than failing.
+    #[test]
+    fn a_sink_outliving_its_server_reports_nowhere() {
+        let sink = TranscriptSink {
+            hub: Weak::new(),
+            utterance: UtteranceId(7),
+        };
+        assert_eq!(sink.utterance(), UtteranceId(7));
+        sink.partial("run");
+        sink.finish("run the tests");
+        sink.fail("the engine failed");
+    }
+}

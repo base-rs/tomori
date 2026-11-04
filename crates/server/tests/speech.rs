@@ -1510,3 +1510,48 @@ fn being_away_neither_raises_nor_clears_attention() {
     assert!(from(&heard, REPLAY_SOURCE) > 0);
     assert_eq!(attention(&mut bob), None);
 }
+
+/// A server without speech recognition fails each utterance that ends, saying why, and nothing reaches the agent; a cancelled one is not reported.
+#[test]
+fn without_recognition_an_ended_utterance_fails_and_a_cancelled_one_is_silent() {
+    let server = TestServer::with_server(FakeBackend::manual(), |backends| {
+        Server::new(
+            backends,
+            Arc::new(tomori_server::NullTranscriber::default()),
+        )
+    });
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Unheard");
+    for (utterance, ended) in [("u1", false), ("u2", true)] {
+        ada.send(&ClientMessage::UtteranceBegin {
+            utterance: utterance.into(),
+            answer: None,
+        });
+        speak(&mut ada, &["run", "the", "tests"]);
+        ada.send(&if ended {
+            ClientMessage::UtteranceEnd {
+                utterance: utterance.into(),
+                pointed: None,
+            }
+        } else {
+            ClientMessage::UtteranceCancel {
+                utterance: utterance.into(),
+            }
+        });
+    }
+    // The first failure reported is the ended utterance's.
+    let failed = ada.wait_for(|message| match message {
+        ServerMessage::TranscriptFailed { utterance, error } => {
+            Some((utterance.clone(), error.clone()))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        failed,
+        (
+            "u2".to_owned(),
+            "Speech recognition is not available on this server.".to_owned()
+        )
+    );
+    assert!(server.backend.started()[0].log().prompts.is_empty());
+}
