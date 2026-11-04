@@ -65,34 +65,42 @@ pub struct Server {
 }
 
 /// Confirms or declines the pairing waiting, from outside the server, such as its console. See `design/security.md`.
+///
+/// It does not keep the server: once the server is dropped, its state, and the lock on its state directory, go with it, though a console thread still holds this, and the handle then finds no pairing.
 #[derive(Clone)]
-pub struct Pairing(Arc<Hub>);
+pub struct Pairing(std::sync::Weak<Hub>);
 
 impl Pairing {
     /// The pairing pending, revealed or not, if any.
     pub fn pending(&self) -> Option<crate::hub::PairingView> {
-        self.0.pending_pairing()
+        self.0.upgrade()?.pending_pairing()
     }
 
     /// Confirm the pairing waiting, if `typed` is the code its device shows. Returns the device's name.
     pub fn confirm(&self, typed: &str) -> Result<String, &'static str> {
         self.0
+            .upgrade()
+            .ok_or("The server has stopped.")?
             .confirm_pairing(crate::hub::Confirmation::Typed(typed))
     }
 
     /// Decline the pairing pending, revealed or not. Returns whether one was pending.
     pub fn decline(&self) -> bool {
-        self.0.decline_pairing(None)
+        self.0
+            .upgrade()
+            .is_some_and(|hub| hub.decline_pairing(None))
     }
 
     /// Whether pairings are paused, since too many began recently.
     pub fn paused(&self) -> bool {
-        self.0.pairing_paused()
+        self.0.upgrade().is_some_and(|hub| hub.pairing_paused())
     }
 
     /// Allow pairings again after they were paused.
     pub fn allow(&self) {
-        self.0.allow_pairing();
+        if let Some(hub) = self.0.upgrade() {
+            hub.allow_pairing();
+        }
     }
 }
 
@@ -280,7 +288,7 @@ impl Server {
 
     /// A handle to confirm or decline pairings, such as from the console, while the server runs.
     pub fn pairing(&self) -> Pairing {
-        Pairing(self.hub.clone())
+        Pairing(Arc::downgrade(&self.hub))
     }
 
     /// Change the most visitors connected at once; see [`DEFAULT_MAX_VISITORS`].
