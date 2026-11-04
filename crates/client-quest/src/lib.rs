@@ -8,6 +8,10 @@ mod arrival_graphics;
 mod arrival_motion;
 mod caption;
 mod capture;
+#[cfg(not(target_os = "android"))]
+mod child_process;
+#[cfg(not(target_os = "android"))]
+mod cli;
 mod connection;
 #[cfg(not(target_os = "android"))]
 mod console;
@@ -20,7 +24,11 @@ mod delegation;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 #[cfg(not(target_os = "android"))]
+mod desktop_audio;
+#[cfg(not(target_os = "android"))]
 mod desktop_participant;
+#[cfg(not(target_os = "android"))]
+mod desktop_window;
 #[cfg(not(target_os = "android"))]
 mod discover;
 mod environment;
@@ -55,13 +63,20 @@ mod spectator_feed;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
 mod swarm;
+#[cfg(all(test, not(target_os = "android")))]
+mod test_support;
 mod transcript;
 mod ui_panel;
 mod ui_text;
 mod vulkan;
+#[cfg(not(target_os = "android"))]
+mod window;
 mod workspace_graphics;
 mod xr;
+mod xr_types;
 
+#[cfg(not(target_os = "android"))]
+pub use cli::{Command, Mode};
 pub use identity::Overrides;
 #[cfg(not(target_os = "android"))]
 pub use spectator_feed::SpectatorOptions;
@@ -69,50 +84,40 @@ pub use spectator_feed::SpectatorOptions;
 /// Run the windowed desktop demo without an XR runtime or headset.
 #[cfg(not(target_os = "android"))]
 pub fn run() -> anyhow::Result<()> {
-    desktop::run(false, false, None)
+    desktop_window::run_demo(None, false)
 }
 
 /// Render a read-only, participant-following view of a live space.
 #[cfg(not(target_os = "android"))]
 pub fn run_spectator(options: SpectatorOptions) -> anyhow::Result<()> {
-    let feed = crate::spectator_feed::Feed::new(options);
-    desktop::run(true, false, Some(feed))
+    desktop_window::run_demo(Some(spectator_feed::Feed::new(options)), false)
 }
 
-/// PipeWire video source of a live space, without a window.
+/// PipeWire video source of a live space, without a window. It needs PipeWire, on Linux.
 #[cfg(not(target_os = "android"))]
 pub fn run_spectator_pipewire(options: SpectatorOptions) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        cfg!(target_os = "linux"),
-        "PipeWire video output requires Linux"
-    );
-    let feed = crate::spectator_feed::Feed::new(options);
-    headless_spectator::run(feed)
+    pipewire_video::Producer::start()
+        .and_then(|producer| headless_spectator::run(spectator_feed::Feed::new(options), producer))
 }
 
-/// PipeWire video source of a live space, with a preview window.
+/// PipeWire video source of a live space, with a preview window. It needs PipeWire, on Linux.
 #[cfg(not(target_os = "android"))]
 pub fn run_spectator_pipewire_preview(options: SpectatorOptions) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        cfg!(target_os = "linux"),
-        "PipeWire video output requires Linux"
-    );
-    let feed = crate::spectator_feed::Feed::new(options);
-    desktop::run(true, true, Some(feed))
+    desktop_window::run_demo(Some(spectator_feed::Feed::new(options)), true)
 }
 
 /// Run against the host's active OpenXR runtime instead of a desktop window.
 #[cfg(not(target_os = "android"))]
 pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
-    xr::run(&(), graphics::SAMPLES, || false, conversation, connection)
+    xr::run_desktop(conversation, connection)
 }
 
 /// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls.
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
-    desktop_participant::run(conversation, connection)
+    desktop_window::run_participant(conversation, connection)
 }
 
 /// The desktop window's keys and what they stand for on the headset.
@@ -123,7 +128,13 @@ pub const DESKTOP_CONTROLS: &str = desktop_participant::CONTROLS;
 #[cfg(not(target_os = "android"))]
 pub fn run_console(overrides: Overrides) -> anyhow::Result<()> {
     let (conversation, connection) = desktop_connection(overrides);
-    console::run(conversation, connection)
+    console::run(
+        conversation,
+        connection,
+        std::io::BufReader::new(std::io::stdin()),
+        &mut |line| println!("{line}"),
+    );
+    Ok(())
 }
 
 /// List the servers on the network, and the spaces on a chosen one.
@@ -167,8 +178,8 @@ fn desktop_connection(
         identity,
         store,
         Box::new(()),
-        Box::new(capture::Desktop),
-        Box::new(playback::Desktop),
+        Box::new(desktop_audio::Microphone),
+        Box::new(desktop_audio::Speaker),
         &mut conversation,
     );
     (conversation, connection)

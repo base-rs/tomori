@@ -3,26 +3,43 @@
 
 //! The headset's OpenXR shell: the instance, session, swapchain, actions and spaces, and the frame loop that reads them into [`crate::scene::headset`]'s plain types and carries out what it decides. Only device calls belong here.
 
+//!
+//! It needs an OpenXR runtime and a headset, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`. The values it reads become plain types, and the choices it makes from what the runtime offers are made, in [`crate::xr_types`].
+
 use crate::{
-    controller::{self, Pose},
+    controller,
+    feedback::Hand,
     graphics::Renderer,
     hands,
+    haptics::{self, Haptics, Vibrator},
     log_cadence::{self, Cadence},
-    scene::headset::{
-        Action, Actions, Controls, Fov, Headset, Joint, Lifecycle, Location, SessionState, View,
-    },
+    scene::headset::{Actions, Controls, Headset, Joint, Lifecycle, Location, View},
     scene_graphics::{self, Panels},
     vulkan::Gpu,
+    xr_types,
 };
 use anyhow::{Context, Result, ensure};
-use ash::vk;
-use glam::{Vec2, Vec3};
 use openxr as xr;
 use std::{
     sync::mpsc,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+
+/// Run against the desktop's active OpenXR runtime, connected as `conversation` and `connection` describe.
+#[cfg(not(target_os = "android"))]
+pub fn run_desktop(
+    conversation: crate::conversation::Conversation,
+    connection: crate::connection::Connection,
+) -> Result<()> {
+    run(
+        &(),
+        crate::graphics::SAMPLES,
+        || false,
+        conversation,
+        connection,
+    )
+}
 
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
@@ -100,16 +117,7 @@ pub fn run(
             .contains(&BLEND),
         "Runtime must support opaque VR"
     );
-    let width = views
-        .iter()
-        .map(|v| v.recommended_image_rect_width)
-        .max()
-        .unwrap();
-    let height = views
-        .iter()
-        .map(|v| v.recommended_image_rect_height)
-        .max()
-        .unwrap();
+    let (width, height) = xr_types::eye_size(&views);
     // Declaration order matters: all XR session resources are dropped before
     // the wgpu-owned Vulkan device and instance.
     let gpu = Gpu::new(&instance, system)?;
@@ -118,43 +126,11 @@ pub fn run(
     let mut input = Input::new(&instance, &session)?;
     let hand_tracking = HandTracking::new(&instance, &session, system, supported.ext_hand_tracking);
     let spaces = session.enumerate_reference_spaces()?;
-    // STAGE is intentionally not used: Quest keeps it world-locked when the
-    // system Meta-button recenter is invoked. LOCAL_FLOOR follows LOCAL's
-    // horizontal recenter while keeping the runtime-estimated floor height.
-    let space_type =
-        if supported.ext_local_floor && spaces.contains(&xr::ReferenceSpaceType::LOCAL_FLOOR) {
-            xr::ReferenceSpaceType::LOCAL_FLOOR
-        } else {
-            xr::ReferenceSpaceType::LOCAL
-        };
-    let offset = if space_type == xr::ReferenceSpaceType::LOCAL {
-        xr::Posef {
-            position: xr::Vector3f {
-                x: 0.0,
-                y: -1.6,
-                z: 0.0,
-            },
-            ..xr::Posef::IDENTITY
-        }
-    } else {
-        xr::Posef::IDENTITY
-    };
+    let (space_type, offset) = xr_types::reference_space(supported.ext_local_floor, &spaces);
     let space = session.create_reference_space(space_type, offset)?;
     log::info!("Recenterable reference space: {space_type:?}");
-    let formats = session.enumerate_swapchain_formats()?;
-    let (vk_format, format) = [
-        (
-            vk::Format::R8G8B8A8_SRGB,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-        ),
-        (
-            vk::Format::B8G8R8A8_SRGB,
-            wgpu::TextureFormat::Bgra8UnormSrgb,
-        ),
-    ]
-    .into_iter()
-    .find(|(f, _)| formats.contains(&(f.as_raw() as u32)))
-    .context("runtime has no supported sRGB color format")?;
+    let (vk_format, format) = xr_types::swapchain_format(&session.enumerate_swapchain_formats()?)
+        .context("runtime has no supported sRGB color format")?;
     let mut swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
         create_flags: xr::SwapchainCreateFlags::EMPTY,
         usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
@@ -199,8 +175,11 @@ pub fn run(
                 xr::Event::SessionStateChanged(event) => {
                     let state = event.state();
                     log::info!("XR state: {state:?}");
-                    let change =
-                        headset.session(session_state(state), &mut conversation, Instant::now());
+                    let change = headset.session(
+                        xr_types::session_state(state),
+                        &mut conversation,
+                        Instant::now(),
+                    );
                     if change.request_microphone {
                         connection.request_microphone();
                     }
@@ -264,7 +243,7 @@ pub fn run(
                     xr::ViewStateFlags::POSITION_VALID | xr::ViewStateFlags::ORIENTATION_VALID,
                 ) =>
             {
-                [view(left), view(right)]
+                [xr_types::view(left), xr_types::view(right)]
             }
             _ => {
                 stream.end(frame.predicted_display_time, BLEND, &[])?;
@@ -307,8 +286,13 @@ pub fn run(
             connection.send_presence(presence.head, presence.left, presence.right, presence.hands);
         }
         let (scene_to_space, projections) = (drawn.scene_to_space, drawn.projections);
+        let vibrator = XrVibrator {
+            action: &input.haptic,
+            session: &session,
+            hands: &input.hand_paths,
+        };
         for (hand, haptic) in headset.haptics(connection.feedback(), now) {
-            input.haptics.apply(&session, hand, haptic);
+            input.haptics.apply(&vibrator, hand, haptic);
         }
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
@@ -360,16 +344,7 @@ pub fn run(
         frames += 1;
         // Once at the first frame, then a summary at most once a minute: per-frame lines would push lifecycle events out of logcat within minutes.
         if let Some(due) = frame_log.record(Instant::now()) {
-            // The rate includes any time the session was not rendering.
-            match due.elapsed {
-                None => log::info!("Submitted first stereo frame"),
-                Some(elapsed) => log::info!(
-                    "Submitted {frames} stereo frames; {} in the last {:.0} s ({:.1} fps)",
-                    due.skipped + 1,
-                    elapsed.as_secs_f64(),
-                    due.rate().unwrap_or_default()
-                ),
-            }
+            log::info!("{}", xr_types::frame_summary(frames, &due));
         }
     }
     if headset.running() && session.request_exit().is_ok() {
@@ -454,20 +429,7 @@ impl HandTracking {
                     return None;
                 }
             };
-            Some(std::array::from_fn(|index| {
-                let joint = joints[index];
-                Joint {
-                    position: Vec3::new(
-                        joint.pose.position.x,
-                        joint.pose.position.y,
-                        joint.pose.position.z,
-                    ),
-                    radius: joint.radius,
-                    position_valid: joint
-                        .location_flags
-                        .contains(xr::SpaceLocationFlags::POSITION_VALID),
-                }
-            }))
+            Some(xr_types::joints(&joints))
         })
     }
 }
@@ -553,10 +515,8 @@ fn load_controller_models(
         let Ok(name) = instance.path_to_string(path) else {
             continue;
         };
-        let hand = match name.as_str() {
-            "/model_fb/controller/left" => controller::LEFT,
-            "/model_fb/controller/right" => controller::RIGHT,
-            _ => continue,
+        let Some(hand) = xr_types::controller_hand(&name) else {
+            continue;
         };
         let model = (|| -> Result<()> {
             let properties = session.get_render_model_properties_fb(
@@ -624,7 +584,9 @@ struct Input {
     audience_grip: xr::Action<f32>,
     /// The right grip, which detaches the right wrist's transcript into the world and reattaches it.
     transcript_grip: xr::Action<f32>,
-    haptics: crate::haptics::Haptics,
+    /// The haptic output action, for both hands.
+    haptic: xr::Action<xr::Haptic>,
+    haptics: Haptics<xr::sys::Result>,
     set: xr::ActionSet,
     hand_paths: [xr::Path; 2],
     location_errors: [Option<xr::sys::Result>; 2],
@@ -657,8 +619,11 @@ impl Input {
             set.create_action::<f32>("audience_mic", "Toggle live audience microphone", &[])?;
         let transcript_grip =
             set.create_action::<f32>("transcript_grip", "Detach or reattach the transcript", &[])?;
-        let haptics = crate::haptics::Haptics::new(instance, &set)?;
-        let [left_haptic, right_haptic] = haptics.bindings(instance)?;
+        let hand_paths = [
+            instance.string_to_path("/user/hand/left")?,
+            instance.string_to_path("/user/hand/right")?,
+        ];
+        let haptic = set.create_action::<xr::Haptic>("haptic", "Vibrate", &hand_paths)?;
         instance.suggest_interaction_profile_bindings(
             instance.string_to_path("/interaction_profiles/oculus/touch_controller")?,
             &[
@@ -718,8 +683,14 @@ impl Input {
                     &transcript_grip,
                     instance.string_to_path("/user/hand/right/input/squeeze/value")?,
                 ),
-                left_haptic,
-                right_haptic,
+                xr::Binding::new(
+                    &haptic,
+                    instance.string_to_path("/user/hand/left/output/haptic")?,
+                ),
+                xr::Binding::new(
+                    &haptic,
+                    instance.string_to_path("/user/hand/right/output/haptic")?,
+                ),
             ],
         )?;
         session.attach_action_sets(&[&set])?;
@@ -745,12 +716,10 @@ impl Input {
             replay,
             audience_grip,
             transcript_grip,
-            haptics,
+            haptic,
+            haptics: Haptics::new(),
             set,
-            hand_paths: [
-                instance.string_to_path("/user/hand/left")?,
-                instance.string_to_path("/user/hand/right")?,
-            ],
+            hand_paths,
             location_errors: [None, None],
             diagnostic_state: None,
             last_diagnostic: Instant::now() - Duration::from_secs(1),
@@ -780,27 +749,24 @@ impl Input {
             return Ok(Controls::default());
         }
         session.sync_actions(&[(&self.set).into()])?;
-        let vector = |state: xr::ActionState<xr::Vector2f>| Action {
-            value: Vec2::new(state.current_state.x, state.current_state.y),
-            active: state.is_active,
-            changed: state.changed_since_last_sync,
-        };
         Ok(Controls::from_actions(
             Actions {
-                trigger: action(self.trigger.state(session, xr::Path::NULL)?),
-                reset: action(self.reset.state(session, xr::Path::NULL)?),
-                talk: action(self.talk.state(session, xr::Path::NULL)?),
-                back: action(self.back.state(session, xr::Path::NULL)?),
-                refresh: action(self.refresh.state(session, xr::Path::NULL)?),
-                navigation: vector(self.navigation.state(session, xr::Path::NULL)?),
-                presentation_navigation: vector(
+                trigger: xr_types::action(self.trigger.state(session, xr::Path::NULL)?),
+                reset: xr_types::action(self.reset.state(session, xr::Path::NULL)?),
+                talk: xr_types::action(self.talk.state(session, xr::Path::NULL)?),
+                back: xr_types::action(self.back.state(session, xr::Path::NULL)?),
+                refresh: xr_types::action(self.refresh.state(session, xr::Path::NULL)?),
+                navigation: xr_types::vector(self.navigation.state(session, xr::Path::NULL)?),
+                presentation_navigation: xr_types::vector(
                     self.presentation_navigation
                         .state(session, xr::Path::NULL)?,
                 ),
-                sound_toggle: action(self.sound_toggle.state(session, xr::Path::NULL)?),
-                replay: action(self.replay.state(session, xr::Path::NULL)?),
-                audience_grip: action(self.audience_grip.state(session, xr::Path::NULL)?),
-                transcript_grip: action(self.transcript_grip.state(session, xr::Path::NULL)?),
+                sound_toggle: xr_types::action(self.sound_toggle.state(session, xr::Path::NULL)?),
+                replay: xr_types::action(self.replay.state(session, xr::Path::NULL)?),
+                audience_grip: xr_types::action(self.audience_grip.state(session, xr::Path::NULL)?),
+                transcript_grip: xr_types::action(
+                    self.transcript_grip.state(session, xr::Path::NULL)?,
+                ),
             },
             focused,
         ))
@@ -837,12 +803,14 @@ impl Input {
                 self.location_errors[hand] = error;
             }
         }
-        controls.set_locations(locations.map(|location| location.ok().flatten().map(location_of)));
+        controls.set_locations(
+            locations.map(|location| location.ok().flatten().map(xr_types::location)),
+        );
         // Pointing is optional: an aim pose that cannot be located only hides the ray.
         controls.aim = locate(&self.aim, &self.aim_space)
             .ok()
             .flatten()
-            .map(location_of)
+            .map(xr_types::location)
             .and_then(Location::tracked);
         // State-change-only and rate-limited: enough to distinguish an absent
         // model from a runtime action/profile switch during a headset check.
@@ -866,54 +834,30 @@ impl Input {
     }
 }
 
-fn action<T: xr::ActionInput>(state: xr::ActionState<T>) -> Action<T> {
-    Action {
-        value: state.current_state,
-        active: state.is_active,
-        changed: state.changed_since_last_sync,
-    }
+/// OpenXR's haptic action, as [`Haptics`] calls it.
+struct XrVibrator<'a> {
+    action: &'a xr::Action<xr::Haptic>,
+    session: &'a xr::Session<xr::Vulkan>,
+    /// `/user/hand/left` and `/user/hand/right`.
+    hands: &'a [xr::Path; 2],
 }
 
-fn pose(pose: xr::Posef) -> Pose {
-    let (p, q) = (pose.position, pose.orientation);
-    Pose {
-        position: [p.x, p.y, p.z],
-        orientation: [q.x, q.y, q.z, q.w],
-    }
-}
+impl Vibrator for XrVibrator<'_> {
+    type Error = xr::sys::Result;
 
-fn location_of(location: xr::SpaceLocation) -> Location {
-    Location {
-        pose: pose(location.pose),
-        position_valid: location
-            .location_flags
-            .contains(xr::SpaceLocationFlags::POSITION_VALID),
-        orientation_valid: location
-            .location_flags
-            .contains(xr::SpaceLocationFlags::ORIENTATION_VALID),
+    fn vibrate(&self, hand: Hand, length: Option<Duration>, amplitude: f32) -> xr::Result<()> {
+        let duration =
+            haptics::nanoseconds(length).map_or(xr::Duration::MIN_HAPTIC, xr::Duration::from_nanos);
+        let vibration = xr::HapticVibration::new()
+            .amplitude(amplitude)
+            .duration(duration)
+            .frequency(xr::FREQUENCY_UNSPECIFIED);
+        self.action
+            .apply_feedback(self.session, self.hands[haptics::index(hand)], &vibration)
     }
-}
 
-fn view(view: &xr::View) -> View {
-    View {
-        pose: pose(view.pose),
-        fov: Fov {
-            left: view.fov.angle_left,
-            right: view.fov.angle_right,
-            down: view.fov.angle_down,
-            up: view.fov.angle_up,
-        },
-    }
-}
-
-fn session_state(state: xr::SessionState) -> SessionState {
-    match state {
-        xr::SessionState::READY => SessionState::Ready,
-        xr::SessionState::VISIBLE => SessionState::Visible,
-        xr::SessionState::FOCUSED => SessionState::Focused,
-        xr::SessionState::STOPPING => SessionState::Stopping,
-        xr::SessionState::EXITING => SessionState::Exiting,
-        xr::SessionState::LOSS_PENDING => SessionState::LossPending,
-        _ => SessionState::Other,
+    fn stop(&self, hand: Hand) -> xr::Result<()> {
+        self.action
+            .stop_feedback(self.session, self.hands[haptics::index(hand)])
     }
 }

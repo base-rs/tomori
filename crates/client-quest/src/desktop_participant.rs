@@ -6,25 +6,15 @@
 use crate::{
     connection::Connection,
     conversation::Conversation,
-    desktop::{WindowGpu, acquire},
     graphics::Renderer,
     scene::desktop::{Button, Desktop, Direction, Key, KeyResult, TITLE},
     scene_graphics::{self, Panels},
+    window::{Contents, Flow, Gpu, Input, Settings, Surface, Wake},
 };
 use anyhow::Result;
 use glam::{Mat4, Vec2};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use winit::{
-    application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, MouseButton, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
-};
+use std::time::{Duration, Instant};
+use winit::{dpi::LogicalSize, event::MouseButton, keyboard::KeyCode};
 
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
 pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left button: choose what is pointed at, or attract the swarm; right drag: look around.\n\
@@ -63,266 +53,125 @@ fn key(code: KeyCode) -> Option<Key> {
     })
 }
 
-/// Open a desktop window connected as `conversation` and `connection` describe, until it is closed.
-pub fn run(conversation: Conversation, connection: Connection) -> Result<()> {
-    let event_loop = EventLoop::new()?;
-    let mut app = App {
-        participant: Some(Participant::new(conversation, connection)),
-        state: None,
-        error: None,
-    };
-    log::info!("{CONTROLS}");
-    event_loop.run_app(&mut app)?;
-    match app.error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-struct App {
-    /// Taken into `state` once the window exists.
-    participant: Option<Participant>,
-    state: Option<State>,
-    error: Option<anyhow::Error>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
-        let result = (|| {
-            let attributes = Window::default_attributes()
-                .with_title(TITLE)
-                .with_inner_size(LogicalSize::new(1280.0, 800.0));
-            let window = Arc::new(event_loop.create_window(attributes)?);
-            let participant = self.participant.take().expect("the participant, once");
-            pollster::block_on(State::new(window, participant))
-        })();
-        match result {
-            Ok(state) => {
-                state.window.request_redraw();
-                self.state = Some(state);
-            }
-            Err(error) => {
-                self.error = Some(error);
-                event_loop.exit();
-            }
-        }
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let Some(state) = &mut self.state else {
-            return;
-        };
-        if id != state.window.id() {
-            return;
-        }
-        let (p, desktop) = (&mut state.participant, &mut state.desktop);
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size),
-            WindowEvent::Focused(focused) => {
-                if desktop.set_focused(focused, &mut p.conversation) {
-                    p.connection.request_microphone();
-                }
-            }
-            WindowEvent::Occluded(occluded) => {
-                state.occluded = occluded;
-                desktop.set_visible(!occluded, &mut p.conversation);
-                if !occluded {
-                    state.window.request_redraw();
-                }
-            }
-            WindowEvent::CursorLeft { .. } => desktop.cursor_left(),
-            WindowEvent::CursorMoved { position, .. } => {
-                desktop.cursor_moved(Vec2::new(position.x as f32, position.y as f32));
-            }
-            WindowEvent::MouseInput {
-                state: pressed,
-                button,
-                ..
-            } => {
-                let button = match button {
-                    MouseButton::Left => Button::Left,
-                    MouseButton::Right => Button::Right,
-                    _ => return,
-                };
-                desktop.mouse(button, pressed == ElementState::Pressed);
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let PhysicalKey::Code(code) = event.physical_key else {
-                    return;
-                };
-                let Some(key) = key(code) else {
-                    return;
-                };
-                let pressed = event.state == ElementState::Pressed;
-                if desktop.key(key, pressed, event.repeat, &mut p.conversation) == KeyResult::Quit {
-                    event_loop.exit();
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                if state.occluded || state.size.width == 0 || state.size.height == 0 {
-                    return;
-                }
-                if let Err(error) = state.frame(true) {
-                    self.error = Some(error);
-                    event_loop.exit();
-                    return;
-                }
-                state.window.request_redraw();
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // A hidden window draws nothing, so it would never receive a redraw; it still keeps its connection and speech going.
-        let Some(state) = &mut self.state else {
-            return;
-        };
-        if state.occluded || state.size.width == 0 || state.size.height == 0 {
-            if let Err(error) = state.frame(false) {
-                self.error = Some(error);
-                event_loop.exit();
-                return;
-            }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(20),
-            ));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
-    }
-}
-
-/// The conversation with the server, until the window exists.
-struct Participant {
+/// The participant's window: the desktop's logic, [`Desktop`], driven by the window's input, drawn into it and keeping its connection going.
+pub struct Participant {
     conversation: Conversation,
     connection: Connection,
-}
-
-impl Participant {
-    fn new(conversation: Conversation, connection: Connection) -> Self {
-        Self {
-            conversation,
-            connection,
-        }
-    }
-}
-
-struct State {
-    window: Arc<Window>,
-    gpu: WindowGpu,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     renderer: Renderer,
     panels: Panels,
-    size: PhysicalSize<u32>,
+    width: u32,
+    height: u32,
     occluded: bool,
-    participant: Participant,
     /// The desktop's logic, whose first frame steps from when the window was ready.
     desktop: Desktop,
     first_frame: bool,
 }
 
-impl State {
-    async fn new(window: Arc<Window>, mut participant: Participant) -> Result<Self> {
-        let gpu = WindowGpu::new(window.clone()).await?;
-        let size = window.inner_size();
-        let samples = gpu.samples(gpu.config.format);
+impl Participant {
+    pub fn settings() -> Settings {
+        Settings {
+            title: TITLE,
+            size: LogicalSize::new(1280.0, 800.0).into(),
+            decorations: true,
+            min_size: None,
+        }
+    }
+
+    /// Take part as `conversation` and `connection` describe, drawn with `gpu`.
+    pub fn new(gpu: Gpu, mut conversation: Conversation, connection: Connection) -> Self {
+        let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_samples(
             &gpu.device,
             &gpu.queue,
-            gpu.config.format,
-            gpu.config.width,
-            gpu.config.height,
+            gpu.format,
+            gpu.width,
+            gpu.height,
             samples,
         );
         let panels = Panels::new(&gpu.device, &renderer);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,
-            gpu.config.width,
-            gpu.config.height
+            gpu.width,
+            gpu.height
         );
-        let desktop = Desktop::new(&mut participant.conversation, Instant::now());
-        Ok(Self {
-            window,
-            gpu,
+        log::info!("{CONTROLS}");
+        let desktop = Desktop::new(&mut conversation, Instant::now());
+        Self {
+            conversation,
+            connection,
+            device: gpu.device,
+            queue: gpu.queue,
             renderer,
             panels,
-            size,
+            width: gpu.width,
+            height: gpu.height,
             occluded: false,
-            participant,
             desktop,
             first_frame: true,
-        })
+        }
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.size = size;
-        if size.width == 0 || size.height == 0 {
+    /// Whether nothing drawn to the window would be seen.
+    fn hidden(&self) -> bool {
+        self.occluded || self.width == 0 || self.height == 0
+    }
+
+    fn resize(&mut self, width: u32, height: u32, surface: &mut dyn Surface) {
+        self.width = width;
+        self.height = height;
+        if width == 0 || height == 0 {
             return;
         }
-        self.gpu.config.width = size.width;
-        self.gpu.config.height = size.height;
-        self.gpu
-            .surface
-            .configure(&self.gpu.device, &self.gpu.config);
-        self.renderer
-            .resize(&self.gpu.device, size.width, size.height);
-        self.window.request_redraw();
+        surface.resize(width, height);
+        self.renderer.resize(&self.device, width, height);
+        surface.request_redraw();
     }
 
-    /// One frame of the desktop's logic, drawing it if `render`.
-    fn frame(&mut self, render: bool) -> Result<()> {
+    /// One frame of the desktop's logic, returning the head's view and projection to draw it with.
+    fn step(&mut self, surface: &mut dyn Surface) -> Mat4 {
         let now = Instant::now();
-        let (p, desktop) = (&mut self.participant, &mut self.desktop);
-        p.connection.poll(desktop.focused(), &mut p.conversation);
-        let size = Vec2::new(
-            self.size.width.max(1) as f32,
-            self.size.height.max(1) as f32,
-        );
-        let drawn = desktop.frame(&mut p.conversation, p.connection.feedback(), now, size);
+        let (conversation, connection) = (&mut self.conversation, &mut self.connection);
+        connection.poll(self.desktop.focused(), conversation);
+        let size = Vec2::new(self.width.max(1) as f32, self.height.max(1) as f32);
+        let drawn = self
+            .desktop
+            .frame(conversation, connection.feedback(), now, size);
         if let Some(title) = &drawn.title {
-            self.window.set_title(title);
+            surface.set_title(title);
         }
         scene_graphics::draw(
             &mut self.renderer,
-            &self.gpu.device,
-            &self.gpu.queue,
+            &self.device,
+            &self.queue,
             &mut self.panels,
             &drawn.frame,
         );
         // Every source is heard from where it is, relative to this participant's head; see `design/spatial-audio.md`.
-        p.connection
-            .listen(drawn.frame.listener, drawn.frame.agent, &p.conversation);
+        connection.listen(drawn.frame.listener, drawn.frame.agent, conversation);
         if let Some(presence) = drawn.frame.presence {
-            p.connection.send_presence(
-                presence.head,
-                presence.left,
-                presence.right,
-                presence.hands,
-            );
+            connection.send_presence(presence.head, presence.left, presence.right, presence.hands);
         }
-        let view_projection = drawn.view_projection;
-        if !render {
-            return Ok(());
-        }
-        let Some(frame) = acquire(&self.gpu.surface, &self.gpu.device, &self.gpu.config)? else {
+        drawn.view_projection
+    }
+
+    /// One frame of the desktop's logic, drawn.
+    fn frame(&mut self, surface: &mut dyn Surface) -> Result<()> {
+        let view_projection = self.step(surface);
+        let Some(target) = surface.acquire()? else {
             return Ok(());
         };
-        let target = frame.texture.create_view(&Default::default());
         self.renderer.render(
-            &self.gpu.device,
-            &self.gpu.queue,
+            &self.device,
+            &self.queue,
             &[target],
             &[view_projection],
             Mat4::IDENTITY,
             &self.panels.list(Mat4::IDENTITY),
         );
-        self.window.pre_present_notify();
-        self.gpu.queue.present(frame);
+        surface.present();
         if self.first_frame {
             log::info!("Presented first desktop frame");
             self.first_frame = false;
@@ -331,9 +180,236 @@ impl State {
     }
 }
 
+impl Contents for Participant {
+    fn input(&mut self, input: Input, surface: &mut dyn Surface) -> Result<Flow> {
+        let (desktop, conversation) = (&mut self.desktop, &mut self.conversation);
+        match input {
+            Input::Close => return Ok(Flow::Exit),
+            Input::Resized { width, height } => self.resize(width, height, surface),
+            Input::Focused(focused) => {
+                if desktop.set_focused(focused, conversation) {
+                    self.connection.request_microphone();
+                }
+            }
+            Input::Occluded(occluded) => {
+                self.occluded = occluded;
+                desktop.set_visible(!occluded, conversation);
+                if !occluded {
+                    surface.request_redraw();
+                }
+            }
+            Input::CursorLeft => desktop.cursor_left(),
+            Input::CursorMoved(position) => desktop.cursor_moved(position),
+            Input::Mouse { button, pressed } => {
+                let button = match button {
+                    MouseButton::Left => Button::Left,
+                    MouseButton::Right => Button::Right,
+                    _ => return Ok(Flow::Continue),
+                };
+                desktop.mouse(button, pressed);
+            }
+            Input::Key {
+                code,
+                pressed,
+                repeat,
+            } => {
+                if let Some(key) = key(code)
+                    && desktop.key(key, pressed, repeat, conversation) == KeyResult::Quit
+                {
+                    return Ok(Flow::Exit);
+                }
+            }
+            Input::Wheel(_) => {}
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn redraw(&mut self, surface: &mut dyn Surface) -> Result<()> {
+        if self.hidden() {
+            return Ok(());
+        }
+        self.frame(surface)?;
+        surface.request_redraw();
+        Ok(())
+    }
+
+    fn about_to_wait(&mut self, surface: &mut dyn Surface) -> Result<Wake> {
+        // A hidden window draws nothing, so it would never receive a redraw; it still keeps its connection and speech going.
+        if !self.hidden() {
+            return Ok(Wake::Wait);
+        }
+        self.step(surface);
+        Ok(Wake::At(Instant::now() + Duration::from_millis(20)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Server;
+    use crate::{
+        test_support::participant,
+        window::test::{TestSurface, with_gpu},
+    };
+    use tomori_protocol::{ClientMessage, ServerMessage};
+
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    /// Redraw until `done`, or fail after a while.
+    fn until(
+        window: &mut Participant,
+        surface: &mut TestSurface,
+        mut done: impl FnMut(&Participant) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(window) {
+            assert!(Instant::now() < deadline, "timed out");
+            window.redraw(surface).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn press(code: KeyCode, pressed: bool) -> Input {
+        Input::Key {
+            code,
+            pressed,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn the_window_opens_at_the_participants_size_with_its_title() {
+        let settings = Participant::settings();
+        assert_eq!(settings.title, TITLE);
+        assert!(settings.decorations);
+        assert_eq!(settings.size, LogicalSize::new(1280.0, 800.0).into());
+    }
+
+    #[test]
+    fn the_window_draws_when_seen_and_keeps_its_connection_going_when_hidden() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let (conversation, connection) = participant("Ada", None);
+            let mut window = Participant::new(gpu, conversation, connection);
+            window.redraw(&mut surface).unwrap();
+            window.redraw(&mut surface).unwrap();
+            assert_eq!((surface.presented, surface.redraws), (2, 2));
+            assert_eq!(window.about_to_wait(&mut surface).unwrap(), Wake::Wait);
+            // Focus asks for the microphone, once.
+            for focused in [true, false, true] {
+                window.input(Input::Focused(focused), &mut surface).unwrap();
+            }
+            assert!(window.desktop.focused());
+            // Hidden, it steps without drawing, and wakes itself to keep going.
+            window.input(Input::Occluded(true), &mut surface).unwrap();
+            window.redraw(&mut surface).unwrap();
+            assert_eq!(surface.presented, 2);
+            assert_ne!(window.about_to_wait(&mut surface).unwrap(), Wake::Wait);
+            assert_eq!(surface.presented, 2);
+            window.input(Input::Occluded(false), &mut surface).unwrap();
+            assert_eq!(surface.redraws, 3);
+            // Minimised, too; a new size is configured and drawn at.
+            for (width, height) in [(0, 0), (64, 48)] {
+                window
+                    .input(Input::Resized { width, height }, &mut surface)
+                    .unwrap();
+            }
+            assert_eq!(surface.sizes, [(64, 48)]);
+            // Nothing to draw into this time: nothing is presented.
+            surface.available = false;
+            window.redraw(&mut surface).unwrap();
+            assert_eq!(surface.presented, 2);
+            surface.fail = true;
+            assert!(window.redraw(&mut surface).is_err());
+        });
+    }
+
+    #[test]
+    fn the_mouse_and_keys_reach_the_desktops_logic() {
+        with_gpu(FORMAT, |gpu| {
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let (conversation, connection) = participant("Ada", None);
+            let mut window = Participant::new(gpu, conversation, connection);
+            let mut input = |input| window.input(input, &mut surface).unwrap();
+            input(Input::Focused(true));
+            input(Input::CursorMoved(Vec2::new(10.0, 10.0)));
+            for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+                for pressed in [true, false] {
+                    assert_eq!(input(Input::Mouse { button, pressed }), Flow::Continue);
+                }
+            }
+            input(Input::CursorLeft);
+            assert_eq!(
+                input(Input::Wheel(winit::event::MouseScrollDelta::LineDelta(
+                    0.0, 1.0
+                ))),
+                Flow::Continue
+            );
+            // M opens the hand menu, which Escape closes before it quits.
+            assert_eq!(input(press(KeyCode::KeyM, true)), Flow::Continue);
+            assert_eq!(input(press(KeyCode::KeyQ, true)), Flow::Continue);
+            assert_eq!(input(press(KeyCode::Escape, true)), Flow::Continue);
+            assert_eq!(input(press(KeyCode::Escape, false)), Flow::Continue);
+            assert_eq!(input(press(KeyCode::Escape, true)), Flow::Exit);
+            assert_eq!(input(Input::Close), Flow::Exit);
+        });
+    }
+
+    #[test]
+    fn in_a_space_its_presence_is_sent_and_a_knock_is_named_in_the_title() {
+        with_gpu(FORMAT, |gpu| {
+            let server = Server::start();
+            let bea = server.remote("Bea", Some(server.owner("Bea")));
+            let space = bea.create_space("Studio", || {}).id;
+            let mut surface = TestSurface::new(&gpu.device, FORMAT);
+            let (mut conversation, connection) =
+                server.participant("Ada", Some(server.owner("Ada")));
+            conversation.join_space(space.clone());
+            let mut window = Participant::new(gpu, conversation, connection);
+            // The others see where this participant's head is.
+            bea.wait_for(
+                || window.redraw(&mut surface).unwrap(),
+                |message| matches!(message, ServerMessage::Presence { .. }).then_some(()),
+            );
+            // Space held is push-to-talk, which opens the microphone.
+            window.input(Input::Focused(true), &mut surface).unwrap();
+            window
+                .input(press(KeyCode::Space, true), &mut surface)
+                .unwrap();
+            until(&mut window, &mut surface, |window| {
+                window.conversation.recording().is_some()
+            });
+            window
+                .input(press(KeyCode::Space, false), &mut surface)
+                .unwrap();
+            let vic = server.remote("Vic", None);
+            vic.send(ClientMessage::Join {
+                space: space.clone(),
+            });
+            vic.wait_for(
+                || {},
+                |message| matches!(message, ServerMessage::Space { .. }).then_some(()),
+            );
+            vic.send(ClientMessage::Knock);
+            until(&mut window, &mut surface, |window| {
+                !window.conversation.knocks().is_empty()
+            });
+            assert!(
+                surface
+                    .titles
+                    .last()
+                    .is_some_and(|title| title.contains("Vic is knocking"))
+            );
+            // + admits the first knock, and the title says no one is knocking.
+            window
+                .input(press(KeyCode::Equal, true), &mut surface)
+                .unwrap();
+            until(&mut window, &mut surface, |window| {
+                window.conversation.knocks().is_empty()
+            });
+            assert_eq!(surface.titles.last().map(String::as_str), Some(TITLE));
+        });
+    }
 
     #[test]
     fn every_control_has_a_key_and_other_keys_do_nothing() {
@@ -365,7 +441,7 @@ mod tests {
             (KeyCode::Escape, Key::Escape),
         ];
         for (code, expected) in bound {
-            assert_eq!(key(code), Some(expected), "{code:?}");
+            assert_eq!(key(code), Some(expected));
         }
         assert_eq!(key(KeyCode::KeyQ), None);
     }

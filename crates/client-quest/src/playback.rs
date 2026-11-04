@@ -148,90 +148,53 @@ fn render_channels(
     }
 }
 
+/// Renders the player into a desktop output stream's samples, in its own format, `channels` interleaved samples per frame. Its buffers are kept between callbacks.
 #[cfg(not(target_os = "android"))]
-pub use desktop::Desktop;
+pub struct Render {
+    player: Shared,
+    sample_rate: u32,
+    channels: usize,
+    samples: Vec<i16>,
+    stereo: Vec<i16>,
+}
 
-/// The default output device, through cpal.
 #[cfg(not(target_os = "android"))]
-mod desktop {
-    use super::{Failed, Output, Playback, Route, Shared, render_channels};
-    use cpal::{
-        ErrorKind, FromSample, SampleFormat, SizedSample, StreamConfig,
-        traits::{DeviceTrait, HostTrait, StreamTrait},
-    };
-
-    pub struct Desktop;
-
-    impl Playback for Desktop {
-        /// The desktop has no echo canceller to route for.
-        fn open(&self, player: Shared, failed: Failed, _route: Route) -> Result<Output, String> {
-            let device = cpal::default_host()
-                .default_output_device()
-                .ok_or("No speaker is available.")?;
-            let supported = device
-                .default_output_config()
-                .map_err(|error| format!("Cannot use the speaker: {error}"))?;
-            let config: StreamConfig = supported.config();
-            // The cues are synthesized for the device's rate here, before the stream starts, rather than in its first callback.
-            if let Ok(mut player) = player.lock() {
-                player.prepare(config.sample_rate);
-            }
-            let stream = match supported.sample_format() {
-                SampleFormat::F32 => build::<f32>(&device, &config, player, failed),
-                SampleFormat::I16 => build::<i16>(&device, &config, player, failed),
-                SampleFormat::I32 => build::<i32>(&device, &config, player, failed),
-                SampleFormat::U16 => build::<u16>(&device, &config, player, failed),
-                format => {
-                    return Err(format!("The speaker's {format} samples are not supported."));
-                }
-            }?;
-            stream
-                .play()
-                .map_err(|error| format!("Cannot start the speaker: {error}"))?;
-            log::info!(
-                "Speaker opened at {} Hz, {} channels",
-                config.sample_rate,
-                config.channels
-            );
-            Ok(Output::new(stream))
+impl Render {
+    pub fn new(player: Shared, sample_rate: u32, channels: u16) -> Self {
+        Self {
+            player,
+            sample_rate,
+            channels: usize::from(channels).max(1),
+            samples: Vec::new(),
+            stereo: Vec::new(),
         }
     }
 
-    fn build<T>(
-        device: &cpal::Device,
-        config: &StreamConfig,
-        player: Shared,
-        failed: Failed,
-    ) -> Result<cpal::Stream, String>
-    where
-        T: SizedSample + FromSample<i16>,
-    {
-        let channels = usize::from(config.channels).max(1);
-        let sample_rate = config.sample_rate;
-        let mut samples = Vec::new();
-        let mut stereo = Vec::new();
-        device
-            .build_output_stream::<T, _, _>(
-                *config,
-                move |data: &mut [T], _| {
-                    samples.resize(data.len(), 0);
-                    render_channels(&player, sample_rate, channels, &mut samples, &mut stereo);
-                    for (output, &sample) in data.iter_mut().zip(&samples) {
-                        *output = T::from_sample(sample);
-                    }
-                },
-                move |error: cpal::Error| match error.kind() {
-                    // The stream keeps playing; a glitch in real-time audio is not worth reopening for.
-                    ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied => {
-                        log::info!("Speaker: {error}");
-                    }
-                    // Underruns can come in bursts whenever the system is busy.
-                    ErrorKind::Xrun => log::debug!("Speaker: {error}"),
-                    _ => failed(format!("The speaker failed: {error}")),
-                },
-                None,
-            )
-            .map_err(|error| format!("Cannot open the speaker: {error}"))
+    /// Fill `data` with what the player plays next.
+    pub fn fill<T: cpal::Sample + cpal::FromSample<i16>>(&mut self, data: &mut [T]) {
+        self.samples.resize(data.len(), 0);
+        render_channels(
+            &self.player,
+            self.sample_rate,
+            self.channels,
+            &mut self.samples,
+            &mut self.stereo,
+        );
+        for (output, &sample) in data.iter_mut().zip(&self.samples) {
+            *output = T::from_sample(sample);
+        }
+    }
+}
+
+/// Handle a desktop output stream's `error`. The stream keeps playing after most: a glitch in real-time audio is not worth reopening for, and underruns can come in bursts whenever the system is busy. Anything else is `failed`.
+#[cfg(not(target_os = "android"))]
+pub fn output_failed(error: &cpal::Error, failed: &Failed) {
+    match error.kind() {
+        cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
+            log::info!("Speaker: {error}");
+        }
+        cpal::ErrorKind::Xrun => log::debug!("Speaker: {error}"),
+        _ => failed(format!("The speaker failed: {error}")),
     }
 }
 
@@ -298,6 +261,42 @@ mod tests {
         render(&player, 48_000, Layout::Stereo, &mut output);
         assert_eq!(output, [0; 4]);
         drop(held);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn a_desktop_stream_is_filled_in_its_own_format() {
+        let (_sender, player, _control) = player();
+        // Nothing to play: silence, in each format's own terms.
+        let mut floats = [1.0_f32; 4];
+        Render::new(player.clone(), 48_000, 2).fill(&mut floats);
+        assert_eq!(floats, [0.0; 4]);
+        let mut unsigned = [0_u16; 3];
+        Render::new(player, 48_000, 0).fill(&mut unsigned);
+        assert_eq!(unsigned, [32_768; 3]);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn only_desktop_output_errors_that_stop_it_are_reported() {
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let sink = reported.clone();
+        let failed: Failed = Box::new(move |error| sink.lock().unwrap().push(error));
+        for kind in [
+            cpal::ErrorKind::DeviceChanged,
+            cpal::ErrorKind::RealtimeDenied,
+            cpal::ErrorKind::Xrun,
+        ] {
+            output_failed(&cpal::Error::new(kind), &failed);
+        }
+        assert!(reported.lock().unwrap().is_empty());
+        output_failed(
+            &cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
+            &failed,
+        );
+        let reported = reported.lock().unwrap();
+        assert_eq!(reported.len(), 1);
+        assert!(reported[0].starts_with("The speaker failed: "));
     }
 }
 
