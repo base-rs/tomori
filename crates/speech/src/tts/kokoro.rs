@@ -372,13 +372,6 @@ impl Drop for KokoroSynthesizer {
 mod tests {
     use super::*;
 
-    fn repository() -> PathBuf {
-        match std::env::var_os("TOMORI_SPEECH_ROOT") {
-            Some(root) => PathBuf::from(root),
-            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        }
-    }
-
     #[test]
     fn converts_samples_to_pcm() {
         assert_eq!(
@@ -414,7 +407,7 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_voice() {
-        let mut config = KokoroConfig::from_root(&repository());
+        let mut config = KokoroConfig::from_root(&crate::test_models::root());
         config.voice = 54;
         assert!(matches!(
             KokoroSynthesizer::new(&config),
@@ -422,12 +415,18 @@ mod tests {
         ));
     }
 
-    /// Requires the Kokoro model; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use models outside this checkout.
+    /// Skipped without the Kokoro model; see [`crate::test_models`].
     #[test]
-    #[ignore = "requires the Kokoro model"]
     fn synthesizes_sentences_as_they_are_generated() {
-        let mut synthesizer =
-            KokoroSynthesizer::new(&KokoroConfig::from_root(&repository())).unwrap();
+        let config = KokoroConfig::from_root(&crate::test_models::root());
+        if !crate::test_models::installed(
+            "the Kokoro model",
+            "bash scripts/fetch-tts-model.sh",
+            &[&config.model],
+        ) {
+            return;
+        }
+        let mut synthesizer = KokoroSynthesizer::new(&config).unwrap();
         assert_eq!(synthesizer.speakers(), VOICES);
         let mut chunks = Vec::new();
         synthesizer

@@ -11,7 +11,7 @@ Speech recognition and synthesis for the Tomori server, run in the server proces
 |---|---|---|
 | Streaming recognition (default) | NeMo FastConformer streaming transducer, English, 480 ms chunks, int8 | `stt::TransducerRecognizer` |
 | Transcript punctuation | English CNN-BiLSTM punctuation and casing, int8 | `stt::CnnBilstmPunctuator`, applied by `stt::Punctuated` |
-| Whole-clip recognition (`--speech-backend offline`) | Whisper `small.en`, int8 | `stt::WhisperRecognizer`, run by `stt::OfflineRecognition` |
+| Whole-clip recognition (`--speech-backend offline`) | Whisper `small.en` unless configured otherwise (`--speech-offline-model`), int8 | `stt::WhisperRecognizer`, run by `stt::OfflineRecognition` |
 | Pauses in long whole-clip utterances | Silero voice activity detector | `stt::SileroVad` |
 | Synthesis | Kokoro multi-language v1.0, voice 3 (`af_heart`) | `tts::KokoroSynthesizer` |
 
@@ -27,7 +27,7 @@ Whisper decodes at most 30 seconds at once. `stt::OfflineRecognition` decodes an
 - Utterances that have ended take turns a segment at a time, the one that has waited longest first, so a short utterance waits for at most one segment of a long one, and two long ones alternate.
 - An utterance that passes 5 minutes (`stt::MAX_UTTERANCE`) fails at once with `Error::TooLong`, and nothing of it is decoded.
 
-On a 32-core Linux PC, the ignored test `transcribes_a_long_utterance_with_whisper` decodes 58.7 seconds of LibriSpeech, in three segments, in about 8.6 seconds, with or without the detector, and the transcripts match the reference apart from British spellings.
+On a 32-core Linux PC, the test `transcribes_a_long_utterance_with_whisper` decodes 58.7 seconds of LibriSpeech, in three segments, with or without the detector, in about 8.6 seconds with `small.en` and 2 seconds with `tiny.en`, which the test uses, and with either model the transcripts match the reference apart from British spellings.
 
 Kokoro reports each sentence as soon as it is generated.
 
@@ -63,6 +63,10 @@ cargo run -p tomori-server --bin tomori-server -- --speech-root .
 ```
 
 `TransducerConfig::from_root`, `PunctuationConfig::from_root`, `KokoroConfig::from_root`, `WhisperConfig::from_root` and `SileroVadConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) and the Silero voice activity detector (`silero_vad.onnx`, 0.6 MB, checked against the digest the release publishes), for `--speech-backend offline` and the benchmark. Without the detector, the offline backend splits long utterances by loudness alone, and the server says so when it starts.
+
+The Whisper model is a configured choice: `bash scripts/fetch-asr-model.sh whisper tiny.en` fetches `tiny.en` instead (120 MB download, 100 MB kept), `WhisperConfig::named(root, "tiny.en")` loads it from `.tools/asr/sherpa-onnx-whisper-tiny.en`, and `tomori-server --speech-backend offline --speech-offline-model tiny.en` runs it. It is smaller and faster than `small.en` and less accurate, so the server keeps `small.en` by default, and the tests use `tiny.en`. The scripts pin `small.en` and `tiny.en`, keeping only the int8 files the server loads.
+
+The scripts check each model against pinned SHA-256 digests every time they run, including one already installed or restored from a cache, and fetch again any that does not match: the release's digest of each archive where it publishes one, and the digests of the files extracted from it.
 
 ## Building and linking
 
@@ -102,11 +106,12 @@ The CUDA path has not been tested yet. Kokoro and the punctuation model always r
 ## Tests
 
 ```bash
+bash scripts/fetch-asr-model.sh whisper tiny.en   # the recognition models the tests run
+bash scripts/fetch-tts-model.sh                   # the Kokoro voices
 cargo test -p tomori-speech
-cargo test -p tomori-speech -- --ignored   # the real engines, with the models installed
 ```
 
-The ignored tests use the models under the repository root. To use models installed elsewhere, set `TOMORI_SPEECH_ROOT` to the directory holding their `.tools/`.
+The tests that run the real engines use the models under the repository root, with Whisper `tiny.en`, and are skipped, each saying which model is missing and how to fetch it, without them. To use models installed elsewhere, set `TOMORI_SPEECH_ROOT` to the directory holding their `.tools/`. Set `TOMORI_REQUIRE_MODELS=1` to fail them instead of skipping them, as CI does: CI fetches the models with the scripts above and keeps them in its cache between runs, keyed by the scripts.
 
 ## Benchmark
 

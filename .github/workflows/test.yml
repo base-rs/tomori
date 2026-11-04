@@ -46,6 +46,18 @@ jobs:
           key: sherpa-onnx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
       - name: Fetch the sherpa-onnx libraries
         run: bash scripts/fetch-sherpa-onnx.sh
+      # The speech models that the speech tests run, kept between runs. The key changes with the scripts, which pin each model's digests, and the scripts check every model against them, cached or not, fetching again any that does not match.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            .tools/asr
+            .tools/tts/kokoro-multi-lang-v1_0
+          key: speech-models-${{ hashFiles('scripts/fetch-asr-model.sh', 'scripts/fetch-tts-model.sh') }}
+      - name: Fetch the speech models
+        # Whisper tiny.en rather than the server's default, small.en, which is ten times larger.
+        run: |
+          bash scripts/fetch-asr-model.sh whisper tiny.en
+          bash scripts/fetch-tts-model.sh
       - name: Check formatting
         if: matrix.rust == 'stable'
         run: cargo fmt --all -- --check
@@ -56,6 +68,8 @@ jobs:
         env:
           # Fail the rendering tests, rather than skipping them, if no Vulkan adapter is found.
           TOMORI_REQUIRE_GPU: 1
+          # Fail the speech model tests, rather than skipping them, if a model is missing.
+          TOMORI_REQUIRE_MODELS: 1
         run: cargo test --workspace --locked
 
   # The client core and the headset application for the Quest, as scripts/android.sh builds them.

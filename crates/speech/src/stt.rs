@@ -38,7 +38,7 @@ pub use resample::Resampler;
 pub use segment::{MAX_SEGMENT, VoiceActivity};
 pub use transducer::{TransducerConfig, TransducerRecognizer};
 pub use vad::{SileroVad, SileroVadConfig};
-pub use whisper::{WhisperConfig, WhisperRecognizer};
+pub use whisper::{DEFAULT_WHISPER_MODEL, WhisperConfig, WhisperRecognizer};
 
 use crate::{
     Error, Stopper,

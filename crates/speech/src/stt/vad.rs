@@ -145,18 +145,9 @@ mod tests {
         ));
     }
 
-    fn repository() -> PathBuf {
-        match std::env::var_os("TOMORI_SPEECH_ROOT") {
-            Some(root) => PathBuf::from(root),
-            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        }
-    }
-
-    /// The LibriSpeech clips that come with the Whisper model, at 16 kHz.
-    fn clip(name: &str) -> Vec<i16> {
-        let path = repository()
-            .join(".tools/asr/sherpa-onnx-whisper-small.en/test_wavs")
-            .join(name);
+    /// The LibriSpeech clip `name` from the `clips` that come with the Whisper model, at 16 kHz.
+    fn clip(clips: &Path, name: &str) -> Vec<i16> {
+        let path = clips.join(name);
         let wave = sherpa_onnx::Wave::read(path.to_str().unwrap()).expect("read the clip");
         assert_eq!(wave.sample_rate(), RATE as i32);
         wave.samples()
@@ -165,13 +156,29 @@ mod tests {
             .collect()
     }
 
-    /// Requires the Silero model and the Whisper model's test clips; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use models outside this checkout.
+    /// Skipped without the Silero model and the clips of the Whisper model the tests use; see [`crate::test_models`].
     #[test]
-    #[ignore = "requires the Silero voice activity model and the Whisper model"]
     fn hears_the_silence_between_two_clips() {
-        let mut vad = SileroVad::new(&SileroVadConfig::from_root(&repository())).unwrap();
-        let first = clip("0.wav");
-        let second = clip("1.wav");
+        use crate::{stt::WhisperConfig, test_models};
+
+        let root = test_models::root();
+        let config = SileroVadConfig::from_root(&root);
+        let clips = WhisperConfig::named(&root, test_models::WHISPER_MODEL)
+            .model
+            .join("test_wavs");
+        if !test_models::installed(
+            "the Silero voice activity model and the clips that come with the Whisper model",
+            &format!(
+                "bash scripts/fetch-asr-model.sh whisper {}",
+                test_models::WHISPER_MODEL
+            ),
+            &[&config.model, &clips],
+        ) {
+            return;
+        }
+        let mut vad = SileroVad::new(&config).unwrap();
+        let first = clip(&clips, "0.wav");
+        let second = clip(&clips, "1.wav");
         let gap = RATE as usize;
         let mut samples = first.clone();
         samples.extend(std::iter::repeat_n(0, gap));

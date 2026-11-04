@@ -447,19 +447,18 @@ mod tests {
         ));
     }
 
-    fn repository() -> PathBuf {
-        match std::env::var_os("TOMORI_SPEECH_ROOT") {
-            Some(root) => PathBuf::from(root),
-            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        }
-    }
-
-    /// Requires the punctuation model; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use a model outside this checkout.
+    /// Skipped without the punctuation model; see [`crate::test_models`].
     #[test]
-    #[ignore = "requires the punctuation model"]
     fn punctuates_with_the_real_model() {
-        let punctuator =
-            CnnBilstmPunctuator::new(&PunctuationConfig::from_root(&repository())).unwrap();
+        let config = PunctuationConfig::from_root(&crate::test_models::root());
+        if !crate::test_models::installed(
+            "the punctuation model",
+            "bash scripts/fetch-asr-model.sh",
+            &[&config.model],
+        ) {
+            return;
+        }
+        let punctuator = CnnBilstmPunctuator::new(&config).unwrap();
         let mut recognition = Recognition::spawn(Punctuated::new(
             Fixed("how are you i am fine thank you"),
             punctuator,
@@ -468,8 +467,7 @@ mod tests {
             transcribe(&mut recognition),
             "How are you? I am fine. Thank you."
         );
-        let punctuator =
-            CnnBilstmPunctuator::new(&PunctuationConfig::from_root(&repository())).unwrap();
+        let punctuator = CnnBilstmPunctuator::new(&config).unwrap();
         let mut recognition = Recognition::spawn(Punctuated::new(
             Fixed("can you explain why the build failed on the linux machine yesterday"),
             punctuator,
