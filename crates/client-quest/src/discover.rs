@@ -335,7 +335,7 @@ mod tests {
             attention_age: None,
         };
         assert!(
-            hint(&some, Some(&[space.clone()]))
+            hint(&some, Some(std::slice::from_ref(&space)))
                 .unwrap()
                 .starts_with("Join one")
         );
