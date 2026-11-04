@@ -7,7 +7,11 @@
 //! ([`discovery::browse`]), and, when given a server, lists the spaces on it the
 //! way the lobby does (connect and [`tomori_protocol::ClientMessage::ListSpaces`]). The
 //! address and space ids it prints are what `--server` and the spectator take.
-use std::time::{Duration, Instant};
+use std::{
+    fmt::Write,
+    sync::mpsc::RecvTimeoutError,
+    time::{Duration, Instant},
+};
 use tomori_client::{Client, Event, Options, discovery};
 use tomori_protocol::{ClientMessage, ServerMessage, SpaceSummary};
 
@@ -18,10 +22,16 @@ const SPACES_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Browse for servers, then list the spaces on `server` if one is given.
 pub fn run(server: Option<String>) -> anyhow::Result<()> {
-    let servers = browse_for(BROWSE_FOR);
-    print_servers(&servers);
+    let browser = discovery::browse().map(|browser| move |timeout| browser.recv_timeout(timeout));
+    let servers = found(browser, BROWSE_FOR);
+    print!("{}", servers_text(&servers));
     match server {
-        Some(address) => list_spaces(&address)?,
+        Some(address) => list_spaces(&address, SPACES_TIMEOUT).map(|spaces| {
+            print!("{}", spaces_text(&spaces));
+            if !spaces.is_empty() {
+                eprintln!("Join one with: tomori --spectator --server ADDRESS --space SPACE_ID");
+            }
+        }),
         None => {
             if servers.compatible().is_empty() {
                 eprintln!(
@@ -32,109 +42,256 @@ pub fn run(server: Option<String>) -> anyhow::Result<()> {
                     "To list the spaces on one of these, pass it: tomori discover --server ADDRESS"
                 );
             }
+            Ok(())
         }
     }
-    Ok(())
 }
 
-/// Browse for servers, folding the events into a list for `duration`.
-fn browse_for(duration: Duration) -> discovery::Servers {
-    let mut servers = discovery::Servers::new();
-    let browser = match discovery::browse() {
-        Ok(browser) => browser,
+/// The servers `browser` finds in `duration`, or none if it could not browse.
+fn found<E: std::fmt::Display>(
+    browser: Result<impl FnMut(Duration) -> Result<discovery::Event, RecvTimeoutError>, E>,
+    duration: Duration,
+) -> discovery::Servers {
+    match browser {
+        Ok(next) => collect(next, duration),
         Err(error) => {
             eprintln!("Cannot browse for servers: {error}");
-            return servers;
+            discovery::Servers::new()
         }
-    };
+    }
+}
+
+/// Fold the events that `next` gives, waiting at most the time it is given, into a list, for `duration`.
+fn collect(
+    mut next: impl FnMut(Duration) -> Result<discovery::Event, RecvTimeoutError>,
+    duration: Duration,
+) -> discovery::Servers {
+    let mut servers = discovery::Servers::new();
     let deadline = Instant::now() + duration;
-    loop {
-        let timeout = deadline.saturating_duration_since(Instant::now());
-        if timeout == Duration::ZERO {
-            break;
-        }
-        match browser.recv_timeout(timeout) {
-            Ok(event) => servers.apply(event),
-            Err(_) => break, // The deadline passed.
-        };
+    // Waiting no longer once the deadline has passed.
+    while let Ok(event) = next(deadline.saturating_duration_since(Instant::now())) {
+        servers.apply(event);
     }
     servers
 }
 
-fn print_servers(servers: &discovery::Servers) {
+fn servers_text(servers: &discovery::Servers) -> String {
     if servers.compatible().is_empty() && servers.incompatible().is_empty() {
-        println!("No servers found on the network.");
-        return;
+        return "No servers found on the network.\n".to_owned();
     }
-    println!("Servers:");
+    let mut text = "Servers:\n".to_owned();
     for server in servers.compatible() {
         let address = server
             .address()
             .unwrap_or_else(|| format!("{}:{}", server.host, server.port));
-        println!("  {name:<24} {address}", name = server.name);
+        let _ = writeln!(text, "  {name:<24} {address}", name = server.name);
     }
     for server in servers.incompatible() {
-        println!(
+        let _ = writeln!(
+            text,
             "  {name:<24} (protocol {:?}, this build is {})",
             server.protocol,
             tomori_protocol::PROTOCOL_VERSION,
             name = server.name
         );
     }
+    text
 }
 
-/// Connect to `address` and print its spaces, with the id to join by.
-fn list_spaces(address: &str) -> anyhow::Result<()> {
+/// Connect to `address` and ask for its spaces, waiting at most `timeout` for them.
+fn list_spaces(address: &str, timeout: Duration) -> anyhow::Result<Vec<SpaceSummary>> {
     let mut options = Options::new(address, "discover", "discover");
     // Listing needs no token: it connects as a visitor, over TLS to a server that admits by token, or plain HTTP to one in `--auth open` mode.
     options.transport = tomori_client::Transport::Automatic { pin: None };
-    let client = Client::connect(options)?;
-    // The connection thread sends Hello and reconnects; only the space list is wanted.
-    if let Err(error) = client.send(ClientMessage::ListSpaces) {
-        client.close();
-        anyhow::bail!("Cannot send to {address}: {error}");
-    }
-    let deadline = Instant::now() + SPACES_TIMEOUT;
+    Client::connect(options)
+        .map_err(anyhow::Error::from)
+        .and_then(|client| {
+            // The connection thread sends Hello and reconnects; only the space list is wanted. A new client queues it until it connects.
+            client
+                .send(ClientMessage::ListSpaces)
+                .expect("a new client queues messages");
+            let spaces = wait_for_spaces(&client, address, timeout);
+            client.close();
+            spaces
+        })
+}
+
+/// The spaces `client` is sent, or why there are none.
+fn wait_for_spaces(
+    client: &Client,
+    address: &str,
+    timeout: Duration,
+) -> anyhow::Result<Vec<SpaceSummary>> {
+    let deadline = Instant::now() + timeout;
     let mut connected = false;
     loop {
         // Drain every event that is waiting, which stops the search.
         while let Some(event) = client.try_event() {
-            match event {
-                Event::State(state) => connected = state.is_connected(),
-                Event::Message(ServerMessage::Spaces { spaces }) => {
-                    print_spaces(&spaces);
-                    client.close();
-                    return Ok(());
-                }
-                Event::Message(ServerMessage::Error { error, .. }) => {
-                    client.close();
-                    anyhow::bail!("The server at {address} refused: {error}");
-                }
-                _ => {}
+            if let Some(answer) = answer(event, &mut connected, address) {
+                return answer;
             }
         }
         if Instant::now() >= deadline {
-            client.close();
-            if connected {
-                anyhow::bail!("The server at {address} sent no space list");
-            }
-            anyhow::bail!("The server at {address} did not answer in time");
+            anyhow::bail!(unanswered(address, connected));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn print_spaces(spaces: &[SpaceSummary]) {
-    if spaces.is_empty() {
-        println!("The server has no spaces yet.");
-        return;
+/// What `event` says about the spaces on the server at `address`, if anything, noting whether it is `connected`.
+fn answer(
+    event: Event,
+    connected: &mut bool,
+    address: &str,
+) -> Option<anyhow::Result<Vec<SpaceSummary>>> {
+    match event {
+        Event::State(state) => {
+            *connected = state.is_connected();
+            None
+        }
+        Event::Message(ServerMessage::Spaces { spaces }) => Some(Ok(spaces)),
+        Event::Message(ServerMessage::Error { error, .. }) => Some(Err(anyhow::anyhow!(
+            "The server at {address} refused: {error}"
+        ))),
+        _ => None,
     }
-    println!("Spaces:");
+}
+
+/// Why no spaces came from the server at `address`, given whether it was `connected`.
+fn unanswered(address: &str, connected: bool) -> String {
+    if connected {
+        format!("The server at {address} sent no space list")
+    } else {
+        format!("The server at {address} did not answer in time")
+    }
+}
+
+fn spaces_text(spaces: &[SpaceSummary]) -> String {
+    if spaces.is_empty() {
+        return "The server has no spaces yet.\n".to_owned();
+    }
+    let mut text = "Spaces:\n".to_owned();
     for space in spaces {
-        println!(
+        let _ = writeln!(
+            text,
             "  {:<12} {:<24} {}{} participant(s)",
             space.id, space.title, space.backend, space.participants
         );
     }
-    eprintln!("Join one with: tomori --spectator --server ADDRESS --space SPACE_ID");
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Server;
+    use std::net::SocketAddr;
+    use tomori_client::{ConnectionState, Disconnect};
+
+    fn server(name: &str, protocol: u32, addresses: Vec<SocketAddr>) -> discovery::Server {
+        discovery::Server {
+            instance: name.to_owned(),
+            name: name.to_owned(),
+            host: format!("{}.local.", name.to_lowercase()),
+            addresses,
+            port: 8765,
+            protocol: Some(protocol),
+            spaces: None,
+            participants: None,
+            waiting: None,
+            problems: None,
+            replies: None,
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn servers_found_while_browsing_are_listed_by_address() {
+        let (sender, events) = std::sync::mpsc::channel();
+        let current = tomori_protocol::PROTOCOL_VERSION;
+        let address = "10.0.0.2:8765".parse().unwrap();
+        for event in [
+            discovery::Event::Found(server("Studio", current, vec![address])),
+            discovery::Event::Found(server("Attic", current, vec![])),
+            discovery::Event::Incompatible(server("Old", current + 1, vec![address])),
+        ] {
+            sender.send(event).unwrap();
+        }
+        let browser: Result<_, &str> = Ok(move |timeout| events.recv_timeout(timeout));
+        let servers = found(browser, Duration::from_millis(50));
+        assert_eq!(
+            servers_text(&servers),
+            format!(
+                "Servers:\n  Attic                    attic.local.:8765\n  Studio                   10.0.0.2:8765\n  Old                      (protocol Some({}), this build is {current})\n",
+                current + 1
+            )
+        );
+    }
+
+    #[test]
+    fn nothing_is_listed_when_browsing_finds_nothing_or_cannot_browse() {
+        let none =
+            Err::<fn(Duration) -> Result<discovery::Event, RecvTimeoutError>, _>("no multicast");
+        let servers = found(none, BROWSE_FOR);
+        assert_eq!(servers_text(&servers), "No servers found on the network.\n");
+    }
+
+    #[test]
+    fn a_servers_spaces_are_listed_with_the_ids_to_join_by() {
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        assert!(
+            list_spaces(&server.address(), SPACES_TIMEOUT)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(spaces_text(&[]), "The server has no spaces yet.\n");
+        let space = bea.create_space("Studio", || {});
+        let spaces = list_spaces(&server.address(), SPACES_TIMEOUT).unwrap();
+        assert_eq!(
+            spaces_text(&spaces),
+            format!(
+                "Spaces:\n  {:<12} Studio                   fake1 participant(s)\n",
+                space.id
+            )
+        );
+    }
+
+    #[test]
+    fn a_server_that_does_not_answer_or_refuses_is_reported() {
+        let error = list_spaces("127.0.0.1:9", Duration::from_millis(200)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The server at 127.0.0.1:9 did not answer in time"
+        );
+        assert_eq!(
+            unanswered("host:1", true),
+            "The server at host:1 sent no space list"
+        );
+        let mut connected = false;
+        let refused = answer(
+            Event::Message(ServerMessage::Error {
+                error: "pair to join".into(),
+                space: None,
+            }),
+            &mut connected,
+            "host:1",
+        );
+        assert_eq!(
+            refused.unwrap().unwrap_err().to_string(),
+            "The server at host:1 refused: pair to join"
+        );
+        assert!(
+            answer(
+                Event::State(ConnectionState::Disconnected {
+                    reason: Disconnect::Timeout,
+                    retry_in: Duration::from_secs(1),
+                }),
+                &mut connected,
+                "host:1"
+            )
+            .is_none()
+        );
+        assert!(!connected);
+    }
 }
