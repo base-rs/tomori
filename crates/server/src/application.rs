@@ -121,8 +121,8 @@ async fn read_form<B: ReadableBody>(mut body: B, cancellation: &Cancellation) ->
                     return Some(bytes);
                 }
             }
-            BodyFrame::Headers { end: false, .. } => {}
-            BodyFrame::Headers { end: true, .. } | BodyFrame::End => return Some(bytes),
+            // Trailers follow all the data, so the form is whole.
+            BodyFrame::Headers { .. } | BodyFrame::End => return Some(bytes),
         }
     }
 }
@@ -461,5 +461,44 @@ impl Handler for Application {
                 ResponseBody::fixed("Not found.\n"),
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request body with nothing in it.
+    struct Nothing;
+
+    impl ReadableBody for Nothing {
+        type Data = Vec<u8>;
+        type Error = std::io::Error;
+
+        fn close(&mut self, _error: Option<Self::Error>) {}
+
+        async fn read(&mut self, _: &Cancellation) -> Result<BodyFrame<Vec<u8>>, Self::Error> {
+            Ok(BodyFrame::End)
+        }
+    }
+
+    #[test]
+    fn a_fixed_body_is_read_once_and_is_empty_once_read() {
+        let mut body = ResponseBody::<Nothing>::fixed("ok");
+        assert!(!body.is_empty());
+        let read = |body: &mut ResponseBody<Nothing>| {
+            futures_lite::future::block_on(body.read(&Cancellation::new())).unwrap()
+        };
+        let BodyFrame::Data { data, end: true } = read(&mut body) else {
+            unreachable!("a fixed body is one frame");
+        };
+        assert_eq!(data, b"ok");
+        assert!(body.is_empty());
+        let BodyFrame::End = read(&mut body) else {
+            unreachable!("a fixed body read again has ended");
+        };
+        let mut nothing = Nothing;
+        assert!(futures_lite::future::block_on(nothing.read(&Cancellation::new())).is_ok());
+        nothing.close(None);
     }
 }
