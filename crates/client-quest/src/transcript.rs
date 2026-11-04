@@ -1612,6 +1612,7 @@ mod tests {
         assert_eq!(tools("plain words"), None);
         assert_eq!(tools("[Bash: failed]"), None);
         assert_eq!(tools("[Bash]"), None);
+        assert_eq!(tools("[Bash: done"), None);
         assert_eq!(tools("[Bash: done]"), Some(vec![("Bash".into(), true)]));
     }
 
@@ -1812,6 +1813,12 @@ mod tests {
         let mut state = State::default();
         let rows = layout(&space, &problem, &mut state, 30);
         assert!(rows[2].plain().ends_with('…'));
+        let short = Input {
+            problem: Some("! Lost".into()),
+            ..input()
+        };
+        let rows = layout(&space, &short, &mut state, 30);
+        assert_eq!(rows[1].plain().trim_end(), "! Lost");
         assert!(body(&space, &input(), &state, 30, 0).is_empty());
         // A card too tall for the room left keeps its title, focused or not.
         let mut tall = space.clone();
