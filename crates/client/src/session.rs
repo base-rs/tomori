@@ -389,10 +389,7 @@ async fn keepalive(context: &Context<'_>, received: &Cell<Instant>) -> Disconnec
             return Disconnect::Timeout;
         }
         if now >= ping_at && now >= last + keepalive.interval {
-            context
-                .shared
-                .outbox
-                .keepalive(ClientMessage::Ping { nonce });
+            context.shared.outbox.ping(nonce);
             nonce = nonce.wrapping_add(1);
             pinged = Some(now);
         }
@@ -454,10 +451,7 @@ fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disco
                 return Err(Disconnect::Protocol("unexpected second welcome".into()));
             }
             // Keepalive is handled here and not reported: receiving it already counted as liveness.
-            ServerMessage::Ping { nonce } => context
-                .shared
-                .outbox
-                .keepalive(ClientMessage::Pong { nonce }),
+            ServerMessage::Ping { nonce } => context.shared.outbox.pong(nonce),
             ServerMessage::Pong { .. } => {}
             message => {
                 match &message {
