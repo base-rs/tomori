@@ -968,14 +968,13 @@ impl Scene {
                             }
                             _ => slot as f32,
                         };
+                        // Of equals, the first and so lowest slot is taken.
                         tier(*a)
                             .cmp(&tier(*b))
                             .then_with(|| score(*a).total_cmp(&score(*b)))
-                            .then_with(|| a.cmp(b))
                     })
             });
-            // 64 workers + 64 departures + 64 absent parents fit exactly.
-            let Some(slot) = slot else { continue };
+            let slot = slot.expect("64 workers + 64 departures + 64 absent parents fit exactly");
             occupied[slot] = true;
             self.slots.insert(id.to_owned(), slot);
         }
@@ -983,28 +982,18 @@ impl Scene {
             if self.workers.contains_key(id) {
                 continue;
             }
-            let Some(&slot) = self.slots.get(id) else {
-                continue;
-            };
-            let Some(parent_id) = node.parent_id.as_deref() else {
-                continue;
-            };
+            // Every node and every parent it names but the root was given a slot above, or kept one as a worker.
+            let slot = self.slots[id];
+            let parent_id = node.parent_id.as_deref().expect("nodes name their parent");
             let origin = if parent_id == root {
                 CENTER
-            } else if let Some(&parent_slot) = self.slots.get(parent_id) {
-                slot_position(parent_slot)
             } else {
-                continue;
+                slot_position(self.slots[parent_id])
             };
             // A cached missing-parent slot preserves provenance, but is not an
-            // observed station from which an outbound event can be shown.
-            let launch = launch_new
-                && (parent_id == root
-                    || nodes.contains_key(parent_id)
-                    || self
-                        .workers
-                        .get(parent_id)
-                        .is_some_and(|parent| parent.retired.is_none()));
+            // observed station from which an outbound event can be shown. A
+            // worker this update left out has already begun to leave.
+            let launch = launch_new && (parent_id == root || nodes.contains_key(parent_id));
             let seed = (stable_hash(id) % 65536) as f32 / 65536.0 * std::f32::consts::TAU;
             let anchor = slot_position(slot);
             let particles = if !launch {
@@ -1079,12 +1068,12 @@ impl Scene {
 
 fn depth<'a>(mut id: &'a str, root: &str, nodes: &BTreeMap<&str, &'a Node>) -> usize {
     let mut depth = 0;
+    // An absent parent ends the chain.
     while id != root && depth < MAX_NODES {
-        let Some(node) = nodes.get(id) else { break };
-        depth += 1;
-        let Some(parent) = node.parent_id.as_deref() else {
+        let Some(parent) = nodes.get(id).and_then(|node| node.parent_id.as_deref()) else {
             break;
         };
+        depth += 1;
         id = parent;
     }
     depth
@@ -1229,8 +1218,9 @@ fn flock_offset(i: usize, seed: f32, time: f64, state: State) -> Vec3 {
         State::Running => (Vec3::new(0.13, 0.13, 0.11), 0.85),
         State::Waiting => (Vec3::new(0.16, 0.065, 0.10), 0.22),
         State::Idle => (Vec3::new(0.12, 0.09, 0.09), 0.15),
-        State::Completed => (Vec3::new(0.105, 0.08, 0.075), 0.08),
-        State::Error => (Vec3::new(0.14, 0.13, 0.10), 0.48),
+        State::Completed | State::Error => {
+            unreachable!("a terminal worker gathers into its terminal shape instead")
+        }
         State::Stopped => (Vec3::new(0.11, 0.08, 0.09), 0.05),
         State::Unknown => (Vec3::new(0.13, 0.10, 0.13), 0.12),
     };
@@ -1297,6 +1287,47 @@ mod tests {
         for _ in 0..150 {
             scene.update(Some("root"), workspace, 1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn a_partial_update_adds_no_worker_beyond_the_limit() {
+        let mut scene = Scene::new();
+        let full = workspace(
+            (0..MAX_NODES)
+                .map(|i| node(&format!("w{i}"), "root"))
+                .collect(),
+        );
+        settle(&mut scene, &full);
+        let partial = Workspace {
+            truncated: true,
+            ..workspace(vec![node("late", "root")])
+        };
+        scene.update(Some("root"), &partial, 1.0 / 60.0);
+        assert!(!scene.workers.contains_key("late"));
+        assert_eq!(scene.stations().len(), MAX_NODES);
+    }
+
+    #[test]
+    fn a_cube_that_is_not_valid_geometry_is_not_drawn() {
+        let mut cubes = Vec::new();
+        for position in [Vec3::NAN, Vec3::splat(1000.0)] {
+            push_cube(
+                &mut cubes,
+                position,
+                Vec3::splat(0.1),
+                Vec3::ONE,
+                Quat::IDENTITY,
+            );
+        }
+        assert!(cubes.is_empty());
+        push_cube(
+            &mut cubes,
+            Vec3::ZERO,
+            Vec3::splat(0.1),
+            Vec3::ONE,
+            Quat::IDENTITY,
+        );
+        assert_eq!(cubes.len(), 1);
     }
 
     fn assert_terminal_form(worker: &Worker) {
@@ -3540,6 +3571,15 @@ mod space_tests {
     }
 
     #[test]
+    fn a_long_error_is_cut_on_a_character_boundary() {
+        let mut state = space(vec![]);
+        state.error = Some(format!("a{}", "é".repeat(2048)));
+        let workspace = Workspace::from_space(&state, true);
+        assert_eq!(workspace.error.as_ref().map(String::len), Some(4095));
+        assert!(workspace.valid());
+    }
+
+    #[test]
     fn a_space_without_workers_is_an_empty_trusted_root() {
         let state = space(vec![]);
         let mut workers = Workers::default();
@@ -3652,7 +3692,9 @@ mod space_tests {
         let at = |target: Vec3| Ray::new(eye, target - eye);
         assert_eq!(scene.targets().len(), 2);
         // Pointing tests what the targets describe.
-        for ray in [at(a), at(b), at(Vec3::ZERO), at((a + b) / 2.0)] {
+        // Including a ray through both, which points at the nearer.
+        let through = Ray::new(a + (a - b), b - a);
+        for ray in [at(a), at(b), at(Vec3::ZERO), at((a + b) / 2.0), through] {
             let expected = ray
                 .and_then(|ray| crate::pointing::nearest(&ray, &scene.targets()))
                 .map(|hit| hit.key);
@@ -3679,7 +3721,8 @@ mod space_tests {
         let plain = size(&scene);
         scene.point(at(a));
         show(&mut scene, &mut workers, Some((&both, true)));
-        assert!(size(&scene) > plain * 1.05, "{} {plain}", size(&scene));
+        let pointed = size(&scene);
+        assert!(pointed > plain * 1.05, "{pointed} {plain}");
         assert!(scene.cubes().iter().all(Cube::valid));
 
         // A worker that leaves can no longer be pointed at.
