@@ -110,9 +110,11 @@ fn tail(heard: &str, rows: usize, style: Style) -> Vec<Row> {
     );
     if lines.len() > rows {
         lines.drain(..lines.len() - rows);
-        if let Some(first) = lines.first_mut() {
-            first[0] = ('…', style);
-        }
+        // What was cut is marked at the start of what is left, if anything is.
+        lines
+            .iter_mut()
+            .take(1)
+            .for_each(|first| first[0] = ('…', style));
     }
     lines.into_iter().map(Row::new).collect()
 }
@@ -383,6 +385,40 @@ mod tests {
         assert!(canvas.rows[0].meter.is_none());
     }
 
+    #[test]
+    fn answering_and_queued_words_say_so_and_positions_have_their_ordinals() {
+        let sending = canvas(
+            &Phase::Sending {
+                heard: "yes".into(),
+                answering: true,
+            },
+            None,
+            0.0,
+        );
+        assert!(text(&sending).starts_with("Answering…"));
+        let queued = canvas(
+            &Phase::Sent {
+                answered: false,
+                position: None,
+            },
+            None,
+            0.0,
+        );
+        assert!(text(&queued).starts_with("✓ Queued"));
+        assert_eq!(
+            [1, 2, 3, 4, 11, 22].map(ordinal),
+            ["1st", "2nd", "3rd", "4th", "11th", "22nd"]
+        );
+    }
+
+    #[test]
+    fn a_still_frame_keeps_the_anchor_where_it_was() {
+        let mut anchor = Anchor::default();
+        anchor.update(Vec3::ZERO, 0.1);
+        let (position, _) = anchor.update(Vec3::new(0.1, 0.0, 0.0), 0.0);
+        assert_eq!(position, Vec3::ZERO);
+    }
+
     fn canvas_without_limit() -> Canvas {
         canvas(&recording(102, "and then"), None, 1.0)
     }
@@ -401,11 +437,7 @@ mod tests {
         );
         assert_eq!(warning(Duration::from_secs(400), None), (RED, None));
         let warned = canvas(&recording(272, ""), limit, 0.0);
-        assert!(
-            text(&warned).ends_with("0:28 left: release X"),
-            "{}",
-            text(&warned)
-        );
+        assert!(text(&warned).ends_with("0:28 left: release X"));
         assert_eq!(warned.rows[0].meter.unwrap().1, AMBER);
     }
 
