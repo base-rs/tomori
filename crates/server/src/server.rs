@@ -221,6 +221,13 @@ impl Server {
         self
     }
 
+    /// Offer `environments` to clients, and bind spaces only to them, in place of the ones this build has, so that tests can change a space between several. See `design/environments.md`.
+    #[cfg(feature = "fake")]
+    pub fn with_environments(self, environments: Vec<tomori_protocol::EnvironmentInfo>) -> Self {
+        self.hub.set_environments(environments);
+        self
+    }
+
     /// Use `roots` unless roots were already given.
     #[cfg(feature = "fake")]
     pub(crate) fn with_default_workspace_roots(mut self, roots: WorkspaceRoots) -> Self {

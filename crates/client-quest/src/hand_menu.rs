@@ -164,7 +164,7 @@ impl Visibility {
 /// A section of the hand menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
-    /// The space's title, mode and speech, this headset's settings, and leaving; shown inside a space.
+    /// The space's title, mode, speech and environment, this headset's settings, and leaving; shown inside a space.
     Space,
     /// Asking whether to leave the space, opened from [`Section::Space`].
     Leave,
@@ -220,6 +220,8 @@ pub enum MenuKey {
     Mode(String),
     /// Switch the space's speech between brief and full, for everyone.
     Speech,
+    /// Change the space's environment to the one with this id, for everyone, as an owner.
+    Environment(String),
     /// Mute or unmute spoken replies on this headset.
     Mute,
     /// Turn the status pill on or off on this headset.
@@ -300,6 +302,11 @@ pub struct SpaceInfo {
     /// The current mode's name, even when it is not one Tomori can switch to.
     pub mode: Option<String>,
     pub speech: tomori_protocol::SpeechSetting,
+    /// The name of the space's environment, or `None` from an older server, which does not name one.
+    pub environment: Option<String>,
+    /// The environments an owner can change the space to, in order: id, name, and whether it is the current one. Empty
+    /// for anyone else, and from a server that does not change environments. See `design/environments.md`.
+    pub environments: Vec<(String, String, bool)>,
     /// How many are here, and away.
     pub here: String,
 }
@@ -333,6 +340,8 @@ pub enum Choice {
     Mode(String),
     /// Switch the space's speech between brief and full.
     Speech,
+    /// Change the space's environment to this one, for everyone.
+    Environment(String),
     /// Mute or unmute spoken replies here.
     Mute,
     /// Turn the status pill on or off here.
@@ -490,6 +499,28 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                             MenuKind::Text,
                             said.split(':').next().unwrap_or(said).into(),
                         );
+                    }
+                }
+                if let Some(environment) = &space.environment {
+                    text(
+                        &mut items,
+                        MenuKind::Heading,
+                        "Environment, for everyone".into(),
+                    );
+                    // Only an owner changes it, to one of those the server offers; anyone else reads it.
+                    if space.environments.is_empty() {
+                        text(&mut items, MenuKind::Text, environment.clone());
+                    }
+                    for (id, name, current) in &space.environments {
+                        if *current {
+                            text(&mut items, MenuKind::Text, format!("* {name} (now)"));
+                        } else {
+                            button(
+                                &mut items,
+                                MenuKey::Environment(id.clone()),
+                                format!("  {name}"),
+                            );
+                        }
                     }
                 }
                 text(&mut items, MenuKind::Heading, "On this headset".into());
@@ -781,6 +812,7 @@ impl HandMenu {
             }
             MenuKey::Mode(id) => Some(Choice::Mode(id.clone())),
             MenuKey::Speech => Some(Choice::Speech),
+            MenuKey::Environment(id) => Some(Choice::Environment(id.clone())),
             MenuKey::Mute => Some(Choice::Mute),
             MenuKey::Pill => Some(Choice::Pill),
             MenuKey::Layer(layer) => {
@@ -1210,6 +1242,8 @@ mod tests {
                 ],
                 mode: Some("build".into()),
                 speech: tomori_protocol::SpeechSetting::Brief,
+                environment: Some("Sky".into()),
+                environments: Vec::new(),
                 here: "2 here".into(),
             }),
             people: vec![
@@ -1273,6 +1307,8 @@ mod tests {
                 "  plan",
                 "Speech, for everyone",
                 "Brief: switch to full",
+                "Environment, for everyone",
+                "Sky",
                 "On this headset",
                 "Spoken replies: on",
                 "Status pill: on",
@@ -1317,6 +1353,58 @@ mod tests {
         );
         assert!(texts(&rows).contains(&"* build (now)"));
         assert!(texts(&rows).contains(&"Brief"));
+    }
+
+    #[test]
+    fn only_an_owner_is_offered_the_space_s_environments() {
+        let mut owner = in_space(ConnectionRole::Owner);
+        // A server that changes environments offers its environments to an owner, the current one marked.
+        let space = owner.space.as_mut().unwrap();
+        space.environments = vec![
+            ("sky".into(), "Sky".into(), true),
+            ("minimal".into(), "Grid".into(), false),
+        ];
+        let rows = items(Some(Section::Space), &owner);
+        let shown = texts(&rows);
+        let heading = shown
+            .iter()
+            .position(|text| *text == "Environment, for everyone")
+            .unwrap();
+        assert_eq!(
+            shown[heading..heading + 4],
+            [
+                "Environment, for everyone",
+                "* Sky (now)",
+                "  Grid",
+                "On this headset"
+            ]
+        );
+        // Only the others can be chosen.
+        assert_eq!(rows[heading + 1].kind, MenuKind::Text);
+        assert_eq!(
+            rows[heading + 2].key,
+            MenuKey::Environment("minimal".into())
+        );
+        let mut menu = HandMenu::default();
+        assert_eq!(
+            menu.choose(&MenuKey::Environment("minimal".into())),
+            Some(Choice::Environment("minimal".into()))
+        );
+        // Anyone else reads the environment and chooses none.
+        let collaborator = in_space(ConnectionRole::Collaborator);
+        let rows = items(Some(Section::Space), &collaborator);
+        assert!(texts(&rows).contains(&"Sky"));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.key, MenuKey::Environment(_)))
+        );
+        // An older server names no environment, so none is shown.
+        let mut older = in_space(ConnectionRole::Owner);
+        older.space.as_mut().unwrap().environment = None;
+        assert!(
+            !texts(&items(Some(Section::Space), &older)).contains(&"Environment, for everyone")
+        );
     }
 
     #[test]

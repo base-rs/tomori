@@ -148,6 +148,12 @@ pub enum ClientMessage {
     SetInstructions {
         text: String,
     },
+    /// Bind the current space to `environment`, one of those the server offers in `Welcome`, for everyone in it. Owners
+    /// only. Sent only to a server whose [`crate::SpaceState::environment_changes`] is set. See
+    /// `design/environments.md`.
+    SetEnvironment {
+        environment: String,
+    },
     /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
     PairBegin {
         commitment: String,
@@ -354,6 +360,13 @@ mod tests {
             })
             .unwrap(),
             serde_json::json!({"type": "set_instructions", "text": "Mind the docs."})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMessage::SetEnvironment {
+                environment: "sky".into()
+            })
+            .unwrap(),
+            serde_json::json!({"type": "set_environment", "environment": "sky"})
         );
         let create: ClientMessage = serde_json::from_value(serde_json::json!({
             "type": "create_space", "title": "t", "backend": "opencode", "directory": "/tmp",

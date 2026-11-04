@@ -229,7 +229,7 @@ pub struct Hub {
     /// The directories a space may run in, sent to clients in `Welcome` so they can choose one without typing a path.
     roots: RwLock<Vec<WorkspaceRoot>>,
     /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
-    environments: Vec<EnvironmentInfo>,
+    environments: RwLock<Vec<EnvironmentInfo>>,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
@@ -1000,7 +1000,7 @@ impl Hub {
             jobs,
             slots,
             roots: RwLock::new(roots),
-            environments: environments::offered(),
+            environments: RwLock::new(environments::offered()),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
@@ -1021,6 +1021,23 @@ impl Hub {
             .roots
             .write()
             .expect("workspace roots are never left poisoned") = roots;
+    }
+
+    /// Offer `environments` in place of the ones this build has, as in [`crate::Server::with_environments`].
+    #[cfg(feature = "fake")]
+    pub(crate) fn set_environments(&self, environments: Vec<EnvironmentInfo>) {
+        *self
+            .environments
+            .write()
+            .expect("environments are never left poisoned") = environments;
+    }
+
+    /// The environments a space may be bound to.
+    fn environments(&self) -> Vec<EnvironmentInfo> {
+        self.environments
+            .read()
+            .expect("environments are never left poisoned")
+            .clone()
     }
 
     /// Pair devices with this setup; see `design/security.md`.
@@ -1744,7 +1761,7 @@ impl Hub {
             role,
             backends,
             roots,
-            environments: self.environments.clone(),
+            environments: self.environments(),
             utterance_limit: self
                 .transcriber
                 .utterance_limit()
@@ -1821,7 +1838,7 @@ impl Hub {
                     return;
                 }
                 let environment =
-                    match environments::choose(&self.environments, environment.as_deref()) {
+                    match environments::choose(&self.environments(), environment.as_deref()) {
                         Ok(environment) => environment,
                         Err(error) => {
                             state.error(participant, error);
@@ -2440,6 +2457,41 @@ impl Hub {
                         record.wake();
                     }
                     state.touch_space(space);
+                }
+            }
+            ClientMessage::SetEnvironment { environment } => {
+                if let Err(error) =
+                    limits::check(&environment, limits::IDENTIFIER_BYTES, "environment")
+                {
+                    state.error(participant, error);
+                    return;
+                }
+                let environment =
+                    match environments::choose(&self.environments(), Some(&environment)) {
+                        Ok(environment) => environment,
+                        Err(error) => {
+                            state.error(participant, error);
+                            return;
+                        }
+                    };
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.model.set_environment(environment) {
+                    Ok(true) => {
+                        log::info!(
+                            "Space {space} is now in the {} environment.",
+                            record.model.environment
+                        );
+                        // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
+                        record.instruct(true);
+                        // Everyone in the space, and the lobby's listing, see the change; it is kept across a restart.
+                        state.touch_space(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    Ok(false) => {}
+                    Err(error) => state.error(participant, error),
                 }
             }
             ClientMessage::SetSpeech { speech } => {

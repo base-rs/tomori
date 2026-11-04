@@ -89,7 +89,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::Knock => watcher,
         ClientMessage::CreateSpace { .. }
         | ClientMessage::ListSessions { .. }
-        | ClientMessage::SetInstructions { .. } => owner,
+        | ClientMessage::SetInstructions { .. }
+        | ClientMessage::SetEnvironment { .. } => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
         | ClientMessage::UtteranceEnd { .. }
@@ -187,6 +188,9 @@ mod tests {
                 speech: tomori_protocol::SpeechSetting::Full,
             },
             ClientMessage::SetInstructions { text: "t".into() },
+            ClientMessage::SetEnvironment {
+                environment: "sky".into(),
+            },
             ClientMessage::PairBegin {
                 commitment: "c".into(),
             },
@@ -252,7 +256,10 @@ mod tests {
                     .to_owned()
             })
             .filter(|kind| {
-                kind != "create_space" && kind != "list_sessions" && kind != "set_instructions"
+                kind != "create_space"
+                    && kind != "list_sessions"
+                    && kind != "set_instructions"
+                    && kind != "set_environment"
             })
             .collect();
         assert_eq!(permitted(ConnectionRole::Collaborator), collaborating);

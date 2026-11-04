@@ -1,0 +1,143 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! Changing a space's environment after it is created. See `design/environments.md`.
+
+use std::sync::Arc;
+
+use tomori_backend::Event;
+use tomori_protocol::{Activity, ClientMessage, EnvironmentInfo, ServerMessage, SpaceState};
+use tomori_security::Grant;
+use tomori_server::Server;
+use tomori_server::fake::FakeBackend;
+use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
+
+/// Sky, and a second environment for a space to change to, since this build offers only Sky.
+fn offered() -> Vec<EnvironmentInfo> {
+    ["sky", "minimal"]
+        .into_iter()
+        .map(|id| EnvironmentInfo {
+            id: id.into(),
+            label: id.into(),
+        })
+        .collect()
+}
+
+fn server() -> TestServer {
+    TestServer::with_server(FakeBackend::new(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(offered())
+    })
+}
+
+fn join(client: &mut TestClient, id: &str) -> SpaceState {
+    client.send(&ClientMessage::Join {
+        space: id.to_owned(),
+    });
+    client.space(|state| state.id == id)
+}
+
+fn change(client: &mut TestClient, environment: &str) {
+    client.send(&ClientMessage::SetEnvironment {
+        environment: environment.to_owned(),
+    });
+}
+
+#[test]
+fn an_owner_changes_the_environment_for_everyone_in_the_space() {
+    let server = server();
+    let mut ada = server.connect("ada", "Ada");
+    // Outside a space there is nothing to change.
+    change(&mut ada, "minimal");
+    assert_eq!(ada.error(), "Join a space first.");
+    let space = ada.create_space("Shrine");
+    assert_eq!(space.environment, "sky");
+    assert!(space.environment_changes);
+    let mut bob = server.connect("bob", "Bob");
+    join(&mut bob, &space.id);
+    let mut cal = server.connect("cal", "Cal");
+    let session = server.backend.started()[0].clone();
+    let given = eventually(|| {
+        let given = session.log().instructions.len();
+        (given == 3).then_some(given)
+    });
+
+    // Something said before the change stays in the conversation.
+    ada.say("u1", "hello");
+    ada.space(|state| {
+        state
+            .messages
+            .iter()
+            .any(|message| message.text.contains("hello"))
+    });
+    change(&mut ada, "minimal");
+    // Everyone in the space switches, and the lobby lists the space in its new environment.
+    for client in [&ada, &bob] {
+        let state = client.space(|state| state.id == space.id && state.environment == "minimal");
+        assert!(
+            state
+                .messages
+                .iter()
+                .any(|message| message.text.contains("hello"))
+        );
+    }
+    cal.wait_for(|message| match message {
+        ServerMessage::Spaces { spaces } => spaces
+            .iter()
+            .any(|listed| listed.id == space.id && listed.environment == "minimal")
+            .then_some(()),
+        _ => None,
+    });
+    // Someone joining later arrives in it.
+    assert_eq!(join(&mut cal, &space.id).environment, "minimal");
+    // The agent is given every layer again, the environment's among them.
+    eventually(|| (session.log().instructions.len() == given + 3).then_some(()));
+    assert!(session.log().instructions[given..].contains(&("tomori-environment".to_owned(), None)));
+
+    // An environment the server does not offer is refused, naming those it does, and changes nothing.
+    change(&mut ada, "observe");
+    assert_eq!(ada.error(), "Unknown environment; available: sky, minimal.");
+    change(&mut ada, &"x".repeat(2048));
+    assert!(ada.error().contains("environment is too long"));
+    // Choosing the environment the space is in already changes nothing, and is not refused.
+    change(&mut ada, "minimal");
+    change(&mut ada, "sky");
+    bob.space(|state| state.environment == "sky");
+    eventually(|| (session.log().instructions.len() == given + 6).then_some(()));
+
+    // A closed space keeps the environment it had.
+    session.emit(Event::Closed { reason: None });
+    ada.space(|state| state.activity == Activity::Closed);
+    change(&mut ada, "minimal");
+    assert_eq!(ada.error(), "The agent session has stopped.");
+    assert_eq!(join(&mut cal, &space.id).environment, "sky");
+}
+
+#[test]
+fn only_owners_change_a_space_s_environment() {
+    let server = TestServer::with_tokens(true, |server| server.with_environments(offered()));
+    let (_, token) = server.issue("Ada", Grant::Owner);
+    let mut ada = server.connect_with_token("ada", "Ada", &token);
+    let space = ada.create_space("Owned");
+    let (_, token) = server.issue(
+        "Cal",
+        Grant::Collaborator {
+            space: space.id.clone(),
+        },
+    );
+    let mut cal = server.connect_with_token("cal", "Cal", &token);
+    let mut vic = TestClient::open(server.address);
+    vic.hello("vic", "Vic");
+    for (client, refusal) in [
+        (&mut cal, "Only owners can do that."),
+        (&mut vic, "Visitors can watch, but not act in a space."),
+    ] {
+        join(client, &space.id);
+        change(client, "minimal");
+        assert_eq!(client.error(), refusal);
+    }
+    // Nothing changed: the owner's next change is the first anyone sees.
+    change(&mut ada, "minimal");
+    let state = cal.space(|state| state.environment != "sky");
+    assert_eq!(state.environment, "minimal");
+    vic.space(|state| state.environment == "minimal");
+}

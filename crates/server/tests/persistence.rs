@@ -161,6 +161,48 @@ fn spaces_survive_a_restart() {
 }
 
 #[test]
+fn a_space_s_changed_environment_is_kept_across_a_restart() {
+    let state = State::new("environment");
+    let backend = FakeBackend::new();
+    // Sky and a second environment, since this build offers only Sky.
+    let start = |backend: &FakeBackend| {
+        let store = Arc::new(SpaceStore::open(&state.0).expect("the spaces open"));
+        TestServer::with_server(backend.clone(), move |backends| {
+            Server::new(backends, Arc::new(TextTranscriber::default()))
+                .with_environments(
+                    ["sky", "minimal"]
+                        .into_iter()
+                        .map(|id| tomori_protocol::EnvironmentInfo {
+                            id: id.into(),
+                            label: id.into(),
+                        })
+                        .collect(),
+                )
+                .with_kept_spaces(store)
+        })
+    };
+    let id = {
+        let server = start(&backend);
+        let mut ada = server.connect("ada", "Ada");
+        let id = ada.create_space("Shrine").id;
+        ada.send(&ClientMessage::SetEnvironment {
+            environment: "minimal".into(),
+        });
+        ada.space(|space| space.environment == "minimal");
+        id
+    };
+    assert_eq!(state.kept()[0].environment, "minimal");
+
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::ListSpaces);
+    assert_eq!(listed(&ada, &id).environment, "minimal");
+    ada.send(&ClientMessage::Join { space: id.clone() });
+    let restored = ada.space(|space| space.id == id && space.error.is_none());
+    assert_eq!(restored.environment, "minimal");
+}
+
+#[test]
 fn a_space_s_instructions_are_kept_and_given_again_after_a_restart() {
     let state = State::new("instructions");
     let backend = FakeBackend::new();
