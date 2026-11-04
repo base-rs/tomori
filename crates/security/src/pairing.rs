@@ -92,7 +92,14 @@ mod tests {
         assert_eq!(Nonce::parse(&nonce.to_hex()), Some(nonce));
         assert_eq!(nonce.commitment().len(), 64);
         assert_ne!(nonce.commitment(), nonce.to_hex());
-        for text in ["", "abc", &"g".repeat(64), &"0".repeat(63)] {
+        // A pair whose second digit is not hexadecimal is refused as well as one whose first is.
+        for text in [
+            "",
+            "abc",
+            &"g".repeat(64),
+            &"0g".repeat(32),
+            &"0".repeat(63),
+        ] {
             assert_eq!(Nonce::parse(text), None, "{text}");
         }
         assert!(!format!("{nonce:?}").contains(&nonce.to_hex()));
