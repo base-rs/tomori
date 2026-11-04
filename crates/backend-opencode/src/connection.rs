@@ -57,6 +57,13 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 /// concurrency, including every response body and page.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SNAPSHOTS: usize = 16;
+/// Sessions whose workers are discovered in the background at once, after a
+/// read ran out of time for them; each lists at most eight parents' children
+/// at once, and gives up on a listing OpenCode does not answer within
+/// [`api::FamilyWalk::LISTING_TIMEOUT`].
+const MAX_DISCOVERIES: usize = 4;
+/// Why a session's workers may be incomplete while they are discovered.
+const DISCOVERING: &str = "Still finding this session's workers, so some may be missing.";
 const MAX_RECONCILIATIONS: usize = 16;
 /// Bound worker identities without changing them, and bound display titles
 /// with a visible truncation marker.
@@ -158,9 +165,14 @@ impl QueuedEvent {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 pending.latest.take().and_then(|update| match update {
-                    PendingWorkerUpdate::Workers { epoch, workers } => (epoch
-                        >= watermark.load(Ordering::Acquire))
-                    .then_some(Event::WorkersChanged { workers }),
+                    PendingWorkerUpdate::Workers {
+                        epoch,
+                        workers,
+                        partial,
+                    } => (epoch >= watermark.load(Ordering::Acquire)).then_some(match partial {
+                        Some(message) => Event::WorkersPartial { workers, message },
+                        None => Event::WorkersChanged { workers },
+                    }),
                     PendingWorkerUpdate::Unavailable(message) => {
                         Some(Event::WorkersUnavailable { message })
                     }
@@ -178,7 +190,12 @@ pub(crate) struct PendingWorkers {
 }
 
 enum PendingWorkerUpdate {
-    Workers { epoch: u64, workers: Vec<Worker> },
+    /// Every worker known, and why they may not be all, if they may not.
+    Workers {
+        epoch: u64,
+        workers: Vec<Worker>,
+        partial: Option<String>,
+    },
     Unavailable(String),
 }
 
@@ -394,10 +411,11 @@ impl Events {
 
     /// Worker notifications use a separate one-element channel so a burst
     /// cannot fill the ordinary event channel or duplicate family snapshots.
-    fn try_deliver_workers(&self, workers: Vec<Worker>) -> bool {
+    fn try_deliver_workers(&self, workers: Vec<Worker>, partial: Option<String>) -> bool {
         self.publish_worker_update(PendingWorkerUpdate::Workers {
             epoch: self.worker_epoch.load(Ordering::Acquire),
             workers,
+            partial,
         })
     }
 
@@ -433,6 +451,20 @@ pub struct Registration {
     running: RunningState,
     /// Observed workers, keyed by child ID. Only a deletion event removes one.
     children: BTreeMap<String, Worker>,
+    /// When each worker was first observed, so that workers first reported
+    /// together are reported in the order they were found: oldest first.
+    order: HashMap<String, u64>,
+    found: u64,
+    /// Why the workers known may not be all the session has: while the rest
+    /// of its family is discovered in the background, or after that failed.
+    workers_partial: Option<String>,
+    /// The rest of the family, to be walked once a background discovery can
+    /// start, and the cancellation of the one running.
+    discovery: Option<api::FamilyWalk>,
+    discovery_in_flight: Option<Cancellation>,
+    /// How many discoveries have started, so that the result of one stopped
+    /// since is told from the one running.
+    discoveries: u64,
     /// Child deletions observed before the initial snapshot was installed.
     initial_deletions: HashSet<String>,
     /// Deletions observed while a snapshot is in flight; its listing may
@@ -569,6 +601,12 @@ impl Registration {
                 seen: Mutex::new(HashSet::new()),
                 running: RunningState::Unknown,
                 children: BTreeMap::new(),
+                order: HashMap::new(),
+                found: 0,
+                workers_partial: None,
+                discovery: None,
+                discovery_in_flight: None,
+                discoveries: 0,
                 initial_deletions: HashSet::new(),
                 snapshot_deletions: HashSet::new(),
                 snapshot_deletions_overflow: false,
@@ -642,10 +680,92 @@ impl Registration {
                 self.mark_workers_incomplete();
                 return Ok(());
             } else {
-                self.children.insert(worker.id.clone(), worker);
+                self.insert_child(worker);
             }
         }
         Ok(())
+    }
+
+    /// Observe `worker`, which was not known.
+    fn insert_child(&mut self, worker: Worker) {
+        self.found += 1;
+        self.order.insert(worker.id.clone(), self.found);
+        self.children.insert(worker.id.clone(), worker);
+    }
+
+    /// Stop observing the worker `id`, returning whether it was known.
+    fn remove_child(&mut self, id: &str) -> bool {
+        self.order.remove(id);
+        self.children.remove(id).is_some()
+    }
+
+    /// Go on discovering the session's family with `rest`, the walk a read ran
+    /// out of time for, or, when the read walked it whole, stop: a discovery
+    /// still running for an earlier read is cancelled either way. While one
+    /// runs, the workers are reported as possibly incomplete, and lifecycle
+    /// events are kept for the workers it has not found yet.
+    fn continue_discovery(&mut self, rest: Option<api::FamilyWalk>) {
+        if let Some(cancellation) = self.discovery_in_flight.take() {
+            cancellation.cancel();
+        }
+        self.workers_partial = rest.is_some().then(|| DISCOVERING.to_owned());
+        self.discovery = rest;
+    }
+
+    /// Stop a discovery whose connection was lost: the session is read again,
+    /// with its family, on the next one. Until then the workers known stay as
+    /// incomplete as they were.
+    fn abandon_discovery(&mut self) {
+        self.discovery = None;
+        self.discovery_in_flight = None;
+    }
+
+    /// Take the workers a background discovery found, as the initial snapshot
+    /// takes its listing: a worker already known, or deleted meanwhile, is
+    /// left as it is, and the lifecycle events kept for the others are newer
+    /// than their records. Creations kept for a parent it found are added
+    /// too. `failure` says why the discovery ended before the family was
+    /// walked whole, in which case the workers stay incomplete.
+    fn adopt_discovered(&mut self, mut workers: Vec<Worker>, failure: Option<String>) {
+        self.discovery_in_flight = None;
+        self.workers_partial = failure.map(|reason| {
+            format!("Could not find every worker of this session, so some may be missing: {reason}")
+        });
+        if let Err(error) = validate_workers(&mut workers) {
+            self.workers_partial = Some(format!(
+                "Could not find every worker of this session, so some may be missing: {}",
+                error.message
+            ));
+            workers.clear();
+        }
+        for mut worker in workers {
+            if self.children.contains_key(&worker.id)
+                || self.initial_deletions.contains(&worker.id)
+                || self.snapshot_deletions.contains(&worker.id)
+            {
+                continue;
+            }
+            if self.children.len() >= api::MAX_TRACKED_WORKERS {
+                self.mark_workers_incomplete();
+                return;
+            }
+            if let Some((state, title)) = self.initial_changes.get(&worker.id) {
+                if let Some(state) = state {
+                    worker.state = *state;
+                }
+                if let Some(title) = title {
+                    worker.title.clone_from(title);
+                }
+            }
+            self.insert_child(worker);
+        }
+        if self.attach_creations().is_err() {
+            self.mark_workers_incomplete();
+            return;
+        }
+        if !self.discovering_workers() {
+            self.clear_bootstrap_journals();
+        }
     }
 
     /// The workers known before a read again, of which those its listing
@@ -674,7 +794,7 @@ impl Registration {
         }
         for id in missing {
             if !changes.contains_key(id) {
-                self.children.remove(id);
+                self.remove_child(id);
             }
         }
     }
@@ -686,9 +806,13 @@ impl Registration {
                     "Worker observation exceeds the supported limit; reattach after reducing it.",
                 )
             } else {
+                // A worker keeps its place in the space, so the order matters
+                // for those first reported together.
+                let mut workers: Vec<Worker> = self.children.values().cloned().collect();
+                workers.sort_by_key(|worker| self.order.get(&worker.id).copied());
                 !self
                     .events
-                    .try_deliver_workers(self.children.values().cloned().collect())
+                    .try_deliver_workers(workers, self.workers_partial.clone())
             };
         }
     }
@@ -713,7 +837,7 @@ impl Registration {
                 self.snapshot_deletions_overflow = true;
             }
         }
-        self.children.remove(id).is_some()
+        self.remove_child(id)
     }
 
     /// Deliver an ordinary event, noting when a message whose text was partly
@@ -756,16 +880,68 @@ impl Registration {
         }
     }
 
+    /// Whether the session's workers are still being discovered: until the
+    /// initial snapshot has been accepted, and while the rest of its family is
+    /// walked in the background.
     fn discovering_workers(&self) -> bool {
-        !self
-            .bootstrap_epoch
-            .is_some_and(|epoch| self.events.worker_watermark.load(Ordering::Acquire) >= epoch)
+        self.discovery.is_some()
+            || self.discovery_in_flight.is_some()
+            || !self
+                .bootstrap_epoch
+                .is_some_and(|epoch| self.events.worker_watermark.load(Ordering::Acquire) >= epoch)
     }
 
     fn clear_bootstrap_journals(&mut self) {
         self.initial_deletions.clear();
         self.initial_changes.clear();
         self.initial_creations.clear();
+    }
+
+    /// Add the creations kept while workers were discovered whose parent is
+    /// known now. A nested child can be created while its preexisting parent
+    /// is still being discovered, so pending descendants are attached only
+    /// after their parent is known, preserving the actual hierarchy.
+    fn attach_creations(&mut self) -> tomori_backend::Result<()> {
+        loop {
+            let ready: Vec<_> = self
+                .initial_creations
+                .iter()
+                .filter(|(_, worker)| {
+                    worker
+                        .parent
+                        .as_ref()
+                        .is_some_and(|parent| self.children.contains_key(parent))
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            if ready.is_empty() {
+                return Ok(());
+            }
+            for id in ready {
+                let mut worker = self
+                    .initial_creations
+                    .remove(&id)
+                    .expect("pending creation");
+                if self.children.contains_key(&id) || self.initial_deletions.contains(&id) {
+                    continue;
+                }
+                if self.children.len() == api::MAX_TRACKED_WORKERS {
+                    return Err(tomori_backend::Error::new(
+                        tomori_backend::ErrorKind::Unavailable,
+                        "Worker observation exceeds the supported limit.",
+                    ));
+                }
+                if let Some((state, title)) = self.initial_changes.get(&id) {
+                    if let Some(state) = state {
+                        worker.state = *state;
+                    }
+                    if let Some(title) = title {
+                        worker.title.clone_from(title);
+                    }
+                }
+                self.insert_child(worker);
+            }
+        }
     }
 
     /// Install a snapshot without losing lifecycle events already observed
@@ -819,53 +995,13 @@ impl Registration {
                         worker.title.clone_from(title);
                     }
                 }
-                self.children.entry(worker.id.clone()).or_insert(worker);
+                if !self.children.contains_key(&worker.id) {
+                    self.insert_child(worker);
+                }
             }
         }
         if discovering {
-            // A nested child can be created while its preexisting parent is
-            // still being discovered. Attach pending descendants only after
-            // their parent is known, preserving the actual hierarchy.
-            loop {
-                let ready: Vec<_> = self
-                    .initial_creations
-                    .iter()
-                    .filter(|(_, worker)| {
-                        worker
-                            .parent
-                            .as_ref()
-                            .is_some_and(|parent| self.children.contains_key(parent))
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                if ready.is_empty() {
-                    break;
-                }
-                for id in ready {
-                    let mut worker = self
-                        .initial_creations
-                        .remove(&id)
-                        .expect("pending creation");
-                    if self.children.contains_key(&id) || self.initial_deletions.contains(&id) {
-                        continue;
-                    }
-                    if self.children.len() == api::MAX_TRACKED_WORKERS {
-                        return Err(tomori_backend::Error::new(
-                            tomori_backend::ErrorKind::Unavailable,
-                            "Worker observation exceeds the supported limit.",
-                        ));
-                    }
-                    if let Some((state, title)) = self.initial_changes.get(&id) {
-                        if let Some(state) = state {
-                            worker.state = *state;
-                        }
-                        if let Some(title) = title {
-                            worker.title.clone_from(title);
-                        }
-                    }
-                    self.children.insert(id, worker);
-                }
-            }
+            self.attach_creations()?;
         }
         *workers = self.children.values().cloned().collect();
         workers.sort_by_key(|worker| listed.get(&worker.id).copied().unwrap_or(usize::MAX));
@@ -1010,6 +1146,22 @@ struct SnapshotResult {
     registration: Arc<AtomicU64>,
     reply: async_channel::Sender<tomori_backend::Result<SnapshotReply>>,
     result: tomori_backend::Result<Snapshot>,
+    /// The rest of the session's family, when the read ran out of time for it.
+    rest: Option<api::FamilyWalk>,
+}
+
+/// What a background discovery of a session's workers found.
+struct DiscoveryResult {
+    id: String,
+    registration: Arc<AtomicU64>,
+    /// Which of the registration's discoveries this was.
+    number: u64,
+    /// The descendants found, and whether the rest of the family was walked
+    /// whole, or why not.
+    found: Vec<Value>,
+    result: std::result::Result<(), Failure>,
+    /// The sessions OpenCode is running, if it said in time.
+    active: Option<HashSet<String>>,
 }
 
 /// A snapshot's worker epoch becomes authoritative only when its recipient
@@ -1062,6 +1214,8 @@ struct ResyncResult {
     id: String,
     registration: Arc<AtomicU64>,
     result: tomori_backend::Result<Snapshot>,
+    /// The rest of the session's family, when the read ran out of time for it.
+    rest: Option<api::FamilyWalk>,
     /// Known workers the read's listing omitted that OpenCode answered do not
     /// exist.
     missing: Vec<String>,
@@ -1566,6 +1720,7 @@ fn connection_lost(registrations: &mut HashMap<String, Registration>) {
         // Their futures were dropped with the connection.
         registration.snapshot_in_flight = None;
         registration.reconcile_in_flight = None;
+        registration.abandon_discovery();
         // A restore being read is read again on the next connection.
         registration.restore_in_flight = false;
         let reading = std::mem::take(&mut registration.restore_reading);
@@ -1687,6 +1842,7 @@ impl<F: Future> futures_core::FusedFuture for Fused<F> {
 type SnapshotFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = SnapshotResult> + 'a>>>;
 type ResyncFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = ResyncResult> + 'a>>>;
 type RestoreFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = RestoreResult> + 'a>>>;
+type DiscoveryFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = DiscoveryResult> + 'a>>>;
 
 /// Open the server's global event stream, then serve it and the commands,
 /// polling the stream, the command channel, the requests in flight, reads and
@@ -1741,6 +1897,7 @@ async fn connected<S: Timers>(
     let mut snapshots: SnapshotFutures<'_> = FuturesUnordered::new();
     let mut resyncs: ResyncFutures<'_> = FuturesUnordered::new();
     let mut restores: RestoreFutures<'_> = FuturesUnordered::new();
+    let mut discoveries: DiscoveryFutures<'_> = FuturesUnordered::new();
     let mut reconciliations: FuturesUnordered<Pin<Box<dyn Future<Output = ReconcileResult> + '_>>> =
         FuturesUnordered::new();
     // The stream is open, so whatever happens from now on is observed: read
@@ -1861,6 +2018,20 @@ async fn connected<S: Timers>(
                 if let Some(completed) = completed {
                     finish_snapshot(registrations, completed);
                 }
+                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
+                continue;
+            }
+            completed = Fused::new(async {
+                if discoveries.is_empty() {
+                    std::future::pending::<Option<DiscoveryResult>>().await
+                } else {
+                    discoveries.next().await
+                }
+            }) => {
+                if let Some(completed) = completed {
+                    finish_discovery(registrations, completed);
+                }
+                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
                 continue;
             }
             completed = Fused::new(async {
@@ -1875,6 +2046,7 @@ async fn connected<S: Timers>(
                 }
                 // A slot is free: start the next waiting session at once.
                 start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
+                start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
                 start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
                 continue;
             }
@@ -1959,6 +2131,7 @@ async fn connected<S: Timers>(
                     snapshots.clear();
                     resyncs.clear();
                     restores.clear();
+                    discoveries.clear();
                     reconciliations.clear();
                     grace = Some(timers.now() + IN_FLIGHT_GRACE);
                 }
@@ -2195,6 +2368,11 @@ fn start_commands<'a, S: Timers>(
 /// Read a session within [`SNAPSHOT_TIMEOUT`], cancelling its requests when the
 /// read ends either way. `on_messages` is called just before its messages are
 /// requested.
+///
+/// Its conversation, running state and pending requests must be read in
+/// time, or the read fails, since a space must not open on any of them
+/// incomplete. Its workers are listed for the rest of the time: a family too
+/// large to walk in time is returned in part, with the walk to go on with.
 #[allow(clippy::too_many_arguments)]
 async fn bounded_snapshot<S: Timers>(
     client: &Client<'_>,
@@ -2205,24 +2383,68 @@ async fn bounded_snapshot<S: Timers>(
     cancellation: &Cancellation,
     timers: &S,
     on_messages: impl FnOnce(),
-) -> tomori_backend::Result<Snapshot> {
-    let result = futures_lite::future::race(
-        async {
-            snapshot(client, resolved, id, modes, local, timers, on_messages)
-                .await
-                .map_err(map_failure)
-        },
-        async {
-            let timer = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
-            Err(tomori_backend::Error::new(
-                tomori_backend::ErrorKind::Unavailable,
-                format!("Snapshot timed out or was cancelled: {timer:?}"),
-            ))
-        },
+) -> tomori_backend::Result<(Snapshot, Option<api::FamilyWalk>)> {
+    let deadline = timers.now() + SNAPSHOT_TIMEOUT;
+    // The connection's cancellation ends the wait early, and so the read.
+    let expired = || async {
+        let remaining = deadline.saturating_duration_since(timers.now());
+        timers.sleep(remaining, cancellation).await
+    };
+    let read = async {
+        let parts = futures_lite::future::or(
+            async { Ok(api::SnapshotParts::fetch(client, resolved, id, local, on_messages).await) },
+            async {
+                let timer = expired().await;
+                Err(tomori_backend::Error::new(
+                    tomori_backend::ErrorKind::Unavailable,
+                    format!("Snapshot timed out or was cancelled: {timer:?}"),
+                ))
+            },
+        )
+        .await?
+        .map_err(map_failure)?;
+        let mut walk = api::FamilyWalk::new(id);
+        let walked = futures_lite::future::or(
+            async {
+                walk.run(client, resolved, local, timers)
+                    .await
+                    .map(|()| true)
+                    .map_err(map_failure)
+            },
+            async {
+                let _ = expired().await;
+                Ok(false)
+            },
+        )
+        .await?;
+        Ok((parts, walk, walked))
+    };
+    let (read, active) = futures_lite::future::zip(
+        read,
+        api::active_sessions_with_timeout(client, resolved, local, timers, Duration::from_secs(1)),
     )
     .await;
     local.cancel();
-    result
+    let (mut parts, mut walk, walked) = read?;
+    parts.children = walk.take_found();
+    Ok((
+        snapshot(parts, id, modes, active.as_ref()),
+        (!walked).then_some(walk),
+    ))
+}
+
+/// Report a worker as running only on positive evidence: OpenCode listing it
+/// among the sessions it runs. Timestamps persist across process restarts, and
+/// a background child may be absent from the foreground-drain listing, so
+/// without that evidence a worker is kept but not claimed to run.
+fn running_evidence(workers: &mut [Worker], active: Option<&HashSet<String>>) {
+    for worker in workers {
+        if active.is_some_and(|active| active.contains(&worker.id)) {
+            worker.state = WorkerState::Running;
+        } else if worker.state == WorkerState::Running {
+            worker.state = WorkerState::Unknown;
+        }
+    }
 }
 
 /// Answer a snapshot a session asked for, installing it if it was read.
@@ -2233,6 +2455,7 @@ fn finish_snapshot(registrations: &mut HashMap<String, Registration>, completed:
         {
             registration.snapshot_in_flight = None;
             let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
+            let rest = completed.rest;
             let result = completed.result.and_then(|mut snapshot| {
                 if overflow {
                     return Err(tomori_backend::Error::new(
@@ -2241,6 +2464,10 @@ fn finish_snapshot(registrations: &mut HashMap<String, Registration>, completed:
                     ));
                 }
                 registration.install(&mut snapshot)?;
+                // The workers not found in time are discovered in the
+                // background; the space opens knowing its list is incomplete.
+                registration.continue_discovery(rest);
+                snapshot.workers_incomplete = registration.workers_partial.clone();
                 Ok(registration.events.snapshot_reply(snapshot))
             });
             registration.snapshot_deletions.clear();
@@ -2315,11 +2542,16 @@ fn schedule_snapshot<'a, S: Timers>(
             move || mark.store(sequence.load(Ordering::Acquire), Ordering::Release),
         )
         .await;
+        let (result, rest) = match result {
+            Ok((snapshot, rest)) => (Ok(snapshot), rest),
+            Err(error) => (Err(error), None),
+        };
         SnapshotResult {
             id,
             registration: identity,
             reply,
             result,
+            rest,
         }
     }));
 }
@@ -2393,6 +2625,10 @@ fn start_resyncs<'a, S: Timers>(
                     )
                     .await;
                     listing.cancel();
+                    let (result, rest) = match result {
+                        Ok((snapshot, rest)) => (Ok(snapshot), rest),
+                        Err(error) => (Err(error), None),
+                    };
                     let missing = match &result {
                         Ok(snapshot) => {
                             let listed: HashSet<&str> = snapshot
@@ -2408,7 +2644,7 @@ fn start_resyncs<'a, S: Timers>(
                         }
                         Err(_) => Vec::new(),
                     };
-                    (result, missing)
+                    (result, rest, missing)
                 },
                 async {
                     // Optional, like the listing at attach: a failure keeps
@@ -2431,11 +2667,12 @@ fn start_resyncs<'a, S: Timers>(
             )
             .await;
             local.cancel();
-            let (result, missing) = result;
+            let (result, rest, missing) = result;
             ResyncResult {
                 id,
                 registration: identity,
                 result,
+                rest,
                 missing,
                 modes,
             }
@@ -2516,6 +2753,7 @@ fn finish_resync(
     registration.snapshot_in_flight = None;
     let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
     let mut resync = registration.resync.take().unwrap_or_default();
+    let rest = completed.rest;
     let result = completed.result.and_then(|mut snapshot| {
         if overflow || resync.changes_overflow {
             return Err(tomori_backend::Error::new(
@@ -2525,6 +2763,8 @@ fn finish_resync(
         }
         registration.merge_workers(std::mem::take(&mut snapshot.workers), &resync.changes)?;
         registration.remove_missing(&completed.missing, &resync.changes);
+        // The workers not found in time are discovered in the background.
+        registration.continue_discovery(rest);
         Ok(snapshot)
     });
     registration.snapshot_deletions.clear();
@@ -2614,6 +2854,87 @@ fn finish_resync(
         }
     };
     end_registration(registrations, &completed.id, Some(reason));
+}
+
+/// Go on, in the background, walking the families that reads ran out of time
+/// for, at most [`MAX_DISCOVERIES`] at once, in the order of their sessions'
+/// identifiers. Each is isolated like a read and lists at most eight parents'
+/// children at once; one whose listing OpenCode does not answer in time gives
+/// up.
+fn start_discoveries<'a, S: Timers>(
+    registrations: &mut HashMap<String, Registration>,
+    discoveries: &mut DiscoveryFutures<'a>,
+    client: &'a Client<'_>,
+    resolved: &'a Resolved,
+    cancellation: &'a Cancellation,
+    timers: &'a S,
+) {
+    let mut ids: Vec<_> = registrations
+        .iter()
+        .filter(|(_, registration)| registration.discovery.is_some())
+        .map(|(id, _)| id.clone())
+        .collect();
+    ids.sort();
+    for id in ids
+        .into_iter()
+        .take(MAX_DISCOVERIES.saturating_sub(discoveries.len()))
+    {
+        let registration = registrations.get_mut(&id).expect("listed above");
+        let mut walk = registration.discovery.take().expect("listed above");
+        let local = cancellation.child();
+        registration.discovery_in_flight = Some(local.clone());
+        registration.discoveries += 1;
+        let number = registration.discoveries;
+        let identity = registration.events.worker_epoch.clone();
+        discoveries.push(Box::pin(async move {
+            // A listing OpenCode does not answer in time ends the walk.
+            let result = walk.run(client, resolved, &local, timers).await;
+            // Like a read, a worker is reported running only on evidence.
+            let active = match result {
+                Ok(()) => {
+                    api::active_sessions_with_timeout(
+                        client,
+                        resolved,
+                        &local,
+                        timers,
+                        Duration::from_secs(1),
+                    )
+                    .await
+                }
+                Err(_) => None,
+            };
+            local.cancel();
+            DiscoveryResult {
+                id,
+                registration: identity,
+                number,
+                found: walk.take_found(),
+                result,
+                active,
+            }
+        }));
+    }
+}
+
+/// Take what a background discovery found into its session's workers, and
+/// report them, as every worker known once the family was walked whole, or
+/// as possibly incomplete, with the reason, if the discovery failed. One for
+/// a registration that has since closed, or stopped since, is ignored.
+fn finish_discovery(registrations: &mut HashMap<String, Registration>, completed: DiscoveryResult) {
+    let Some(registration) = registrations.get_mut(&completed.id).filter(|registration| {
+        Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
+            && registration.discovery_in_flight.is_some()
+            && registration.discoveries == completed.number
+    }) else {
+        return;
+    };
+    let mut workers = api::workers_from_children(&completed.found);
+    running_evidence(&mut workers, completed.active.as_ref());
+    registration.adopt_discovered(
+        workers,
+        completed.result.err().map(|failure| failure.message),
+    );
+    registration.publish_workers();
 }
 
 /// Read again, once each, the messages that ended after a read listed them
@@ -3197,19 +3518,16 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                     registration.initial_deletions.remove(child);
                     registration.initial_changes.remove(child);
                     registration.snapshot_deletions.remove(child);
-                    registration.children.insert(
-                        child.to_owned(),
-                        Worker {
-                            id: child.to_owned(),
-                            parent: parent.map(str::to_owned),
-                            title: data
-                                .get("title")
-                                .and_then(Value::as_str)
-                                .map(bounded_worker_title)
-                                .unwrap_or_else(|| "worker".to_owned()),
-                            state: WorkerState::Unknown,
-                        },
-                    );
+                    registration.insert_child(Worker {
+                        id: child.to_owned(),
+                        parent: parent.map(str::to_owned),
+                        title: data
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .map(bounded_worker_title)
+                            .unwrap_or_else(|| "worker".to_owned()),
+                        state: WorkerState::Unknown,
+                    });
                     true
                 }
             }
@@ -3305,6 +3623,9 @@ fn end_registration(
             cancellation.cancel();
         }
         if let Some(cancellation) = registration.reconcile_in_flight {
+            cancellation.cancel();
+        }
+        if let Some(cancellation) = registration.discovery_in_flight {
             cancellation.cancel();
         }
         registration.events.close_with(reason);
@@ -3769,55 +4090,31 @@ fn complete(completion: Completion, registrations: &mut HashMap<String, Registra
 const ALREADY_ATTACHED: &str =
     "That OpenCode session is already attached; join its existing space.";
 
-async fn snapshot<S: Timers>(
-    client: &Client<'_>,
-    resolved: &Resolved,
+/// The session `id` as `parts` describe it, given the sessions OpenCode said
+/// it is running, if it did.
+fn snapshot(
+    parts: api::SnapshotParts,
     id: &str,
     modes: Modes,
-    cancellation: &Cancellation,
-    timers: &S,
-    on_messages: impl FnOnce(),
-) -> std::result::Result<Snapshot, Failure> {
-    let (parts, active) = futures_lite::future::zip(
-        api::SnapshotParts::fetch(client, resolved, id, cancellation, on_messages),
-        api::active_sessions_with_timeout(
-            client,
-            resolved,
-            cancellation,
-            timers,
-            Duration::from_secs(1),
-        ),
-    )
-    .await;
-    let parts = parts?;
+    active: Option<&HashSet<String>>,
+) -> Snapshot {
     let messages = snapshot_messages(&parts.messages);
-    let busy = match &active {
+    let busy = match active {
         Some(active) if active.contains(id) => Some(true),
         Some(_) if !parts.has_parent => Some(false),
         _ => parts.busy,
     };
     let mut workers = parts.workers();
-    for worker in &mut workers {
-        if active
-            .as_ref()
-            .is_some_and(|active| active.contains(&worker.id))
-        {
-            worker.state = WorkerState::Running;
-        } else if worker.state == WorkerState::Running {
-            // Timestamps persist across process restarts, and a background
-            // child may be absent from the foreground-drain listing. Without
-            // positive evidence, retain the worker but do not claim it runs.
-            worker.state = WorkerState::Unknown;
-        }
-    }
-    Ok(Snapshot {
+    running_evidence(&mut workers, active);
+    Snapshot {
         modes,
         busy,
         messages,
         permissions: parts.permissions(),
         questions: parts.questions(),
         workers,
-    })
+        workers_incomplete: None,
+    }
 }
 
 /// The session's message list, as [`api::session_messages`] answers it, as snapshot messages.
@@ -4299,7 +4596,7 @@ mod tests {
         let (events, rx) = Events::new();
         let (commands, _receiver) = Commands::new();
         let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
-        assert!(events.try_deliver_workers(Vec::new()));
+        assert!(events.try_deliver_workers(Vec::new(), None));
         events.deliver(Event::Busy);
         events.advance_workers();
         events.snapshot_reply(Snapshot::default()).accept().unwrap();
@@ -5926,7 +6223,21 @@ mod tests {
         agents: Option<Value>,
         /// Each reply, interruption and agent switch received, as path and body.
         actions: Vec<(String, Value)>,
+        /// Each session's child records, as its child listing answers them.
+        children: HashMap<String, Vec<Value>>,
+        /// How long each child listing takes to be answered.
+        child_latency: Duration,
+        /// Sessions whose child listing waits until they are removed.
+        stalled_children: HashSet<String>,
         stopping: bool,
+    }
+
+    /// The record of a worker `id` of `parent`, created at `created`.
+    fn fake_child(id: &str, parent: &str, created: u64) -> Value {
+        let mut record = fake_record(id);
+        record["parentID"] = json!(parent);
+        record["time"]["created"] = json!(created);
+        record
     }
 
     #[derive(Default)]
@@ -6155,8 +6466,23 @@ mod tests {
             )
         } else if path == "/api/session/active" {
             ("200 OK", r#"{"data":{}}"#.to_owned())
-        } else if path.starts_with("/api/session?parentID=") {
-            ("200 OK", r#"{"data":[],"cursor":{"next":null}}"#.to_owned())
+        } else if let Some(query) = path.strip_prefix("/api/session?parentID=") {
+            let parent = query.split('&').next().unwrap_or_default().to_owned();
+            let latency = shared.state.lock().unwrap().child_latency;
+            std::thread::sleep(latency);
+            let mut state = shared.state.lock().unwrap();
+            while state.stalled_children.contains(&parent) && !state.stopping {
+                state = shared
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(50))
+                    .unwrap()
+                    .0;
+            }
+            let children = state.children.get(&parent).cloned().unwrap_or_default();
+            (
+                "200 OK",
+                json!({"data": children, "cursor": {"next": null}}).to_string(),
+            )
         } else if path.starts_with("/api/session?directory=") {
             ("200 OK", r#"{"data":[]}"#.to_owned())
         } else if let Some(rest) = path.strip_prefix("/api/experimental/session/") {
@@ -7594,6 +7920,7 @@ mod tests {
                 id: "full".into(),
                 registration: identity,
                 result: Ok(Snapshot::default()),
+                rest: None,
                 missing: Vec::new(),
                 modes: None,
             },
@@ -7755,6 +8082,7 @@ mod tests {
                 id: "s".into(),
                 registration: identity,
                 result: Ok(Snapshot::default()),
+                rest: None,
                 missing: Vec::new(),
                 modes: Some(Modes {
                     offered: vec![mode("build"), mode("plan")],
@@ -7878,6 +8206,7 @@ mod tests {
                     ],
                     ..Snapshot::default()
                 }),
+                rest: None,
                 missing: Vec::new(),
                 modes: None,
             },
@@ -8020,6 +8349,7 @@ mod tests {
                 id: "s".into(),
                 registration: identity,
                 result: Ok(Snapshot::default()),
+                rest: None,
                 missing: Vec::new(),
                 modes: None,
             },
@@ -8101,6 +8431,7 @@ mod tests {
                     }],
                     ..Snapshot::default()
                 }),
+                rest: None,
                 missing: Vec::new(),
                 modes: None,
             },
@@ -8184,6 +8515,382 @@ mod tests {
                 ("omitted", WorkerState::Unknown),
             ]
         );
+    }
+
+    /// Create a session against a simulated service without reading it.
+    fn create_session(commands: &Commands) -> (String, RegistrationEvents) {
+        block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Family".into(),
+            },
+            reply,
+        }))
+        .unwrap()
+    }
+
+    /// Give the simulated session `root` a chain of workers, each the only
+    /// child of the one before, created in that order.
+    fn chain(state: &mut FakeState, root: &str, ids: &[&str]) {
+        let mut parent = root.to_owned();
+        for (place, id) in ids.iter().enumerate() {
+            state.children.insert(
+                parent.clone(),
+                vec![fake_child(id, &parent, place as u64 + 1)],
+            );
+            parent = (*id).to_owned();
+        }
+    }
+
+    fn worker_ids(workers: &[Worker]) -> Vec<&str> {
+        workers.iter().map(|worker| worker.id.as_str()).collect()
+    }
+
+    /// A family too deep to walk within the snapshot's bound, a chain of 64
+    /// workers whose children each take 80 milliseconds to list, opens in time
+    /// with the workers found so far, marked incomplete. The rest is found in
+    /// the background, and every worker is then reported, oldest first, as a
+    /// complete list.
+    #[test]
+    fn a_deep_worker_family_opens_in_part_and_is_completed_in_the_background() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        // Identifiers do not sort in the order the workers were created.
+        let ids: Vec<String> = (0..64).map(|level| format!("w{level}")).collect();
+        let names: Vec<&str> = ids.iter().map(String::as_str).collect();
+        shared.update(|state| {
+            state.child_latency = Duration::from_millis(80);
+            chain(state, "s1", &names);
+        });
+        let (id, events) = create_session(&commands);
+        assert_eq!(id, "s1");
+        let started = std::time::Instant::now();
+        let snapshot = read_snapshot(&commands, &id, &events).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < SNAPSHOT_TIMEOUT + Duration::from_secs(1),
+            "the snapshot took {elapsed:?}"
+        );
+        assert_eq!(snapshot.workers_incomplete.as_deref(), Some(DISCOVERING));
+        let found = worker_ids(&snapshot.workers);
+        assert!(!found.is_empty() && found.len() < names.len(), "{found:?}");
+        assert_eq!(found, names[..found.len()]);
+
+        let watched = watch(&events);
+        let seen = until(&watched, "the whole family", |event| {
+            matches!(event, Event::WorkersChanged { .. })
+        });
+        let Some(Event::WorkersChanged { workers }) = seen.last() else {
+            unreachable!("until returns the event it waited for last")
+        };
+        assert_eq!(worker_ids(workers), names);
+        assert_eq!(workers[0].parent.as_deref(), Some("s1"));
+        assert_eq!(workers[63].parent.as_deref(), Some("w62"));
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// While the rest of a family is discovered in the background, worker
+    /// changes are still reported, as an incomplete list. Once it has been
+    /// found, a worker deleted meanwhile is not restored from an older page, a
+    /// worker created meanwhile under a parent found only then is kept, once,
+    /// a worker no page lists is not taken as deleted, and a state or title
+    /// observed meanwhile is kept over the record's.
+    #[test]
+    fn workers_discovered_in_the_background_keep_what_happened_meanwhile() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        shared.update(|state| {
+            chain(state, "s1", &["w0", "w1", "w2", "w3", "w4"]);
+            // w6 is listed too, though it is created after w3's page is first
+            // asked for.
+            state
+                .children
+                .get_mut("w3")
+                .unwrap()
+                .push(fake_child("w6", "w3", 7));
+            state.stalled_children.insert("w2".into());
+        });
+        let (id, events) = create_session(&commands);
+        let snapshot = read_snapshot(&commands, &id, &events).unwrap();
+        assert_eq!(worker_ids(&snapshot.workers), ["w0", "w1", "w2"]);
+        assert_eq!(snapshot.workers_incomplete.as_deref(), Some(DISCOVERING));
+
+        let watched = watch(&events);
+        let partial = |event: &Event, wanted: &[&str]| {
+            matches!(event, Event::WorkersPartial { workers, message }
+                if worker_ids(workers) == wanted && message == DISCOVERING)
+        };
+        service.send(json!({"type":"session.execution.started","data":{"sessionID":"w0"}}));
+        let seen = until(&watched, "w0 running", |event| {
+            partial(event, &["w0", "w1", "w2"])
+        });
+        let Some(Event::WorkersPartial { workers, .. }) = seen.last() else {
+            unreachable!("until returns the event it waited for last")
+        };
+        assert_eq!(workers[0].state, WorkerState::Running);
+        service.send(json!({"type":"session.deleted","data":{"sessionID":"w1"}}));
+        until(&watched, "w1's departure", |event| {
+            partial(event, &["w0", "w2"])
+        });
+        // w4 is deleted before it is found, though the simulated service
+        // still lists it, as a page read before the deletion would; w5 is
+        // created under w3 before w3 is found, and no page lists it; w6 is
+        // created there too, and listed; and w3 starts and is renamed.
+        service.send(json!({"type":"session.deleted","data":{"sessionID":"w4"}}));
+        service.send(json!({"type":"session.created","data":{"sessionID":"w5","parentID":"w3","title":"w5"}}));
+        service
+            .send(json!({"type":"session.renamed","data":{"sessionID":"w5","title":"Renamed w5"}}));
+        service.send(json!({"type":"session.created","data":{"sessionID":"w6","parentID":"w3","title":"w6"}}));
+        service.send(json!({"type":"session.execution.started","data":{"sessionID":"w3"}}));
+        service
+            .send(json!({"type":"session.renamed","data":{"sessionID":"w3","title":"Renamed w3"}}));
+        // x is created under the session itself, and no page lists it.
+        service.send(
+            json!({"type":"session.created","data":{"sessionID":"x","parentID":"s1","title":"x"}}),
+        );
+        until(&watched, "x's arrival", |event| {
+            partial(event, &["w0", "w2", "x"])
+        });
+
+        shared.update(|state| {
+            state.stalled_children.clear();
+        });
+        let seen = until(&watched, "the whole family", |event| {
+            matches!(event, Event::WorkersChanged { .. })
+        });
+        let Some(Event::WorkersChanged { workers }) = seen.last() else {
+            unreachable!("until returns the event it waited for last")
+        };
+        assert_eq!(worker_ids(workers), ["w0", "w2", "x", "w3", "w6", "w5"]);
+        assert_eq!(workers[0].state, WorkerState::Running);
+        assert_eq!(workers[3].state, WorkerState::Running);
+        assert_eq!(workers[3].title, "Renamed w3");
+        assert_eq!(workers[5].parent.as_deref(), Some("w3"));
+        assert_eq!(workers[5].title, "Renamed w5");
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// A background discovery whose listing OpenCode does not answer gives
+    /// up, and the workers are reported as incomplete, with the reason.
+    #[test]
+    fn a_stalled_background_discovery_gives_up_visibly() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        shared.update(|state| {
+            chain(state, "s1", &["w0", "w1"]);
+            state.stalled_children.insert("w0".into());
+        });
+        let (id, events) = create_session(&commands);
+        let snapshot = read_snapshot(&commands, &id, &events).unwrap();
+        assert_eq!(worker_ids(&snapshot.workers), ["w0"]);
+        let watched = watch(&events);
+        let seen = until_within(
+            &watched,
+            SNAPSHOT_TIMEOUT + Duration::from_secs(3),
+            "the discovery giving up",
+            |event| matches!(event, Event::WorkersPartial { .. }),
+        );
+        let Some(Event::WorkersPartial { workers, message }) = seen.last() else {
+            unreachable!("until returns the event it waited for last")
+        };
+        assert_eq!(worker_ids(workers), ["w0"]);
+        assert!(
+            message.starts_with("Could not find every worker")
+                && message.contains("did not list a worker's children within 5 seconds"),
+            "{message}"
+        );
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// Only the workers may be read in part: a session whose conversation
+    /// is not read in time is still refused, whatever its family.
+    #[test]
+    fn a_conversation_not_read_in_time_still_refuses_the_snapshot() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        shared.update(|state| {
+            chain(state, "s1", &["w0"]);
+            state.stalled.insert("s1".into());
+        });
+        let (id, events) = create_session(&commands);
+        let refused = read_snapshot(&commands, &id, &events).unwrap_err();
+        assert_eq!(refused.kind, tomori_backend::ErrorKind::Unavailable);
+        assert!(refused.message.contains("timed out"), "{refused:?}");
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// Closing a session while its workers are discovered cancels the
+    /// discovery, and its result is ignored, as is that of a discovery a
+    /// later read replaced.
+    #[test]
+    fn closing_during_a_discovery_cancels_it_and_ignores_its_result() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let discovering = Cancellation::new();
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.discovery_in_flight = Some(discovering.clone());
+        registration.discoveries = 1;
+        let identity = events.identity.clone();
+        let found = |number| DiscoveryResult {
+            id: "s".into(),
+            registration: identity.clone(),
+            number,
+            found: vec![fake_child("w", "s", 1)],
+            result: Ok(()),
+            active: None,
+        };
+        close_registration(&mut registrations, "s", &identity);
+        assert!(discovering.is_cancelled());
+        assert!(matches!(
+            events.try_recv().unwrap().into_current(),
+            Some(Event::Closed { reason: None })
+        ));
+        // A later registration of the same session is not touched by the
+        // abandoned discovery's result.
+        let replacement =
+            insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        finish_discovery(&mut registrations, found(1));
+        assert!(registrations["s"].children.is_empty());
+        assert!(replacement.try_recv().is_err());
+
+        // A read that walked the family whole stops the discovery an earlier
+        // one started, whose result is then ignored too.
+        let identity = replacement.identity.clone();
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.continue_discovery(Some(api::FamilyWalk::new("s")));
+        assert_eq!(registration.workers_partial.as_deref(), Some(DISCOVERING));
+        let running = Cancellation::new();
+        registration.discovery = None;
+        registration.discovery_in_flight = Some(running.clone());
+        registration.discoveries = 1;
+        registration.continue_discovery(None);
+        assert!(running.is_cancelled());
+        assert!(registration.workers_partial.is_none());
+        finish_discovery(
+            &mut registrations,
+            DiscoveryResult {
+                registration: identity,
+                ..found(1)
+            },
+        );
+        assert!(registrations["s"].children.is_empty());
+        assert!(replacement.try_recv().is_err());
+    }
+
+    /// A read again after reconnecting that runs out of time for the family
+    /// merges the workers it found and discovers the rest in the background,
+    /// reporting the workers as incomplete meanwhile.
+    #[test]
+    fn a_read_again_goes_on_discovering_the_family_it_ran_out_of_time_for() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("s").unwrap();
+        registration.workers_ready = true;
+        registration.resync = Some(Resync::default());
+        let identity = registration.events.worker_epoch.clone();
+        finish_resync(
+            &mut registrations,
+            ResyncResult {
+                id: "s".into(),
+                registration: identity,
+                result: Ok(Snapshot {
+                    workers: vec![Worker {
+                        id: "w".into(),
+                        parent: Some("s".into()),
+                        title: "w".into(),
+                        state: WorkerState::Unknown,
+                    }],
+                    ..Snapshot::default()
+                }),
+                rest: Some(api::FamilyWalk::new("s")),
+                missing: Vec::new(),
+                modes: None,
+            },
+            Instant::now(),
+        );
+        assert!(registrations["s"].discovery.is_some());
+        let mut workers = None;
+        while let Ok(event) = events.try_recv() {
+            if let Some(event @ Event::WorkersPartial { .. }) = event.into_current() {
+                workers = Some(event);
+            }
+        }
+        assert!(
+            matches!(&workers, Some(Event::WorkersPartial { workers, message })
+                if worker_ids(workers) == ["w"] && message == DISCOVERING),
+            "{workers:?}"
+        );
+    }
+
+    /// Workers found in the background are checked like a snapshot's: an
+    /// identity beyond the supported size is refused, leaving the workers
+    /// visibly incomplete, and more workers than can be tracked make
+    /// observation visibly incomplete, as do pending creations beyond it.
+    #[test]
+    fn workers_found_in_the_background_stay_within_the_limits() {
+        let worker = |id: String, parent: &str| Worker {
+            id,
+            parent: Some(parent.into()),
+            title: "worker".into(),
+            state: WorkerState::Unknown,
+        };
+        let (mut registration, _events) = Registration::new();
+        registration.adopt_discovered(vec![worker("x".repeat(MAX_WORKER_ID_BYTES + 1), "s")], None);
+        assert!(registration.children.is_empty());
+        assert!(
+            registration
+                .workers_partial
+                .as_deref()
+                .is_some_and(|reason| reason.contains("exceeds the supported size")),
+            "{:?}",
+            registration.workers_partial
+        );
+
+        let (mut registration, _events) = Registration::new();
+        registration.adopt_discovered(
+            (0..=api::MAX_TRACKED_WORKERS)
+                .map(|n| worker(format!("w{n}"), "s"))
+                .collect(),
+            None,
+        );
+        assert!(registration.workers_incomplete);
+        assert_eq!(registration.children.len(), api::MAX_TRACKED_WORKERS);
+
+        let (mut registration, _events) = Registration::new();
+        registration.adopt_discovered(
+            (0..api::MAX_TRACKED_WORKERS)
+                .map(|n| worker(format!("w{n}"), "s"))
+                .collect(),
+            None,
+        );
+        assert!(!registration.workers_incomplete);
+        registration
+            .initial_creations
+            .insert("late".into(), worker("late".into(), "w0"));
+        registration.adopt_discovered(Vec::new(), None);
+        assert!(registration.workers_incomplete);
     }
 
     /// Read `id`'s initial state, as a space does once it is bound.
@@ -8960,6 +9667,7 @@ mod tests {
                 registration: identity,
                 reply,
                 result: Ok(snapshot),
+                rest: None,
             },
         );
         answer.try_recv().unwrap().and_then(SnapshotReply::accept)

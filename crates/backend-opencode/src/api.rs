@@ -30,7 +30,9 @@ pub(crate) const MAX_TRACKED_WORKERS: usize = 4096;
 pub(crate) const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 /// Bound the aggregate size of records retained for a worker family.
 const MAX_WORKER_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
-type ChildListRequest<'a> = Pin<Box<dyn Future<Output = Result<Vec<Value>, Failure>> + 'a>>;
+/// The listing of one parent's children, with that parent.
+type ChildListRequest<'a> =
+    Pin<Box<dyn Future<Output = (String, Result<Vec<Value>, Failure>)> + 'a>>;
 
 /// A failed call, with the HTTP status when the server answered.
 #[derive(Debug)]
@@ -392,56 +394,137 @@ pub async fn child_sessions<'scope>(
     })
 }
 
-/// Discover descendants through direct-child pages. A repeated identity or a
-/// limit failure rejects the snapshot rather than returning a partial family.
-async fn session_family<'scope>(
-    client: &Client<'scope>,
-    resolved: &Resolved,
-    session_id: &str,
-    cancellation: &Cancellation,
-) -> Result<Vec<Value>, Failure> {
+/// A walk of a session's descendants through their direct-child pages, which
+/// can stop and later go on where it stopped: a family too large to read in
+/// time is read in part, and the rest later. A repeated identity or a limit
+/// failure fails the walk rather than reporting what it found as the family.
+pub(crate) struct FamilyWalk {
+    /// Sessions whose children have not been listed yet, oldest discovered first.
+    pending: std::collections::VecDeque<String>,
+    /// Sessions whose children were being listed when the walk last stopped.
+    listing: Vec<String>,
+    /// Every session the walk has found, including the root.
+    seen: std::collections::HashSet<String>,
+    /// The records found since [`FamilyWalk::take_found`] last took them.
+    found: Vec<Value>,
+    /// How many descendants, and how many bytes of their records, the walk has
+    /// found in all.
+    count: usize,
+    bytes: usize,
+}
+
+impl FamilyWalk {
+    /// Child pages listed at once.
     const MAX_IN_FLIGHT: usize = 8;
-    let mut pending = std::collections::VecDeque::from([session_id.to_owned()]);
-    let mut seen = std::collections::HashSet::from([session_id.to_owned()]);
-    let mut family = Vec::new();
-    let mut family_bytes = 0usize;
-    let mut requests: FuturesUnordered<ChildListRequest<'_>> = FuturesUnordered::new();
-    while !pending.is_empty() || !requests.is_empty() {
-        while requests.len() < MAX_IN_FLIGHT {
-            let Some(parent) = pending.pop_front() else {
-                break;
-            };
-            requests.push(Box::pin(async move {
-                child_sessions(client, resolved, &parent, cancellation).await
-            }));
-        }
-        let children = requests
-            .next()
-            .await
-            .expect("a request is in flight while the loop runs");
-        for child in children? {
-            let id = child
-                .get("id")
-                .and_then(Value::as_str)
-                .expect("validated child identifier");
-            if !seen.insert(id.to_owned()) {
-                return Err(Failure {
-                    status: None,
-                    message: "the server returned a repeated or cyclic worker identity".into(),
-                });
-            }
-            if family.len() == MAX_TRACKED_WORKERS {
-                return Err(Failure {
-                    status: None,
-                    message: "the worker family exceeds the worker limit".into(),
-                });
-            }
-            add_worker_record_size(&mut family_bytes, &child)?;
-            pending.push_back(id.to_owned());
-            family.push(child);
+    /// How long one parent's children may take to list before the walk fails,
+    /// so that a walk OpenCode stops answering ends.
+    pub(crate) const LISTING_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub(crate) fn new(session_id: &str) -> Self {
+        Self {
+            pending: std::collections::VecDeque::from([session_id.to_owned()]),
+            listing: Vec::new(),
+            seen: std::collections::HashSet::from([session_id.to_owned()]),
+            found: Vec::new(),
+            count: 0,
+            bytes: 0,
         }
     }
-    Ok(family)
+
+    /// The records found since this was last called.
+    pub(crate) fn take_found(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.found)
+    }
+
+    /// List children, at most [`Self::MAX_IN_FLIGHT`] parents at once, until
+    /// the family has been read. A parent whose children are not listed
+    /// within [`Self::LISTING_TIMEOUT`] fails the walk. The future may be
+    /// dropped at any point: a later call lists again the parents whose
+    /// listing it abandoned.
+    pub(crate) async fn run<'scope, S: Timers>(
+        &mut self,
+        client: &Client<'scope>,
+        resolved: &Resolved,
+        cancellation: &Cancellation,
+        timers: &S,
+    ) -> Result<(), Failure> {
+        for parent in self.listing.drain(..).rev() {
+            self.pending.push_front(parent);
+        }
+        let mut requests: FuturesUnordered<ChildListRequest<'_>> = FuturesUnordered::new();
+        while !self.pending.is_empty() || !requests.is_empty() {
+            while requests.len() < Self::MAX_IN_FLIGHT {
+                let Some(parent) = self.pending.pop_front() else {
+                    break;
+                };
+                self.listing.push(parent.clone());
+                requests.push(Box::pin(async move {
+                    let children = futures_lite::future::or(
+                        child_sessions(client, resolved, &parent, cancellation),
+                        async {
+                            let _ = timers.sleep(Self::LISTING_TIMEOUT, cancellation).await;
+                            Err(Failure {
+                                status: None,
+                                message: format!(
+                                    "OpenCode did not list a worker's children within {} seconds",
+                                    Self::LISTING_TIMEOUT.as_secs()
+                                ),
+                            })
+                        },
+                    )
+                    .await;
+                    (parent, children)
+                }));
+            }
+            let (parent, children) = requests
+                .next()
+                .await
+                .expect("a request is in flight while the loop runs");
+            self.listing.retain(|listing| *listing != parent);
+            for child in children? {
+                let id = child
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("validated child identifier");
+                if !self.seen.insert(id.to_owned()) {
+                    return Err(Failure {
+                        status: None,
+                        message: "the server returned a repeated or cyclic worker identity".into(),
+                    });
+                }
+                if self.count == MAX_TRACKED_WORKERS {
+                    return Err(Failure {
+                        status: None,
+                        message: "the worker family exceeds the worker limit".into(),
+                    });
+                }
+                add_worker_record_size(&mut self.bytes, &child)?;
+                self.pending.push_back(id.to_owned());
+                self.count += 1;
+                self.found.push(child);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Workers from child session records, oldest first: in the order their
+/// records say they were created, since neither the order they were
+/// discovered in nor their identifiers say how old they are.
+pub fn workers_from_children(children: &[Value]) -> Vec<tomori_backend::Worker> {
+    let created = |child: &Value| {
+        child
+            .get("time")
+            .and_then(|time| time.get("created"))
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::INFINITY)
+    };
+    let mut children: Vec<&Value> = children.iter().collect();
+    children.sort_by(|a, b| created(a).total_cmp(&created(b)));
+    children
+        .into_iter()
+        .filter_map(crate::wire::worker_from_session)
+        .collect()
 }
 
 fn add_worker_record_size(total: &mut usize, child: &Value) -> Result<(), Failure> {
@@ -943,6 +1026,8 @@ pub struct SnapshotParts {
     pub messages: Value,
     pub permissions: Vec<Value>,
     pub forms: Vec<Value>,
+    /// The descendants found by the session's [`FamilyWalk`], which
+    /// [`SnapshotParts::fetch`] leaves to its caller.
     pub children: Vec<Value>,
     /// The record's running state; `None` if its timing is invalid.
     pub busy: Option<bool>,
@@ -956,19 +1041,7 @@ impl SnapshotParts {
     /// order their records say they were created, since neither the order they
     /// were discovered in nor their identifiers say how old they are.
     pub fn workers(&self) -> Vec<tomori_backend::Worker> {
-        let created = |child: &Value| {
-            child
-                .get("time")
-                .and_then(|time| time.get("created"))
-                .and_then(Value::as_f64)
-                .unwrap_or(f64::INFINITY)
-        };
-        let mut children: Vec<&Value> = self.children.iter().collect();
-        children.sort_by(|a, b| created(a).total_cmp(&created(b)));
-        children
-            .into_iter()
-            .filter_map(crate::wire::worker_from_session)
-            .collect()
+        workers_from_children(&self.children)
     }
 
     /// All pending permissions, in the order the server returned them.
@@ -984,7 +1057,8 @@ impl SnapshotParts {
         self.forms.iter().map(question_from_form).collect()
     }
 
-    /// Fetch every piece for `session_id`.
+    /// Fetch every piece for `session_id` but its children, which a
+    /// [`FamilyWalk`] lists, since they may take longer than the rest.
     /// `on_messages` is called just before the messages are requested, so a
     /// caller can tell which of the events it observed the listing must
     /// already reflect.
@@ -1056,12 +1130,11 @@ impl SnapshotParts {
                 message: "the server returned an invalid form".into(),
             });
         }
-        let children = session_family(client, resolved, session_id, cancellation).await?;
         Ok(Self {
             messages,
             permissions,
             forms,
-            children,
+            children: Vec::new(),
             busy,
             has_parent: info.get("parentID").is_some(),
         })
@@ -1460,18 +1533,83 @@ mod tests {
     /// What reading the worker family of `s` from a service routed by `route` returns.
     fn family(route: fn(&str, &str) -> (&'static str, String)) -> Result<Vec<String>, String> {
         let mut result = Ok(Vec::new());
-        with_client(service(route), async |client, resolved, cancellation, _| {
-            result = session_family(client, resolved, "s", cancellation)
-                .await
-                .map(|family| {
-                    family
-                        .iter()
-                        .map(|child| child["id"].as_str().unwrap().to_owned())
-                        .collect()
-                })
-                .map_err(|failure| failure.message);
-        });
+        with_client(
+            service(route),
+            async |client, resolved, cancellation, timers| {
+                let mut walk = FamilyWalk::new("s");
+                result = walk
+                    .run(client, resolved, cancellation, timers)
+                    .await
+                    .map(|()| {
+                        walk.take_found()
+                            .iter()
+                            .map(|child| child["id"].as_str().unwrap().to_owned())
+                            .collect()
+                    })
+                    .map_err(|failure| failure.message);
+            },
+        );
         result
+    }
+
+    /// A walk stopped while it lists a parent's children lists them again when it goes on, and finds each
+    /// descendant once.
+    #[test]
+    fn a_stopped_family_walk_goes_on_where_it_stopped() {
+        with_client(
+            service(|_, path| {
+                let parent = path
+                    .split_once("parentID=")
+                    .unwrap()
+                    .1
+                    .split('&')
+                    .next()
+                    .unwrap();
+                match parent {
+                    "s" => page(vec![child("c1", "s")], Value::Null),
+                    "c1" => {
+                        // Slow enough that the first run stops while listing it.
+                        std::thread::sleep(Duration::from_millis(200));
+                        page(vec![child("g1", "c1")], Value::Null)
+                    }
+                    _ => page(Vec::new(), Value::Null),
+                }
+            }),
+            async |client, resolved, cancellation, timers| {
+                use base_scheduler::Clock as _;
+                let mut walk = FamilyWalk::new("s");
+                futures_lite::future::or(walk.run(client, resolved, cancellation, timers), async {
+                    timers
+                        .sleep(Duration::from_millis(100), cancellation)
+                        .await
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                assert_eq!(walk.take_found(), [child("c1", "s")]);
+                walk.run(client, resolved, cancellation, timers)
+                    .await
+                    .unwrap();
+                assert_eq!(walk.take_found(), [child("g1", "c1")]);
+            },
+        );
+    }
+
+    /// A walk counts the workers it found before it stopped against the worker limit.
+    #[test]
+    fn a_family_walk_is_held_to_the_worker_limit_across_its_runs() {
+        with_client(
+            service(|_, _| page(vec![child("c1", "s")], Value::Null)),
+            async |client, resolved, cancellation, timers| {
+                let mut walk = FamilyWalk::new("s");
+                walk.count = MAX_TRACKED_WORKERS;
+                assert_eq!(
+                    failed(walk.run(client, resolved, cancellation, timers).await).1,
+                    "the worker family exceeds the worker limit"
+                );
+            },
+        );
     }
 
     #[test]

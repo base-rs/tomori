@@ -319,12 +319,13 @@ impl SpaceModel {
             questions: VecDeque::new(),
             submitting: Vec::new(),
             workers,
-            workers_authoritative: true,
+            // A list the backend is still completing never authorizes a departure.
+            workers_authoritative: snapshot.workers_incomplete.is_none(),
             attribution: true,
             speech: SpeechSetting::Full,
             modes: snapshot.modes,
             error: None,
-            worker_error: None,
+            worker_error: snapshot.workers_incomplete,
             reconnecting: None,
             settled: HashSet::new(),
             unattended: None,
@@ -366,6 +367,7 @@ impl SpaceModel {
             permissions,
             questions,
             workers: _,
+            workers_incomplete: _,
             modes,
         } = snapshot;
         // The agent keeps a message's text in its records only once the message ends, so a message read again while
@@ -558,7 +560,8 @@ impl SpaceModel {
             .cloned()
             .map(|entry| worker(entry, &session))
             .collect();
-        self.workers_authoritative = true;
+        self.workers_authoritative = snapshot.workers_incomplete.is_none();
+        self.worker_error.clone_from(&snapshot.workers_incomplete);
         self.session = session;
         // The session's history, read again after a restart, is not news: what happened while the server was stopped
         // is not known, so it raises no problem or reply. A pending request still waits for input.
@@ -825,6 +828,15 @@ impl SpaceModel {
                 self.workers = oldest_first(&self.workers, workers);
                 self.workers_authoritative = true;
                 self.worker_error = None;
+            }
+            Event::WorkersPartial { workers, message } => {
+                let workers = workers
+                    .into_iter()
+                    .map(|entry| worker(entry, &self.session))
+                    .collect();
+                self.workers = oldest_first(&self.workers, workers);
+                self.workers_authoritative = false;
+                self.worker_error = Some(message);
             }
             Event::WorkersUnavailable { message } => {
                 self.worker_error = Some(message);
@@ -1843,6 +1855,7 @@ mod tests {
                 questions: vec![question("kept"), question("asked")],
                 // Workers are left to their own events.
                 workers: Vec::new(),
+                workers_incomplete: None,
                 modes: Modes::default(),
             },
         });
@@ -2375,6 +2388,79 @@ mod tests {
         assert_eq!(recovered.error.as_deref(), Some("unrelated error"));
         space.apply(Event::Closed { reason: None });
         assert_eq!(space.state(Vec::new()).workers_authoritative, Some(false));
+    }
+
+    /// A space opened, or bound again, with the workers its backend has found so far says that its list is incomplete,
+    /// and keeps saying so through the changes reported meanwhile, until the backend reports every worker.
+    #[test]
+    fn a_worker_list_still_being_completed_never_authorizes_a_departure() {
+        let found = |ids: &[&str]| -> Vec<tomori_backend::Worker> {
+            ids.iter()
+                .map(|id| tomori_backend::Worker {
+                    id: (*id).into(),
+                    parent: None,
+                    title: (*id).into(),
+                    state: tomori_backend::WorkerState::Unknown,
+                })
+                .collect()
+        };
+        let ids = |state: &tomori_protocol::SpaceState| -> Vec<String> {
+            state
+                .workers
+                .iter()
+                .map(|worker| worker.id.clone())
+                .collect()
+        };
+        let incomplete = Snapshot {
+            busy: Some(false),
+            workers: found(&["older"]),
+            workers_incomplete: Some("Still finding workers.".into()),
+            ..Snapshot::default()
+        };
+        let mut space = SpaceModel::new(
+            "s1".into(),
+            "Title".into(),
+            "fake".into(),
+            "/tmp".into(),
+            "sky".into(),
+            "fake-1".into(),
+            incomplete.clone(),
+        );
+        let state = space.state(Vec::new());
+        assert_eq!(state.workers_authoritative, Some(false));
+        assert_eq!(state.error.as_deref(), Some("Still finding workers."));
+        assert_eq!(ids(&state), ["older"]);
+        // A change meanwhile keeps the list incomplete, and each worker its place.
+        space.apply(Event::WorkersPartial {
+            workers: found(&["newer", "older"]),
+            message: "Still finding workers.".into(),
+        });
+        let state = space.state(Vec::new());
+        assert_eq!(state.workers_authoritative, Some(false));
+        assert_eq!(ids(&state), ["older", "newer"]);
+        assert_eq!(state.error.as_deref(), Some("Still finding workers."));
+        space.apply(Event::WorkersChanged {
+            workers: found(&["older", "newer", "newest"]),
+        });
+        let state = space.state(Vec::new());
+        assert_eq!(state.workers_authoritative, Some(true));
+        assert_eq!(state.error, None);
+
+        // Bound again after a restart, likewise.
+        space.bind("fake-2".into(), incomplete);
+        let state = space.state(Vec::new());
+        assert_eq!(state.workers_authoritative, Some(false));
+        assert_eq!(state.error.as_deref(), Some("Still finding workers."));
+        space.bind(
+            "fake-3".into(),
+            Snapshot {
+                workers: found(&["older"]),
+                ..Snapshot::default()
+            },
+        );
+        let state = space.state(Vec::new());
+        assert_eq!(state.workers_authoritative, Some(true));
+        assert_eq!(state.error, None);
     }
 
     #[test]
