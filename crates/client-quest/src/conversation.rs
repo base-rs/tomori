@@ -7645,14 +7645,8 @@ mod tests {
         /// The utterance a press of X began.
         fn talking(conversation: &mut Conversation) -> String {
             conversation.talk(true);
-            conversation
-                .take_actions()
-                .into_iter()
-                .find_map(|action| match action {
-                    Action::BeginUtterance(utterance, ..) => Some(utterance),
-                    _ => None,
-                })
-                .expect("recording began")
+            conversation.take_actions();
+            conversation.talk.as_ref().unwrap().utterance().to_owned()
         }
 
         fn failed(utterance: &str, failure: tomori_client::UtteranceFailure) -> Event {
@@ -7660,12 +7654,6 @@ mod tests {
                 utterance: utterance.into(),
                 failure,
             })
-        }
-
-        fn heard(talk: &Talk) -> &str {
-            match talk {
-                Talk::Recording { heard, .. } | Talk::Sending { heard, .. } => heard,
-            }
         }
 
         fn disconnected() -> Event {
@@ -7756,7 +7744,12 @@ mod tests {
                 text: "fix".into(),
                 finished: false,
             }));
-            assert_eq!(conversation.talk.as_ref().map(heard), Some("fix"));
+            let phase = conversation.recording_phase(Instant::now()).unwrap();
+            assert!(
+                crate::recording::canvas(&phase, None, 0.0)
+                    .plain()
+                    .contains("\"fix\"")
+            );
             conversation.apply(Event::Message(ServerMessage::Transcript {
                 utterance,
                 text: "fix it".into(),
@@ -8074,6 +8067,168 @@ mod tests {
             conversation.error = Some("A problem.".into());
             assert!(conversation.wrist_back());
             assert_eq!(conversation.error, None);
+        }
+
+        /// Each state a connection can be in other than connected, as the pill and the lobby say them.
+        fn unconnected() -> [(ConnectionState, &'static str, &'static str); 4] {
+            [
+                (
+                    ConnectionState::Connecting { attempt: 1 },
+                    "Connecting...",
+                    "Connecting...",
+                ),
+                (
+                    ConnectionState::Connecting { attempt: 3 },
+                    "Connecting (attempt 3)...",
+                    "Connecting (attempt 3)...",
+                ),
+                (
+                    ConnectionState::Disconnected {
+                        reason: tomori_client::Disconnect::Timeout,
+                        retry_in: Duration::from_secs(2),
+                    },
+                    "Offline, retrying in 2 s",
+                    "Offline, retry in 2s: ",
+                ),
+                (ConnectionState::Closed, "Disconnected.", "Disconnected."),
+            ]
+        }
+
+        #[test]
+        fn the_pill_and_the_lobby_say_how_the_connection_is() {
+            use crate::pill::Need;
+            for (state, pill, status) in unconnected() {
+                let mut conversation = joined();
+                conversation.apply(Event::State(state.clone()));
+                assert_eq!(
+                    conversation.pill_status(Instant::now()).unwrap().need,
+                    Some(Need::Connection(pill.into()))
+                );
+                let mut conversation = lobby(ConnectionRole::Owner);
+                conversation.apply(Event::State(state));
+                assert!(conversation.status().unwrap().starts_with(status));
+            }
+            // A question needs the participant before the connection does.
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.question = Some(Question {
+                    id: "q1".into(),
+                    title: "Which?".into(),
+                    text: "Which one?".into(),
+                    field: "Choice".into(),
+                    supported: true,
+                });
+                state.modes = vec![tomori_protocol::Mode {
+                    id: "build".into(),
+                    name: "Build".into(),
+                    description: None,
+                }];
+                state.mode = Some("custom".into());
+            }));
+            let status = conversation.pill_status(Instant::now()).unwrap();
+            assert_eq!(status.need, Some(Need::Question));
+            assert_eq!(status.mode.as_deref(), Some("custom"));
+        }
+
+        #[test]
+        fn b_and_y_do_nothing_at_the_servers_and_dismiss_or_refetch_in_a_space() {
+            let mut conversation = Conversation::new("Ada");
+            conversation.back();
+            assert_eq!(conversation.mode, Mode::Servers);
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.error = Some("The agent failed.".into())
+            }));
+            conversation.back();
+            assert_eq!(conversation.dismissed.as_deref(), Some("The agent failed."));
+            // Y on the session ring without its backend and folder asks for nothing.
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.step = LobbyStep::Session;
+            conversation.refresh();
+            assert!(conversation.take_actions().is_empty());
+            // Y in a space whose state has not come does nothing.
+            conversation.mode = Mode::Space;
+            conversation.refresh();
+            assert!(conversation.take_actions().is_empty());
+        }
+
+        #[test]
+        fn live_audio_needs_a_space_and_a_connection() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.toggle_live();
+            assert_eq!(
+                conversation.notice.as_deref(),
+                Some("Join a space to use live audio.")
+            );
+            let mut conversation = joined();
+            conversation.apply(disconnected());
+            conversation.toggle_live();
+            assert_eq!(
+                conversation.error.as_deref(),
+                Some("Offline; cannot use live audio.")
+            );
+        }
+
+        #[test]
+        fn the_recording_says_what_it_is_about_and_what_it_answers() {
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.workers = vec![tomori_protocol::Worker {
+                    id: "w1".into(),
+                    parent: None,
+                    title: "Parser".into(),
+                    state: tomori_protocol::WorkerState::Running,
+                }];
+            }));
+            conversation.point_at(Some("w1"));
+            talking(&mut conversation);
+            let phase = conversation.recording_phase(Instant::now()).unwrap();
+            assert!(
+                crate::recording::canvas(&phase, None, 0.0)
+                    .plain()
+                    .contains("Parser")
+            );
+            conversation.talk(false);
+            let phase = conversation.recording_phase(Instant::now()).unwrap();
+            assert_eq!(
+                phase,
+                crate::recording::Phase::Sending {
+                    heard: String::new(),
+                    answering: false
+                }
+            );
+            // An answer names the question it answers.
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.voice_answers = true;
+                state.question = Some(Question {
+                    id: "q1".into(),
+                    title: "Which?".into(),
+                    text: "Which one?".into(),
+                    field: "Choice".into(),
+                    supported: true,
+                });
+            }));
+            talking(&mut conversation);
+            let phase = conversation.recording_phase(Instant::now()).unwrap();
+            assert!(
+                crate::recording::canvas(&phase, None, 0.0)
+                    .plain()
+                    .contains("Which?")
+            );
+        }
+
+        #[test]
+        fn a_decision_on_its_way_or_words_waiting_keep_the_agent_working() {
+            let mut conversation = crate::scene::fixtures::approval_waiting();
+            conversation.decided = Some("request-1".into());
+            assert_eq!(conversation.activity(), SessionActivity::Working);
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.activity = Activity::Idle;
+                state.queue = vec![entry("e1", "Bob", QueueState::Queued)];
+            }));
+            assert_eq!(conversation.activity(), SessionActivity::Working);
         }
     }
 }
