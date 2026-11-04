@@ -63,6 +63,27 @@ pollster = "0.4"
 tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
 tomori-environment-sky = { version = "0.1.0", path = "../environment-sky", features = ["test-gpu"] }
 
+# The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See the Tests section of readme.md.
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/xr.rs"
+reason = "OpenXR runtime calls: the instance, session, swapchain, actions and the frame loop that drives them; needs an OpenXR runtime and a headset."
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/vulkan.rs"
+reason = "Creates the Vulkan instance and device through OpenXR and imports the runtime's swapchain images into wgpu; needs an OpenXR runtime."
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/desktop_window.rs"
+reason = "winit's event loop and window, and the window's Vulkan or Metal surface; needs a display."
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/desktop_audio.rs"
+reason = "Opens the default microphone and speaker through cpal; needs audio devices."
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/child_process.rs"
+reason = "Runs in a forked child before it executes its program, where the child's coverage counters are discarded."
+
 [package.metadata.android]
 package = "io.github.ioquatix.tomori"
 apk_name = "tomori"
