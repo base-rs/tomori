@@ -100,10 +100,13 @@ fn escaped_len(character: char) -> usize {
     }
 }
 
-/// Cut `text`, marking the cut, so that its JSON encoding shrinks by at least `excess` bytes. Returns the bytes saved.
+/// Cut `text`, marking the cut, so that its JSON encoding shrinks by at least `excess` bytes. Returns the bytes saved. A text no longer than the marker is left whole, since marking it would only lengthen it.
 fn shrink(text: &mut String, excess: usize) -> usize {
     let before = json_len(text.as_str());
     let marker = json_len(TRUNCATED) - 2;
+    if before - 2 <= marker {
+        return 0;
+    }
     let allowed = (before - 2).saturating_sub(excess).saturating_sub(marker);
     let mut used = 0;
     let mut end = 0;
@@ -164,9 +167,6 @@ pub fn fit_state(state: &mut SpaceState) {
     for text in texts {
         if size <= SNAPSHOT_BUDGET {
             break;
-        }
-        if text.len() <= TRUNCATED.len() {
-            continue;
         }
         size -= shrink(text, size - SNAPSHOT_BUDGET);
     }
@@ -425,5 +425,18 @@ mod tests {
         assert!(!error.contains("secret"));
         let cut = truncate(&"é".repeat(1000), ERROR_BYTES);
         assert!(cut.len() <= ERROR_BYTES && cut.ends_with(TRUNCATED));
+    }
+
+    #[test]
+    fn a_message_shorter_than_the_marker_is_kept_whole_while_other_text_is_cut() {
+        let mut state = SpaceState {
+            messages: vec![message(0, "Done.".into())],
+            error: Some("e".repeat(SNAPSHOT_BUDGET)),
+            ..SpaceState::default()
+        };
+        fit_state(&mut state);
+        assert!(json_len(&state) <= SNAPSHOT_BUDGET);
+        assert_eq!(state.messages[0].text, "Done.");
+        assert!(state.error.unwrap().ends_with(TRUNCATED));
     }
 }
