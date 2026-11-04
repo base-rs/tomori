@@ -3585,6 +3585,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "tomori-backend",
  "tomori-client",
  "tomori-discovery",
  "tomori-environment-sky",
