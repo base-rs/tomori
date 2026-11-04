@@ -1280,3 +1280,11 @@ fn a_connection_that_never_said_hello_renders_no_space() {
     let client = Client::connect(&hub, Access::open());
     assert!(hub.render(client.connection, Outgoing::Space).is_none());
 }
+
+#[test]
+fn audio_from_the_lobby_goes_nowhere() {
+    let (hub, _jobs) = hub();
+    let client = Client::greeted(&hub, Access::open(), "ada");
+    hub.receive(client.connection, Frame::audio(&frame(320)));
+    assert!(client.read().is_empty());
+}

@@ -1062,6 +1062,27 @@ impl Hub {
         *self.tokens.write().expect("never left poisoned") = Some(tokens);
     }
 
+    /// The state of the space `id`, as its participants would see it.
+    #[cfg(test)]
+    pub(crate) fn space_state(&self, id: &str) -> tomori_protocol::SpaceState {
+        self.lock()
+            .space(id)
+            .expect("the space is listed")
+            .model
+            .state(Vec::new(), "")
+    }
+
+    /// The session the space `id` is bound to.
+    #[cfg(test)]
+    pub(crate) fn space_session(&self, id: &str) -> String {
+        self.lock()
+            .space(id)
+            .expect("the space is listed")
+            .model
+            .session
+            .clone()
+    }
+
     /// Whether the space `id` is listed, so that a collaborator token for a space that is gone can be revoked.
     pub fn has_space(&self, id: &str) -> bool {
         self.lock().space(id).is_some()
