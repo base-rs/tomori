@@ -351,10 +351,12 @@ mod enabled {
             }
             // Holding the labels across `speak` means the pacer finds each segment's label once synthesis starts it.
             let mut labels = self.labels.lock().unwrap_or_else(PoisonError::into_inner);
-            for segment_text in segments {
-                if let Some(segment) = self.speech.speak(&segment_text) {
-                    labels.insert(segment, (message.to_owned(), self.reply));
-                }
+            // A segment with nothing to say is not spoken.
+            for segment in segments
+                .iter()
+                .filter_map(|segment| self.speech.speak(segment))
+            {
+                labels.insert(segment, (message.to_owned(), self.reply));
             }
         }
 
@@ -842,9 +844,12 @@ mod enabled {
             drop(sender);
             let (mut stopped, sender) = pacer(&hub, &space);
             stopped.pending.push_back((0, Item::Gap));
+            let (mut woken, woken_sender) = pacer(&hub, &space);
+            woken.woken = true;
             drop(hub);
             stopped.run();
-            drop(sender);
+            woken.run();
+            drop((sender, woken_sender));
         }
 
         #[test]
@@ -861,13 +866,17 @@ mod enabled {
         fn a_message_is_spoken_once_and_what_is_not_spoken_is_ignored() {
             let (hub, space) = space();
             let mut voice = Voices::new(Mute).start(&hub, &space).unwrap();
-            let started = || Event::MessageStarted {
-                message: "m".into(),
+            let started = |message: &str| Event::MessageStarted {
+                message: message.into(),
                 role: Role::Assistant,
             };
-            voice.observe(&started());
-            voice.observe(&started());
+            voice.observe(&started("m"));
+            voice.observe(&started("m"));
             assert_eq!(voice.speaking.len(), 1);
+            // Another message of the same turn continues its reply.
+            voice.observe(&started("n"));
+            assert_eq!(voice.reply, 1);
+            assert!(Mute.synthesize("", &mut |_| {}).is_ok());
             voice.observe(&Event::TextDelta {
                 message: "other".into(),
                 text: "Hi.".into(),
