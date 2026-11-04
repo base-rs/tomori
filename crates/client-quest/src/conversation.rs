@@ -1656,7 +1656,7 @@ impl Conversation {
             .as_ref()
             .and_then(|id| waiting.iter().position(|entry| entry == id));
         let next = match current {
-            None if direction > 0 => Some(0),
+            None if direction > 0 => (!waiting.is_empty()).then_some(0),
             None => waiting.len().checked_sub(1),
             Some(index) => index
                 .checked_add_signed(direction as isize)
@@ -5629,6 +5629,16 @@ mod tests {
         assert!(conversation.text().contains("line 29"));
         conversation.back();
         assert!(conversation.text().contains("line 29"));
+    }
+
+    #[test]
+    fn selecting_in_an_empty_queue_selects_nothing() {
+        let mut conversation = joined(|_| {});
+        for direction in [1, -1] {
+            conversation.select_queued(direction);
+            conversation.accept();
+            assert!(sent(&mut conversation).is_empty());
+        }
     }
 
     #[test]
