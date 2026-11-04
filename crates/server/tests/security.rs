@@ -723,3 +723,56 @@ fn an_automatic_client_never_sends_its_token_over_plain_http() {
     );
     client.close();
 }
+
+/// Send `request` as it is, ending the upload, and read the whole response.
+fn raw(server: &TestServer, request: &[u8]) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(server.address).unwrap();
+    stream.write_all(request).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    response
+}
+
+#[test]
+fn a_form_too_large_cut_short_or_with_trailers_is_read_as_far_as_it_goes() {
+    let server = TestServer::with_tokens(true, |server| server);
+    // Beyond the form limit, 4096 bytes.
+    let form = "token=".to_owned() + &"x".repeat(4096);
+    // Read as no form, it signs nobody in.
+    let (status, _, _) = exchange(&server, "POST", "/sign-in", &[], &form);
+    assert_eq!(status, 401);
+    // The upload ends before the length it gave.
+    let response = raw(
+        &server,
+        b"POST /sign-in HTTP/1.1\r\nHost: tomori\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\ntoken=",
+    );
+    assert!(!response.starts_with("HTTP/1.1 303"), "{response}");
+    // A chunked form with trailers.
+    let response = raw(
+        &server,
+        b"POST /sign-in HTTP/1.1\r\nHost: tomori\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n6\r\ntoken=\r\n0\r\nX-Trailer: a\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+}
+
+#[test]
+fn pairing_and_revoking_from_the_status_page_need_an_owner_and_what_they_name() {
+    let server = TestServer::with_tokens(true, |server| server);
+    let (_, owner_token) = server.issue("Ada", Grant::Owner);
+    let owner = format!("__Host-tomori-token={owner_token}");
+    let posted = |path: &str, cookie: &[(&str, &str)], body: &str| {
+        let mut fields = vec![("Origin", "https://tomori")];
+        fields.extend_from_slice(cookie);
+        exchange(&server, "POST", path, &fields, body)
+    };
+    // A visitor may not allow pairing.
+    let (status, _, _) = posted("/pairing/allow", &[], "");
+    assert_eq!(status, 403);
+    // An owner naming no pairing, or no token, is shown the status page.
+    for path in ["/pairing/confirm", "/tokens/revoke"] {
+        let (status, fields, _) = posted(path, &[("Cookie", &owner)], "");
+        assert_eq!((status, field(&fields, "location")), (303, Some("/")));
+    }
+}
