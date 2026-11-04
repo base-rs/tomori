@@ -258,16 +258,12 @@ impl Application {
             return html(403, pages::not_an_owner());
         }
         let id = form.and_then(|form| pages::form_value(form, "id"));
-        if let (Some(store), Some(id)) = (self.door.store(), id) {
-            match store.revoke(&id) {
-                Ok(true) => {
-                    log::info!("Revoked token {id} from the status page.");
-                    self.hub
-                        .revoke(|principal| store.entry(principal).is_some());
-                }
-                Ok(false) => {}
-                Err(error) => log::warn!("Could not revoke token {id}: {error}."),
-            }
+        if let (Some(store), Some(id)) = (self.door.store(), id)
+            && crate::door::revoke(store, &id)
+        {
+            log::info!("Revoked token {id} from the status page.");
+            self.hub
+                .revoke(|principal| store.entry(principal).is_some());
         }
         redirect(pages::STATUS_PATH, None)
     }

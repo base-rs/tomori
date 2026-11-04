@@ -706,9 +706,7 @@ impl Server {
                 && !self.hub.has_space(space)
             {
                 log::info!("Revoking token {}, whose space {space} is gone.", entry.id);
-                if let Err(error) = store.revoke(&entry.id) {
-                    log::warn!("Could not revoke token {}: {error}.", entry.id);
-                }
+                crate::door::revoke(store, &entry.id);
             }
         }
         self.hub
