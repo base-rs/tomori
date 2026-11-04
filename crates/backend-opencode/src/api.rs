@@ -27,7 +27,7 @@ use crate::wire::question_from_form;
 /// snapshot, never an authoritative truncated list.
 pub(crate) const MAX_TRACKED_WORKERS: usize = 4096;
 /// A single agent response must not grow without bound while it is read.
-const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 /// Bound the aggregate size of records retained for a worker family.
 const MAX_WORKER_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 type ChildListRequest<'a> = Pin<Box<dyn Future<Output = Result<Vec<Value>, Failure>> + 'a>>;

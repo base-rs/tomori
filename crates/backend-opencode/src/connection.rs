@@ -455,6 +455,9 @@ pub struct Registration {
     listings: u8,
     /// Set from a lost event stream until the session has been read again.
     resync: Option<Resync>,
+    /// Ordinary events held from registration until the initial snapshot is
+    /// installed, which they follow, except those it already shows.
+    opening: Resync,
     /// Messages a read after reconnecting listed while they were still being
     /// written: text streamed while the stream was down is in no event, so
     /// each is read again once it ends, when OpenCode records its text.
@@ -572,6 +575,7 @@ impl Registration {
                 directory: String::new(),
                 listings: LISTINGS,
                 resync: None,
+                opening: Resync::default(),
                 restoring: HashSet::new(),
                 restore_due: Vec::new(),
                 restore_reading: Vec::new(),
@@ -819,6 +823,49 @@ impl Registration {
             self.clear_bootstrap_journals();
         }
         self.workers_ready = true;
+        Ok(())
+    }
+
+    /// Install a snapshot read for a session. The first is the initial state
+    /// the space opens with: the events held since the session was registered
+    /// are delivered after it, as after a reconnection, except those it
+    /// already shows (see [`shown`]), and the running state and modes it
+    /// reports are the latest known. A channel without room for them refuses
+    /// the snapshot, leaving them held for a retry.
+    fn install(&mut self, snapshot: &mut Snapshot) -> tomori_backend::Result<()> {
+        let opening = !self.workers_ready;
+        if opening && self.events.room() <= self.opening.events.len() {
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Unavailable,
+                "Too many session events arrived while reading the initial state.",
+            ));
+        }
+        self.install_workers(&mut snapshot.workers)?;
+        if opening {
+            let held: Vec<Event> = std::mem::take(&mut self.opening.events)
+                .into_iter()
+                .map(|(_, event)| event)
+                .filter(|event| !shown(snapshot, event))
+                .collect();
+            let mut running = match snapshot.busy {
+                Some(true) => RunningState::Running,
+                Some(false) => RunningState::Idle,
+                None => self.running,
+            };
+            for event in &held {
+                match event {
+                    Event::Busy => running = RunningState::Running,
+                    Event::Idle => running = RunningState::Idle,
+                    _ => {}
+                }
+            }
+            self.running = running;
+            // An agent switch confirmed during the read is newer than it.
+            snapshot.modes = self.modes.clone();
+            for event in held {
+                self.deliver_content(event);
+            }
+        }
         Ok(())
     }
 }
@@ -1623,7 +1670,7 @@ async fn connected<S: Timers>(
         sequence,
     } = sessions;
 
-    let mut pending = String::new();
+    let mut groups = EventGroups::default();
     let mut timer = timers.timer();
     let mut next_reconcile = timers.now() + RECONCILE_INTERVAL;
     let mut reconcile_offset = 0usize;
@@ -1668,23 +1715,7 @@ async fn connected<S: Timers>(
                         }
                     }) => {
                         if let Some(completed) = completed {
-                            let result = match registrations.get_mut(&completed.id) {
-                                Some(registration) if Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration) => {
-                                    registration.snapshot_in_flight = None;
-                                    let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
-                                    let result = completed.result.and_then(|mut snapshot| {
-                                        if overflow {
-                                            return Err(tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, "Too many sessions were deleted during the snapshot; please retry."));
-                                        }
-                                        registration.install_workers(&mut snapshot.workers)?;
-                                        Ok(registration.events.snapshot_reply(snapshot))
-                                    });
-                                    registration.snapshot_deletions.clear();
-                                    result
-                                }
-                                _ => Err(tomori_backend::Error::new(tomori_backend::ErrorKind::Closed, "The session was closed during its snapshot.")),
-                            };
-                            let _ = completed.reply.try_send(result);
+                            finish_snapshot(registrations, completed);
                         }
                         continue;
                     }
@@ -1751,16 +1782,20 @@ async fn connected<S: Timers>(
                         };
                         let end = frame.is_end();
                         if let base_http::body::BodyFrame::Data { data, .. } = frame {
-                            pending.push_str(&String::from_utf8_lossy(&data));
-                            while let Some(index) = pending.find("\n\n") {
-                                let group = pending[..index + 2].to_owned();
-                                pending = pending[index + 2..].to_owned();
-                                if let Some(payload) = sse_payload(&group) {
+                            let complete = groups.push(&data);
+                            for group in &complete {
+                                if let Some(payload) = sse_payload(group) {
                                     let number = sequence.fetch_add(1, Ordering::AcqRel) + 1;
-                                dispatch_events_at(&payload, registrations, number);
+                                    dispatch_events_at(&payload, registrations, number);
                                 }
                             }
                             start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
+                            if groups.oversized() {
+                                // Dropping part of it could lose an event, so
+                                // the stream is treated as lost, and every
+                                // session is read again on the next one.
+                                break Outcome::Lost(format!("sent an event larger than {MAX_EVENT_BYTES} bytes"));
+                            }
                         }
                         if end {
                             break Outcome::Lost("ended".to_owned());
@@ -1780,7 +1815,8 @@ async fn connected<S: Timers>(
                         }
                         // A session read again after reconnecting reports its
                         // running state from that read.
-                        ids.retain(|id| registrations.get(id).is_some_and(|registration| registration.resync.is_none()));
+                        // One not yet read reports it with its initial state.
+                        ids.retain(|id| registrations.get(id).is_some_and(|registration| registration.resync.is_none() && registration.workers_ready));
                         ids.sort();
                         if !ids.is_empty() {
                             let start = reconcile_offset % ids.len();
@@ -1896,6 +1932,35 @@ async fn bounded_snapshot<S: Timers>(
     .await;
     local.cancel();
     result
+}
+
+/// Answer a snapshot a session asked for, installing it if it was read.
+fn finish_snapshot(registrations: &mut HashMap<String, Registration>, completed: SnapshotResult) {
+    let result = match registrations.get_mut(&completed.id) {
+        Some(registration)
+            if Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration) =>
+        {
+            registration.snapshot_in_flight = None;
+            let overflow = std::mem::take(&mut registration.snapshot_deletions_overflow);
+            let result = completed.result.and_then(|mut snapshot| {
+                if overflow {
+                    return Err(tomori_backend::Error::new(
+                        tomori_backend::ErrorKind::Unavailable,
+                        "Too many sessions were deleted during the snapshot; please retry.",
+                    ));
+                }
+                registration.install(&mut snapshot)?;
+                Ok(registration.events.snapshot_reply(snapshot))
+            });
+            registration.snapshot_deletions.clear();
+            result
+        }
+        _ => Err(tomori_backend::Error::new(
+            tomori_backend::ErrorKind::Closed,
+            "The session was closed during its snapshot.",
+        )),
+    };
+    let _ = completed.reply.try_send(result);
 }
 
 /// Start a snapshot a session asked for, isolated from the event dispatcher.
@@ -2318,6 +2383,20 @@ fn reflected(snapshot: &Snapshot, event: &Event) -> bool {
     }
 }
 
+/// Whether the initial `snapshot` already shows `event`, held since its
+/// session was registered: as [`reflected`], except that a message it lists
+/// still being written keeps its start. Every event since that start was
+/// held, so the space can follow the message, and speak it, from its start.
+fn shown(snapshot: &Snapshot, event: &Event) -> bool {
+    match event {
+        Event::MessageStarted { message, .. } => snapshot
+            .messages
+            .iter()
+            .any(|listed| listed.id == *message && listed.completed),
+        event => reflected(snapshot, event),
+    }
+}
+
 /// Whether `event` changes the pending permissions or questions, which a read
 /// lists after it requests the messages: one held from before that request is
 /// reflected by the read's lists, and delivering it afterwards could present a
@@ -2330,6 +2409,48 @@ fn requests(event: &Event) -> bool {
             | Event::QuestionAsked(_)
             | Event::QuestionResolved { .. }
     )
+}
+
+/// The largest event the stream may send, as for any response.
+const MAX_EVENT_BYTES: usize = api::MAX_JSON_BYTES;
+
+/// Splits the event stream's bytes into its event groups, each ending with a
+/// blank line. A group is decoded once it is whole, so a character split
+/// between two reads is kept, and at most [`MAX_EVENT_BYTES`] of an
+/// unfinished one are held.
+#[derive(Default)]
+struct EventGroups {
+    pending: Vec<u8>,
+    /// How much of `pending` has been searched for a group's end.
+    searched: usize,
+}
+
+impl EventGroups {
+    /// Add `data`, returning the groups it completes.
+    fn push(&mut self, data: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(data);
+        let mut groups = Vec::new();
+        let mut start = 0;
+        // A separator may straddle the previous read.
+        let mut from = self.searched.saturating_sub(1);
+        while let Some(offset) = self.pending[from..]
+            .windows(2)
+            .position(|pair| pair == b"\n\n")
+        {
+            let end = from + offset + 2;
+            groups.push(String::from_utf8_lossy(&self.pending[start..end]).into_owned());
+            start = end;
+            from = end;
+        }
+        self.pending.drain(..start);
+        self.searched = self.pending.len();
+        groups
+    }
+
+    /// Whether the unfinished group has outgrown the limit.
+    fn oversized(&self) -> bool {
+        self.pending.len() > MAX_EVENT_BYTES
+    }
 }
 
 /// The JSON payload of one SSE group, `None` for keep-alive and comment groups.
@@ -2414,7 +2535,12 @@ fn dispatch_events_at(
                     None => registration.publish_modes(),
                 }
             }
-        } else if let Some(resync) = registration.resync.as_mut() {
+        } else if registration.resync.is_some() || !registration.workers_ready {
+            let opening = registration.resync.is_none();
+            let held = registration
+                .resync
+                .as_mut()
+                .unwrap_or(&mut registration.opening);
             if let Some(event) = wire::event_for(
                 &value,
                 &session_id,
@@ -2422,12 +2548,26 @@ fn dispatch_events_at(
                     .seen
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
-            ) {
+            ) && !(opening
+                && registration
+                    .events
+                    .ordinary_incomplete
+                    .load(Ordering::Acquire))
+            {
                 // Held from the loss until the session is read: text deltas
                 // are not kept in OpenCode's records until the message ends,
                 // so no read covers them, and dropping one would lose it.
-                if !resync.hold(sequence, event) {
-                    overflowed = Some(session_id.clone());
+                // Likewise before the initial snapshot, which they follow,
+                // unless events were lost already and it will be refused.
+                if !held.hold(sequence, event) {
+                    if opening {
+                        // The space has not opened, so its snapshot is
+                        // refused rather than presented without them.
+                        held.events.clear();
+                        registration.events.mark_ordinary_incomplete();
+                    } else {
+                        overflowed = Some(session_id.clone());
+                    }
                 }
             }
         } else if let Some(event) = {
@@ -4375,7 +4515,7 @@ mod tests {
                                 while !stopped.load(Ordering::Acquire) {
                                     std::thread::sleep(Duration::from_millis(20));
                                 }
-                            } else if path == "/api/session/slow"
+                            } else if path == "/api/session/steady"
                                 && stall_reconcile.load(Ordering::Acquire)
                             {
                                 let _ = write!(
@@ -4736,6 +4876,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
+        // An open session whose periodic state check will stall: only a
+        // session whose initial state has been read is checked.
+        let steady_events = attach("steady");
+        let (steady_reply, steady_wait) = async_channel::bounded(1);
+        commands
+            .tx()
+            .try_send(Command::Snapshot {
+                id: "steady".into(),
+                identity: steady_events.identity.clone(),
+                reply: steady_reply,
+            })
+            .unwrap();
+        block_on(steady_wait.recv())
+            .unwrap()
+            .unwrap()
+            .accept()
+            .unwrap();
         // A stalled optional active-session lookup must not discard the
         // valid idle record used to recover a missed idle event.
         stall_active.store(true, Ordering::Release);
@@ -5380,6 +5537,16 @@ mod tests {
             let data = format!("data: {event}\n\n");
             for stream in self.streams.lock().unwrap().iter_mut() {
                 let _ = write!(stream, "{:x}\r\n{}\r\n", data.len(), data);
+                let _ = stream.flush();
+            }
+        }
+
+        /// Send `bytes` as one chunk of every open event stream, framed or not.
+        fn send_raw(&self, bytes: &[u8]) {
+            for stream in self.streams.lock().unwrap().iter_mut() {
+                let _ = write!(stream, "{:x}\r\n", bytes.len());
+                let _ = stream.write_all(bytes);
+                let _ = write!(stream, "\r\n");
                 let _ = stream.flush();
             }
         }
@@ -7501,5 +7668,330 @@ mod tests {
                 ("omitted", WorkerState::Unknown),
             ]
         );
+    }
+
+    /// Read `id`'s initial state, as a space does once it is bound.
+    fn read_snapshot(
+        commands: &Commands,
+        id: &str,
+        events: &RegistrationEvents,
+    ) -> tomori_backend::Result<Snapshot> {
+        let id = id.to_owned();
+        let identity = events.identity.clone();
+        block_on(commands.reply_with(|reply| Command::Snapshot {
+            id,
+            identity,
+            reply,
+        }))
+        .and_then(SnapshotReply::accept)
+    }
+
+    /// Create a session against a simulated service and open it.
+    fn open_session(commands: &Commands) -> (String, RegistrationEvents) {
+        let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Open".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        read_snapshot(commands, &id, &events).unwrap();
+        (id, events)
+    }
+
+    /// Events that arrive before a space's initial state has been read wait
+    /// for it, and those it already shows are not delivered again: a message
+    /// that ended meanwhile is in the state with its text, while one still
+    /// being written has no recorded text yet, so its streamed text follows.
+    #[test]
+    fn text_streamed_while_the_initial_snapshot_is_read_is_not_repeated() {
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| {
+            state.sessions.insert("attached".into(), Vec::new());
+            state.messages.insert(
+                "attached".into(),
+                // Newest first, as OpenCode lists them.
+                json!([
+                    {"id":"live","type":"assistant","time":{"created":3},"content":[{"type":"text","text":""}]},
+                    {"id":"done","type":"assistant","time":{"created":1,"completed":2},"content":[{"type":"text","text":"Finished."}]},
+                ]),
+            );
+            state.stalled.insert("attached".into());
+        });
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        // Another open session shows when the stream has been dispatched.
+        let (other, other_events) = open_session(&commands);
+        let other_events = watch(&other_events);
+        let events = block_on(commands.reply_with(|reply| Command::Attach {
+            id: "attached".into(),
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap();
+        let watched = watch(&events);
+        let reading = {
+            let commands = commands.clone();
+            let events = events.clone();
+            in_thread(move || read_snapshot(&commands, "attached", &events))
+        };
+        let event = |kind: &str, data: Value| {
+            let mut data = data;
+            data["sessionID"] = json!("attached");
+            json!({ "type": kind, "data": data })
+        };
+        service.send(event(
+            "session.text.started",
+            json!({"assistantMessageID":"done"}),
+        ));
+        service.send(event(
+            "session.text.delta",
+            json!({"assistantMessageID":"done","delta":"Finished."}),
+        ));
+        service.send(event(
+            "session.text.ended",
+            json!({"assistantMessageID":"done"}),
+        ));
+        service.send(event(
+            "session.text.started",
+            json!({"assistantMessageID":"live"}),
+        ));
+        service.send(event(
+            "session.text.delta",
+            json!({"assistantMessageID":"live","delta":"Still going"}),
+        ));
+        service.send(json!({"type":"session.execution.started","data":{"sessionID":other}}));
+        until(&other_events, "the other session's event", |event| {
+            matches!(event, Event::Busy)
+        });
+        shared.update(|state| {
+            state.stalled.remove("attached");
+        });
+        let (snapshot, _) = reading.recv_timeout(Duration::from_secs(5)).unwrap();
+        let snapshot = snapshot.unwrap();
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .map(|message| (message.id.as_str(), message.completed))
+                .collect::<Vec<_>>(),
+            [("done", true), ("live", false)]
+        );
+        let seen = until(
+            &watched,
+            "the live message's text",
+            |event| matches!(event, Event::TextDelta { message, .. } if message == "live"),
+        );
+        // Workers travel on their own lane.
+        let ordinary: Vec<_> = seen
+            .into_iter()
+            .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
+            .collect();
+        assert_eq!(
+            ordinary,
+            [
+                Event::MessageStarted {
+                    message: "live".into(),
+                    role: tomori_backend::Role::Assistant,
+                },
+                Event::TextDelta {
+                    message: "live".into(),
+                    text: "Still going".into(),
+                }
+            ],
+            "only what the snapshot does not show follows it"
+        );
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// The event stream is decoded once each event is whole, so a character
+    /// split between two chunks is kept; an unfinished event that outgrows
+    /// the limit is not held in memory but ends the stream, after which every
+    /// session is read again.
+    #[test]
+    fn event_groups_are_decoded_whole_and_bounded() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let (id, events) = open_session(&commands);
+        let watched = watch(&events);
+        let payload = format!(
+            "data: {}\n\n",
+            json!({"type":"session.text.delta","data":{"sessionID":id,"assistantMessageID":"m","delta":"こんにちは"}})
+        );
+        let split = payload.find('ん').unwrap() + 1;
+        service.send_raw(&payload.as_bytes()[..split]);
+        std::thread::sleep(Duration::from_millis(50));
+        service.send_raw(&payload.as_bytes()[split..]);
+        let seen = until(&watched, "the split delta", |event| {
+            matches!(event, Event::TextDelta { .. })
+        });
+        assert_eq!(
+            seen.last(),
+            Some(&Event::TextDelta {
+                message: "m".into(),
+                text: "こんにちは".into(),
+            })
+        );
+
+        // An event without its end, larger than any OpenCode sends.
+        service.send_raw(b"data: \"");
+        let filler = vec![b'x'; 1024 * 1024];
+        for _ in 0..=api::MAX_JSON_BYTES / filler.len() {
+            service.send_raw(&filler);
+        }
+        until(&watched, "the loss of the stream", |event| {
+            matches!(event, Event::Reconnecting { .. })
+        });
+        until(&watched, "the session read again", |event| {
+            matches!(event, Event::Resynchronized { .. })
+        });
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    #[test]
+    fn event_groups_end_at_a_blank_line_split_between_reads() {
+        let mut groups = EventGroups::default();
+        assert!(groups.push(b"data: 1\n").is_empty());
+        // The blank line ending the group straddles two reads.
+        assert_eq!(
+            groups.push(b"\ndata: 2\n\ndata: 3\n\n: keep"),
+            ["data: 1\n\n", "data: 2\n\n", "data: 3\n\n"]
+        );
+        assert!(!groups.oversized());
+        assert_eq!(groups.push(b"-alive\n\n"), [": keep-alive\n\n"]);
+        assert!(groups.pending.is_empty());
+        assert!(groups.push(&vec![b'x'; MAX_EVENT_BYTES]).is_empty());
+        assert!(!groups.oversized());
+        assert!(groups.push(b"x").is_empty());
+        assert!(groups.oversized());
+    }
+
+    /// A session registered and not yet read, whose snapshot is in flight.
+    fn opening() -> (HashMap<String, Registration>, RegistrationEvents) {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        (registrations, events)
+    }
+
+    fn finish_opening(
+        registrations: &mut HashMap<String, Registration>,
+        snapshot: Snapshot,
+    ) -> tomori_backend::Result<Snapshot> {
+        let (reply, answer) = async_channel::bounded(1);
+        let identity = registrations["s"].events.worker_epoch.clone();
+        finish_snapshot(
+            registrations,
+            SnapshotResult {
+                id: "s".into(),
+                registration: identity,
+                reply,
+                result: Ok(snapshot),
+            },
+        );
+        answer.try_recv().unwrap().and_then(SnapshotReply::accept)
+    }
+
+    fn state_event(kind: &str) -> String {
+        json!({"type": kind, "data": {"sessionID": "s"}}).to_string()
+    }
+
+    /// More events than can be held before the initial state is read refuse
+    /// it, rather than opening the space without them.
+    #[test]
+    fn too_many_events_before_the_initial_snapshot_refuse_it() {
+        let (mut registrations, events) = opening();
+        for turn in 0..=MAX_RESYNC_EVENTS {
+            let kind = if turn % 2 == 0 {
+                "session.execution.started"
+            } else {
+                "session.execution.succeeded"
+            };
+            dispatch_events(&state_event(kind), &mut registrations);
+        }
+        assert!(registrations["s"].opening.events.is_empty());
+        // Nothing more is held for a snapshot that will be refused.
+        dispatch_events(
+            &state_event("session.execution.started"),
+            &mut registrations,
+        );
+        assert!(registrations["s"].opening.events.is_empty());
+        assert!(finish_opening(&mut registrations, Snapshot::default()).is_err());
+        assert!(matches!(
+            events.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
+        ));
+    }
+
+    /// Without room for the events held for it, the initial state is refused
+    /// and they stay held, so a retry delivers them after it with the latest
+    /// running state and modes.
+    #[test]
+    fn events_held_for_the_initial_snapshot_wait_for_room() {
+        let (mut registrations, events) = opening();
+        dispatch_events(
+            &state_event("session.execution.started"),
+            &mut registrations,
+        );
+        dispatch_events(
+            &state_event("session.execution.succeeded"),
+            &mut registrations,
+        );
+        let switched =
+            json!({"type":"session.agent.selected","data":{"sessionID":"s","agent":"plan"}})
+                .to_string();
+        dispatch_events(&switched, &mut registrations);
+        // The mode is reported at once; the running state waits for the snapshot.
+        assert!(
+            matches!(events.try_recv().unwrap().into_current(), Some(Event::ModesChanged(modes)) if modes.current.as_deref() == Some("plan"))
+        );
+        let registration = registrations.get_mut("s").unwrap();
+        while registration.events.room() > 2 {
+            assert!(registration.events.deliver(Event::Idle));
+        }
+        let refused = finish_opening(&mut registrations, Snapshot::default()).unwrap_err();
+        assert!(refused.message.contains("Too many"), "{refused:?}");
+        assert_eq!(registrations["s"].opening.events.len(), 2);
+        while events.try_recv().is_ok() {}
+        // So is a snapshot that cannot tell which workers were deleted.
+        registrations
+            .get_mut("s")
+            .unwrap()
+            .snapshot_deletions_overflow = true;
+        let refused = finish_opening(&mut registrations, Snapshot::default()).unwrap_err();
+        assert!(refused.message.contains("deleted"), "{refused:?}");
+        assert_eq!(registrations["s"].opening.events.len(), 2);
+        let snapshot = finish_opening(
+            &mut registrations,
+            Snapshot {
+                busy: Some(true),
+                ..Snapshot::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.modes.current.as_deref(), Some("plan"));
+        // The turn the snapshot shows running has ended since.
+        assert!(matches!(registrations["s"].running, RunningState::Idle));
+        let delivered: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(QueuedEvent::into_current)
+            .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
+            .collect();
+        assert_eq!(delivered, [Event::Busy, Event::Idle]);
+        // Once read, events are delivered as they arrive.
+        dispatch_events(
+            &state_event("session.execution.started"),
+            &mut registrations,
+        );
+        assert!(matches!(
+            events.try_recv().unwrap().into_current(),
+            Some(Event::Busy)
+        ));
     }
 }
