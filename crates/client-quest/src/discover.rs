@@ -174,7 +174,7 @@ fn spaces_text(spaces: &[SpaceSummary]) -> String {
     for space in spaces {
         let _ = writeln!(
             text,
-            "  {:<12} {:<24} {}{} participant(s)",
+            "  {:<12} {:<24} {}, {} participant(s)",
             space.id, space.title, space.backend, space.participants
         );
     }
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(
             spaces_text(&spaces),
             format!(
-                "Spaces:\n  {:<12} Studio                   fake1 participant(s)\n",
+                "Spaces:\n  {:<12} Studio                   fake, 1 participant(s)\n",
                 space.id
             )
         );
