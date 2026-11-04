@@ -453,6 +453,12 @@ impl Renderer {
         self.workspace.update(device, queue, workspace, stations);
     }
 
+    /// How many vertices the arrival labels' buffer holds now.
+    #[cfg(test)]
+    pub fn arrival_label_capacity(&self) -> usize {
+        self.arrival.capacity()
+    }
+
     /// Append the arrival scene, the pointing ray and the labels anchored to its objects, after the swarm, floor and any workspace cubes, which a space's arrival may still be leaving. Call after `update` and `update_workspace`.
     pub fn update_arrival(
         &mut self,
@@ -793,240 +799,248 @@ mod tests {
 
     #[test]
     fn sky_environment_renders_stereo_switches_and_preserves_recenter() {
-        pollster::block_on(async {
-            const WIDTH: u32 = 768;
-            const HEIGHT: u32 = 512;
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let textures: [_; 2] = std::array::from_fn(|_| {
-                device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Sky test eye"),
-                    size: wgpu::Extent3d {
-                        width: WIDTH,
-                        height: HEIGHT,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                })
-            });
-            let views = textures
-                .each_ref()
-                .map(|t| t.create_view(&Default::default()));
-            let mut renderer = Renderer::new(
-                &device,
-                &queue,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-                WIDTH,
-                HEIGHT,
-            );
-            let mut swarm = Swarm::new();
-            for _ in 0..240 {
-                swarm.set_visual(
-                    crate::interaction::Visual {
-                        mode: Mode::Ready,
-                        ..Default::default()
-                    },
-                    1.0 / 72.0,
-                );
-                swarm.step(1.0 / 72.0, None);
-            }
-            let positions: Vec<_> = swarm.agents.iter().map(|a| a.position).collect();
-            let projection = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 100.0);
-            let matrices = [-0.032, 0.032].map(|x| {
-                let eye = glam::Vec3::new(x, 1.6, 0.0);
-                projection
-                    * Mat4::look_at_rh(eye, eye + glam::Vec3::new(0.0, 0.15, -1.0), glam::Vec3::Y)
-            });
-            let capture = |renderer: &Renderer, matrices: [Mat4; 2], anchor: Mat4| {
-                renderer.render(&device, &queue, &views, &matrices, anchor, &[]);
-                let buffers: [_; 2] = std::array::from_fn(|_| {
-                    device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Sky test readback"),
-                        size: u64::from(WIDTH * HEIGHT * 4),
-                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                        mapped_at_creation: false,
-                    })
-                });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                for eye in 0..2 {
-                    encoder.copy_texture_to_buffer(
-                        textures[eye].as_image_copy(),
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: &buffers[eye],
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(WIDTH * 4),
-                                rows_per_image: Some(HEIGHT),
-                            },
-                        },
-                        wgpu::Extent3d {
+        const WIDTH: u32 = 768;
+        const HEIGHT: u32 = 512;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let textures: [_; 2] = std::array::from_fn(|_| {
+                    device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Sky test eye"),
+                        size: wgpu::Extent3d {
                             width: WIDTH,
                             height: HEIGHT,
                             depth_or_array_layers: 1,
                         },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    })
+                });
+                let views = textures
+                    .each_ref()
+                    .map(|t| t.create_view(&Default::default()));
+                let mut renderer = Renderer::new(
+                    &device,
+                    &queue,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    WIDTH,
+                    HEIGHT,
+                );
+                let mut swarm = Swarm::new();
+                for _ in 0..240 {
+                    swarm.set_visual(
+                        crate::interaction::Visual {
+                            mode: Mode::Ready,
+                            ..Default::default()
+                        },
+                        1.0 / 72.0,
+                    );
+                    swarm.step(1.0 / 72.0, None);
+                }
+                let positions: Vec<_> = swarm.agents.iter().map(|a| a.position).collect();
+                let projection =
+                    Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 100.0);
+                let matrices = [-0.032, 0.032].map(|x| {
+                    let eye = glam::Vec3::new(x, 1.6, 0.0);
+                    projection
+                        * Mat4::look_at_rh(
+                            eye,
+                            eye + glam::Vec3::new(0.0, 0.15, -1.0),
+                            glam::Vec3::Y,
+                        )
+                });
+                let capture = |renderer: &Renderer, matrices: [Mat4; 2], anchor: Mat4| {
+                    renderer.render(&device, &queue, &views, &matrices, anchor, &[]);
+                    let buffers: [_; 2] = std::array::from_fn(|_| {
+                        device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Sky test readback"),
+                            size: u64::from(WIDTH * HEIGHT * 4),
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        })
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    for eye in 0..2 {
+                        encoder.copy_texture_to_buffer(
+                            textures[eye].as_image_copy(),
+                            wgpu::TexelCopyBufferInfo {
+                                buffer: &buffers[eye],
+                                layout: wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(WIDTH * 4),
+                                    rows_per_image: Some(HEIGHT),
+                                },
+                            },
+                            wgpu::Extent3d {
+                                width: WIDTH,
+                                height: HEIGHT,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                    queue.submit([encoder.finish()]);
+                    buffers
+                        .iter()
+                        .map(|buffer| {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            buffer
+                                .slice(..)
+                                .map_async(wgpu::MapMode::Read, move |result| {
+                                    tx.send(result).unwrap();
+                                });
+                            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                            rx.recv().unwrap().unwrap();
+                            let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                            buffer.unmap();
+                            data
+                        })
+                        .collect::<Vec<_>>()
+                };
+                renderer.set_environment(Environment::Minimal);
+                renderer.update(&queue, &swarm, None, false);
+                let minimal = capture(&renderer, matrices, Mat4::IDENTITY);
+                renderer.set_environment(Environment::Sky);
+                renderer.update(&queue, &swarm, None, false);
+                let sky = capture(&renderer, matrices, Mat4::IDENTITY);
+                assert_ne!(sky[0], minimal[0]);
+                assert_ne!(sky[0], sky[1], "scenery must have stereo parallax");
+                // Return to the original preset without touching the simulation.
+                renderer.set_environment(Environment::Minimal);
+                renderer.update(&queue, &swarm, None, false);
+                assert_eq!(minimal, capture(&renderer, matrices, Mat4::IDENTITY));
+                assert_eq!(
+                    positions,
+                    swarm.agents.iter().map(|a| a.position).collect::<Vec<_>>()
+                );
+                renderer.set_environment(Environment::Sky);
+                renderer.update(&queue, &swarm, None, false);
+                let anchor = Mat4::from_rotation_translation(
+                    glam::Quat::from_rotation_y(0.35),
+                    glam::Vec3::new(1.0, 0.0, -0.5),
+                );
+                let compensated =
+                    capture(&renderer, matrices.map(|m| m * anchor.inverse()), anchor);
+                for eye in 0..2 {
+                    let changed = sky[eye]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(compensated[eye].as_chunks::<4>().0)
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    assert!(
+                        changed < 2000,
+                        "recenter changed {changed} pixels in eye {eye}"
                     );
                 }
-                queue.submit([encoder.finish()]);
-                buffers
-                    .iter()
-                    .map(|buffer| {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        buffer
-                            .slice(..)
-                            .map_async(wgpu::MapMode::Read, move |result| {
-                                tx.send(result).unwrap();
-                            });
-                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                        rx.recv().unwrap().unwrap();
-                        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                        buffer.unmap();
-                        data
-                    })
-                    .collect::<Vec<_>>()
-            };
-            renderer.set_environment(Environment::Minimal);
-            renderer.update(&queue, &swarm, None, false);
-            let minimal = capture(&renderer, matrices, Mat4::IDENTITY);
-            renderer.set_environment(Environment::Sky);
-            renderer.update(&queue, &swarm, None, false);
-            let sky = capture(&renderer, matrices, Mat4::IDENTITY);
-            assert_ne!(sky[0], minimal[0]);
-            assert_ne!(sky[0], sky[1], "scenery must have stereo parallax");
-            // Return to the original preset without touching the simulation.
-            renderer.set_environment(Environment::Minimal);
-            renderer.update(&queue, &swarm, None, false);
-            assert_eq!(minimal, capture(&renderer, matrices, Mat4::IDENTITY));
-            assert_eq!(
-                positions,
-                swarm.agents.iter().map(|a| a.position).collect::<Vec<_>>()
-            );
-            renderer.set_environment(Environment::Sky);
-            renderer.update(&queue, &swarm, None, false);
-            let anchor = Mat4::from_rotation_translation(
-                glam::Quat::from_rotation_y(0.35),
-                glam::Vec3::new(1.0, 0.0, -0.5),
-            );
-            let compensated = capture(&renderer, matrices.map(|m| m * anchor.inverse()), anchor);
-            for eye in 0..2 {
-                let changed = sky[eye]
+                // Distant sky follows orientation, not the viewer's translation.
+                let translated = capture(
+                    &renderer,
+                    matrices.map(|m| m * Mat4::from_translation(glam::Vec3::new(-0.4, 0.0, 0.0))),
+                    Mat4::IDENTITY,
+                );
+                let top_bytes = (WIDTH * 100 * 4) as usize;
+                let sky_changes = sky[0][..top_bytes]
                     .as_chunks::<4>()
                     .0
                     .iter()
-                    .zip(compensated[eye].as_chunks::<4>().0)
+                    .zip(translated[0][..top_bytes].as_chunks::<4>().0)
                     .filter(|(a, b)| a != b)
                     .count();
                 assert!(
-                    changed < 2000,
-                    "recenter changed {changed} pixels in eye {eye}"
+                    sky_changes < 800,
+                    "translation must not drag the sky: {sky_changes}"
                 );
-            }
-            // Distant sky follows orientation, not the viewer's translation.
-            let translated = capture(
-                &renderer,
-                matrices.map(|m| m * Mat4::from_translation(glam::Vec3::new(-0.4, 0.0, 0.0))),
-                Mat4::IDENTITY,
-            );
-            let top_bytes = (WIDTH * 100 * 4) as usize;
-            let sky_changes = sky[0][..top_bytes]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(translated[0][..top_bytes].as_chunks::<4>().0)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert!(
-                sky_changes < 800,
-                "translation must not drag the sky: {sky_changes}"
-            );
-            let overview = projection
-                * Mat4::look_at_rh(
-                    glam::Vec3::new(6.0, 5.0, 8.0),
-                    glam::Vec3::new(0.0, 0.7, -2.5),
-                    glam::Vec3::Y,
-                );
-            let overview = capture(&renderer, [overview; 2], Mat4::IDENTITY);
-            // Growing out of a space's object: Sky inside the sphere, the grid outside it.
-            let reveal = |radius| crate::arrival_motion::Scenery {
-                environment: Environment::Sky,
-                reveal: Some(crate::arrival_motion::Sphere {
-                    centre: glam::Vec3::new(0.0, 1.0, -2.5),
-                    radius,
-                }),
-            };
-            let mut revealed = |scenery| {
-                renderer.set_scenery(scenery);
-                renderer.update(&queue, &swarm, None, false);
-                capture(&renderer, matrices, Mat4::IDENTITY)
-            };
-            let point = revealed(reveal(0.0));
-            let growing = revealed(reveal(1.5));
-            let world = revealed(reveal(1000.0));
-            let filled = revealed(crate::arrival_motion::Scenery {
-                environment: Environment::Sky,
-                reveal: None,
-            });
-            assert_eq!(renderer.environment(), Environment::Sky);
-            // Within one step, as in `workspace_graphics`: a few interpolated colours may round differently where only the pipeline differs.
-            let changed = |a: &[u8], b: &[u8]| {
-                a.as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(b.as_chunks::<4>().0)
-                    .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 1))
-                    .count()
-            };
-            let rows = |image: &[u8], rows: std::ops::Range<u32>| {
-                image[(rows.start * WIDTH * 4) as usize..(rows.end * WIDTH * 4) as usize].to_vec()
-            };
-            for eye in 0..2 {
-                assert_eq!(
-                    changed(&point[eye], &minimal[eye]),
-                    0,
-                    "a sphere of no size shows only the grid"
-                );
-                assert_eq!(
-                    changed(&world[eye], &sky[eye]),
-                    0,
-                    "a sphere around everything shows all of Sky"
-                );
-                assert_eq!(filled[eye], sky[eye], "filling the world draws as before");
-                // The sphere, centred below the view, fills its middle and bottom, and leaves the top to the grid.
-                assert_eq!(
-                    changed(&rows(&growing[eye], 0..40), &rows(&minimal[eye], 0..40)),
-                    0,
-                    "the grid shows outside the sphere"
-                );
-                let middle = rows(&growing[eye], 380..420);
-                assert!(
-                    changed(&middle, &rows(&minimal[eye], 380..420)) > middle.len() / 4 / 2,
-                    "Sky shows inside the sphere"
-                );
-                assert_ne!(growing[eye], sky[eye]);
-            }
-            if let Ok(path) = std::env::var("TOMORI_SKY_PREVIEW") {
-                let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
-                for (i, bytes) in [&sky[0], &sky[1], &minimal[0], &overview[0]]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let image = image::RgbaImage::from_raw(WIDTH, HEIGHT, bytes.clone()).unwrap();
-                    image::imageops::replace(
-                        &mut sheet,
-                        &image,
-                        (i % 2) as i64 * i64::from(WIDTH),
-                        (i / 2) as i64 * i64::from(HEIGHT),
+                let overview = projection
+                    * Mat4::look_at_rh(
+                        glam::Vec3::new(6.0, 5.0, 8.0),
+                        glam::Vec3::new(0.0, 0.7, -2.5),
+                        glam::Vec3::Y,
                     );
+                let overview = capture(&renderer, [overview; 2], Mat4::IDENTITY);
+                // Growing out of a space's object: Sky inside the sphere, the grid outside it.
+                let reveal = |radius| crate::arrival_motion::Scenery {
+                    environment: Environment::Sky,
+                    reveal: Some(crate::arrival_motion::Sphere {
+                        centre: glam::Vec3::new(0.0, 1.0, -2.5),
+                        radius,
+                    }),
+                };
+                let mut revealed = |scenery| {
+                    renderer.set_scenery(scenery);
+                    renderer.update(&queue, &swarm, None, false);
+                    capture(&renderer, matrices, Mat4::IDENTITY)
+                };
+                let point = revealed(reveal(0.0));
+                let growing = revealed(reveal(1.5));
+                let world = revealed(reveal(1000.0));
+                let filled = revealed(crate::arrival_motion::Scenery {
+                    environment: Environment::Sky,
+                    reveal: None,
+                });
+                assert_eq!(renderer.environment(), Environment::Sky);
+                // Within one step, as in `workspace_graphics`: a few interpolated colours may round differently where only the pipeline differs.
+                let changed = |a: &[u8], b: &[u8]| {
+                    a.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(b.as_chunks::<4>().0)
+                        .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 1))
+                        .count()
+                };
+                let rows = |image: &[u8], rows: std::ops::Range<u32>| {
+                    image[(rows.start * WIDTH * 4) as usize..(rows.end * WIDTH * 4) as usize]
+                        .to_vec()
+                };
+                for eye in 0..2 {
+                    assert_eq!(
+                        changed(&point[eye], &minimal[eye]),
+                        0,
+                        "a sphere of no size shows only the grid"
+                    );
+                    assert_eq!(
+                        changed(&world[eye], &sky[eye]),
+                        0,
+                        "a sphere around everything shows all of Sky"
+                    );
+                    assert_eq!(filled[eye], sky[eye], "filling the world draws as before");
+                    // The sphere, centred below the view, fills its middle and bottom, and leaves the top to the grid.
+                    assert_eq!(
+                        changed(&rows(&growing[eye], 0..40), &rows(&minimal[eye], 0..40)),
+                        0,
+                        "the grid shows outside the sphere"
+                    );
+                    let middle = rows(&growing[eye], 380..420);
+                    assert!(
+                        changed(&middle, &rows(&minimal[eye], 380..420)) > middle.len() / 4 / 2,
+                        "Sky shows inside the sphere"
+                    );
+                    assert_ne!(growing[eye], sky[eye]);
                 }
-                sheet.save(path).unwrap();
-            }
-            assert!(scope.pop().await.is_none());
+                {
+                    let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
+                    for (i, bytes) in [&sky[0], &sky[1], &minimal[0], &overview[0]]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let image =
+                            image::RgbaImage::from_raw(WIDTH, HEIGHT, bytes.clone()).unwrap();
+                        image::imageops::replace(
+                            &mut sheet,
+                            &image,
+                            (i % 2) as i64 * i64::from(WIDTH),
+                            (i / 2) as i64 * i64::from(HEIGHT),
+                        );
+                    }
+                    crate::test_support::preview("TOMORI_SKY_PREVIEW", &sheet);
+                }
+                assert!(scope.pop().await.is_none());
+            })
         });
     }
 
@@ -1106,338 +1120,14 @@ mod tests {
 
     #[test]
     fn conversational_states_render_distinct_images() {
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("conversation signal test"),
-                size: wgpu::Extent3d {
-                    width: 512,
-                    height: 384,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let mut renderer = Renderer::new(
-                &device,
-                &queue,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-                512,
-                384,
-            );
-            let camera = Mat4::perspective_rh(1.1, 512.0 / 384.0, 0.05, 50.0)
-                * Mat4::from_translation(glam::Vec3::new(0.0, -1.6, 0.0));
-            let mut images = Vec::new();
-            for mode in [
-                Mode::Working,
-                Mode::Preparing,
-                Mode::Speaking,
-                Mode::Ready,
-                Mode::Waiting,
-                Mode::Listening,
-            ] {
-                let mut swarm = Swarm::new();
-                for _ in 0..240 {
-                    swarm.set_visual(
-                        crate::interaction::Visual {
-                            mode,
-                            level: 0.8,
-                            ..Default::default()
-                        },
-                        1.0 / 72.0,
-                    );
-                    swarm.step(1.0 / 72.0, None);
-                }
-                renderer.update(&queue, &swarm, None, false);
-                renderer.render(
-                    &device,
-                    &queue,
-                    std::slice::from_ref(&view),
-                    &[camera],
-                    Mat4::IDENTITY,
-                    &[],
-                );
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("signal readback"),
-                    size: 512 * 384 * 4,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.copy_texture_to_buffer(
-                    texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(512 * 4),
-                            rows_per_image: Some(384),
-                        },
-                    },
-                    wgpu::Extent3d {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("conversation signal test"),
+                    size: wgpu::Extent3d {
                         width: 512,
                         height: 384,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| {
-                        tx.send(result).unwrap();
-                    });
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let image = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                buffer.unmap();
-                assert!(
-                    images.iter().all(|previous| previous != &image),
-                    "{mode:?} must be visually distinct"
-                );
-                images.push(image);
-            }
-            if let Ok(path) = std::env::var("TOMORI_SIGNAL_PREVIEW") {
-                let mut sheet = image::RgbaImage::new(512 * 3, 384 * 2);
-                for (i, bytes) in images.into_iter().enumerate() {
-                    let image = image::RgbaImage::from_raw(512, 384, bytes).unwrap();
-                    image::imageops::replace(
-                        &mut sheet,
-                        &image,
-                        (i % 3) as i64 * 512,
-                        (i / 3) as i64 * 384,
-                    );
-                }
-                sheet.save(path).unwrap();
-            }
-            assert!(scope.pop().await.is_none());
-        });
-    }
-
-    #[test]
-    fn both_controller_poses_change_the_offscreen_image() {
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("controller test target"),
-                size: wgpu::Extent3d {
-                    width: 128,
-                    height: 128,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let mut renderer = Renderer::new(
-                &device,
-                &queue,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-                128,
-                128,
-            );
-            let mut swarm = Swarm::new();
-            swarm.agents.clear();
-            renderer.update(&queue, &swarm, None, false);
-            let capture = |renderer: &Renderer| {
-                renderer.render(
-                    &device,
-                    &queue,
-                    std::slice::from_ref(&view),
-                    &[Mat4::IDENTITY],
-                    Mat4::IDENTITY,
-                    &[],
-                );
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("controller test readback"),
-                    size: 128 * 128 * 4,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.copy_texture_to_buffer(
-                    texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(128 * 4),
-                            rows_per_image: Some(128),
-                        },
-                    },
-                    wgpu::Extent3d {
-                        width: 128,
-                        height: 128,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| {
-                        let _ = tx.send(result);
-                    });
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                buffer.unmap();
-                data
-            };
-            let empty = capture(&renderer);
-            renderer.update_controllers(
-                &queue,
-                [
-                    Some(crate::controller::Pose {
-                        position: [-0.45, 0.0, 0.5],
-                        orientation: [0.0, 0.0, 0.0, 1.0],
-                    }),
-                    Some(crate::controller::Pose {
-                        position: [0.45, 0.0, 0.5],
-                        orientation: [0.0, 0.0, 0.0, 1.0],
-                    }),
-                ],
-                [None, None],
-            );
-            let with_controllers = capture(&renderer);
-            let changed = |start: usize, end: usize| {
-                (0..128).any(|y| {
-                    (start..end).any(|x| {
-                        let offset = (y * 128 + x) * 4;
-                        empty[offset..offset + 4] != with_controllers[offset..offset + 4]
-                    })
-                })
-            };
-            assert!(changed(0, 64), "left controller should render");
-            assert!(changed(64, 128), "right controller should render");
-            let make_hand = |x| {
-                let mut hand = crate::hands::Hand {
-                    joints: [None; crate::hands::JOINT_COUNT],
-                };
-                hand.joints[1] = Some(crate::hands::Joint {
-                    position: [x, -0.1, 0.5],
-                    radius: 0.01,
-                });
-                hand.joints[2] = Some(crate::hands::Joint {
-                    position: [x, 0.1, 0.5],
-                    radius: 0.01,
-                });
-                hand
-            };
-            renderer.update_controllers(
-                &queue,
-                [None, None],
-                [Some(make_hand(-0.45)), Some(make_hand(0.45))],
-            );
-            let with_hands = capture(&renderer);
-            let hand_changed = |start: usize, end: usize| {
-                (0..128).any(|y| {
-                    (start..end).any(|x| {
-                        let offset = (y * 128 + x) * 4;
-                        empty[offset..offset + 4] != with_hands[offset..offset + 4]
-                    })
-                })
-            };
-            assert!(hand_changed(0, 64), "left hand should render");
-            assert!(hand_changed(64, 128), "right hand should render");
-            // A model the runtime provides replaces the bundled one, on its own hand only; an empty one is ignored.
-            let pose = |x| {
-                Some(crate::controller::Pose {
-                    position: [x, 0.0, 0.5],
-                    orientation: [0.0, 0.0, 0.0, 1.0],
-                })
-            };
-            renderer.update_controllers(&queue, [pose(-0.45), pose(0.45)], [None, None]);
-            assert_eq!(capture(&renderer), with_controllers);
-            let vertex = |x, y| crate::controller::Vertex {
-                position: [x, y, 0.0],
-                normal: [0.0, 0.0, -1.0],
-                color: [1.0, 0.1, 0.1],
-                uv: [0.0, 0.0],
-            };
-            let triangle = ControllerModel {
-                vertices: vec![vertex(-0.3, -0.3), vertex(0.3, -0.3), vertex(0.0, 0.3)],
-                parts: vec![crate::controller::Part {
-                    start: 0,
-                    count: 3,
-                    texture: None,
-                }],
-                textures: Vec::new(),
-            };
-            renderer.set_controller_model(&device, &queue, 0, &triangle);
-            let replaced = capture(&renderer);
-            let differs = |a: &[u8], b: &[u8], start: usize, end: usize| {
-                (0..128).any(|y| {
-                    (start..end).any(|x| {
-                        let offset = (y * 128 + x) * 4;
-                        a[offset..offset + 4] != b[offset..offset + 4]
-                    })
-                })
-            };
-            assert!(
-                differs(&replaced, &with_controllers, 0, 64),
-                "the left model should change"
-            );
-            assert!(
-                !differs(&replaced, &with_controllers, 64, 128),
-                "the right model should not change"
-            );
-            let empty_model = ControllerModel {
-                vertices: Vec::new(),
-                parts: Vec::new(),
-                textures: Vec::new(),
-            };
-            renderer.set_controller_model(&device, &queue, 1, &empty_model);
-            renderer.set_controller_model(&device, &queue, 2, &triangle);
-            assert_eq!(
-                capture(&renderer),
-                replaced,
-                "an empty model or unknown hand is ignored"
-            );
-
-            // Without tracked controllers, the desktop's pointer is a cube that turns orange while it attracts the swarm.
-            renderer.update_controllers(&queue, [None, None], [None, None]);
-            renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), false);
-            let pointer = capture(&renderer);
-            renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), true);
-            let attracting = capture(&renderer);
-            assert_ne!(pointer, empty, "the pointer should render");
-            assert_ne!(
-                pointer, attracting,
-                "attracting should change the pointer's colour"
-            );
-            assert!(error_scope.pop().await.is_none());
-        });
-    }
-
-    #[test]
-    fn workspace_pages_render_stereo_recenter_and_clear() {
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let textures: [_; 2] = std::array::from_fn(|_| {
-                device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("workspace test eye"),
-                    size: wgpu::Extent3d {
-                        width: 256,
-                        height: 256,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
@@ -1446,284 +1136,613 @@ mod tests {
                     format: wgpu::TextureFormat::Rgba8UnormSrgb,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
-                })
-            });
-            let views: [_; 2] =
-                std::array::from_fn(|i| textures[i].create_view(&Default::default()));
-            let mut renderer = Renderer::new(
-                &device,
-                &queue,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-                256,
-                256,
-            );
-            let mut swarm = Swarm::new();
-            swarm.agents.clear();
-            renderer.update(&queue, &swarm, None, false);
-            let projection = Mat4::perspective_rh(1.0, 1.0, 0.05, 50.0);
-            let direction =
-                (glam::Vec3::new(-3.5, 2.4, -3.35) - glam::Vec3::new(0.0, 1.6, 0.0)).normalize();
-            let matrices = [-0.032, 0.032].map(|x| {
-                let eye = glam::Vec3::new(x, 1.6, 0.0);
-                projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
-            });
-            let capture = |renderer: &Renderer, matrices: [Mat4; 2], scene_to_space: Mat4| {
-                renderer.render(&device, &queue, &views, &matrices, scene_to_space, &[]);
-                let buffers: [_; 2] = std::array::from_fn(|_| {
-                    device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("workspace test readback"),
-                        size: 256 * 256 * 4,
+                });
+                let view = texture.create_view(&Default::default());
+                let mut renderer = Renderer::new(
+                    &device,
+                    &queue,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    512,
+                    384,
+                );
+                let camera = Mat4::perspective_rh(1.1, 512.0 / 384.0, 0.05, 50.0)
+                    * Mat4::from_translation(glam::Vec3::new(0.0, -1.6, 0.0));
+                let mut images = Vec::new();
+                for mode in [
+                    Mode::Working,
+                    Mode::Preparing,
+                    Mode::Speaking,
+                    Mode::Ready,
+                    Mode::Waiting,
+                    Mode::Listening,
+                ] {
+                    let mut swarm = Swarm::new();
+                    for _ in 0..240 {
+                        swarm.set_visual(
+                            crate::interaction::Visual {
+                                mode,
+                                level: 0.8,
+                                ..Default::default()
+                            },
+                            1.0 / 72.0,
+                        );
+                        swarm.step(1.0 / 72.0, None);
+                    }
+                    renderer.update(&queue, &swarm, None, false);
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[camera],
+                        Mat4::IDENTITY,
+                        &[],
+                    );
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("signal readback"),
+                        size: 512 * 384 * 4,
                         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                         mapped_at_creation: false,
-                    })
-                });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                for i in 0..2 {
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
                     encoder.copy_texture_to_buffer(
-                        textures[i].as_image_copy(),
+                        texture.as_image_copy(),
                         wgpu::TexelCopyBufferInfo {
-                            buffer: &buffers[i],
+                            buffer: &buffer,
                             layout: wgpu::TexelCopyBufferLayout {
                                 offset: 0,
-                                bytes_per_row: Some(256 * 4),
-                                rows_per_image: Some(256),
+                                bytes_per_row: Some(512 * 4),
+                                rows_per_image: Some(384),
                             },
                         },
                         wgpu::Extent3d {
+                            width: 512,
+                            height: 384,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| {
+                            tx.send(result).unwrap();
+                        });
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let image = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                    buffer.unmap();
+                    assert!(
+                        images.iter().all(|previous| previous != &image),
+                        "{mode:?} must be visually distinct"
+                    );
+                    images.push(image);
+                }
+                {
+                    let mut sheet = image::RgbaImage::new(512 * 3, 384 * 2);
+                    for (i, bytes) in images.into_iter().enumerate() {
+                        let image = image::RgbaImage::from_raw(512, 384, bytes).unwrap();
+                        image::imageops::replace(
+                            &mut sheet,
+                            &image,
+                            (i % 3) as i64 * 512,
+                            (i / 3) as i64 * 384,
+                        );
+                    }
+                    crate::test_support::preview("TOMORI_SIGNAL_PREVIEW", &sheet);
+                }
+                assert!(scope.pop().await.is_none());
+            })
+        });
+    }
+
+    #[test]
+    fn both_controller_poses_change_the_offscreen_image() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("controller test target"),
+                    size: wgpu::Extent3d {
+                        width: 128,
+                        height: 128,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                let mut renderer = Renderer::new(
+                    &device,
+                    &queue,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    128,
+                    128,
+                );
+                let mut swarm = Swarm::new();
+                swarm.agents.clear();
+                renderer.update(&queue, &swarm, None, false);
+                let capture = |renderer: &Renderer| {
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[Mat4::IDENTITY],
+                        Mat4::IDENTITY,
+                        &[],
+                    );
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("controller test readback"),
+                        size: 128 * 128 * 4,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &buffer,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(128 * 4),
+                                rows_per_image: Some(128),
+                            },
+                        },
+                        wgpu::Extent3d {
+                            width: 128,
+                            height: 128,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| {
+                            let _ = tx.send(result);
+                        });
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                    buffer.unmap();
+                    data
+                };
+                let empty = capture(&renderer);
+                renderer.update_controllers(
+                    &queue,
+                    [
+                        Some(crate::controller::Pose {
+                            position: [-0.45, 0.0, 0.5],
+                            orientation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                        Some(crate::controller::Pose {
+                            position: [0.45, 0.0, 0.5],
+                            orientation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                    ],
+                    [None, None],
+                );
+                let with_controllers = capture(&renderer);
+                let changed = |start: usize, end: usize| {
+                    (0..128).any(|y| {
+                        (start..end).any(|x| {
+                            let offset = (y * 128 + x) * 4;
+                            empty[offset..offset + 4] != with_controllers[offset..offset + 4]
+                        })
+                    })
+                };
+                assert!(changed(0, 64), "left controller should render");
+                assert!(changed(64, 128), "right controller should render");
+                let make_hand = |x| {
+                    let mut hand = crate::hands::Hand {
+                        joints: [None; crate::hands::JOINT_COUNT],
+                    };
+                    hand.joints[1] = Some(crate::hands::Joint {
+                        position: [x, -0.1, 0.5],
+                        radius: 0.01,
+                    });
+                    hand.joints[2] = Some(crate::hands::Joint {
+                        position: [x, 0.1, 0.5],
+                        radius: 0.01,
+                    });
+                    hand
+                };
+                renderer.update_controllers(
+                    &queue,
+                    [None, None],
+                    [Some(make_hand(-0.45)), Some(make_hand(0.45))],
+                );
+                let with_hands = capture(&renderer);
+                let hand_changed = |start: usize, end: usize| {
+                    (0..128).any(|y| {
+                        (start..end).any(|x| {
+                            let offset = (y * 128 + x) * 4;
+                            empty[offset..offset + 4] != with_hands[offset..offset + 4]
+                        })
+                    })
+                };
+                assert!(hand_changed(0, 64), "left hand should render");
+                assert!(hand_changed(64, 128), "right hand should render");
+                // A model the runtime provides replaces the bundled one, on its own hand only; an empty one is ignored.
+                let pose = |x| {
+                    Some(crate::controller::Pose {
+                        position: [x, 0.0, 0.5],
+                        orientation: [0.0, 0.0, 0.0, 1.0],
+                    })
+                };
+                renderer.update_controllers(&queue, [pose(-0.45), pose(0.45)], [None, None]);
+                assert_eq!(capture(&renderer), with_controllers);
+                let vertex = |x, y| crate::controller::Vertex {
+                    position: [x, y, 0.0],
+                    normal: [0.0, 0.0, -1.0],
+                    color: [1.0, 0.1, 0.1],
+                    uv: [0.0, 0.0],
+                };
+                let triangle = ControllerModel {
+                    vertices: vec![vertex(-0.3, -0.3), vertex(0.3, -0.3), vertex(0.0, 0.3)],
+                    parts: vec![crate::controller::Part {
+                        start: 0,
+                        count: 3,
+                        texture: None,
+                    }],
+                    textures: Vec::new(),
+                };
+                renderer.set_controller_model(&device, &queue, 0, &triangle);
+                let replaced = capture(&renderer);
+                let differs = |a: &[u8], b: &[u8], start: usize, end: usize| {
+                    (0..128).any(|y| {
+                        (start..end).any(|x| {
+                            let offset = (y * 128 + x) * 4;
+                            a[offset..offset + 4] != b[offset..offset + 4]
+                        })
+                    })
+                };
+                assert!(
+                    differs(&replaced, &with_controllers, 0, 64),
+                    "the left model should change"
+                );
+                assert!(
+                    !differs(&replaced, &with_controllers, 64, 128),
+                    "the right model should not change"
+                );
+                let empty_model = ControllerModel {
+                    vertices: Vec::new(),
+                    parts: Vec::new(),
+                    textures: Vec::new(),
+                };
+                renderer.set_controller_model(&device, &queue, 1, &empty_model);
+                renderer.set_controller_model(&device, &queue, 2, &triangle);
+                assert_eq!(
+                    capture(&renderer),
+                    replaced,
+                    "an empty model or unknown hand is ignored"
+                );
+
+                // Without tracked controllers, the desktop's pointer is a cube that turns orange while it attracts the swarm.
+                renderer.update_controllers(&queue, [None, None], [None, None]);
+                renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), false);
+                let pointer = capture(&renderer);
+                renderer.update(&queue, &swarm, Some(glam::Vec3::new(0.0, 0.0, 0.5)), true);
+                let attracting = capture(&renderer);
+                assert_ne!(pointer, empty, "the pointer should render");
+                assert_ne!(
+                    pointer, attracting,
+                    "attracting should change the pointer's colour"
+                );
+                assert!(error_scope.pop().await.is_none());
+            })
+        });
+    }
+
+    #[test]
+    fn workspace_pages_render_stereo_recenter_and_clear() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let textures: [_; 2] = std::array::from_fn(|_| {
+                    device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("workspace test eye"),
+                        size: wgpu::Extent3d {
                             width: 256,
                             height: 256,
                             depth_or_array_layers: 1,
                         },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    })
+                });
+                let views: [_; 2] =
+                    std::array::from_fn(|i| textures[i].create_view(&Default::default()));
+                let mut renderer = Renderer::new(
+                    &device,
+                    &queue,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    256,
+                    256,
+                );
+                let mut swarm = Swarm::new();
+                swarm.agents.clear();
+                renderer.update(&queue, &swarm, None, false);
+                let projection = Mat4::perspective_rh(1.0, 1.0, 0.05, 50.0);
+                let direction = (glam::Vec3::new(-3.5, 2.4, -3.35)
+                    - glam::Vec3::new(0.0, 1.6, 0.0))
+                .normalize();
+                let matrices = [-0.032, 0.032].map(|x| {
+                    let eye = glam::Vec3::new(x, 1.6, 0.0);
+                    projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
+                });
+                let capture = |renderer: &Renderer, matrices: [Mat4; 2], scene_to_space: Mat4| {
+                    renderer.render(&device, &queue, &views, &matrices, scene_to_space, &[]);
+                    let buffers: [_; 2] = std::array::from_fn(|_| {
+                        device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("workspace test readback"),
+                            size: 256 * 256 * 4,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        })
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    for i in 0..2 {
+                        encoder.copy_texture_to_buffer(
+                            textures[i].as_image_copy(),
+                            wgpu::TexelCopyBufferInfo {
+                                buffer: &buffers[i],
+                                layout: wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(256 * 4),
+                                    rows_per_image: Some(256),
+                                },
+                            },
+                            wgpu::Extent3d {
+                                width: 256,
+                                height: 256,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                    queue.submit([encoder.finish()]);
+                    buffers
+                        .iter()
+                        .map(|buffer| {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            buffer
+                                .slice(..)
+                                .map_async(wgpu::MapMode::Read, move |result| {
+                                    let _ = tx.send(result);
+                                });
+                            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                            rx.recv().unwrap().unwrap();
+                            let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                            buffer.unmap();
+                            data
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let empty = capture(&renderer, matrices, Mat4::IDENTITY);
+                let workspace = crate::delegation::Workspace {
+                    presentations: (0..5)
+                        .map(|i| crate::delegation::Presentation {
+                            id: format!("card-{i}"),
+                            title: format!("Synthetic result {i}"),
+                            source_id: "worker".into(),
+                            source_message_id: "message".into(),
+                            text: if i == 0 {
+                                format!("{}{}", "A".repeat(44 * 14), "B".repeat(44 * 14))
+                            } else {
+                                format!("Example content for page entry {i}")
+                            },
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                };
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                assert_eq!(renderer.presentation_page_count(), 5);
+                let page0 = capture(&renderer, matrices, Mat4::IDENTITY);
+                assert_ne!(page0[0], empty[0]);
+                assert_ne!(page0[1], empty[1]);
+                assert_ne!(page0[0], page0[1], "each eye uses its own matrix");
+                renderer.set_presentation_content_page(1);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                let content_page1 = capture(&renderer, matrices, Mat4::IDENTITY);
+                for eye in 0..2 {
+                    assert_ne!(page0[eye], content_page1[eye], "content page in eye {eye}");
+                }
+                renderer.set_presentation_content_page(0);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                let recenter = Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0));
+                let compensated = capture(
+                    &renderer,
+                    matrices.map(|m| m * recenter.inverse()),
+                    recenter,
+                );
+                for eye in 0..2 {
+                    let changed = page0[eye]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(compensated[eye].as_chunks::<4>().0.iter())
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    assert!(
+                        changed < 256,
+                        "recenter should preserve world-relative rendering: {changed} pixels"
                     );
                 }
-                queue.submit([encoder.finish()]);
-                buffers
-                    .iter()
-                    .map(|buffer| {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        buffer
-                            .slice(..)
-                            .map_async(wgpu::MapMode::Read, move |result| {
-                                let _ = tx.send(result);
-                            });
-                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                        rx.recv().unwrap().unwrap();
-                        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                        buffer.unmap();
-                        data
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let empty = capture(&renderer, matrices, Mat4::IDENTITY);
-            let workspace = crate::delegation::Workspace {
-                presentations: (0..5)
-                    .map(|i| crate::delegation::Presentation {
-                        id: format!("card-{i}"),
-                        title: format!("Synthetic result {i}"),
-                        source_id: "worker".into(),
-                        source_message_id: "message".into(),
-                        text: if i == 0 {
-                            format!("{}{}", "A".repeat(44 * 14), "B".repeat(44 * 14))
-                        } else {
-                            format!("Example content for page entry {i}")
-                        },
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            renderer.update_workspace(&device, &queue, &[], &[], &workspace);
-            assert_eq!(renderer.presentation_page_count(), 5);
-            let page0 = capture(&renderer, matrices, Mat4::IDENTITY);
-            assert_ne!(page0[0], empty[0]);
-            assert_ne!(page0[1], empty[1]);
-            assert_ne!(page0[0], page0[1], "each eye uses its own matrix");
-            renderer.set_presentation_content_page(1);
-            renderer.update_workspace(&device, &queue, &[], &[], &workspace);
-            let content_page1 = capture(&renderer, matrices, Mat4::IDENTITY);
-            for eye in 0..2 {
-                assert_ne!(page0[eye], content_page1[eye], "content page in eye {eye}");
-            }
-            renderer.set_presentation_content_page(0);
-            renderer.update_workspace(&device, &queue, &[], &[], &workspace);
-            let recenter = Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0));
-            let compensated = capture(
-                &renderer,
-                matrices.map(|m| m * recenter.inverse()),
-                recenter,
-            );
-            for eye in 0..2 {
-                let changed = page0[eye]
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(compensated[eye].as_chunks::<4>().0.iter())
-                    .filter(|(a, b)| a != b)
-                    .count();
-                assert!(
-                    changed < 256,
-                    "recenter should preserve world-relative rendering: {changed} pixels"
-                );
-            }
-            renderer.set_presentation_page(1);
-            renderer.update_workspace(&device, &queue, &[], &[], &workspace);
-            let page1 = capture(&renderer, matrices, Mat4::IDENTITY);
-            assert_ne!(page0[0], page1[0]);
-            assert_ne!(page1[0], empty[0]);
+                renderer.set_presentation_page(1);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                let page1 = capture(&renderer, matrices, Mat4::IDENTITY);
+                assert_ne!(page0[0], page1[0]);
+                assert_ne!(page1[0], empty[0]);
 
-            // Empty snapshots must not hide an independently retained/fading cube.
-            let cube = crate::delegation::Cube {
-                position: [-3.5, 1.8, -3.0],
-                scale: [0.1; 3],
-                color: [0.5; 3],
-                orientation: glam::Quat::IDENTITY.to_array(),
-            };
-            let invalid = crate::delegation::Cube {
-                scale: [f32::NAN; 3],
-                ..cube
-            };
-            renderer.update_workspace(&device, &queue, &[cube, invalid], &[], &Default::default());
-            assert_eq!(renderer.scene.len(), renderer.base_scene_len + 1);
-            let unrotated = capture(&renderer, matrices, Mat4::IDENTITY);
-            let rotated = crate::delegation::Cube {
-                orientation: glam::Quat::from_euler(glam::EulerRot::YXZ, 0.6, 0.35, 0.15)
-                    .to_array(),
-                ..cube
-            };
-            renderer.update_workspace(&device, &queue, &[rotated], &[], &Default::default());
-            assert_ne!(
-                unrotated,
-                capture(&renderer, matrices, Mat4::IDENTITY),
-                "orientation must reach both the vertex transform and lighting shader"
-            );
-            let invalid_rotation = crate::delegation::Cube {
-                orientation: [1.0; 4],
-                ..cube
-            };
-            renderer.update_workspace(
-                &device,
-                &queue,
-                &[invalid_rotation],
-                &[],
-                &Default::default(),
-            );
-            assert_eq!(renderer.scene.len(), renderer.base_scene_len);
-            renderer.update_workspace(&device, &queue, &[], &[], &Default::default());
-            assert_eq!(renderer.scene.len(), renderer.base_scene_len);
-            assert_eq!(renderer.presentation_page_count(), 0);
-            assert_eq!(capture(&renderer, matrices, Mat4::IDENTITY), empty);
+                // Empty snapshots must not hide an independently retained/fading cube.
+                let cube = crate::delegation::Cube {
+                    position: [-3.5, 1.8, -3.0],
+                    scale: [0.1; 3],
+                    color: [0.5; 3],
+                    orientation: glam::Quat::IDENTITY.to_array(),
+                };
+                let invalid = crate::delegation::Cube {
+                    scale: [f32::NAN; 3],
+                    ..cube
+                };
+                renderer.update_workspace(
+                    &device,
+                    &queue,
+                    &[cube, invalid],
+                    &[],
+                    &Default::default(),
+                );
+                assert_eq!(renderer.scene.len(), renderer.base_scene_len + 1);
+                let unrotated = capture(&renderer, matrices, Mat4::IDENTITY);
+                let rotated = crate::delegation::Cube {
+                    orientation: glam::Quat::from_euler(glam::EulerRot::YXZ, 0.6, 0.35, 0.15)
+                        .to_array(),
+                    ..cube
+                };
+                renderer.update_workspace(&device, &queue, &[rotated], &[], &Default::default());
+                assert_ne!(
+                    unrotated,
+                    capture(&renderer, matrices, Mat4::IDENTITY),
+                    "orientation must reach both the vertex transform and lighting shader"
+                );
+                let invalid_rotation = crate::delegation::Cube {
+                    orientation: [1.0; 4],
+                    ..cube
+                };
+                renderer.update_workspace(
+                    &device,
+                    &queue,
+                    &[invalid_rotation],
+                    &[],
+                    &Default::default(),
+                );
+                assert_eq!(renderer.scene.len(), renderer.base_scene_len);
+                renderer.update_workspace(&device, &queue, &[], &[], &Default::default());
+                assert_eq!(renderer.scene.len(), renderer.base_scene_len);
+                assert_eq!(renderer.presentation_page_count(), 0);
+                assert_eq!(capture(&renderer, matrices, Mat4::IDENTITY), empty);
 
-            let label_workspace = crate::delegation::Workspace {
-                nodes: vec![crate::delegation::Node {
-                    id: "worker".into(),
-                    parent_id: Some("root".into()),
-                    title: "Synthetic task".into(),
-                    state: crate::delegation::State::Running,
-                }],
-                ..Default::default()
-            };
-            let mut workers = crate::delegation::Scene::new();
-            for _ in 0..30 {
-                workers.update(Some("root"), &label_workspace, 0.05);
-            }
-            let label_target = glam::Vec3::from_array(workers.stations()[0].position)
-                + glam::Vec3::new(0.0, 0.35, 0.0);
-            let direction = (label_target - glam::Vec3::new(0.0, 1.6, 0.0)).normalize();
-            let label_matrices = [-0.032, 0.032].map(|x| {
-                let eye = glam::Vec3::new(x, 1.6, 0.0);
-                projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
-            });
-            let without_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
-            renderer.update_workspace(&device, &queue, &[], workers.stations(), &label_workspace);
-            let with_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
-            for eye in 0..2 {
-                assert_ne!(
-                    without_label[eye], with_label[eye],
-                    "worker label in eye {eye}"
-                );
-            }
-            let mut faded = workers.stations().to_vec();
-            faded[0].opacity = 0.4;
-            renderer.update_workspace(&device, &queue, &[], &faded, &label_workspace);
-            let faded_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
-            for eye in 0..2 {
-                assert_ne!(
-                    with_label[eye], faded_label[eye],
-                    "label transition in eye {eye}"
-                );
-            }
-            let preview_path = std::env::var("TOMORI_TERMINAL_PREVIEW").ok();
-            let mut sheet = preview_path
-                .as_ref()
-                .map(|_| image::RgbaImage::new(768, 512));
-            for (row, state) in [
-                crate::delegation::State::Completed,
-                crate::delegation::State::Error,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let workspace = crate::delegation::Workspace {
+                let label_workspace = crate::delegation::Workspace {
                     nodes: vec![crate::delegation::Node {
-                        id: "synthetic-terminal".into(),
+                        id: "worker".into(),
                         parent_id: Some("root".into()),
-                        title: "Synthetic terminal".into(),
-                        state,
+                        title: "Synthetic task".into(),
+                        state: crate::delegation::State::Running,
                     }],
                     ..Default::default()
                 };
-                let mut scene = crate::delegation::Scene::new();
-                scene.update(Some("root"), &workspace, 0.0);
-                let anchor = glam::Vec3::from_array(scene.stations()[0].position);
-                let focus = Mat4::perspective_rh(0.22, 1.0, 0.05, 50.0);
-                let matrices = [-0.032, 0.032].map(|x| {
-                    focus * Mat4::look_at_rh(glam::Vec3::new(x, 1.6, 0.0), anchor, glam::Vec3::Y)
-                });
-                let mut previous = None;
-                for column in 0..3 {
-                    if column > 0 {
-                        for _ in 0..120 {
-                            scene.update(Some("root"), &workspace, 1.0 / 60.0);
-                        }
-                    }
-                    assert_eq!(
-                        scene.cubes().len(),
-                        if state == crate::delegation::State::Completed {
-                            1
-                        } else {
-                            24
-                        }
-                    );
-                    renderer.update_workspace(
-                        &device,
-                        &queue,
-                        scene.cubes(),
-                        &[],
-                        &Default::default(),
-                    );
-                    assert_eq!(
-                        renderer.scene.len(),
-                        renderer.base_scene_len + scene.cubes().len()
-                    );
-                    let image = capture(&renderer, matrices, Mat4::IDENTITY);
-                    if let Some(previous) = &previous {
-                        assert_ne!(
-                            *previous, image,
-                            "actual terminal ambient motion must reach the renderer"
-                        );
-                    }
-                    if let Some(sheet) = &mut sheet {
-                        let tile = image::RgbaImage::from_raw(256, 256, image[0].clone()).unwrap();
-                        image::imageops::replace(sheet, &tile, column * 256, row as i64 * 256);
-                    }
-                    previous = Some(image);
+                let mut workers = crate::delegation::Scene::new();
+                for _ in 0..30 {
+                    workers.update(Some("root"), &label_workspace, 0.05);
                 }
-            }
-            if let (Some(sheet), Some(path)) = (sheet, preview_path) {
-                sheet.save(path).unwrap();
-            }
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(scope.pop().await.is_none());
+                let label_target = glam::Vec3::from_array(workers.stations()[0].position)
+                    + glam::Vec3::new(0.0, 0.35, 0.0);
+                let direction = (label_target - glam::Vec3::new(0.0, 1.6, 0.0)).normalize();
+                let label_matrices = [-0.032, 0.032].map(|x| {
+                    let eye = glam::Vec3::new(x, 1.6, 0.0);
+                    projection * Mat4::look_at_rh(eye, eye + direction, glam::Vec3::Y)
+                });
+                let without_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
+                renderer.update_workspace(
+                    &device,
+                    &queue,
+                    &[],
+                    workers.stations(),
+                    &label_workspace,
+                );
+                let with_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
+                for eye in 0..2 {
+                    assert_ne!(
+                        without_label[eye], with_label[eye],
+                        "worker label in eye {eye}"
+                    );
+                }
+                let mut faded = workers.stations().to_vec();
+                faded[0].opacity = 0.4;
+                renderer.update_workspace(&device, &queue, &[], &faded, &label_workspace);
+                let faded_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
+                for eye in 0..2 {
+                    assert_ne!(
+                        with_label[eye], faded_label[eye],
+                        "label transition in eye {eye}"
+                    );
+                }
+                let mut sheet = image::RgbaImage::new(768, 512);
+                for (row, state) in [
+                    crate::delegation::State::Completed,
+                    crate::delegation::State::Error,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let workspace = crate::delegation::Workspace {
+                        nodes: vec![crate::delegation::Node {
+                            id: "synthetic-terminal".into(),
+                            parent_id: Some("root".into()),
+                            title: "Synthetic terminal".into(),
+                            state,
+                        }],
+                        ..Default::default()
+                    };
+                    let mut scene = crate::delegation::Scene::new();
+                    scene.update(Some("root"), &workspace, 0.0);
+                    let anchor = glam::Vec3::from_array(scene.stations()[0].position);
+                    let focus = Mat4::perspective_rh(0.22, 1.0, 0.05, 50.0);
+                    let matrices = [-0.032, 0.032].map(|x| {
+                        focus
+                            * Mat4::look_at_rh(glam::Vec3::new(x, 1.6, 0.0), anchor, glam::Vec3::Y)
+                    });
+                    let mut previous = None;
+                    for column in 0..3 {
+                        if column > 0 {
+                            for _ in 0..120 {
+                                scene.update(Some("root"), &workspace, 1.0 / 60.0);
+                            }
+                        }
+                        assert_eq!(
+                            scene.cubes().len(),
+                            if state == crate::delegation::State::Completed {
+                                1
+                            } else {
+                                24
+                            }
+                        );
+                        renderer.update_workspace(
+                            &device,
+                            &queue,
+                            scene.cubes(),
+                            &[],
+                            &Default::default(),
+                        );
+                        assert_eq!(
+                            renderer.scene.len(),
+                            renderer.base_scene_len + scene.cubes().len()
+                        );
+                        let image = capture(&renderer, matrices, Mat4::IDENTITY);
+                        if let Some(previous) = &previous {
+                            assert_ne!(
+                                *previous, image,
+                                "actual terminal ambient motion must reach the renderer"
+                            );
+                        }
+                        let tile = image::RgbaImage::from_raw(256, 256, image[0].clone()).unwrap();
+                        image::imageops::replace(&mut sheet, &tile, column * 256, row as i64 * 256);
+                        previous = Some(image);
+                    }
+                }
+                crate::test_support::preview("TOMORI_TERMINAL_PREVIEW", &sheet);
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                assert!(scope.pop().await.is_none());
+            })
         });
     }
 
@@ -1733,180 +1752,179 @@ mod tests {
         use crate::arrival::{Item, Key, Kind, Ring, Scene, Step, View};
         const WIDTH: u32 = 640;
         const HEIGHT: u32 = 480;
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("arrival test eye"),
-                size: wgpu::Extent3d {
-                    width: WIDTH,
-                    height: HEIGHT,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let mut renderer = Renderer::new(
-                &device,
-                &queue,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-                WIDTH,
-                HEIGHT,
-            );
-            renderer.set_environment(Environment::Minimal);
-            let swarm = Swarm::new();
-            let eye = glam::Vec3::new(0.0, 1.6, 0.0);
-            let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
-            // A closer look at the rings, as the headset's resolution would show them.
-            let close = Mat4::perspective_rh(0.75, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(eye, crate::arrival::CREATE, glam::Vec3::Y);
-            let capture = |renderer: &Renderer, matrix: Mat4| {
-                renderer.render(
-                    &device,
-                    &queue,
-                    std::slice::from_ref(&view),
-                    &[matrix],
-                    Mat4::IDENTITY,
-                    &[],
-                );
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("arrival test readback"),
-                    size: (WIDTH * HEIGHT * 4) as u64,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("arrival test eye"),
+                    size: wgpu::Extent3d {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
                 });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.copy_texture_to_buffer(
-                    texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(WIDTH * 4),
-                            rows_per_image: Some(HEIGHT),
-                        },
-                    },
-                    texture.size(),
-                );
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| {
-                        let _ = tx.send(result);
-                    });
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                buffer.unmap();
-                data
-            };
-            let space = |id: &str, title: &str, activity, participants| Item {
-                key: Key::Space(id.into()),
-                kind: Kind::Space {
-                    activity,
-                    participants,
-                    hue: crate::arrival::hue(id),
-                    attention: None,
-                },
-                label: title.into(),
-                detail: Some(format!("{activity:?}").to_lowercase()),
-                selected: false,
-            };
-            let create = |open| Item {
-                key: Key::Create,
-                kind: Kind::Create { open },
-                label: "New space".into(),
-                detail: None,
-                selected: false,
-            };
-            let connected = Some(Item {
-                key: Key::Connected("studio.local:8765".into()),
-                kind: Kind::Connected,
-                label: "studio.local".into(),
-                detail: Some("connected".into()),
-                selected: false,
-            });
-            let spaces = vec![
-                space("a1", "Tomori", tomori_protocol::Activity::Running, 2),
-                space("b2", "Fantail", tomori_protocol::Activity::Idle, 0),
-                space("c3", "Notes", tomori_protocol::Activity::Waiting, 1),
-                space("d4", "Old review", tomori_protocol::Activity::Closed, 0),
-            ];
-            let choosing = View {
-                heading: "Spaces on studio.local".into(),
-                connected: connected.clone(),
-                items: spaces.iter().cloned().chain([create(false)]).collect(),
-                ..Default::default()
-            };
-            let backend = |name: &str| Item {
-                key: Key::Backend(name.into()),
-                kind: Kind::Choice,
-                label: name.into(),
-                detail: None,
-                selected: name == "opencode",
-            };
-            let creating = View {
-                heading: "Choose a backend".into(),
-                connected,
-                items: spaces.into_iter().chain([create(true)]).collect(),
-                ring: Some(Ring {
-                    step: Step::Backend,
-                    items: ["opencode", "codex", "echo"].map(backend).into(),
-                }),
-                ..Default::default()
-            };
-            renderer.update(&queue, &swarm, None, false);
-            let bare = capture(&renderer, matrix);
-            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
-            for (row, (view, hovered, matrix)) in [
-                (&choosing, Key::Space("a1".into()), matrix),
-                (&creating, Key::Backend("opencode".into()), matrix),
-                (&creating, Key::Backend("opencode".into()), close),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let scene = Scene::layout(view);
-                let target = scene.object(&hovered).unwrap().position;
-                let origin = glam::Vec3::new(0.22, 1.1, -0.35);
-                renderer.update(&queue, &swarm, None, false);
-                renderer.update_arrival(
+                let view = texture.create_view(&Default::default());
+                let mut renderer = Renderer::new(
                     &device,
                     &queue,
-                    &crate::arrival_graphics::Frame {
-                        scene: &scene,
-                        hovered: Some(&hovered),
-                        ray: Some(crate::arrival_graphics::Beam {
-                            origin,
-                            end: target,
-                            hit: true,
-                        }),
-                        time: 1.0,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    WIDTH,
+                    HEIGHT,
+                );
+                renderer.set_environment(Environment::Minimal);
+                let swarm = Swarm::new();
+                let eye = glam::Vec3::new(0.0, 1.6, 0.0);
+                let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                    * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
+                // A closer look at the rings, as the headset's resolution would show them.
+                let close = Mat4::perspective_rh(0.75, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                    * Mat4::look_at_rh(eye, crate::arrival::CREATE, glam::Vec3::Y);
+                let capture = |renderer: &Renderer, matrix: Mat4| {
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[matrix],
+                        Mat4::IDENTITY,
+                        &[],
+                    );
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("arrival test readback"),
+                        size: (WIDTH * HEIGHT * 4) as u64,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &buffer,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(WIDTH * 4),
+                                rows_per_image: Some(HEIGHT),
+                            },
+                        },
+                        texture.size(),
+                    );
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| {
+                            let _ = tx.send(result);
+                        });
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                    buffer.unmap();
+                    data
+                };
+                let space = |id: &str, title: &str, activity, participants| Item {
+                    key: Key::Space(id.into()),
+                    kind: Kind::Space {
+                        activity,
+                        participants,
+                        hue: crate::arrival::hue(id),
+                        attention: None,
                     },
-                );
-                let image = capture(&renderer, matrix);
-                assert_ne!(image, bare, "arrival must draw over the bare scene");
-                image::imageops::replace(
-                    &mut sheet,
-                    &image::RgbaImage::from_raw(WIDTH, HEIGHT, image).unwrap(),
-                    0,
-                    (row as u32 * HEIGHT).into(),
-                );
-            }
-            if let Ok(path) = std::env::var("TOMORI_ARRIVAL_PREVIEW") {
-                sheet.save(path).unwrap();
-            }
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(scope.pop().await.is_none());
+                    label: title.into(),
+                    detail: Some(format!("{activity:?}").to_lowercase()),
+                    selected: false,
+                };
+                let create = |open| Item {
+                    key: Key::Create,
+                    kind: Kind::Create { open },
+                    label: "New space".into(),
+                    detail: None,
+                    selected: false,
+                };
+                let connected = Some(Item {
+                    key: Key::Connected("studio.local:8765".into()),
+                    kind: Kind::Connected,
+                    label: "studio.local".into(),
+                    detail: Some("connected".into()),
+                    selected: false,
+                });
+                let spaces = vec![
+                    space("a1", "Tomori", tomori_protocol::Activity::Running, 2),
+                    space("b2", "Fantail", tomori_protocol::Activity::Idle, 0),
+                    space("c3", "Notes", tomori_protocol::Activity::Waiting, 1),
+                    space("d4", "Old review", tomori_protocol::Activity::Closed, 0),
+                ];
+                let choosing = View {
+                    heading: "Spaces on studio.local".into(),
+                    connected: connected.clone(),
+                    items: spaces.iter().cloned().chain([create(false)]).collect(),
+                    ..Default::default()
+                };
+                let backend = |name: &str| Item {
+                    key: Key::Backend(name.into()),
+                    kind: Kind::Choice,
+                    label: name.into(),
+                    detail: None,
+                    selected: name == "opencode",
+                };
+                let creating = View {
+                    heading: "Choose a backend".into(),
+                    connected,
+                    items: spaces.into_iter().chain([create(true)]).collect(),
+                    ring: Some(Ring {
+                        step: Step::Backend,
+                        items: ["opencode", "codex", "echo"].map(backend).into(),
+                    }),
+                    ..Default::default()
+                };
+                renderer.update(&queue, &swarm, None, false);
+                let bare = capture(&renderer, matrix);
+                let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+                for (row, (view, hovered, matrix)) in [
+                    (&choosing, Key::Space("a1".into()), matrix),
+                    (&creating, Key::Backend("opencode".into()), matrix),
+                    (&creating, Key::Backend("opencode".into()), close),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let scene = Scene::layout(view);
+                    let target = scene.object(&hovered).unwrap().position;
+                    let origin = glam::Vec3::new(0.22, 1.1, -0.35);
+                    renderer.update(&queue, &swarm, None, false);
+                    renderer.update_arrival(
+                        &device,
+                        &queue,
+                        &crate::arrival_graphics::Frame {
+                            scene: &scene,
+                            hovered: Some(&hovered),
+                            ray: Some(crate::arrival_graphics::Beam {
+                                origin,
+                                end: target,
+                                hit: true,
+                            }),
+                            time: 1.0,
+                        },
+                    );
+                    let image = capture(&renderer, matrix);
+                    assert_ne!(image, bare, "arrival must draw over the bare scene");
+                    image::imageops::replace(
+                        &mut sheet,
+                        &image::RgbaImage::from_raw(WIDTH, HEIGHT, image).unwrap(),
+                        0,
+                        (row as u32 * HEIGHT).into(),
+                    );
+                }
+                {
+                    crate::test_support::preview("TOMORI_ARRIVAL_PREVIEW", &sheet);
+                }
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                assert!(scope.pop().await.is_none());
+            })
         });
     }
 
@@ -1915,158 +1933,155 @@ mod tests {
         use crate::arrival::{Item, Key, Kind, Scene, View};
         const WIDTH: u32 = 320;
         const HEIGHT: u32 = 200;
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("multisample test eye"),
-                size: wgpu::Extent3d {
-                    width: WIDTH,
-                    height: HEIGHT,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let eye = glam::Vec3::new(0.0, 1.6, 0.0);
-            let matrix = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
-            let scene = Scene::layout(&View {
-                heading: "Spaces on studio.local".into(),
-                items: vec![Item {
-                    key: Key::Create,
-                    kind: Kind::Create { open: false },
-                    label: "New space".into(),
-                    detail: None,
-                    selected: false,
-                }],
-                ..Default::default()
-            });
-            let pill = crate::pill::rows(&crate::pill::Status {
-                activity: tomori_protocol::Activity::Running,
-                mode: Some("build".into()),
-                title: "Hello from the desktop window.".into(),
-                replaying: false,
-                need: Some(crate::pill::Need::Approval),
-            });
-            let mut swarm = Swarm::new();
-            for _ in 0..120 {
-                swarm.step(1.0 / 72.0, None);
-            }
-            // Draw everything the scene pass draws, so that each pipeline's sample count must match the pass's.
-            let render = |samples: u32, environment: Environment| {
-                let mut renderer =
-                    Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, samples);
-                renderer.set_environment(environment);
-                renderer.update(&queue, &swarm, None, false);
-                renderer.update_controllers(
-                    &queue,
-                    [
-                        Some(crate::controller::Pose {
-                            position: [-0.2, 1.3, -0.6],
-                            orientation: [0.0, 0.0, 0.0, 1.0],
-                        }),
-                        None,
-                    ],
-                    [None, None],
-                );
-                renderer.update_arrival(
-                    &device,
-                    &queue,
-                    &crate::arrival_graphics::Frame {
-                        scene: &scene,
-                        hovered: Some(&Key::Create),
-                        ray: Some(crate::arrival_graphics::Beam {
-                            origin: glam::Vec3::new(0.2, 1.1, -0.3),
-                            end: crate::arrival::CREATE,
-                            hit: true,
-                        }),
-                        time: 1.0,
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("multisample test eye"),
+                    size: wgpu::Extent3d {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        depth_or_array_layers: 1,
                     },
-                );
-                let mut panel = renderer.panel(&device, 24_000);
-                let mut canvas =
-                    crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
-                canvas.rows = pill.clone();
-                panel.set(&queue, &canvas);
-                renderer.render(
-                    &device,
-                    &queue,
-                    std::slice::from_ref(&view),
-                    &[matrix],
-                    Mat4::IDENTITY,
-                    &[(
-                        &panel,
-                        Mat4::from_translation(eye)
-                            * Mat4::from_translation(crate::controller_ui::PILL_OFFSET),
-                    )],
-                );
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("multisample test readback"),
-                    size: u64::from(WIDTH * HEIGHT * 4),
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
                 });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.copy_texture_to_buffer(
-                    texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(WIDTH * 4),
-                            rows_per_image: Some(HEIGHT),
+                let view = texture.create_view(&Default::default());
+                let eye = glam::Vec3::new(0.0, 1.6, 0.0);
+                let matrix = Mat4::perspective_rh(1.0, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                    * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
+                let scene = Scene::layout(&View {
+                    heading: "Spaces on studio.local".into(),
+                    items: vec![Item {
+                        key: Key::Create,
+                        kind: Kind::Create { open: false },
+                        label: "New space".into(),
+                        detail: None,
+                        selected: false,
+                    }],
+                    ..Default::default()
+                });
+                let pill = crate::pill::rows(&crate::pill::Status {
+                    activity: tomori_protocol::Activity::Running,
+                    mode: Some("build".into()),
+                    title: "Hello from the desktop window.".into(),
+                    replaying: false,
+                    need: Some(crate::pill::Need::Approval),
+                });
+                let mut swarm = Swarm::new();
+                for _ in 0..120 {
+                    swarm.step(1.0 / 72.0, None);
+                }
+                // Draw everything the scene pass draws, so that each pipeline's sample count must match the pass's.
+                let render = |samples: u32, environment: Environment| {
+                    let mut renderer =
+                        Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, samples);
+                    renderer.set_environment(environment);
+                    renderer.update(&queue, &swarm, None, false);
+                    renderer.update_controllers(
+                        &queue,
+                        [
+                            Some(crate::controller::Pose {
+                                position: [-0.2, 1.3, -0.6],
+                                orientation: [0.0, 0.0, 0.0, 1.0],
+                            }),
+                            None,
+                        ],
+                        [None, None],
+                    );
+                    renderer.update_arrival(
+                        &device,
+                        &queue,
+                        &crate::arrival_graphics::Frame {
+                            scene: &scene,
+                            hovered: Some(&Key::Create),
+                            ray: Some(crate::arrival_graphics::Beam {
+                                origin: glam::Vec3::new(0.2, 1.1, -0.3),
+                                end: crate::arrival::CREATE,
+                                hit: true,
+                            }),
+                            time: 1.0,
                         },
-                    },
-                    texture.size(),
-                );
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
-            };
-            // Edges drawn with several samples blend into their background, which a single sample never does.
-            let colours = |image: &image::RgbaImage| {
-                image
-                    .pixels()
-                    .map(|pixel| pixel.0)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len()
-            };
-            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
-            for (row, environment) in [Environment::Minimal, Environment::Sky]
-                .into_iter()
-                .enumerate()
-            {
-                let single = render(1, environment);
-                let multi = render(4, environment);
-                assert!(
-                    colours(&multi) > colours(&single),
-                    "{environment:?}: {} colours multisampled, {} without",
-                    colours(&multi),
-                    colours(&single)
-                );
-                let y = (row as u32 * HEIGHT).into();
-                image::imageops::replace(&mut sheet, &single, 0, y);
-                image::imageops::replace(&mut sheet, &multi, WIDTH.into(), y);
-            }
-            if let Ok(path) = std::env::var("TOMORI_MULTISAMPLE_PREVIEW") {
-                sheet.save(path).unwrap();
-            }
-            assert!(scope.pop().await.is_none());
+                    );
+                    let mut panel = renderer.panel(&device, 24_000);
+                    let mut canvas =
+                        crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                    canvas.rows = pill.clone();
+                    panel.set(&queue, &canvas);
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[matrix],
+                        Mat4::IDENTITY,
+                        &[(
+                            &panel,
+                            Mat4::from_translation(eye)
+                                * Mat4::from_translation(crate::controller_ui::PILL_OFFSET),
+                        )],
+                    );
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("multisample test readback"),
+                        size: u64::from(WIDTH * HEIGHT * 4),
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    encoder.copy_texture_to_buffer(
+                        texture.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &buffer,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(WIDTH * 4),
+                                rows_per_image: Some(HEIGHT),
+                            },
+                        },
+                        texture.size(),
+                    );
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                    image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
+                };
+                // Edges drawn with several samples blend into their background, which a single sample never does.
+                let colours = |image: &image::RgbaImage| {
+                    image
+                        .pixels()
+                        .map(|pixel| pixel.0)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                };
+                let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
+                for (row, environment) in [Environment::Minimal, Environment::Sky]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let single = render(1, environment);
+                    let multi = render(4, environment);
+                    assert!(
+                        colours(&multi) > colours(&single),
+                        "{environment:?}: multisampling blends more colours"
+                    );
+                    let y = (row as u32 * HEIGHT).into();
+                    image::imageops::replace(&mut sheet, &single, 0, y);
+                    image::imageops::replace(&mut sheet, &multi, WIDTH.into(), y);
+                }
+                {
+                    crate::test_support::preview("TOMORI_MULTISAMPLE_PREVIEW", &sheet);
+                }
+                assert!(scope.pop().await.is_none());
+            })
         });
     }
 
@@ -2093,372 +2108,380 @@ mod tests {
         // Rows of whole multiples of 256 bytes, as copying to a buffer needs.
         const WIDTH: u32 = 256;
         const HEIGHT: u32 = 256;
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu {
-                adapter,
-                device,
-                queue,
-            }) = test_gpu::open()
-            else {
-                return;
-            };
-            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-            assert_eq!(supported_samples(&adapter, format, SAMPLES), 4);
-            assert_eq!(supported_samples(&adapter, format, 1), 1);
-            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("headset test swapchain image"),
-                size: wgpu::Extent3d {
-                    width: WIDTH,
-                    height: HEIGHT,
-                    depth_or_array_layers: 2,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let views: [_; 2] = std::array::from_fn(|eye| {
-                texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: eye as u32,
-                    array_layer_count: Some(1),
-                    ..Default::default()
-                })
-            });
-            let projection = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let matrices = [-0.032, 0.032].map(|x| {
-                let eye = glam::Vec3::new(x, 1.6, 0.0);
-                projection * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y)
-            });
-            let arrival = Scene::layout(&View {
-                heading: "Spaces on studio.local".into(),
-                items: vec![Item {
-                    key: Key::Create,
-                    kind: Kind::Create { open: false },
-                    label: "New space".into(),
-                    detail: None,
-                    selected: false,
-                }],
-                ..Default::default()
-            });
-            let workspace = crate::delegation::Workspace {
-                nodes: vec![crate::delegation::Node {
-                    id: "worker".into(),
-                    parent_id: Some("root".into()),
-                    title: "Synthetic task".into(),
-                    state: crate::delegation::State::Running,
-                }],
-                presentations: vec![crate::delegation::Presentation {
-                    id: "card".into(),
-                    title: "Synthetic result".into(),
-                    source_id: "worker".into(),
-                    source_message_id: "message".into(),
-                    text: "Example content".into(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            };
-            let mut workers = crate::delegation::Scene::new();
-            for _ in 0..30 {
-                workers.update(Some("root"), &workspace, 0.05);
-            }
-            let indicator = crate::recording::canvas(
-                &crate::recording::Phase::Recording {
-                    elapsed: std::time::Duration::from_secs(15),
-                    heard: "Hello from the headset.".into(),
-                    answering: None,
-                    about: None,
-                },
-                Some(std::time::Duration::from_secs(60)),
-                0.5,
-            );
-            let mut swarm = Swarm::new();
-            for _ in 0..120 {
-                swarm.step(1.0 / 72.0, None);
-            }
-            let hand = {
-                let mut hand = crate::hands::Hand {
-                    joints: [None; crate::hands::JOINT_COUNT],
-                };
-                for (joint, y) in [(1, 1.2), (2, 1.3)] {
-                    hand.joints[joint] = Some(crate::hands::Joint {
-                        position: [0.2, y, -0.6],
-                        radius: 0.01,
-                    });
-                }
-                hand
-            };
-            let render = |samples: u32, environment: Environment| {
-                let mut renderer =
-                    Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, samples);
-                renderer.set_environment(environment);
-                renderer.update(&queue, &swarm, None, false);
-                renderer.update_controllers(
-                    &queue,
-                    [
-                        Some(crate::controller::Pose {
-                            position: [-0.2, 1.3, -0.6],
-                            orientation: [0.0, 0.0, 0.0, 1.0],
-                        }),
-                        None,
-                    ],
-                    [None, Some(hand)],
-                );
-                renderer.update_workspace(
-                    &device,
-                    &queue,
-                    workers.cubes(),
-                    workers.stations(),
-                    &workspace,
-                );
-                renderer.update_arrival(
-                    &device,
-                    &queue,
-                    &crate::arrival_graphics::Frame {
-                        scene: &arrival,
-                        hovered: Some(&Key::Create),
-                        ray: Some(crate::arrival_graphics::Beam {
-                            origin: glam::Vec3::new(0.2, 1.1, -0.3),
-                            end: crate::arrival::CREATE,
-                            hit: true,
-                        }),
-                        time: 1.0,
-                    },
-                );
-                let mut pill = renderer.panel(&device, 24_000);
-                let mut canvas =
-                    crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
-                canvas.rows = vec![crate::ui_text::Row::text(
-                    "Hello from the headset.",
-                    crate::ui_text::Style::plain([1.0; 4]),
-                    crate::pill::COLUMNS,
-                )];
-                pill.set(&queue, &canvas);
-                let mut card = renderer.panel(&device, 24_000);
-                card.set(&queue, &indicator);
-                let mut panels = vec![(
-                    &pill,
-                    Mat4::from_translation(glam::Vec3::new(0.0, 1.1, -1.5)),
-                )];
-                panels.push((
-                    &card,
-                    crate::recording::facing(
-                        glam::Vec3::new(-0.2, 1.4, -0.6),
-                        glam::Vec3::new(0.0, 1.6, 0.0),
-                        1.0,
-                    ),
-                ));
-                renderer.render(&device, &queue, &views, &matrices, Mat4::IDENTITY, &panels);
-                let layer = u64::from(WIDTH * HEIGHT * 4);
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("headset test readback"),
-                    size: layer * 2,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-                let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.copy_texture_to_buffer(
-                    texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo {
-                        buffer: &buffer,
-                        layout: wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(WIDTH * 4),
-                            rows_per_image: Some(HEIGHT),
-                        },
-                    },
-                    texture.size(),
-                );
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-                let (left, right) = data.split_at(layer as usize);
-                [left, right]
-                    .map(|eye| image::RgbaImage::from_raw(WIDTH, HEIGHT, eye.to_vec()).unwrap())
-            };
-            let colours = |image: &image::RgbaImage| {
-                image
-                    .pixels()
-                    .map(|pixel| pixel.0)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len()
-            };
-            let mut sheet = image::RgbaImage::new(WIDTH * 4, HEIGHT * 2);
-            for (row, environment) in [Environment::Minimal, Environment::Sky]
-                .into_iter()
-                .enumerate()
-            {
-                let single = render(1, environment);
-                let multi = render(4, environment);
-                assert_ne!(
-                    multi[0], multi[1],
-                    "{environment:?}: each eye has its own layer"
-                );
-                for eye in 0..2 {
-                    assert!(
-                        colours(&multi[eye]) > colours(&single[eye]),
-                        "{environment:?}, eye {eye}: {} colours multisampled, {} without",
-                        colours(&multi[eye]),
-                        colours(&single[eye])
-                    );
-                }
-                let y = (row as u32 * HEIGHT).into();
-                for (column, image) in single.iter().chain(&multi).enumerate() {
-                    image::imageops::replace(
-                        &mut sheet,
-                        image,
-                        column as i64 * i64::from(WIDTH),
-                        y,
-                    );
-                }
-            }
-            if let Ok(path) = std::env::var("TOMORI_HEADSET_MULTISAMPLE_PREVIEW") {
-                sheet.save(path).unwrap();
-            }
-            assert!(scope.pop().await.is_none());
-        });
-    }
-
-    #[test]
-    fn renders_stereo_offscreen() {
-        pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-                return;
-            };
-            let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let targets: [wgpu::TextureView; 2] = std::array::from_fn(|_| {
-                device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some("test eye"),
+        test_gpu::with(
+            |test_gpu::Gpu {
+                 adapter,
+                 device,
+                 queue,
+             }| {
+                pollster::block_on(async move {
+                    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+                    assert_eq!(supported_samples(&adapter, format, SAMPLES), 4);
+                    assert_eq!(supported_samples(&adapter, format, 1), 1);
+                    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("headset test swapchain image"),
                         size: wgpu::Extent3d {
-                            width: 128,
-                            height: 128,
-                            depth_or_array_layers: 1,
+                            width: WIDTH,
+                            height: HEIGHT,
+                            depth_or_array_layers: 2,
                         },
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
-                    })
-                    .create_view(&Default::default())
-            });
-            let mut renderer = Renderer::new(
-                &device,
-                &queue,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-                128,
-                128,
-            );
-            renderer.update(&queue, &Swarm::new(), None, false);
-            renderer.update_controllers(
-                &queue,
-                [
-                    Some(crate::controller::Pose {
-                        position: [-0.2, 1.3, -1.0],
-                        orientation: [0.0, 0.0, 0.0, 1.0],
-                    }),
-                    Some(crate::controller::Pose {
-                        position: [0.2, 1.3, -1.0],
-                        orientation: [0.0, 0.0, 0.0, 1.0],
-                    }),
-                ],
-                [None, None],
-            );
-            let projection = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
-            let matrices = [-0.032, 0.032]
-                .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
-            let mut pill = renderer.panel(&device, 24_000);
-            let mut canvas = crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
-            canvas.rows = vec![crate::ui_text::Row::text(
-                "Hello from the Quest microphone!",
-                crate::ui_text::Style::plain([1.0; 4]),
-                crate::pill::COLUMNS,
-            )];
-            pill.set(&queue, &canvas);
-            // Exercise the recording indicator through its states, beside the panel, and drawing no panel at all.
-            let mut indicator = renderer.panel(&device, 24_000);
-            let limit = Some(std::time::Duration::from_secs(60));
-            for elapsed in [Some(0), Some(15), Some(50), Some(55), Some(60), None] {
-                let mut panels = vec![(
-                    &pill,
-                    Mat4::from_translation(glam::Vec3::new(0.0, 1.1, -1.5)),
-                )];
-                if let Some(elapsed) = elapsed {
-                    indicator.set(
-                        &queue,
-                        &crate::recording::canvas(
-                            &crate::recording::Phase::Recording {
-                                elapsed: std::time::Duration::from_secs(elapsed),
-                                heard: "Hello from the Quest microphone!".into(),
-                                answering: None,
-                                about: None,
-                            },
-                            limit,
-                            0.5,
-                        ),
+                    });
+                    let views: [_; 2] = std::array::from_fn(|eye| {
+                        texture.create_view(&wgpu::TextureViewDescriptor {
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            base_array_layer: eye as u32,
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        })
+                    });
+                    let projection =
+                        Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+                    let matrices = [-0.032, 0.032].map(|x| {
+                        let eye = glam::Vec3::new(x, 1.6, 0.0);
+                        projection * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y)
+                    });
+                    let arrival = Scene::layout(&View {
+                        heading: "Spaces on studio.local".into(),
+                        items: vec![Item {
+                            key: Key::Create,
+                            kind: Kind::Create { open: false },
+                            label: "New space".into(),
+                            detail: None,
+                            selected: false,
+                        }],
+                        ..Default::default()
+                    });
+                    let workspace = crate::delegation::Workspace {
+                        nodes: vec![crate::delegation::Node {
+                            id: "worker".into(),
+                            parent_id: Some("root".into()),
+                            title: "Synthetic task".into(),
+                            state: crate::delegation::State::Running,
+                        }],
+                        presentations: vec![crate::delegation::Presentation {
+                            id: "card".into(),
+                            title: "Synthetic result".into(),
+                            source_id: "worker".into(),
+                            source_message_id: "message".into(),
+                            text: "Example content".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    let mut workers = crate::delegation::Scene::new();
+                    for _ in 0..30 {
+                        workers.update(Some("root"), &workspace, 0.05);
+                    }
+                    let indicator = crate::recording::canvas(
+                        &crate::recording::Phase::Recording {
+                            elapsed: std::time::Duration::from_secs(15),
+                            heard: "Hello from the headset.".into(),
+                            answering: None,
+                            about: None,
+                        },
+                        Some(std::time::Duration::from_secs(60)),
+                        0.5,
                     );
-                    panels.push((
-                        &indicator,
-                        crate::recording::facing(
-                            glam::Vec3::new(-0.2, 1.2, -0.4),
-                            glam::Vec3::new(0.0, 1.6, 0.0),
-                            1.0,
-                        ),
-                    ));
+                    let mut swarm = Swarm::new();
+                    for _ in 0..120 {
+                        swarm.step(1.0 / 72.0, None);
+                    }
+                    let hand = {
+                        let mut hand = crate::hands::Hand {
+                            joints: [None; crate::hands::JOINT_COUNT],
+                        };
+                        for (joint, y) in [(1, 1.2), (2, 1.3)] {
+                            hand.joints[joint] = Some(crate::hands::Joint {
+                                position: [0.2, y, -0.6],
+                                radius: 0.01,
+                            });
+                        }
+                        hand
+                    };
+                    let render = |samples: u32, environment: Environment| {
+                        let mut renderer =
+                            Renderer::with_samples(&device, &queue, format, WIDTH, HEIGHT, samples);
+                        renderer.set_environment(environment);
+                        renderer.update(&queue, &swarm, None, false);
+                        renderer.update_controllers(
+                            &queue,
+                            [
+                                Some(crate::controller::Pose {
+                                    position: [-0.2, 1.3, -0.6],
+                                    orientation: [0.0, 0.0, 0.0, 1.0],
+                                }),
+                                None,
+                            ],
+                            [None, Some(hand)],
+                        );
+                        renderer.update_workspace(
+                            &device,
+                            &queue,
+                            workers.cubes(),
+                            workers.stations(),
+                            &workspace,
+                        );
+                        renderer.update_arrival(
+                            &device,
+                            &queue,
+                            &crate::arrival_graphics::Frame {
+                                scene: &arrival,
+                                hovered: Some(&Key::Create),
+                                ray: Some(crate::arrival_graphics::Beam {
+                                    origin: glam::Vec3::new(0.2, 1.1, -0.3),
+                                    end: crate::arrival::CREATE,
+                                    hit: true,
+                                }),
+                                time: 1.0,
+                            },
+                        );
+                        let mut pill = renderer.panel(&device, 24_000);
+                        let mut canvas =
+                            crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                        canvas.rows = vec![crate::ui_text::Row::text(
+                            "Hello from the headset.",
+                            crate::ui_text::Style::plain([1.0; 4]),
+                            crate::pill::COLUMNS,
+                        )];
+                        pill.set(&queue, &canvas);
+                        let mut card = renderer.panel(&device, 24_000);
+                        card.set(&queue, &indicator);
+                        let mut panels = vec![(
+                            &pill,
+                            Mat4::from_translation(glam::Vec3::new(0.0, 1.1, -1.5)),
+                        )];
+                        panels.push((
+                            &card,
+                            crate::recording::facing(
+                                glam::Vec3::new(-0.2, 1.4, -0.6),
+                                glam::Vec3::new(0.0, 1.6, 0.0),
+                                1.0,
+                            ),
+                        ));
+                        renderer.render(
+                            &device,
+                            &queue,
+                            &views,
+                            &matrices,
+                            Mat4::IDENTITY,
+                            &panels,
+                        );
+                        let layer = u64::from(WIDTH * HEIGHT * 4);
+                        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("headset test readback"),
+                            size: layer * 2,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        });
+                        let mut encoder = device.create_command_encoder(&Default::default());
+                        encoder.copy_texture_to_buffer(
+                            texture.as_image_copy(),
+                            wgpu::TexelCopyBufferInfo {
+                                buffer: &buffer,
+                                layout: wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(WIDTH * 4),
+                                    rows_per_image: Some(HEIGHT),
+                                },
+                            },
+                            texture.size(),
+                        );
+                        queue.submit([encoder.finish()]);
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        buffer
+                            .slice(..)
+                            .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        rx.recv().unwrap().unwrap();
+                        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                        let (left, right) = data.split_at(layer as usize);
+                        [left, right].map(|eye| {
+                            image::RgbaImage::from_raw(WIDTH, HEIGHT, eye.to_vec()).unwrap()
+                        })
+                    };
+                    let colours = |image: &image::RgbaImage| {
+                        image
+                            .pixels()
+                            .map(|pixel| pixel.0)
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                    };
+                    let mut sheet = image::RgbaImage::new(WIDTH * 4, HEIGHT * 2);
+                    for (row, environment) in [Environment::Minimal, Environment::Sky]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let single = render(1, environment);
+                        let multi = render(4, environment);
+                        assert_ne!(
+                            multi[0], multi[1],
+                            "{environment:?}: each eye has its own layer"
+                        );
+                        for eye in 0..2 {
+                            assert!(
+                                colours(&multi[eye]) > colours(&single[eye]),
+                                "{environment:?}, eye {eye}: multisampling blends more colours"
+                            );
+                        }
+                        let y = (row as u32 * HEIGHT).into();
+                        for (column, image) in single.iter().chain(&multi).enumerate() {
+                            image::imageops::replace(
+                                &mut sheet,
+                                image,
+                                column as i64 * i64::from(WIDTH),
+                                y,
+                            );
+                        }
+                    }
+                    {
+                        crate::test_support::preview("TOMORI_HEADSET_MULTISAMPLE_PREVIEW", &sheet);
+                    }
+                    assert!(scope.pop().await.is_none());
+                })
+            },
+        );
+    }
+
+    #[test]
+    fn renders_stereo_offscreen() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            pollster::block_on(async move {
+                let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let targets: [wgpu::TextureView; 2] = std::array::from_fn(|_| {
+                    device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            label: Some("test eye"),
+                            size: wgpu::Extent3d {
+                                width: 128,
+                                height: 128,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            view_formats: &[],
+                        })
+                        .create_view(&Default::default())
+                });
+                let mut renderer = Renderer::new(
+                    &device,
+                    &queue,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    128,
+                    128,
+                );
+                renderer.update(&queue, &Swarm::new(), None, false);
+                renderer.update_controllers(
+                    &queue,
+                    [
+                        Some(crate::controller::Pose {
+                            position: [-0.2, 1.3, -1.0],
+                            orientation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                        Some(crate::controller::Pose {
+                            position: [0.2, 1.3, -1.0],
+                            orientation: [0.0, 0.0, 0.0, 1.0],
+                        }),
+                    ],
+                    [None, None],
+                );
+                let projection = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
+                let matrices = [-0.032, 0.032]
+                    .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
+                let mut pill = renderer.panel(&device, 24_000);
+                let mut canvas =
+                    crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                canvas.rows = vec![crate::ui_text::Row::text(
+                    "Hello from the Quest microphone!",
+                    crate::ui_text::Style::plain([1.0; 4]),
+                    crate::pill::COLUMNS,
+                )];
+                pill.set(&queue, &canvas);
+                // Exercise the recording indicator through its states, beside the panel, and drawing no panel at all.
+                let mut indicator = renderer.panel(&device, 24_000);
+                let limit = Some(std::time::Duration::from_secs(60));
+                for elapsed in [Some(0), Some(15), Some(50), Some(55), Some(60), None] {
+                    let mut panels = vec![(
+                        &pill,
+                        Mat4::from_translation(glam::Vec3::new(0.0, 1.1, -1.5)),
+                    )];
+                    if let Some(elapsed) = elapsed {
+                        indicator.set(
+                            &queue,
+                            &crate::recording::canvas(
+                                &crate::recording::Phase::Recording {
+                                    elapsed: std::time::Duration::from_secs(elapsed),
+                                    heard: "Hello from the Quest microphone!".into(),
+                                    answering: None,
+                                    about: None,
+                                },
+                                limit,
+                                0.5,
+                            ),
+                        );
+                        panels.push((
+                            &indicator,
+                            crate::recording::facing(
+                                glam::Vec3::new(-0.2, 1.2, -0.4),
+                                glam::Vec3::new(0.0, 1.6, 0.0),
+                                1.0,
+                            ),
+                        ));
+                    }
+                    renderer.render(
+                        &device,
+                        &queue,
+                        &targets,
+                        &matrices,
+                        Mat4::IDENTITY,
+                        &panels,
+                    );
                 }
+                // Exercise every activity shape/halo through both eye targets.
+                let mut swarm = Swarm::new();
+                for mode in [
+                    Mode::Ready,
+                    Mode::Working,
+                    Mode::Preparing,
+                    Mode::Speaking,
+                    Mode::Waiting,
+                    Mode::Listening,
+                    Mode::Transcribing,
+                    Mode::Unknown,
+                    Mode::Unavailable,
+                ] {
+                    swarm.visual = crate::interaction::Visual {
+                        mode,
+                        level: 0.8,
+                        time: 2.0,
+                        working: true,
+                    };
+                    renderer.update(&queue, &swarm, None, false);
+                    renderer.render(&device, &queue, &targets, &matrices, Mat4::IDENTITY, &[]);
+                }
+                // Exercise the same single-view + resized-depth path as desktop.
+                renderer.resize(&device, 128, 128);
                 renderer.render(
                     &device,
                     &queue,
-                    &targets,
-                    &matrices,
+                    &targets[..1],
+                    &matrices[..1],
                     Mat4::IDENTITY,
-                    &panels,
+                    &[],
                 );
-            }
-            // Exercise every activity shape/halo through both eye targets.
-            let mut swarm = Swarm::new();
-            for mode in [
-                Mode::Ready,
-                Mode::Working,
-                Mode::Preparing,
-                Mode::Speaking,
-                Mode::Waiting,
-                Mode::Listening,
-                Mode::Transcribing,
-                Mode::Unknown,
-                Mode::Unavailable,
-            ] {
-                swarm.visual = crate::interaction::Visual {
-                    mode,
-                    level: 0.8,
-                    time: 2.0,
-                    working: true,
-                };
-                renderer.update(&queue, &swarm, None, false);
-                renderer.render(&device, &queue, &targets, &matrices, Mat4::IDENTITY, &[]);
-            }
-            // Exercise the same single-view + resized-depth path as desktop.
-            renderer.resize(&device, 128, 128);
-            renderer.render(
-                &device,
-                &queue,
-                &targets[..1],
-                &matrices[..1],
-                Mat4::IDENTITY,
-                &[],
-            );
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(error_scope.pop().await.is_none());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                assert!(error_scope.pop().await.is_none());
+            })
         });
     }
     #[test]

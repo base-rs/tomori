@@ -111,81 +111,80 @@ mod tests {
 
     #[test]
     fn a_frame_draws_its_panels_where_the_step_placed_them() {
-        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
-            return;
-        };
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let mut renderer =
-            Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
-        let mut panels = Panels::new(&device, &renderer);
-        assert!(panels.list(Mat4::IDENTITY).is_empty(), "nothing drawn yet");
-        let head = Mat4::from_translation(arrival::HOME);
-        let senses = Senses {
-            focused: true,
-            head: Some(head),
-            head_pose: Pose::from_transform(head),
-            viewer: Some(arrival::HOME),
-            space_head: head,
-            trigger: Some(0.0),
-            // A right palm turned up, which shows the transcript.
-            right_palm: Some(Palm {
-                wrist: arrival::HOME + Vec3::new(0.1, -0.35, -0.3),
-                normal: Vec3::Y,
-            }),
-            ..Default::default()
-        };
-        let mut conversation = joined();
-        let mut step = Step::default();
-        let start = Instant::now();
-        step.update(&senses, &mut conversation, &mut felt(), start, 0.01);
-        let frame = step.update(&senses, &mut conversation, &mut felt(), start + HOLD, 0.01);
-        let pill = frame.panels.pill.model;
-        let wrist = frame.panels.wrist.model.expect("the transcript shows");
-        draw(&mut renderer, &device, &queue, &mut panels, &frame);
-        // The pill is hidden while a hand's panel shows; the transcript is moved from the scene to the eyes' space.
-        assert!(pill.is_none());
-        let scene_to_space = Mat4::from_translation(Vec3::X);
-        let list = panels.list(scene_to_space);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].1, scene_to_space * wrist);
-        // In arrival, the objects are drawn, with the pill hidden and the transcript gone.
-        let mut lobby = lobby(tomori_protocol::ConnectionRole::Owner);
-        let mut step = Step::default();
-        let frame = step.update(&senses, &mut lobby, &mut felt(), start, 1.0);
-        assert!(frame.arrival.is_some());
-        draw(&mut renderer, &device, &queue, &mut panels, &frame);
-        assert!(panels.list(scene_to_space).is_empty());
-        // In a space with nothing on the hands, only the pill, already in the eyes' space.
-        let mut step = Step::default();
-        let plain = Senses {
-            right_palm: None,
-            ..senses
-        };
-        let frame = step.update(&plain, &mut conversation, &mut felt(), start, 0.01);
-        let pill = frame.panels.pill.model.expect("the pill");
-        draw(&mut renderer, &device, &queue, &mut panels, &frame);
-        let list = panels.list(scene_to_space);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].1, pill);
-        // Recording, the pill comes first, then the indicator, moved into the eyes' space.
-        let recording = Senses {
-            trackers: crate::recording::Trackers {
-                view: Some(arrival::HOME - Vec3::Z * 0.5),
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+            let mut panels = Panels::new(&device, &renderer);
+            assert!(panels.list(Mat4::IDENTITY).is_empty(), "nothing drawn yet");
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                // A right palm turned up, which shows the transcript.
+                right_palm: Some(Palm {
+                    wrist: arrival::HOME + Vec3::new(0.1, -0.35, -0.3),
+                    normal: Vec3::Y,
+                }),
                 ..Default::default()
-            },
-            ..plain
-        };
-        conversation.talk(true);
-        let frame = step.update(&recording, &mut conversation, &mut felt(), start, 0.01);
-        let card = frame.panels.indicator[0].model.expect("the recording card");
-        let pill = frame.panels.pill.model.expect("the pill");
-        draw(&mut renderer, &device, &queue, &mut panels, &frame);
-        let models: Vec<Mat4> = panels
-            .list(scene_to_space)
-            .into_iter()
-            .map(|(_, model)| model)
-            .collect();
-        assert_eq!(models, [pill, scene_to_space * card]);
-        assert!(pollster::block_on(scope.pop()).is_none());
+            };
+            let mut conversation = joined();
+            let mut step = Step::default();
+            let start = Instant::now();
+            step.update(&senses, &mut conversation, &mut felt(), start, 0.01);
+            let frame = step.update(&senses, &mut conversation, &mut felt(), start + HOLD, 0.01);
+            let pill = frame.panels.pill.model;
+            let wrist = frame.panels.wrist.model.expect("the transcript shows");
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            // The pill is hidden while a hand's panel shows; the transcript is moved from the scene to the eyes' space.
+            assert!(pill.is_none());
+            let scene_to_space = Mat4::from_translation(Vec3::X);
+            let list = panels.list(scene_to_space);
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].1, scene_to_space * wrist);
+            // In arrival, the objects are drawn, with the pill hidden and the transcript gone.
+            let mut lobby = lobby(tomori_protocol::ConnectionRole::Owner);
+            let mut step = Step::default();
+            let frame = step.update(&senses, &mut lobby, &mut felt(), start, 1.0);
+            assert!(frame.arrival.is_some());
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            assert!(panels.list(scene_to_space).is_empty());
+            // In a space with nothing on the hands, only the pill, already in the eyes' space.
+            let mut step = Step::default();
+            let plain = Senses {
+                right_palm: None,
+                ..senses
+            };
+            let frame = step.update(&plain, &mut conversation, &mut felt(), start, 0.01);
+            let pill = frame.panels.pill.model.expect("the pill");
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let list = panels.list(scene_to_space);
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].1, pill);
+            // Recording, the pill comes first, then the indicator, moved into the eyes' space.
+            let recording = Senses {
+                trackers: crate::recording::Trackers {
+                    view: Some(arrival::HOME - Vec3::Z * 0.5),
+                    ..Default::default()
+                },
+                ..plain
+            };
+            conversation.talk(true);
+            let frame = step.update(&recording, &mut conversation, &mut felt(), start, 0.01);
+            let card = frame.panels.indicator[0].model.expect("the recording card");
+            let pill = frame.panels.pill.model.expect("the pill");
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let models: Vec<Mat4> = panels
+                .list(scene_to_space)
+                .into_iter()
+                .map(|(_, model)| model)
+                .collect();
+            assert_eq!(models, [pill, scene_to_space * card]);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
     }
 }
