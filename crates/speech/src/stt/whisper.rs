@@ -12,10 +12,13 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineWhisperMode
 use super::RATE;
 use crate::Error;
 
+/// The Whisper model the server's offline backend uses unless configured otherwise.
+pub const DEFAULT_WHISPER_MODEL: &str = "small.en";
+
 /// Where to find a sherpa-onnx Whisper model and how to run it.
 #[derive(Clone, Debug)]
 pub struct WhisperConfig {
-    /// The `sherpa-onnx-whisper-small.en` directory: `small.en-encoder.int8.onnx`, `small.en-decoder.int8.onnx` and `small.en-tokens.txt`.
+    /// The model's directory, such as `sherpa-onnx-whisper-small.en`, holding `small.en-encoder.int8.onnx`, `small.en-decoder.int8.onnx` and `small.en-tokens.txt`.
     pub model: PathBuf,
     /// The prefix of the model's file names, such as `small.en`.
     pub name: String,
@@ -27,15 +30,31 @@ pub struct WhisperConfig {
 }
 
 impl WhisperConfig {
-    /// The model fetched by `scripts/fetch-asr-model.sh whisper` under the repository `root`: `.tools/asr/sherpa-onnx-whisper-small.en`.
+    /// The default model, [`DEFAULT_WHISPER_MODEL`], fetched by `scripts/fetch-asr-model.sh whisper` under the repository `root`: `.tools/asr/sherpa-onnx-whisper-small.en`.
     pub fn from_root(root: &Path) -> Self {
+        Self::named(root, DEFAULT_WHISPER_MODEL)
+    }
+
+    /// The Whisper model `name`, such as `small.en` or `tiny.en`, fetched by `scripts/fetch-asr-model.sh whisper NAME` under the repository `root`: `.tools/asr/sherpa-onnx-whisper-NAME`. Use [`Self::valid_name`] to check a name from outside the server first.
+    pub fn named(root: &Path, name: &str) -> Self {
         Self {
-            model: root.join(".tools/asr/sherpa-onnx-whisper-small.en"),
-            name: "small.en".into(),
+            model: root
+                .join(".tools/asr")
+                .join(format!("sherpa-onnx-whisper-{name}")),
+            name: name.into(),
             language: "en".into(),
             threads: 4,
             provider: "cpu".into(),
         }
+    }
+
+    /// Whether `name` can name a model: lowercase letters, digits, `.` and `-`, not starting with `.`, so that it stays within `.tools/asr`.
+    pub fn valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && !name.starts_with('.')
+            && name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-".contains(&byte)
+            })
     }
 
     fn sherpa(&self) -> Result<OfflineRecognizerConfig, Error> {
@@ -47,8 +66,10 @@ impl WhisperConfig {
         ];
         if !files.iter().all(|file| file.exists()) {
             return Err(Error::Unavailable(format!(
-                "the Whisper model is not installed in {}; run bash scripts/fetch-asr-model.sh whisper",
-                self.model.display()
+                "the Whisper model {} is not installed in {}; run bash scripts/fetch-asr-model.sh whisper {}",
+                self.name,
+                self.model.display(),
+                self.name
             )));
         }
         let [encoder, decoder, tokens] =
@@ -111,22 +132,54 @@ mod tests {
 
     #[test]
     fn reports_a_missing_installation() {
-        let config = WhisperConfig::from_root(Path::new("/nonexistent"));
+        let config = WhisperConfig::named(Path::new("/nonexistent"), "tiny.en");
         assert!(matches!(
             WhisperRecognizer::new(&config),
-            Err(Error::Unavailable(_))
+            Err(Error::Unavailable(message)) if message.contains("fetch-asr-model.sh whisper tiny.en")
         ));
     }
 
-    /// Requires the Whisper model; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use models outside this checkout.
     #[test]
-    #[ignore = "requires the Whisper model"]
+    fn names_its_model() {
+        let root = Path::new("/srv/tomori");
+        let config = WhisperConfig::from_root(root);
+        assert_eq!(config.name, DEFAULT_WHISPER_MODEL);
+        assert_eq!(
+            config.model,
+            root.join(".tools/asr/sherpa-onnx-whisper-small.en")
+        );
+        let config = WhisperConfig::named(root, "tiny.en");
+        assert_eq!(config.name, "tiny.en");
+        assert_eq!(
+            config.model,
+            root.join(".tools/asr/sherpa-onnx-whisper-tiny.en")
+        );
+        for name in ["small.en", "tiny.en", "large-v3"] {
+            assert!(WhisperConfig::valid_name(name), "{name:?}");
+        }
+        for name in ["", ".", "..", "../small.en", "a/b", "Small.en", "tiny en"] {
+            assert!(!WhisperConfig::valid_name(name), "{name:?}");
+        }
+    }
+
+    /// Skipped without the Whisper model the tests use; see [`crate::test_models`].
+    #[test]
     fn decodes_silence_without_failing() {
-        let root = match std::env::var_os("TOMORI_SPEECH_ROOT") {
-            Some(root) => PathBuf::from(root),
-            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        };
-        let mut whisper = WhisperRecognizer::new(&WhisperConfig::from_root(&root)).unwrap();
+        use crate::test_models;
+
+        let config = WhisperConfig::named(&test_models::root(), test_models::WHISPER_MODEL);
+        if !test_models::installed(
+            "the Whisper model",
+            &format!("bash scripts/fetch-asr-model.sh whisper {}", config.name),
+            &[&config.model],
+        ) {
+            return;
+        }
+        let mut whisper = WhisperRecognizer::new(&config).unwrap();
         assert!(whisper.transcribe(&vec![0; RATE as usize]).is_ok());
+        assert!(matches!(
+            whisper.transcribe(&vec![0; RATE as usize * 31]),
+            Err(Error::Engine(_))
+        ));
     }
 }

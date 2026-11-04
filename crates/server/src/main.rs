@@ -50,6 +50,10 @@ Options:
                        words as you speak) or offline (a whole-clip model, more accurate, that reports
                        the transcript a couple of seconds after you stop, for messages of up to 5
                        minutes).
+  --speech-offline-model NAME
+                       The Whisper model the offline backend uses, from
+                       .tools/asr/sherpa-onnx-whisper-NAME: small.en (default) or tiny.en, which is
+                       smaller and faster but less accurate.
   --speech-segmentation NAME
                        How a reply is spoken, by document-level block: block (default, a whole block
                        in one go) or sentence (each sentence separately, so a long block starts sooner).
@@ -93,6 +97,8 @@ struct Arguments {
     speech_provider: String,
     /// How utterances are transcribed: the streaming transducer, or the offline (whole-clip) model.
     speech_backend: String,
+    /// The Whisper model the offline backend uses, such as `tiny.en`; without it, [`tomori_speech::stt::DEFAULT_WHISPER_MODEL`].
+    speech_offline_model: Option<String>,
     /// How a space's closed blocks are spoken: one segment per block, or one per sentence.
     speech_segmentation: String,
     name: Option<String>,
@@ -139,6 +145,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
         speech_root: None,
         speech_provider: "cpu".to_owned(),
         speech_backend: "streaming".to_owned(),
+        speech_offline_model: None,
         speech_segmentation: "block".to_owned(),
         name: None,
         advertise: true,
@@ -205,6 +212,18 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Arguments, Strin
                     }
                 }
                 parsed.speech_backend = value;
+            }
+            "--speech-offline-model" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--speech-offline-model needs a name")?;
+                #[cfg(feature = "speech")]
+                if !tomori_speech::stt::WhisperConfig::valid_name(&value) {
+                    return Err(format!(
+                        "--speech-offline-model needs a model name, such as small.en or tiny.en, not {value:?}"
+                    ));
+                }
+                parsed.speech_offline_model = Some(value);
             }
             "--speech-segmentation" => {
                 let value = arguments
@@ -579,12 +598,13 @@ impl Engines {
     }
 }
 
-/// Speech recognition: the streaming transducer or the offline (whole-clip) model from `root`, run with `provider`, or none. Without recognition, every utterance fails visibly.
+/// Speech recognition: the streaming transducer or the offline (whole-clip) model, Whisper `offline_model` or the default, from `root`, run with `provider`, or none. Without recognition, every utterance fails visibly.
 #[cfg(feature = "speech")]
 fn transcriber(
     root: Option<&Path>,
     provider: &str,
     backend: &str,
+    offline_model: Option<&str>,
     engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
     let Some(root) = root else {
@@ -592,7 +612,7 @@ fn transcriber(
         return Ok(Arc::new(NullTranscriber::new()));
     };
     if backend == "offline" {
-        return offline_transcriber(root, provider, engines);
+        return offline_transcriber(root, provider, offline_model, engines);
     }
     streaming_transcriber(root, provider, engines)
 }
@@ -630,16 +650,20 @@ fn streaming_transcriber(
     })
 }
 
-/// The offline (whole-clip) model from `root`, which buffers each utterance and reports its transcript a couple of seconds after the participant stops.
+/// The offline (whole-clip) model from `root`, Whisper `model` or the default, which buffers each utterance and reports its transcript a couple of seconds after the participant stops.
 #[cfg(feature = "speech")]
 fn offline_transcriber(
     root: &Path,
     provider: &str,
+    model: Option<&str>,
     engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
     use tomori_speech::stt::{SileroVad, SileroVadConfig, WhisperConfig};
 
-    let mut config = WhisperConfig::from_root(root);
+    let mut config = match model {
+        Some(name) => WhisperConfig::named(root, name),
+        None => WhisperConfig::from_root(root),
+    };
     config.provider = provider.to_owned();
     let recognizer = match tomori_server::offline::Whisper::new(&config) {
         Ok(recognizer) => recognizer,
@@ -653,7 +677,8 @@ fn offline_transcriber(
         }
     };
     eprintln!(
-        "Speech recognition: offline whole-clip model from {} ({provider}), for utterances of up to {} minutes.",
+        "Speech recognition: offline whole-clip model, Whisper {}, from {} ({provider}), for utterances of up to {} minutes.",
+        config.name,
         config.model.display(),
         tomori_speech::stt::MAX_UTTERANCE / tomori_speech::stt::RATE as usize / 60
     );
@@ -710,6 +735,7 @@ fn transcriber(
     root: Option<&Path>,
     _provider: &str,
     _backend: &str,
+    _offline_model: Option<&str>,
     _engines: &mut Engines,
 ) -> Result<Arc<dyn Transcriber>, String> {
     if root.is_some() {
@@ -827,6 +853,7 @@ fn configure(
         root,
         &arguments.speech_provider,
         &arguments.speech_backend,
+        arguments.speech_offline_model.as_deref(),
         engines,
     )?;
     let server = Server::new(backends, transcriber)
@@ -1245,6 +1272,14 @@ mod tests {
         for extra in [
             &["--speech-root", root][..],
             &["--speech-root", root, "--speech-backend", "offline"],
+            &[
+                "--speech-root",
+                root,
+                "--speech-backend",
+                "offline",
+                "--speech-offline-model",
+                "tiny.en",
+            ],
         ] {
             let mut engines = Engines::default();
             let arguments = local(&directory, &[&["--auth", "open"][..], extra].concat());
@@ -1581,6 +1616,26 @@ mod tests {
         }
         assert!(arguments(&["--speech-provider", "gpu"]).is_err());
         assert!(arguments(&["--speech-provider"]).is_err());
+    }
+
+    #[test]
+    fn the_offline_model_is_configurable() {
+        assert_eq!(arguments(&[]).unwrap().speech_offline_model, None);
+        assert_eq!(
+            arguments(&["--speech-offline-model", "tiny.en"])
+                .unwrap()
+                .speech_offline_model
+                .as_deref(),
+            Some("tiny.en")
+        );
+        assert!(arguments(&["--speech-offline-model"]).is_err());
+        #[cfg(feature = "speech")]
+        for name in ["", "../small.en", ".hidden", "Small.en"] {
+            assert!(
+                arguments(&["--speech-offline-model", name]).is_err(),
+                "{name:?} was accepted"
+            );
+        }
     }
 
     #[test]

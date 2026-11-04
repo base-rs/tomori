@@ -260,6 +260,7 @@ Type the controller buttons as commands, such as `a`, `b`, `y`, `u` and `d` for 
 
 ```sh
 bash scripts/fetch-sherpa-onnx.sh        # once: the speech libraries the server links
+bash scripts/fetch-asr-model.sh whisper tiny.en && bash scripts/fetch-tts-model.sh   # optional: the speech models the speech tests run
 cargo test --workspace                   # simulation, projection, rendering, server and client tests
 cargo run -p tomori-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
 npm test --prefix bridge          # session routing, questions and permissions
@@ -267,7 +268,9 @@ npm test --prefix bridge          # session routing, questions and permissions
 
 The rendering tests draw offscreen with Vulkan: on a GPU when there is one, and otherwise on a software driver such as Mesa's lavapipe (`mesa-vulkan-drivers` on Debian and Ubuntu, `vulkan-swrast` on Arch). With no Vulkan adapter at all they are skipped, each saying so; set `TOMORI_REQUIRE_GPU=1` to fail them instead, as CI does. The tests in each test binary share one Vulkan device, created once and never dropped, because Vulkan loaders before 1.4.346 can crash when one thread creates a device while another uses one. To render on lavapipe, as CI does, on a computer with a GPU, name its driver file in `VK_DRIVER_FILES`, such as `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`. Every `.wgsl` shader is also parsed and validated with naga, with or without an adapter.
 
-`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests, including the rendering tests on lavapipe, on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. The main branch requires these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
+The speech tests that run the real recognition, punctuation, voice activity and synthesis models are skipped, each saying so, when the models aren't installed; set `TOMORI_REQUIRE_MODELS=1` to fail them instead, as CI does. They use Whisper `tiny.en` rather than the server's default, `small.en`; see [crates/speech/readme.md](crates/speech/readme.md#tests).
+
+`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests, including the rendering tests on lavapipe and the speech tests with their models, on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. The main branch requires these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. `cargo bake test:coverage` checks the 100% source-region coverage that Base projects require; the Coverage workflow runs it on every pull request, but it is not required yet, because coverage is still well short of it ([#55](https://github.com/ioquatix/tomori/issues/55)).
 
 For the PC streaming-recognition test (model + public sample required):
 

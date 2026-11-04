@@ -212,13 +212,6 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    fn repository() -> PathBuf {
-        match std::env::var_os("TOMORI_SPEECH_ROOT") {
-            Some(root) => PathBuf::from(root),
-            None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        }
-    }
-
     #[test]
     fn splits_the_last_word_off_as_tentative() {
         assert_eq!(
@@ -247,14 +240,25 @@ mod tests {
         ));
     }
 
-    /// Speaks sentences with Kokoro and recognizes them as they are produced, as push-to-talk would deliver them. Requires both models; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use models outside this checkout.
+    /// Speaks sentences with Kokoro and recognizes them as they are produced, as push-to-talk would deliver them. Skipped without both models; see [`crate::test_models`].
     #[test]
-    #[ignore = "requires the Kokoro and streaming recognition models"]
     fn recognizes_synthesized_speech_while_it_arrives() {
-        use crate::tts::{KokoroConfig, KokoroSynthesizer, Synthesizer};
+        use crate::{
+            test_models,
+            tts::{KokoroConfig, KokoroSynthesizer, Synthesizer},
+        };
 
-        let root = repository();
-        let mut kokoro = KokoroSynthesizer::new(&KokoroConfig::from_root(&root)).unwrap();
+        let root = test_models::root();
+        let voice = KokoroConfig::from_root(&root);
+        let config = TransducerConfig::from_root(&root);
+        if !test_models::installed(
+            "the Kokoro and streaming recognition models",
+            "bash scripts/fetch-asr-model.sh and bash scripts/fetch-tts-model.sh",
+            &[&voice.model, &config.model],
+        ) {
+            return;
+        }
+        let mut kokoro = KokoroSynthesizer::new(&voice).unwrap();
         let mut audio = Vec::new();
         let mut rate = 0;
         kokoro
@@ -267,7 +271,7 @@ mod tests {
             )
             .unwrap();
 
-        let recognizer = TransducerRecognizer::new(&TransducerConfig::from_root(&root)).unwrap();
+        let recognizer = TransducerRecognizer::new(&config).unwrap();
         let mut recognition = Recognition::spawn(recognizer);
         let (sender, events) = mpsc::channel();
         let mut utterance = recognition.begin(1, rate, move |event| {

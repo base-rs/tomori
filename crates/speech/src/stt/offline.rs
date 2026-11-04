@@ -1184,11 +1184,13 @@ mod tests {
         ));
     }
 
-    /// Transcribes a minute of LibriSpeech, from the clips that come with the Whisper model, with Whisper and the Silero detector, as the offline backend does. Requires both models; see `readme.md`. Set `TOMORI_SPEECH_ROOT` to use models outside this checkout.
+    /// Transcribes a minute of LibriSpeech, from the clips that come with the Whisper model, with Whisper and the Silero detector, as the offline backend does. Skipped without both models; see [`crate::test_models`].
     #[test]
-    #[ignore = "requires the Whisper and Silero voice activity models"]
     fn transcribes_a_long_utterance_with_whisper() {
-        use crate::stt::{SileroVad, SileroVadConfig, WhisperConfig, WhisperRecognizer};
+        use crate::{
+            stt::{SileroVad, SileroVadConfig, WhisperConfig, WhisperRecognizer},
+            test_models,
+        };
 
         /// Whisper, recording the length of each segment it decodes.
         struct Whisper(WhisperRecognizer, Arc<Mutex<Vec<usize>>>);
@@ -1199,11 +1201,17 @@ mod tests {
             }
         }
 
-        let root = match std::env::var_os("TOMORI_SPEECH_ROOT") {
-            Some(root) => std::path::PathBuf::from(root),
-            None => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        };
-        let directory = root.join(".tools/asr/sherpa-onnx-whisper-small.en/test_wavs");
+        let root = test_models::root();
+        let config = WhisperConfig::named(&root, test_models::WHISPER_MODEL);
+        let vad = SileroVadConfig::from_root(&root);
+        if !test_models::installed(
+            "the Whisper and Silero voice activity models",
+            &format!("bash scripts/fetch-asr-model.sh whisper {}", config.name),
+            &[&config.model, &vad.model],
+        ) {
+            return;
+        }
+        let directory = config.model.join("test_wavs");
         let transcripts = std::fs::read_to_string(directory.join("trans.txt")).unwrap();
         let mut audio = Vec::new();
         let mut reference = Vec::new();
@@ -1228,11 +1236,11 @@ mod tests {
 
         // With the detector, as the server runs, and by loudness alone, as when its model is not installed.
         for detector in [true, false] {
-            let whisper = WhisperRecognizer::new(&WhisperConfig::from_root(&root)).unwrap();
+            let whisper = WhisperRecognizer::new(&config).unwrap();
             let segments = Arc::new(Mutex::new(Vec::new()));
             let whisper = Whisper(whisper, Arc::clone(&segments));
             let mut offline = if detector {
-                let vad = SileroVad::new(&SileroVadConfig::from_root(&root)).unwrap();
+                let vad = SileroVad::new(&vad).unwrap();
                 OfflineRecognition::with_voice_activity(whisper, vad)
             } else {
                 OfflineRecognition::spawn(whisper)
