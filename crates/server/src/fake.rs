@@ -55,6 +55,8 @@ struct FakeShared {
     sessions: Mutex<Vec<FakeSession>>,
     /// The backend takes no instructions; see [`FakeBackend::take_no_instructions`].
     no_instructions: AtomicBool,
+    /// The backend cannot attach existing sessions; see [`FakeBackend::attach_nothing`].
+    no_attach: AtomicBool,
     /// Setting instructions fails as unavailable; see [`FakeBackend::fail_instructions`].
     instruction_failure: Arc<AtomicBool>,
     /// The sessions whose instruction entries were forgotten, with the keys, in order.
@@ -82,6 +84,11 @@ impl FakeBackend {
     /// Take no instructions, as a backend without [`Capabilities::instructions`].
     pub fn take_no_instructions(&self) {
         self.shared.no_instructions.store(true, Ordering::SeqCst);
+    }
+
+    /// Attach no existing sessions, and so list none, as a backend without [`Capabilities::attach`].
+    pub fn attach_nothing(&self) {
+        self.shared.no_attach.store(true, Ordering::SeqCst);
     }
 
     /// Make setting instructions fail, as an agent whose endpoint for them changed would.
@@ -124,7 +131,8 @@ impl FakeBackend {
 
     /// Wait while creating and attaching are held.
     async fn released(&self) {
-        while self.shared.held.load(Ordering::SeqCst) {
+        loop {
+            // Listening before looking, so that a release between the two is not missed.
             let listener = self.shared.released.listen();
             if !self.shared.held.load(Ordering::SeqCst) {
                 break;
@@ -191,7 +199,7 @@ impl Backend for FakeBackend {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            attach: true,
+            attach: !self.shared.no_attach.load(Ordering::SeqCst),
             interrupt: true,
             questions: true,
             workers: true,
@@ -451,17 +459,17 @@ impl Session for FakeSession {
         let event = futures_lite::future::or(
             async {
                 self.handle.closing.cancelled().await;
-                Ok(Event::Closed { reason: None })
+                Event::Closed { reason: None }
             },
             async {
                 self.handle
                     .receiver
                     .recv()
                     .await
-                    .map_err(|_| Error::new(ErrorKind::Closed, "the fake session closed"))
+                    .expect("the handle holds a sender, so its events never end")
             },
         )
-        .await?;
+        .await;
         if matches!(event, Event::Closed { .. }) {
             self.handle.closed.store(true, Ordering::SeqCst);
         }
@@ -511,9 +519,7 @@ impl Session for FakeSession {
 
     async fn decide(&self, permission: &str, decision: Decision) -> Result<()> {
         loop {
-            if !self.inner.commands_held.load(Ordering::SeqCst) {
-                break;
-            }
+            // Listening before looking, so that a release between the two is not missed.
             let released = self.inner.commands_released.listen();
             if !self.inner.commands_held.load(Ordering::SeqCst) {
                 break;
@@ -611,5 +617,138 @@ impl Session for FakeSession {
         outbound.current = None;
         *bound = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_lite::future::block_on;
+
+    fn spec() -> SessionSpec {
+        SessionSpec {
+            directory: "/tmp".to_owned(),
+            title: "Fake".to_owned(),
+        }
+    }
+
+    fn permission() -> Permission {
+        Permission {
+            id: "request-1".to_owned(),
+            tool: "Bash".to_owned(),
+            input: serde_json::Value::Null,
+            description: None,
+            options: Vec::new(),
+        }
+    }
+
+    fn question() -> Question {
+        Question {
+            id: "question-1".to_owned(),
+            title: "Which?".to_owned(),
+            fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_closed_handle_does_nothing_more() {
+        let backend = FakeBackend::new();
+        let session = block_on(backend.create(spec())).unwrap();
+        block_on(session.close()).unwrap();
+        let closed = |result: Result<()>| {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Closed);
+        };
+        let prompt = Prompt {
+            key: "key".to_owned(),
+            text: "Hello".to_owned(),
+        };
+        closed(block_on(session.send(prompt)));
+        closed(block_on(session.decide("request-1", Decision::AllowOnce)));
+        closed(block_on(session.answer("question-1", Vec::new())));
+        closed(block_on(session.set_mode("plan")));
+        closed(block_on(session.set_instruction("tomori.space", None)));
+        closed(block_on(session.interrupt()));
+        // Its waiter hears it close, then nothing more.
+        assert_eq!(
+            block_on(session.next_event()).unwrap(),
+            Event::Closed { reason: None }
+        );
+        assert!(block_on(session.next_event()).is_err());
+        // Closing again is harmless.
+        block_on(session.close()).unwrap();
+    }
+
+    #[test]
+    fn requests_and_prompts_are_taken_once() {
+        let backend = FakeBackend::new();
+        let session = block_on(backend.create(spec())).unwrap();
+        for _ in 0..2 {
+            session.emit(Event::PermissionRequested(permission()));
+            session.emit(Event::QuestionAsked(question()));
+        }
+        let snapshot = block_on(session.snapshot()).unwrap();
+        assert_eq!(snapshot.permissions.len(), 1);
+        assert_eq!(snapshot.questions.len(), 1);
+        let prompt = Prompt {
+            key: "key".to_owned(),
+            text: "Hello".to_owned(),
+        };
+        block_on(session.send(prompt.clone())).unwrap();
+        block_on(session.send(prompt)).unwrap();
+        assert_eq!(session.log().prompts.len(), 1);
+        // An empty delta says nothing.
+        let message = session.start_message();
+        while session.handle.receiver.try_recv().is_ok() {}
+        session.delta(&message, "");
+        assert!(
+            !std::iter::from_fn(|| session.handle.receiver.try_recv().ok())
+                .any(|event| matches!(event, Event::TextDelta { .. }))
+        );
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_turn() {
+        let backend = FakeBackend::manual();
+        let session = block_on(backend.create(spec())).unwrap();
+        session.emit(Event::Busy);
+        block_on(session.interrupt()).unwrap();
+        assert!(!session.is_busy());
+        assert_eq!(session.log().interrupts, 1);
+    }
+
+    #[test]
+    fn modes_and_instruction_keys_it_does_not_know_are_refused() {
+        let backend = FakeBackend::new();
+        let session = block_on(backend.create(spec())).unwrap();
+        assert_eq!(
+            block_on(session.set_mode("yolo")).unwrap_err().kind,
+            ErrorKind::Invalid
+        );
+        assert_eq!(
+            block_on(session.set_instruction("not a key", Some("x")))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Invalid
+        );
+    }
+
+    #[test]
+    fn instructions_are_forgotten_only_where_there_are_some_and_the_session_is_not_bound_again() {
+        let backend = FakeBackend::new();
+        let session = block_on(backend.create(spec())).unwrap();
+        let id = session.id();
+        let keys = || vec!["tomori.space".to_owned()];
+        // Still bound, its entries are the binding's.
+        block_on(backend.forget_instructions(&id, keys())).unwrap();
+        // Unknown sessions are forgotten without entries to remove.
+        block_on(backend.forget_instructions("fake-99", keys())).unwrap();
+        assert_eq!(backend.forgotten(), [("fake-99".to_owned(), keys())]);
+        backend.take_no_instructions();
+        assert_eq!(
+            block_on(backend.forget_instructions(&id, keys()))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Unsupported
+        );
     }
 }
