@@ -220,7 +220,7 @@ fn normalize(path: &Path) -> Option<PathBuf> {
             Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
                 normalized.push(component)
             }
-            Component::CurDir => {}
+            Component::CurDir => unreachable!("an absolute path has no `.` component"),
             Component::ParentDir => {
                 normalized.pop();
             }
