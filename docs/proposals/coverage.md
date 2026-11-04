@@ -416,7 +416,7 @@ That is within the ~3,600 regions the analysis found truly beyond CI, and about 
 
 **Order of the split.** One pull request each, every one leaving the tree green:
 
-1. Draw the device boundary inside `tomori-quest`: extract the shared frame step and each platform's logic from `xr::run` and `desktop_participant::State::frame` into covered modules, with tests, leaving the device files as thin calls. This is the only step that changes behaviour-bearing code, and the one with the most value even if nothing else follows. Started.
+1. Draw the device boundary inside `tomori-quest`: extract the shared frame step and each platform's logic from `xr::run` and `desktop_participant::State::frame` into covered modules, with tests, leaving the device files as thin calls. This is the only step that changes behaviour-bearing code, and the one with the most value even if nothing else follows. Started in [#119](https://github.com/ioquatix/tomori/pull/119).
 2. Move the renderers into `tomori-render`.
 3. Move the scene logic into `tomori-scene`. `tomori-quest` is now the shell.
 4. Add the exclusion metadata to `tomori-quest`, if `bake-test` supports it by then (decision 5).
@@ -439,7 +439,7 @@ That is within the ~3,600 regions the analysis found truly beyond CI, and about 
 | 1 | Run the GPU tests on lavapipe in the coverage job | Tomori | Done |
 | 2 | Server-side tests: `tomori-server`, `tomori-backend-opencode`, `tomori-speech`, `tomori-discovery` and the small crates, with the speech models fetched and cached in CI | Tomori | Mostly done; the workspace is at about 91% |
 | 3 | `bake-test` 0.4: the exclusion metadata, measuring only the workspace, the summary; the guidance in `base-project-testing` and `context/testing.md` | base-rs `bake-test`, `base-project` | Not decided (decision 5) |
-| 4 | The `tomori-quest` split, in the four pull requests above, then the remaining tests of the scene logic | Tomori | The first pull request is open. Lines up with #73's builders and `design/clients.md`. This is where most of the remaining `tomori-quest` gap closes |
+| 4 | The `tomori-quest` split, in the four pull requests above, then the remaining tests of the scene logic | Tomori | The first pull request is [#119](https://github.com/ioquatix/tomori/pull/119). Lines up with #73's builders and `design/clients.md`. This is where most of the remaining `tomori-quest` gap closes |
 | 5 | Make the gate required | Tomori | When the workspace passes. See below |
 
 **Stage 5, making the gate required:**
