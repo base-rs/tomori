@@ -413,6 +413,8 @@ mod enabled {
         pending: VecDeque<(u64, Item)>,
         /// The segment that started but has produced no audio yet: its number, message and text.
         announcing: Option<(u64, String, String)>,
+        /// Whether the current segment has produced audio, so that a breath follows it.
+        spoke: bool,
         /// The reply of the current segment.
         reply: u64,
         /// When the hub next has catch-up or replay audio due, if anyone is catching up or replaying.
@@ -452,6 +454,7 @@ mod enabled {
                 open: true,
                 pending: VecDeque::new(),
                 announcing: None,
+                spoke: false,
                 reply: 0,
                 streams: None,
                 woken: false,
@@ -582,8 +585,8 @@ mod enabled {
                 SpeechEvent::Audio { chunk, .. } => self.audio(chunk),
                 SpeechEvent::Finished { .. } => {
                     self.flush();
-                    let had_segment = self.announcing.take().is_some();
-                    if had_segment {
+                    self.announcing = None;
+                    if std::mem::take(&mut self.spoke) {
                         // A breath between this segment and the next, so back-to-back blocks do not run together.
                         self.pending.push_back((self.reply, Item::Gap));
                     }
@@ -591,6 +594,7 @@ mod enabled {
                 SpeechEvent::Failed { error, .. } => {
                     self.flush();
                     self.announcing = None;
+                    self.spoke = false;
                     if matches!(error, tomori_speech::Error::Stopped(_)) {
                         // Synthesis stays stopped until the server restarts, so say so once rather than for every sentence.
                         if !self.stopped {
@@ -621,6 +625,7 @@ mod enabled {
                 self.carry_rate = chunk.sample_rate;
             }
             if let Some((segment, message, text)) = self.announcing.take() {
+                self.spoke = true;
                 self.pending.push_back((
                     self.reply,
                     Item::Announce(ServerMessage::Speech {
@@ -675,6 +680,86 @@ mod enabled {
                     ),
                 ));
             }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::backends::Backends;
+        use crate::transcriber::NullTranscriber;
+        use tomori_speech::AudioChunk;
+
+        /// A hub with a space nobody is in, and the space.
+        fn space() -> (Arc<Hub>, String) {
+            let (jobs, _) = async_channel::unbounded();
+            let hub = Hub::new(
+                Backends::new(),
+                Arc::new(NullTranscriber::new()),
+                jobs,
+                Vec::new(),
+                crate::workspace::SpaceSlots::new(1),
+            );
+            let (commands, _) = async_channel::unbounded();
+            let request = crate::hub::CreateRequest {
+                title: "Space".into(),
+                backend: "fake".into(),
+                directory: "/tmp".into(),
+                session: None,
+                creator: "nobody".into(),
+                creator_space: None,
+                environment: "sky".into(),
+                instructions: String::new(),
+            };
+            let id = hub
+                .register_space(&request, "session".into(), Default::default(), commands)
+                .unwrap();
+            (hub, id)
+        }
+
+        /// A pacer for `space` of `hub`, with what tells it of synthesis.
+        fn pacer(hub: &Arc<Hub>, space: &str) -> (Pacer, Sender<Input>) {
+            let (sender, events) = mpsc::channel();
+            let pacer = Pacer::new(
+                Arc::downgrade(hub),
+                space.into(),
+                Arc::default(),
+                Arc::new(AtomicBool::new(false)),
+                events,
+            );
+            (pacer, sender)
+        }
+
+        fn chunk(sample_rate: u32, samples: usize) -> AudioChunk {
+            AudioChunk {
+                sample_rate,
+                samples: vec![0; samples],
+            }
+        }
+
+        #[test]
+        fn a_breath_follows_each_spoken_segment_and_not_a_silent_one() {
+            let (hub, space) = space();
+            let (mut pacer, _sender) = pacer(&hub, &space);
+            let breaths = |pacer: &Pacer| {
+                pacer
+                    .pending
+                    .iter()
+                    .filter(|(_, item)| matches!(item, Item::Gap))
+                    .count()
+            };
+            pacer.handle(SpeechEvent::Started {
+                segment: 1,
+                text: "Hello.".into(),
+            });
+            pacer.audio(chunk(16_000, 400));
+            pacer.handle(SpeechEvent::Finished { segment: 1 });
+            assert_eq!(breaths(&pacer), 1);
+            pacer.handle(SpeechEvent::Started {
+                segment: 2,
+                text: "...".into(),
+            });
+            pacer.handle(SpeechEvent::Finished { segment: 2 });
+            assert_eq!(breaths(&pacer), 1);
         }
     }
 }
