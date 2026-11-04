@@ -4315,13 +4315,13 @@ mod tests {
             details,
             ["idle", "new reply", "problem", "needs you", "needs you"]
         );
-        assert!(matches!(
-            view.items[2].kind,
-            arrival::Kind::Space {
-                attention: Some(tomori_protocol::Attention::Problem),
-                ..
-            }
-        ));
+        let arrival::Kind::Space {
+            attention: Some(tomori_protocol::Attention::Problem),
+            ..
+        } = view.items[2].kind
+        else {
+            unreachable!("arrival::Kind::Space")
+        };
         assert_eq!(view.status.as_deref(), Some("Tests needs you"));
         assert!(conversation.text().contains("Tests needs you"));
         assert_fits(&mut conversation);
@@ -4450,7 +4450,8 @@ mod tests {
 
     fn pairing_label(conversation: &Conversation) -> Option<String> {
         conversation
-            .arrival()?
+            .arrival()
+            .expect("arrival shows")
             .items
             .into_iter()
             .find(|item| item.key == arrival::Key::Pair)
@@ -4466,7 +4467,7 @@ mod tests {
 
         conversation.choose_object(&arrival::Key::Pair);
         let [ClientMessage::PairBegin { commitment }] = &sent(&mut conversation)[..] else {
-            panic!("expected a commitment");
+            unreachable!("a commitment is sent");
         };
         let commitment = commitment.clone();
         assert_eq!(pairing_label(&conversation).as_deref(), Some("Pairing..."));
@@ -4476,7 +4477,7 @@ mod tests {
             nonce: server.to_hex(),
         }));
         let [ClientMessage::PairReveal { nonce }] = &sent(&mut conversation)[..] else {
-            panic!("expected the value revealed");
+            unreachable!("the value is revealed");
         };
         let device = Nonce::parse(nonce).unwrap();
         // The revealed value is the one committed to, and the code is derived from it, the server's and the certificate.
@@ -4744,10 +4745,9 @@ mod tests {
         conversation.apply(role(ConnectionRole::Collaborator));
         conversation.take_actions();
         conversation.accept();
-        assert!(matches!(
-            sent(&mut conversation)[..],
-            [ClientMessage::Decide { .. }]
-        ));
+        let [ClientMessage::Decide { .. }] = sent(&mut conversation)[..] else {
+            unreachable!("[ClientMessage::Decide")
+        };
     }
 
     #[test]
@@ -4864,10 +4864,10 @@ mod tests {
         sent(&mut conversation);
         conversation.apply(sessions());
         assert!(!conversation.press_a(None));
-        assert!(matches!(
-            sent(&mut conversation).as_slice(),
-            [ClientMessage::CreateSpace { session: None, .. }]
-        ));
+        let [ClientMessage::CreateSpace { session: None, .. }] = sent(&mut conversation).as_slice()
+        else {
+            unreachable!("[ClientMessage::CreateSpace")
+        };
     }
 
     #[test]
@@ -5089,13 +5089,14 @@ mod tests {
             [ClientMessage::CreateSpace { instructions: Some(text), .. }] if text == "Mind the docs."
         ));
         create_in(&mut conversation);
-        assert!(matches!(
-            sent(&mut conversation).as_slice(),
-            [ClientMessage::CreateSpace {
-                instructions: None,
-                ..
-            }]
-        ));
+        let [
+            ClientMessage::CreateSpace {
+                instructions: None, ..
+            },
+        ] = sent(&mut conversation).as_slice()
+        else {
+            unreachable!("[ClientMessage::CreateSpace")
+        };
 
         // In a space whose agent takes them, they change the space's own; otherwise nothing is sent.
         let layers = AgentInstructions {
@@ -5146,13 +5147,14 @@ mod tests {
         }));
         conversation.take_actions();
         create_in(&mut conversation);
-        assert!(matches!(
-            sent(&mut conversation).as_slice(),
-            [ClientMessage::CreateSpace {
-                environment: None,
-                ..
-            }]
-        ));
+        let [
+            ClientMessage::CreateSpace {
+                environment: None, ..
+            },
+        ] = sent(&mut conversation).as_slice()
+        else {
+            unreachable!("[ClientMessage::CreateSpace")
+        };
     }
 
     #[test]
@@ -5513,10 +5515,9 @@ mod tests {
             let mut conversation = joined(change);
             assert!(conversation.text().contains("on the PC"));
             conversation.talk(true);
-            assert!(matches!(
-                &conversation.take_actions()[..],
-                [Action::BeginUtterance(_, _, None)]
-            ));
+            let [Action::BeginUtterance(_, _, None)] = &conversation.take_actions()[..] else {
+                unreachable!("[Action::BeginUtterance")
+            };
             assert!(conversation.text().contains("MIC AGENT"));
         }
     }
@@ -6272,10 +6273,11 @@ mod tests {
     /// Press X and return the utterance it began.
     fn press(conversation: &mut Conversation) -> String {
         conversation.talk(true);
-        match conversation.take_actions().as_slice() {
-            [Action::BeginUtterance(utterance, ..)] => utterance.clone(),
-            actions => panic!("{actions:?}"),
-        }
+        let actions = conversation.take_actions();
+        let [Action::BeginUtterance(utterance, ..)] = actions.as_slice() else {
+            unreachable!("recording begins")
+        };
+        utterance.clone()
     }
 
     #[test]
@@ -6330,9 +6332,7 @@ mod tests {
         assert!(
             conversation
                 .text()
-                .contains("MIC AGENT about Review commit 2657a52"),
-            "{}",
-            conversation.text()
+                .contains("MIC AGENT about Review commit 2657a52")
         );
         assert_fits(&mut conversation);
         conversation.point_at(None);
@@ -6606,11 +6606,7 @@ mod tests {
                 engagement: Some(Engagement::Away),
             });
         });
-        assert!(
-            conversation.text().contains("1 here, 1 away"),
-            "{}",
-            conversation.text()
-        );
+        assert!(conversation.text().contains("1 here, 1 away"));
     }
 
     #[test]
@@ -6630,10 +6626,9 @@ mod tests {
         let mut conversation = joined(|_| {});
         conversation.toggle_live();
         conversation.talk(true);
-        assert!(matches!(
-            conversation.next_action(),
-            Some(Action::StartLive(_))
-        ));
+        let Some(Action::StartLive(_)) = conversation.next_action() else {
+            unreachable!("Some")
+        };
         conversation.microphone_failed("capture failed");
         assert_eq!(conversation.next_action(), Some(Action::StopLive));
         assert_eq!(conversation.next_action(), None);
@@ -6663,10 +6658,9 @@ mod tests {
         assert_eq!(conversation.take_actions(), [Action::StartLive(7)]);
         conversation.talk(true);
         conversation.set_capture_generation(9);
-        assert!(matches!(
-            conversation.next_action(),
-            Some(Action::BeginUtterance(_, 8, _))
-        ));
+        let Some(Action::BeginUtterance(_, 8, _)) = conversation.next_action() else {
+            unreachable!("Some")
+        };
     }
 
     #[test]
@@ -6694,10 +6688,14 @@ mod tests {
         conversation.talk(false);
         // The end has been performed: the utterance is with the server.
         conversation.take_actions();
-        assert!(matches!(conversation.talk, Some(Talk::Sending { .. })));
+        let Some(Talk::Sending { .. }) = conversation.talk else {
+            unreachable!("Some")
+        };
         // The live capture reopened afterwards fails.
         conversation.microphone_failed("capture failed");
-        assert!(matches!(conversation.talk, Some(Talk::Sending { .. })));
+        let Some(Talk::Sending { .. }) = conversation.talk else {
+            unreachable!("Some")
+        };
         assert_eq!(conversation.take_actions(), [Action::StopLive]);
         assert!(!conversation.live);
         // The panel no longer claims a live microphone, and the error is kept
@@ -6725,9 +6723,7 @@ mod tests {
         assert!(
             conversation
                 .text()
-                .contains("Microphone lost audio; not sent."),
-            "{}",
-            conversation.text()
+                .contains("Microphone lost audio; not sent.")
         );
     }
 
@@ -6741,10 +6737,9 @@ mod tests {
         // A second press and release land before the first end is performed.
         conversation.talk(true);
         conversation.talk(false);
-        assert!(matches!(
-            conversation.next_action(),
-            Some(Action::EndUtterance(None))
-        ));
+        let Some(Action::EndUtterance(None)) = conversation.next_action() else {
+            unreachable!("Some")
+        };
         conversation.utterance_not_sent("Microphone lost audio; not sent.");
         assert!(conversation.talk.is_none());
         // The second utterance never began, so nothing of it is performed.
@@ -6819,10 +6814,9 @@ mod tests {
         conversation.wrist_step(1);
         conversation.wrist_step(1);
         conversation.wrist_step(1);
-        assert!(matches!(
-            conversation.wrist_focus(),
-            Some(crate::transcript::Focus::Card(_))
-        ));
+        let Some(crate::transcript::Focus::Card(_)) = conversation.wrist_focus() else {
+            unreachable!("Some")
+        };
         assert!(conversation.wrist_accept());
         assert_eq!(
             sent(&mut conversation),
@@ -7282,10 +7276,9 @@ mod tests {
             error: "Nothing was heard.".into(),
         }));
         press(&mut conversation);
-        assert!(matches!(
-            conversation.recording_phase(Instant::now()),
-            Some(Phase::Recording { .. })
-        ));
+        let Some(Phase::Recording { .. }) = conversation.recording_phase(Instant::now()) else {
+            unreachable!("Some")
+        };
     }
 
     #[test]
