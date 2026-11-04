@@ -119,10 +119,8 @@ fn decode_texture(encoded: &[u8], budget: usize) -> Result<Texture> {
             width > 0 && height > 0 && width <= 4096 && height <= 4096,
             "invalid controller texture dimensions"
         );
-        let size = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|n| n.checked_mul(4))
-            .context("controller texture size overflow")?;
+        // At most 4096 by 4096 by 4 bytes, which cannot overflow.
+        let size = width as usize * height as usize * 4;
         ensure!(size <= budget, "controller textures exceed size limit");
         let rgba = decoder
             .transcode(0, basisu::TargetFormat::Rgba32, basisu::DecodeFlags::NONE)
@@ -134,7 +132,9 @@ fn decode_texture(encoded: &[u8], budget: usize) -> Result<Texture> {
             rgba,
         })
     } else {
-        let mut reader = image::ImageReader::new(Cursor::new(encoded)).with_guessed_format()?;
+        let mut reader = image::ImageReader::new(Cursor::new(encoded))
+            .with_guessed_format()
+            .expect("guessing the format reads from memory, which cannot fail");
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(4096);
         limits.max_image_height = Some(4096);
@@ -225,10 +225,10 @@ fn append_node(
             if primitive.mode() != gltf::mesh::Mode::Triangles {
                 continue;
             }
+            // Validation has already refused a primitive without positions.
             let position_count = primitive
                 .get(&gltf::Semantic::Positions)
-                .context("controller model missing positions")?
-                .count();
+                .map_or(0, |positions| positions.count());
             ensure!(
                 position_count <= MAX_VERTICES,
                 "controller model has too many positions"
@@ -294,10 +294,8 @@ fn append_node(
                         matches!(view.buffer().source(), gltf::buffer::Source::Bin),
                         "controller texture is not embedded"
                     );
-                    let end = view
-                        .offset()
-                        .checked_add(view.length())
-                        .context("controller texture length overflow")?;
+                    // A range that overflows is out of bounds, as one past the buffer is.
+                    let end = view.offset().saturating_add(view.length());
                     let encoded = blob
                         .get(view.offset()..end)
                         .context("controller texture out of bounds")?;
@@ -537,5 +535,279 @@ mod tests {
         assert_eq!(mesh[1].position, [2.0, 2.0, 3.0]);
         assert_eq!(mesh[0].normal, [0.0, 0.0, 1.0]);
         assert_eq!(mesh[0].color, [0.2, 0.3, 0.4]);
+    }
+
+    /// A GLB holding `json`, and `bin` as its binary chunk if there is one.
+    fn glb(json: serde_json::Value, bin: Option<&[u8]>) -> Vec<u8> {
+        let mut json = serde_json::to_vec(&json).unwrap();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut bin = bin.map(<[u8]>::to_vec);
+        if let Some(bin) = &mut bin {
+            while !bin.len().is_multiple_of(4) {
+                bin.push(0);
+            }
+        }
+        let chunk = bin.as_ref().map_or(0, |bin| 8 + bin.len());
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2_u32.to_le_bytes());
+        glb.extend_from_slice(&((12 + 8 + json.len() + chunk) as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(b"JSON");
+        glb.extend_from_slice(&json);
+        if let Some(bin) = bin {
+            glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+            glb.extend_from_slice(b"BIN\0");
+            glb.extend_from_slice(&bin);
+        }
+        glb
+    }
+
+    /// A triangle's positions, then `extra`.
+    fn triangle(extra: &[u8]) -> Vec<u8> {
+        let mut bin = Vec::new();
+        for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        bin.extend_from_slice(extra);
+        bin
+    }
+
+    /// A model of one triangle, with `change` made to it, and its binary chunk.
+    fn model(change: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+        let mut json = serde_json::json!({
+            "asset": {"version": "2.0"},
+            "buffers": [{"byteLength": 36}],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36}],
+            "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,1,0]}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+            "nodes": [{"mesh": 0}],
+            "scenes": [{"nodes": [0]}], "scene": 0
+        });
+        change(&mut json);
+        json
+    }
+
+    fn rejected(json: serde_json::Value, bin: Option<&[u8]>) -> String {
+        format!(
+            "{:#}",
+            parse_glb(&glb(json, bin))
+                .map(drop)
+                .expect_err("the model is refused")
+        )
+    }
+
+    #[test]
+    fn a_model_that_cannot_be_drawn_is_refused_with_the_reason() {
+        let bin = triangle(&[]);
+        let bin = Some(bin.as_slice());
+        assert!(
+            rejected(
+                model(|json| json["textures"] =
+                    serde_json::json!([{"extensions": {"KHR_texture_basisu": {}}}])),
+                bin
+            )
+            .contains("invalid Basis texture source")
+        );
+        assert!(rejected(model(|json| json["textures"] = serde_json::json!([{"extensions": {"KHR_texture_basisu": {"source": 4_294_967_296_u64}}}])), bin).contains("Basis texture index too large"));
+        assert!(
+            rejected(
+                model(|json| json["accessors"][0]["bufferView"] = 5.into()),
+                bin
+            )
+            .contains("validating controller glTF")
+        );
+        // Without a default scene, the first is drawn; without any, nothing can be.
+        let first = model(|json| {
+            json.as_object_mut().unwrap().remove("scene");
+        });
+        assert_eq!(parse_glb(&glb(first, bin)).unwrap().vertices.len(), 3);
+        let none = model(|json| {
+            json.as_object_mut().unwrap().remove("scene");
+            json["scenes"] = serde_json::json!([]);
+        });
+        assert!(rejected(none, bin).contains("controller glTF has no scene"));
+        assert!(
+            rejected(
+                model(|json| json["nodes"][0]["scale"] = serde_json::json!([0, 0, 0])),
+                bin
+            )
+            .contains("invalid controller node transform")
+        );
+        assert!(
+            rejected(
+                model(|json| json["nodes"] =
+                    serde_json::json!([{"children": [1]}, {"mesh": 0, "scale": [0, 0, 0]}])),
+                bin
+            )
+            .contains("invalid controller node transform")
+        );
+        assert!(
+            rejected(
+                model(|json| json["meshes"][0]["primitives"][0]["mode"] = 0.into()),
+                bin
+            )
+            .contains("no supported triangles")
+        );
+        assert!(rejected(model(|_| {}), None).contains("no embedded binary buffer"));
+    }
+
+    #[test]
+    fn a_model_whose_data_is_elsewhere_or_out_of_range_is_refused() {
+        let bin = triangle(&[0, 0, 7, 0, 1, 0]);
+        let bin = Some(bin.as_slice());
+        // Positions in a buffer outside the GLB.
+        assert!(rejected(model(|json| {
+            json["buffers"] = serde_json::json!([{"byteLength": 36}, {"byteLength": 36, "uri": "positions.bin"}]);
+            json["bufferViews"][0]["buffer"] = 1.into();
+        }), bin).contains("missing embedded positions"));
+        // An index past the positions.
+        assert!(rejected(model(|json| {
+            json["buffers"][0]["byteLength"] = 42.into();
+            json["bufferViews"] = serde_json::json!([{"buffer": 0, "byteOffset": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 6}]);
+            json["accessors"] = serde_json::json!([
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,1,0]},
+                {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}
+            ]);
+            json["meshes"][0]["primitives"][0]["indices"] = 1.into();
+        }), bin).contains("controller index out of bounds"));
+    }
+
+    #[test]
+    fn a_texture_that_cannot_be_read_is_refused() {
+        let textured = |image: serde_json::Value, uvs: bool| {
+            model(move |json| {
+                json["images"] = serde_json::json!([image]);
+                json["textures"] = serde_json::json!([{"source": 0}]);
+                json["materials"] = serde_json::json!([{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}]);
+                json["meshes"][0]["primitives"][0]["material"] = 0.into();
+                json["buffers"] = serde_json::json!([{"byteLength": 60}, {"byteLength": 8, "uri": "texture.bin"}]);
+                json["bufferViews"] = serde_json::json!([
+                    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                    {"buffer": 0, "byteOffset": 36, "byteLength": 24},
+                    {"buffer": 1, "byteOffset": 0, "byteLength": 8},
+                    {"buffer": 0, "byteOffset": 52, "byteLength": 8}
+                ]);
+                json["accessors"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!(
+                        {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2"}
+                    ));
+                if uvs {
+                    json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"] = 1.into();
+                }
+            })
+        };
+        let bin = triangle(&[0; 24]);
+        let bin = Some(bin.as_slice());
+        assert!(
+            rejected(
+                textured(serde_json::json!({"uri": "texture.png"}), true),
+                bin
+            )
+            .contains("external controller texture is unsupported")
+        );
+        assert!(
+            rejected(
+                textured(
+                    serde_json::json!({"bufferView": 2, "mimeType": "image/png"}),
+                    true
+                ),
+                bin
+            )
+            .contains("controller texture is not embedded")
+        );
+        assert!(
+            rejected(
+                textured(
+                    serde_json::json!({"bufferView": 3, "mimeType": "image/png"}),
+                    true
+                ),
+                bin
+            )
+            .contains("decoding controller texture")
+        );
+        let mut short = triangle(&[0; 24]);
+        short.truncate(56);
+        assert!(
+            rejected(
+                textured(
+                    serde_json::json!({"bufferView": 3, "mimeType": "image/png"}),
+                    true
+                ),
+                Some(&short)
+            )
+            .contains("controller texture out of bounds")
+        );
+        let png = {
+            let mut png = Vec::new();
+            image::RgbaImage::new(1, 1)
+                .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+            png
+        };
+        let mut bin = triangle(&[0; 24]);
+        bin.extend_from_slice(&png);
+        let with_png = |uvs| {
+            let mut json = textured(
+                serde_json::json!({"bufferView": 3, "mimeType": "image/png"}),
+                uvs,
+            );
+            json["buffers"][0]["byteLength"] = (60 + png.len()).into();
+            json["bufferViews"][3] =
+                serde_json::json!({"buffer": 0, "byteOffset": 60, "byteLength": png.len()});
+            json
+        };
+        assert!(rejected(with_png(false), Some(&bin)).contains("controller texture missing UVs"));
+        assert_eq!(
+            parse_glb(&glb(with_png(true), Some(&bin)))
+                .unwrap()
+                .textures[0]
+                .width,
+            1
+        );
+        // Two textures share the size limit.
+        let mut two = with_png(true);
+        let image = two["images"][0].clone();
+        two["images"].as_array_mut().unwrap().push(image);
+        two["textures"] = serde_json::json!([{"source": 0}, {"source": 1}]);
+        two["materials"] = serde_json::json!([
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}},
+            {"pbrMetallicRoughness": {"baseColorTexture": {"index": 1}}}
+        ]);
+        let mut second = two["meshes"][0]["primitives"][0].clone();
+        second["material"] = 1.into();
+        two["meshes"][0]["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        assert_eq!(parse_glb(&glb(two, Some(&bin))).unwrap().textures.len(), 2);
+    }
+
+    #[test]
+    fn a_ktx2_texture_that_cannot_be_transcoded_is_refused() {
+        let mut garbage = b"\xABKTX 20\xBB\r\n\x1A\n".to_vec();
+        garbage.extend_from_slice(&[0; 64]);
+        assert!(
+            format!(
+                "{:#}",
+                decode_texture(&garbage, MAX_TEXTURE_BYTES)
+                    .map(drop)
+                    .unwrap_err()
+            )
+            .contains("invalid KTX2 texture")
+        );
+        // Its header is whole, but its data is not.
+        let mut corrupt = include_bytes!("../tests/fixtures/etc1s.ktx2").to_vec();
+        for byte in &mut corrupt[850..] {
+            *byte ^= 0x5a;
+        }
+        let error = decode_texture(&corrupt, MAX_TEXTURE_BYTES)
+            .map(drop)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("KTX2 transcode failed"));
     }
 }
