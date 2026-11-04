@@ -154,12 +154,17 @@ impl Outbox {
         });
     }
 
-    /// A `Ping` or `Pong`, sent before everything already queued.
-    pub fn keepalive(&self, message: ServerMessage) {
-        debug_assert!(matches!(
-            message,
-            ServerMessage::Ping { .. } | ServerMessage::Pong { .. }
-        ));
+    /// A `Ping` with `nonce`, sent before everything already queued.
+    pub fn ping(&self, nonce: u64) {
+        self.keepalive(ServerMessage::Ping { nonce });
+    }
+
+    /// A `Pong` echoing `nonce`, sent before everything already queued.
+    pub fn pong(&self, nonce: u64) {
+        self.keepalive(ServerMessage::Pong { nonce });
+    }
+
+    fn keepalive(&self, message: ServerMessage) {
         self.update(|inner| {
             inner.keepalive.push_back(message);
             true
@@ -310,17 +315,26 @@ mod tests {
         outbox.space();
         outbox.space();
         outbox.message(ServerMessage::Left);
-        assert!(matches!(outbox.pop(), Popped::Control(Outgoing::Space)));
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Left))
-        ));
-        assert!(matches!(outbox.pop(), Popped::Audio(_)));
-        assert!(matches!(outbox.pop(), Popped::Empty));
+        let Popped::Control(Outgoing::Space) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Space)");
+        };
+        let Popped::Control(Outgoing::Message(ServerMessage::Left)) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Message(ServerMessage::Left))");
+        };
+        let Popped::Audio(_) = outbox.pop() else {
+            unreachable!("expected Popped::Audio(_)");
+        };
+        let Popped::Empty = outbox.pop() else {
+            unreachable!("expected Popped::Empty");
+        };
         outbox.space();
-        assert!(matches!(outbox.pop(), Popped::Control(Outgoing::Space)));
+        let Popped::Control(Outgoing::Space) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Space)");
+        };
         outbox.close();
-        assert!(matches!(outbox.pop(), Popped::Closed));
+        let Popped::Closed = outbox.pop() else {
+            unreachable!("expected Popped::Closed");
+        };
     }
 
     #[test]
@@ -331,20 +345,23 @@ mod tests {
         }
         outbox.agent_audio(vec![100]);
         outbox.message(ServerMessage::Left);
-        outbox.keepalive(ServerMessage::Pong { nonce: 1 });
-        outbox.keepalive(ServerMessage::Ping { nonce: 2 });
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Pong { nonce: 1 }))
-        ));
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Ping { nonce: 2 }))
-        ));
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Left))
-        ));
+        outbox.pong(1);
+        outbox.ping(2);
+        let Popped::Control(Outgoing::Message(ServerMessage::Pong { nonce: 1 })) = outbox.pop()
+        else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Pong {{ nonce: 1 }}))"
+            );
+        };
+        let Popped::Control(Outgoing::Message(ServerMessage::Ping { nonce: 2 })) = outbox.pop()
+        else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Ping {{ nonce: 2 }}))"
+            );
+        };
+        let Popped::Control(Outgoing::Message(ServerMessage::Left)) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Message(ServerMessage::Left))");
+        };
     }
 
     fn presence(source: u32, x: f32) -> ServerMessage {
@@ -432,7 +449,9 @@ mod tests {
             outbox.message(ServerMessage::Left);
         }
         assert_eq!(drain(&outbox).len(), CONTROL_LIMIT);
-        assert!(matches!(outbox.pop(), Popped::Closed));
+        let Popped::Closed = outbox.pop() else {
+            unreachable!("expected Popped::Closed");
+        };
     }
 
     #[test]
@@ -442,7 +461,7 @@ mod tests {
             outbox.audio(vec![index as u8]);
         }
         let Popped::Audio(first) = outbox.pop() else {
-            panic!("expected audio");
+            unreachable!("expected audio");
         };
         assert_eq!(first, vec![2]);
     }
@@ -458,17 +477,23 @@ mod tests {
         outbox.agent_audio(vec![101]);
         outbox.agent_message(speech(2));
         outbox.agent_audio(vec![102]);
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Speech { segment: 1, .. }))
-        ));
+        let Popped::Control(Outgoing::Message(ServerMessage::Speech { segment: 1, .. })) =
+            outbox.pop()
+        else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Speech {{ segment: 1, .. }}))"
+            );
+        };
         assert!(matches!(outbox.pop(), Popped::Audio(frame) if frame == [100]));
         assert!(matches!(outbox.pop(), Popped::Audio(frame) if frame == [101]));
         // An announcement stays behind the frames of the previous segment.
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Speech { segment: 2, .. }))
-        ));
+        let Popped::Control(Outgoing::Message(ServerMessage::Speech { segment: 2, .. })) =
+            outbox.pop()
+        else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Speech {{ segment: 2, .. }}))"
+            );
+        };
         assert!(matches!(outbox.pop(), Popped::Audio(frame) if frame == [102]));
         assert!(matches!(outbox.pop(), Popped::Audio(frame) if frame == [AUDIO_LIMIT as u8]));
     }
@@ -480,12 +505,17 @@ mod tests {
         for index in 0..AGENT_AUDIO_LIMIT + 3 {
             outbox.agent_audio(vec![index as u8]);
         }
-        assert!(matches!(
-            outbox.pop(),
-            Popped::Control(Outgoing::Message(ServerMessage::Speech { segment: 1, .. }))
-        ));
+        let Popped::Control(Outgoing::Message(ServerMessage::Speech { segment: 1, .. })) =
+            outbox.pop()
+        else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Speech {{ segment: 1, .. }}))"
+            );
+        };
         assert!(matches!(outbox.pop(), Popped::Audio(frame) if frame == [3]));
         outbox.clear_audio();
-        assert!(matches!(outbox.pop(), Popped::Empty));
+        let Popped::Empty = outbox.pop() else {
+            unreachable!("expected Popped::Empty");
+        };
     }
 }

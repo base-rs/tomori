@@ -1483,9 +1483,7 @@ impl Hub {
                     })
                 {
                     *next_ping += 1;
-                    record
-                        .outbox
-                        .keepalive(ServerMessage::Ping { nonce: *next_ping });
+                    record.outbox.ping(*next_ping);
                     liveness.pinged = Some(now);
                 }
             }
@@ -1623,7 +1621,7 @@ impl Hub {
             // Keepalive is answered whether or not the connection has said hello. Receiving it already counted as liveness.
             ClientMessage::Ping { nonce } => {
                 if let Some(record) = self.lock().connections.get(&connection) {
-                    record.outbox.keepalive(ServerMessage::Pong { nonce });
+                    record.outbox.pong(nonce);
                 }
                 return;
             }
