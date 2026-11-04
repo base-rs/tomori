@@ -533,11 +533,377 @@ mod tests {
     #[test]
     fn deleting_the_registered_session_closes_its_space() {
         let event = serde_json::json!({"type":"session.deleted","data":{"sessionID":"parent"}});
-        assert!(matches!(
+        assert_eq!(
             event_for(&event, "parent", &mut Default::default()),
-            Some(Event::Closed { .. })
-        ));
+            Some(Event::Closed {
+                reason: Some("the OpenCode session was deleted".into())
+            })
+        );
         assert!(event_for(&event, "other", &mut Default::default()).is_none());
+    }
+
+    /// An event of `kind` whose data is `data` with `"sessionID": "s"` added.
+    fn for_s(kind: &str, mut data: Value) -> Value {
+        data["sessionID"] = "s".into();
+        serde_json::json!({"type": kind, "data": data})
+    }
+
+    /// Each OpenCode event, as session `s` sees it and as another session does.
+    #[test]
+    fn each_event_becomes_the_backend_event_for_its_session_only() {
+        use serde_json::json;
+        let cases = [
+            (
+                for_s(
+                    "session.text.delta",
+                    json!({"assistantMessageID":"m","delta":"Hi"}),
+                ),
+                Some(Event::TextDelta {
+                    message: "m".into(),
+                    text: "Hi".into(),
+                }),
+            ),
+            (
+                for_s(
+                    "session.reasoning.delta",
+                    json!({"assistantMessageID":"m","delta":"Hmm"}),
+                ),
+                None,
+            ),
+            (
+                for_s("session.text.ended", json!({"assistantMessageID":"m"})),
+                Some(Event::MessageCompleted {
+                    message: "m".into(),
+                }),
+            ),
+            (
+                for_s("session.tool.success", json!({"id":"t1"})),
+                Some(Event::ToolFinished {
+                    id: "t1".into(),
+                    error: None,
+                }),
+            ),
+            (
+                for_s(
+                    "session.tool.failed",
+                    json!({"id":"t1","error":{"message":"denied"}}),
+                ),
+                Some(Event::ToolFinished {
+                    id: "t1".into(),
+                    error: Some("denied".into()),
+                }),
+            ),
+            (
+                for_s("session.tool.failed", json!({"id":"t1"})),
+                Some(Event::ToolFinished {
+                    id: "t1".into(),
+                    error: None,
+                }),
+            ),
+            (
+                for_s(
+                    "permission.asked",
+                    json!({"id":"p1","action":"bash","resources":["ls"],"message":"List files","save":["bash ls*", "malformed", 3]}),
+                ),
+                Some(Event::PermissionRequested(Permission {
+                    id: "p1".into(),
+                    tool: "bash".into(),
+                    input: json!({"0": "ls"}),
+                    description: Some("List files".into()),
+                    options: vec![PermissionOption {
+                        id: "0".into(),
+                        grants: vec![Grant::Rule {
+                            tool: "bash".into(),
+                            content: Some("ls*".into()),
+                            scope: GrantScope::Session,
+                        }],
+                    }],
+                })),
+            ),
+            (
+                for_s("permission.asked", json!({"id":"p1","action":"edit"})),
+                Some(Event::PermissionRequested(Permission {
+                    id: "p1".into(),
+                    tool: "edit".into(),
+                    input: json!({}),
+                    description: None,
+                    options: Vec::new(),
+                })),
+            ),
+            (
+                for_s("permission.replied", json!({"requestID":"p1"})),
+                Some(Event::PermissionResolved { id: "p1".into() }),
+            ),
+            (
+                json!({"type":"form.created","data":{"form":{"id":"f1","sessionID":"s","title":"Choose","fields":[]}}}),
+                Some(Event::QuestionAsked(Question {
+                    id: "f1".into(),
+                    title: "Choose".into(),
+                    fields: Vec::new(),
+                })),
+            ),
+            (
+                for_s("form.replied", json!({"id":"f1"})),
+                Some(Event::QuestionResolved { id: "f1".into() }),
+            ),
+            (
+                json!({"type":"form.cancelled","data":{"form":{"id":"f1","sessionID":"s"}}}),
+                Some(Event::QuestionResolved { id: "f1".into() }),
+            ),
+            (
+                for_s("session.inbox.delivered", json!({"inboxID":"msg_k1"})),
+                Some(Event::Delivered { key: "k1".into() }),
+            ),
+            (
+                for_s("session.inbox.delivered", json!({"inboxID":"k2"})),
+                Some(Event::Delivered { key: "k2".into() }),
+            ),
+            (
+                for_s("session.status", json!({"status":{"type":"busy"}})),
+                Some(Event::Busy),
+            ),
+            (
+                for_s("session.status", json!({"status":{"type":"retry"}})),
+                None,
+            ),
+            (for_s("session.idle", json!({})), Some(Event::Idle)),
+            (
+                for_s("session.execution.started", json!({})),
+                Some(Event::Busy),
+            ),
+            (
+                for_s("session.execution.interrupted", json!({})),
+                Some(Event::Idle),
+            ),
+            (
+                for_s("session.execution.succeeded", json!({})),
+                Some(Event::Idle),
+            ),
+            (
+                for_s(
+                    "session.execution.failed",
+                    json!({"error":{"message":"out of credit"}}),
+                ),
+                Some(Event::Error {
+                    message: "out of credit".into(),
+                }),
+            ),
+            (
+                for_s("session.execution.failed", json!({})),
+                Some(Event::Error {
+                    message: "the agent execution failed".into(),
+                }),
+            ),
+            (for_s("session.created", json!({"id":"child"})), None),
+            (for_s("session.forked", json!({"id":"child"})), None),
+            (for_s("session.compacted", json!({})), None),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                event_for(&value, "s", &mut Default::default()),
+                expected,
+                "{value}"
+            );
+            assert_eq!(
+                event_for(&value, "other", &mut Default::default()),
+                None,
+                "{value}"
+            );
+            assert_eq!(session_id_of(&value).as_deref(), Some("s"), "{value}");
+        }
+    }
+
+    /// Events missing what they must carry are not reported, rather than reported with something made up.
+    #[test]
+    fn incomplete_events_are_ignored() {
+        use serde_json::json;
+        for value in [
+            json!({"type":"session.idle"}),
+            json!({"data":{"sessionID":"s"}}),
+            json!({"type":7,"data":{"sessionID":"s"}}),
+            for_s("session.text.started", json!({})),
+            for_s("session.text.delta", json!({"delta":"Hi"})),
+            for_s("session.text.delta", json!({"assistantMessageID":"m"})),
+            for_s(
+                "session.text.delta",
+                json!({"assistantMessageID":"m","delta":7}),
+            ),
+            for_s("session.text.ended", json!({})),
+            for_s("session.tool.called", json!({"id":"t1"})),
+            for_s("session.tool.called", json!({"assistantMessageID":"m"})),
+            for_s(
+                "session.tool.called",
+                json!({"assistantMessageID":"m","id":7}),
+            ),
+            for_s("session.tool.success", json!({})),
+            for_s("session.tool.success", json!({"id":7})),
+            for_s("permission.asked", json!({"action":"bash"})),
+            for_s("permission.asked", json!({"id":7,"action":"bash"})),
+            for_s("permission.asked", json!({"id":"p1"})),
+            for_s("permission.asked", json!({"id":"p1","action":7})),
+            for_s("permission.replied", json!({})),
+            for_s("permission.replied", json!({"requestID":7})),
+            json!({"type":"form.created","data":{}}),
+            json!({"type":"form.replied","data":{"id":"f1"}}),
+            json!({"type":"form.replied","data":{}}),
+            json!({"type":"form.replied","data":{"form":{"sessionID":"s"}}}),
+            json!({"type":"form.replied","data":{"form":{"id":7,"sessionID":"s"}}}),
+            json!({"type":"form.replied","data":{"form":{"id":"f1"}}}),
+            json!({"type":"form.replied","data":{"form":{"id":"f1","sessionID":7}}}),
+            for_s("session.inbox.delivered", json!({})),
+            for_s("session.inbox.delivered", json!({"inboxID":7})),
+            for_s("session.status", json!({})),
+            for_s("session.status", json!({"status":{}})),
+            for_s("session.status", json!({"status":{"type":7}})),
+        ] {
+            assert_eq!(
+                event_for(&value, "s", &mut Default::default()),
+                None,
+                "{value}"
+            );
+        }
+        assert_eq!(session_id_of(&json!({"type":"session.idle"})), None);
+        assert_eq!(
+            session_id_of(&json!({"type":"x","data":{"form":{"sessionID":7}}})),
+            None
+        );
+    }
+
+    #[test]
+    fn form_fields_become_question_fields() {
+        use serde_json::json;
+        let question = question_from_form(&json!({
+            "id": "f1",
+            "title": "Deploy",
+            "fields": [
+                {"key": "name", "type": "string", "title": "Name", "description": "Who deploys"},
+                {"key": "target", "type": "string", "options": ["staging", {"label": "production", "description": "Live"}, {"value": 3}], "custom": true},
+                {"key": "count", "type": "number", "title": ""},
+                {"key": "steps", "type": "integer"},
+                {"key": "confirm", "type": "boolean"},
+                {"key": "regions", "type": "multiselect", "options": ["eu", "us"]},
+                {"key": "empty", "type": "multiselect"},
+                {"key": "login", "type": "external"},
+                {"key": "file", "type": "upload"},
+                {"type": "string"},
+                {"key": 7, "type": "string"},
+                {"key": "untyped"},
+                {"key": "badly typed", "type": 7}
+            ]
+        }));
+        let field = |key: &str, title: &str, kind: FieldKind, options: Vec<FieldOption>| Field {
+            key: key.into(),
+            title: title.into(),
+            description: None,
+            kind,
+            options,
+            custom: false,
+        };
+        let option = |label: &str| FieldOption {
+            label: label.into(),
+            description: None,
+        };
+        assert_eq!(
+            question,
+            Question {
+                id: "f1".into(),
+                title: "Deploy".into(),
+                fields: vec![
+                    Field {
+                        description: Some("Who deploys".into()),
+                        ..field("name", "Name", FieldKind::Text, Vec::new())
+                    },
+                    Field {
+                        custom: true,
+                        ..field(
+                            "target",
+                            "target",
+                            FieldKind::Choice,
+                            vec![
+                                option("staging"),
+                                FieldOption {
+                                    label: "production".into(),
+                                    description: Some("Live".into()),
+                                },
+                                option("{\"value\":3}"),
+                            ]
+                        )
+                    },
+                    field("count", "count", FieldKind::Text, Vec::new()),
+                    field("steps", "steps", FieldKind::Text, Vec::new()),
+                    field(
+                        "confirm",
+                        "confirm",
+                        FieldKind::Choice,
+                        vec![option("true"), option("false")]
+                    ),
+                    field(
+                        "regions",
+                        "regions",
+                        FieldKind::MultipleChoice,
+                        vec![option("eu"), option("us")]
+                    ),
+                    field("empty", "empty", FieldKind::MultipleChoice, Vec::new()),
+                    field("login", "login", FieldKind::Unsupported, Vec::new()),
+                    field("file", "file", FieldKind::Unsupported, Vec::new()),
+                ],
+            }
+        );
+        // A form without an id, title or fields is still a question, which cannot be answered.
+        assert_eq!(
+            question_from_form(&json!({})),
+            Question {
+                id: String::new(),
+                title: String::new(),
+                fields: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn workers_are_child_sessions_with_their_state() {
+        use serde_json::json;
+        let worker = |info: Value| worker_from_session(&info);
+        assert_eq!(
+            worker(json!({"id":"c1","parentID":"p","title":"Explore","time":{"busy":5}})),
+            Some(Worker {
+                id: "c1".into(),
+                parent: Some("p".into()),
+                title: "Explore".into(),
+                state: WorkerState::Running,
+            })
+        );
+        for (outcome, state) in [
+            ("failed", WorkerState::Error),
+            ("interrupted", WorkerState::Stopped),
+            ("unheard of", WorkerState::Unknown),
+        ] {
+            assert_eq!(
+                worker(json!({"id":"c1","outcome":outcome})),
+                Some(Worker {
+                    id: "c1".into(),
+                    parent: None,
+                    title: "worker".into(),
+                    state,
+                })
+            );
+        }
+        assert_eq!(worker(json!({"title":"No id"})), None);
+        assert_eq!(worker(json!({"id":7})), None);
+    }
+
+    #[test]
+    fn answers_take_the_shape_of_an_opencode_reply() {
+        assert_eq!(
+            form_answer(&[
+                ("name".into(), AnswerValue::Text("Ada".into())),
+                (
+                    "regions".into(),
+                    AnswerValue::Choices(vec!["eu".into(), "us".into()])
+                ),
+            ]),
+            serde_json::json!({"name": "Ada", "regions": ["eu", "us"]})
+        );
     }
 
     fn event(
@@ -601,8 +967,12 @@ mod tests {
                 "ordinal": 0
             }
         });
-        assert!(
-            matches!(event(&started, session, &mut seen), Some(Event::MessageStarted { message, role }) if message == "msg_1" && role == Role::Assistant)
+        assert_eq!(
+            event(&started, session, &mut seen),
+            Some(Event::MessageStarted {
+                message: "msg_1".into(),
+                role: Role::Assistant
+            })
         );
 
         let delta = serde_json::json!({
@@ -613,8 +983,12 @@ mod tests {
                 "delta": "pong"
             }
         });
-        assert!(
-            matches!(event(&delta, session, &mut seen), Some(Event::TextDelta { message, text }) if message == "msg_1" && text == "pong")
+        assert_eq!(
+            event(&delta, session, &mut seen),
+            Some(Event::TextDelta {
+                message: "msg_1".into(),
+                text: "pong".into()
+            })
         );
 
         let ended = serde_json::json!({
@@ -625,8 +999,11 @@ mod tests {
                 "delta": "pong"
             }
         });
-        assert!(
-            matches!(event(&ended, session, &mut seen), Some(Event::MessageCompleted { message }) if message == "msg_1"),
+        assert_eq!(
+            event(&ended, session, &mut seen),
+            Some(Event::MessageCompleted {
+                message: "msg_1".into()
+            }),
             "text.ended must complete the message it names"
         );
     }

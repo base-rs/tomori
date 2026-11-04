@@ -41,12 +41,17 @@ pub const DEFAULT_URL: &str = "http://127.0.0.1:4096";
 /// in the XDG state directory: `$XDG_STATE_HOME/opencode`, else
 /// `$HOME/.local/state/opencode`.
 pub fn xdg_state_dir() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
+    state_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+}
+
+/// [`xdg_state_dir`] from the values of `XDG_STATE_HOME` and `HOME`.
+fn state_dir_from(
+    state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let base = state_home
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(".local").join("state"))
-        })?;
+        .or_else(|| home.map(|home| std::path::PathBuf::from(home).join(".local").join("state")))?;
     Some(base.join("opencode"))
 }
 
@@ -58,7 +63,12 @@ pub fn resolve_url(url: &str) -> Option<Resolved> {
     if !matches!(scheme, "http" | "https") {
         return None;
     }
-    let hostport = rest.split(['/', '?']).next()?.trim_end_matches('/');
+    // Splitting always yields the part before the first separator.
+    let hostport = rest
+        .split(['/', '?'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
     let (host, port) = match hostport.rsplit_once(':') {
         Some((host, port)) => (host, port),
         // A bare hostname means port 443 for https and 80 for http, but OpenCode
@@ -257,7 +267,54 @@ mod tests {
     }
 
     #[test]
+    fn the_state_directory_follows_xdg_then_home() {
+        assert_eq!(
+            state_dir_from(Some("/state".into()), Some("/home/ada".into())),
+            Some(std::path::PathBuf::from("/state/opencode"))
+        );
+        assert_eq!(
+            state_dir_from(None, Some("/home/ada".into())),
+            Some(std::path::PathBuf::from("/home/ada/.local/state/opencode"))
+        );
+        assert_eq!(state_dir_from(None, None), None);
+    }
+
+    #[test]
+    fn a_service_file_is_read_only_when_it_names_a_valid_url() {
+        let directory = std::env::temp_dir().join(format!(
+            "tomori-opencode-service-file-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("service.json");
+        let read = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            read_service_file_at(&path).map(|resolved| (resolved.authority(), resolved.auth))
+        };
+        for text in ["not json", "{}", r#"{"url": 7}"#, r#"{"url": "localhost"}"#] {
+            assert_eq!(read(text), None, "{text}");
+        }
+        assert_eq!(
+            read(r#"{"url": "http://127.0.0.1:4096", "password": ""}"#),
+            Some(("127.0.0.1:4096".to_owned(), None))
+        );
+        assert_eq!(
+            read(r#"{"url": "http://127.0.0.1:4096", "password": "secret", "username": "ada"}"#),
+            Some((
+                "127.0.0.1:4096".to_owned(),
+                Some(("ada".to_owned(), "secret".to_owned()))
+            ))
+        );
+        // A file that exists but cannot be read is read once more, as one being replaced might be, then passed over.
+        std::fs::write(&path, "{").unwrap();
+        assert_eq!(resolve_from(None, None, Some(&path)).1, Source::Default);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn url_resolution_reads_host_and_port() {
+        assert!(resolve_url("127.0.0.1:4096").is_none(), "no scheme");
         assert!(resolve_url("http://localhost").is_none(), "no port");
         assert!(resolve_url("ftp://127.0.0.1:4096").is_none());
         assert!(resolve_url("http://127.0.0.1:0").is_none());

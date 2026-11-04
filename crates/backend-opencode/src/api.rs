@@ -59,15 +59,14 @@ where
     B: ReadableBody + 'scope,
     B::Data: Into<Vec<u8>>,
 {
+    // Every authorization is `Basic` and base64, and a request has room for these few fields.
     if let Some(authorization) = auth {
-        let field = Field::new("authorization", authorization).map_err(|error| Failure {
-            status: None,
-            message: error.to_string(),
-        })?;
-        request.fields.append(field).map_err(|error| Failure {
-            status: None,
-            message: error.to_string(),
-        })?;
+        let field = Field::new("authorization", authorization)
+            .expect("a Basic authorization is a valid field value");
+        request
+            .fields
+            .append(field)
+            .expect("a request has room for its authorization");
     }
     // Opt out of connection reuse: opencode closes idle keep-alive connections
     // after five seconds, and `base-http-client` pools and reuses connections
@@ -75,12 +74,10 @@ where
     // dropped reads EOF and fails with "truncated HTTP/1 message" (base-rs/
     // base-http#36). `Connection: close` keeps the client from reusing: each
     // call gets a fresh connection, which stays valid for the single exchange.
-    if let Ok(field) = Field::new("connection", "close") {
-        request.fields.append(field).map_err(|error| Failure {
-            status: None,
-            message: error.to_string(),
-        })?;
-    }
+    request
+        .fields
+        .append(Field::new("connection", "close").expect("a valid field"))
+        .expect("a request has room to close its connection");
     Ok(client.call(request, cancellation).await?)
 }
 
@@ -148,9 +145,10 @@ fn post(path: &str, payload: &Value) -> Request<BufferedBody> {
         Path::from(path.to_owned()),
         BufferedBody::from(payload.to_string().into_bytes()),
     );
-    if let Ok(field) = Field::new("content-type", "application/json") {
-        let _ = request.fields.append(field);
-    }
+    request
+        .fields
+        .append(Field::new("content-type", "application/json").expect("a valid field"))
+        .expect("a new request has room for its content type");
     request
 }
 
@@ -417,9 +415,10 @@ async fn session_family<'scope>(
                 child_sessions(client, resolved, &parent, cancellation).await
             }));
         }
-        let Some(children) = requests.next().await else {
-            break;
-        };
+        let children = requests
+            .next()
+            .await
+            .expect("a request is in flight while the loop runs");
         for child in children? {
             let id = child
                 .get("id")
@@ -447,10 +446,7 @@ async fn session_family<'scope>(
 
 fn add_worker_record_size(total: &mut usize, child: &Value) -> Result<(), Failure> {
     let size = serde_json::to_vec(child)
-        .map_err(|error| Failure {
-            status: None,
-            message: format!("could not size a child session: {error}"),
-        })?
+        .expect("a JSON value serializes")
         .len();
     let next = total.saturating_add(size);
     if next > MAX_WORKER_SNAPSHOT_BYTES {
@@ -870,10 +866,7 @@ pub async fn session_messages<'scope>(
                 Some("user" | "assistant")
             ) {
                 let size = serde_json::to_vec(message)
-                    .map_err(|error| Failure {
-                        status: None,
-                        message: format!("could not size a session message: {error}"),
-                    })?
+                    .expect("a JSON value serializes")
                     .len();
                 if !messages.is_empty() && message_bytes.saturating_add(size) > MAX_MESSAGE_BYTES {
                     return Ok(finish_messages(messages));
@@ -1130,7 +1123,604 @@ fn urlencoding(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base_scheduler::{
+        AddressHints, AddressInfoCollection, AddressInfoView, AddressResolution, AddressService,
+    };
+    use base_scheduler_native::{NativeOptions, NativeScheduler};
+    use futures_lite::future::block_on;
     use serde_json::json;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    /// A service on its own port that answers each request with what `route` returns for its method and path, as a
+    /// status line and a JSON body, until the test ends.
+    fn service(route: fn(&str, &str) -> (&'static str, String)) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut socket in listener.incoming().flatten() {
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut words = line.split_whitespace();
+                let (method, path) = (
+                    words.next().unwrap().to_owned(),
+                    words.next().unwrap().to_owned(),
+                );
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let (status, body) = route(&method, &path);
+                let _ = write!(
+                    socket,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        port
+    }
+
+    /// A port nothing listens on.
+    fn unreachable_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// Run `calls` with a client of the service on `port`, then stop the client.
+    fn with_client(
+        port: u16,
+        calls: impl AsyncFnOnce(&Client<'_>, &Resolved, &Cancellation, &NativeScheduler),
+    ) {
+        block_on(async {
+            let scheduler = NativeScheduler::with_options(NativeOptions {
+                workers: 1,
+                threads: 2,
+                capacity: 256,
+                ..Default::default()
+            })
+            .unwrap();
+            let cancellation = Cancellation::new();
+            let address = scheduler
+                .address_resolve(
+                    Some("127.0.0.1"),
+                    AddressService::Port(port),
+                    AddressHints::default(),
+                    &cancellation,
+                )
+                .await
+                .unwrap()
+                .entries()
+                .next()
+                .unwrap()
+                .address();
+            let (client, driver) = Client::new(
+                &scheduler,
+                base_http_client::Endpoint::new(address),
+                base_http_client::Options::default(),
+            )
+            .unwrap();
+            let resolved = Resolved {
+                host: "127.0.0.1".into(),
+                port,
+                auth: Some(("opencode".into(), "secret".into())),
+            };
+            let (_driven, ()) = futures_lite::future::zip(driver.run(&cancellation), async {
+                calls(&client, &resolved, &cancellation, &scheduler).await;
+                cancellation.cancel();
+            })
+            .await;
+            drop(client);
+            scheduler.shutdown().await;
+        });
+    }
+
+    /// The status and message of a failed call.
+    fn failed<T: std::fmt::Debug>(result: Result<T, Failure>) -> (Option<u16>, String) {
+        let failure = result.unwrap_err();
+        (failure.status, failure.message)
+    }
+
+    /// Every call reports a refusal with its status and the service's message, wherever OpenCode puts it.
+    #[test]
+    fn a_refused_call_reports_the_status_and_the_services_message() {
+        let port = service(|_, path| {
+            if path.starts_with("/api/session/s1") {
+                ("409 Conflict", r#"{"data":{"message":"busy"}}"#.to_owned())
+            } else {
+                (
+                    "503 Service Unavailable",
+                    r#"{"message":"starting"}"#.to_owned(),
+                )
+            }
+        });
+        with_client(port, async |client, resolved, cancellation, scheduler| {
+            let starting = (Some(503), "starting".to_owned());
+            let busy = (Some(409), "busy".to_owned());
+            assert_eq!(
+                failed(create_session(client, resolved, "/tmp", Some("t"), cancellation).await),
+                starting
+            );
+            assert_eq!(
+                failed(list_sessions(client, resolved, "/tmp", cancellation).await),
+                starting
+            );
+            assert_eq!(
+                failed(active_sessions(client, resolved, cancellation).await),
+                starting
+            );
+            assert_eq!(
+                failed(child_sessions(client, resolved, "s1", cancellation).await),
+                starting
+            );
+            assert_eq!(
+                failed(list_agents(client, resolved, "/tmp", cancellation).await),
+                starting
+            );
+            assert_eq!(
+                failed(session_info(client, resolved, "s1", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(send_prompt(client, resolved, "s1", "k", "Hi", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(switch_agent(client, resolved, "s1", "plan", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(interrupt(client, resolved, "s1", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(open_permissions(client, resolved, "s1", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(reply_permission(client, resolved, "s1", "p1", "once", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(open_forms(client, resolved, "s1", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(reply_form(client, resolved, "s1", "f1", &json!({}), cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(session_messages(client, resolved, "s1", cancellation).await),
+                busy
+            );
+            assert_eq!(
+                failed(session_running(client, resolved, "s1", cancellation, scheduler).await),
+                busy
+            );
+            assert_eq!(
+                active_sessions_with_timeout(
+                    client,
+                    resolved,
+                    cancellation,
+                    scheduler,
+                    Duration::from_secs(5)
+                )
+                .await,
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn a_refusal_without_a_message_names_its_status() {
+        let port = service(|_, _| ("500 Internal Server Error", "not json".to_owned()));
+        with_client(port, async |client, resolved, cancellation, _| {
+            assert_eq!(
+                failed(interrupt(client, resolved, "s1", cancellation).await),
+                (Some(500), "the server answered with status 500".to_owned())
+            );
+        });
+    }
+
+    #[test]
+    fn an_unparseable_or_malformed_answer_is_a_failure() {
+        let port = service(|_, path| match path {
+            "/api/session/active" => ("200 OK", r#"{"data":[]}"#.to_owned()),
+            _ if path.contains("/message?") => ("200 OK", r#"{"data":[],"cursor":7}"#.to_owned()),
+            _ if path.starts_with("/api/session/s2/message") => {
+                ("200 OK", r#"{"cursor":{}}"#.to_owned())
+            }
+            _ if path.ends_with("/permission") || path.ends_with("/form") => {
+                ("200 OK", r#"{"data":{}}"#.to_owned())
+            }
+            _ => ("200 OK", "{not json".to_owned()),
+        });
+        with_client(port, async |client, resolved, cancellation, _| {
+            let (status, message) =
+                failed(session_info(client, resolved, "s1", cancellation).await);
+            assert_eq!(status, Some(200));
+            assert!(
+                message.starts_with("the server sent an unparseable body: "),
+                "{message}"
+            );
+            assert_eq!(
+                failed(active_sessions(client, resolved, cancellation).await).0,
+                None
+            );
+            assert_eq!(
+                failed(open_permissions(client, resolved, "s1", cancellation).await).0,
+                None
+            );
+            assert_eq!(
+                failed(open_forms(client, resolved, "s1", cancellation).await).0,
+                None
+            );
+        });
+    }
+
+    /// A child session record of `parent` that OpenCode would list.
+    fn child(id: &str, parent: &str) -> Value {
+        json!({"id":id,"parentID":parent,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1}})
+    }
+
+    /// One page of a listing, as OpenCode answers it.
+    fn page(data: Vec<Value>, next: Value) -> (&'static str, String) {
+        (
+            "200 OK",
+            json!({"data": data, "cursor": {"next": next}}).to_string(),
+        )
+    }
+
+    /// What listing the children of `p` from a service routed by `route` fails with.
+    fn child_failure(route: fn(&str, &str) -> (&'static str, String)) -> String {
+        let mut message = String::new();
+        with_client(service(route), async |client, resolved, cancellation, _| {
+            message = failed(child_sessions(client, resolved, "p", cancellation).await).1;
+        });
+        message
+    }
+
+    /// A child listing that cannot be trusted whole fails, rather than reporting part of the family.
+    #[test]
+    fn a_child_listing_that_cannot_be_trusted_whole_fails() {
+        assert_eq!(
+            child_failure(|_, _| page(vec![json!({"parentID":"p"})], Value::Null)),
+            "the server returned a child session without an identifier"
+        );
+        assert_eq!(
+            child_failure(|_, _| page(vec![child("c", "q")], Value::Null)),
+            "the server returned a child session with an invalid parent or identifier"
+        );
+        assert_eq!(
+            child_failure(|_, path| match path.contains("cursor=") {
+                false => page(vec![child("c", "p")], json!("next")),
+                true => page(vec![child("c", "p")], Value::Null),
+            }),
+            "the server repeated a child session across pages"
+        );
+        assert_eq!(
+            child_failure(|_, _| page(Vec::new(), json!(7))),
+            "the server returned an invalid child session cursor"
+        );
+        // A cursor seen before would list the same pages forever.
+        assert_eq!(
+            child_failure(|_, _| page(Vec::new(), json!("again"))),
+            "the server returned an invalid child session cursor"
+        );
+        assert_eq!(
+            child_failure(|_, path| {
+                let next = path
+                    .rsplit_once("cursor=")
+                    .map_or(0, |(_, n)| n.parse::<u32>().unwrap() + 1);
+                page(Vec::new(), json!(next.to_string()))
+            }),
+            "the child session list exceeds the page limit"
+        );
+        assert_eq!(
+            child_failure(|_, _| page(
+                (0..=MAX_TRACKED_WORKERS)
+                    .map(|n| child(&format!("c{n}"), "p"))
+                    .collect(),
+                Value::Null
+            )),
+            "the child session list exceeds the worker limit"
+        );
+        assert_eq!(
+            child_failure(|_, _| {
+                let mut large = child("c", "p");
+                large["title"] = json!("x".repeat(MAX_WORKER_SNAPSHOT_BYTES));
+                page(vec![large], Value::Null)
+            }),
+            "the worker family exceeds the supported snapshot size"
+        );
+    }
+
+    /// What reading the worker family of `s` from a service routed by `route` returns.
+    fn family(route: fn(&str, &str) -> (&'static str, String)) -> Result<Vec<String>, String> {
+        let mut result = Ok(Vec::new());
+        with_client(service(route), async |client, resolved, cancellation, _| {
+            result = session_family(client, resolved, "s", cancellation)
+                .await
+                .map(|family| {
+                    family
+                        .iter()
+                        .map(|child| child["id"].as_str().unwrap().to_owned())
+                        .collect()
+                })
+                .map_err(|failure| failure.message);
+        });
+        result
+    }
+
+    #[test]
+    fn a_worker_family_is_read_whole_or_not_at_all() {
+        // Grandchildren are workers of the session too.
+        assert_eq!(
+            family(|_, path| {
+                match path
+                    .split_once("parentID=")
+                    .unwrap()
+                    .1
+                    .split('&')
+                    .next()
+                    .unwrap()
+                {
+                    "s" => page(vec![child("c1", "s"), child("c2", "s")], Value::Null),
+                    "c1" => page(vec![child("g1", "c1")], Value::Null),
+                    _ => page(Vec::new(), Value::Null),
+                }
+            }),
+            Ok(vec!["c1".to_owned(), "c2".to_owned(), "g1".to_owned()])
+        );
+        // A child listed under its own child would be read forever.
+        assert_eq!(
+            family(|_, path| {
+                match path
+                    .split_once("parentID=")
+                    .unwrap()
+                    .1
+                    .split('&')
+                    .next()
+                    .unwrap()
+                {
+                    "s" => page(vec![child("c1", "s")], Value::Null),
+                    _ => page(vec![child("c1", "c1")], Value::Null),
+                }
+            }),
+            Err("the server returned a repeated or cyclic worker identity".to_owned())
+        );
+        // A grandchild listing that fails fails the family.
+        assert_eq!(
+            family(|_, path| {
+                match path
+                    .split_once("parentID=")
+                    .unwrap()
+                    .1
+                    .split('&')
+                    .next()
+                    .unwrap()
+                {
+                    "s" => page(vec![child("c1", "s")], Value::Null),
+                    _ => (
+                        "500 Internal Server Error",
+                        r#"{"message":"lost"}"#.to_owned(),
+                    ),
+                }
+            }),
+            Err("lost".to_owned())
+        );
+    }
+
+    /// A message OpenCode would list, with the id `id`.
+    fn message(id: &str) -> Value {
+        json!({"id": id, "type": "user", "text": "Hello."})
+    }
+
+    /// What reading the messages of `s` from a service routed by `route` returns, as message ids.
+    fn messages(route: fn(&str, &str) -> (&'static str, String)) -> Result<Vec<String>, String> {
+        let mut result = Ok(Vec::new());
+        with_client(service(route), async |client, resolved, cancellation, _| {
+            result = session_messages(client, resolved, "s", cancellation)
+                .await
+                .map(|messages| {
+                    messages["data"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|message| message["id"].as_str().unwrap().to_owned())
+                        .collect()
+                })
+                .map_err(|failure| failure.message);
+        });
+        result
+    }
+
+    #[test]
+    fn message_history_is_bounded_and_refused_when_malformed() {
+        let refused = |message: &str| Err(message.to_owned());
+        assert_eq!(
+            messages(|_, _| ("200 OK", r#"{"cursor":{"next":null}}"#.to_owned())),
+            refused("the server did not return a message list")
+        );
+        assert_eq!(
+            messages(|_, _| ("200 OK", r#"{"data":[]}"#.to_owned())),
+            refused("the server did not return a message cursor")
+        );
+        assert_eq!(
+            messages(|_, _| page(Vec::new(), json!(""))),
+            refused("the server returned an invalid message cursor")
+        );
+        assert_eq!(
+            messages(|_, _| page(Vec::new(), json!(7))),
+            refused("the server returned an invalid message cursor")
+        );
+        assert_eq!(
+            messages(|_, _| page(vec![json!({"type": "user", "text": "No id."})], Value::Null)),
+            refused("the server returned a message without a supported identifier")
+        );
+        assert_eq!(
+            messages(|_, _| page(vec![message("m"), message("m")], Value::Null)),
+            refused("the server repeated a message across pages")
+        );
+        assert_eq!(
+            messages(|_, _| page(vec![json!({"id": "m", "type": "user"})], Value::Null)),
+            refused("the server returned an invalid session message")
+        );
+        // A cursor seen before would list the same pages forever.
+        assert_eq!(
+            messages(|_, path| match path.contains("cursor=") {
+                false => page(vec![message("m1")], json!("older")),
+                true => page(vec![message("m2")], json!("older")),
+            }),
+            refused("the server returned an invalid message cursor")
+        );
+
+        // Only the latest hundred messages are kept, oldest first.
+        let kept = messages(|_, _| {
+            page(
+                (0..150).map(|n| message(&format!("m{n:03}"))).collect(),
+                Value::Null,
+            )
+        })
+        .unwrap();
+        assert_eq!(kept.len(), 100);
+        assert_eq!((kept[0].as_str(), kept[99].as_str()), ("m099", "m000"));
+        // Older pages are read until the history ends, and older history beyond the page limit is left out.
+        assert_eq!(
+            messages(|_, path| {
+                let page_number = path
+                    .rsplit_once("cursor=")
+                    .map_or(0, |(_, n)| n.parse::<u32>().unwrap() + 1);
+                page(Vec::new(), json!(page_number.to_string()))
+            }),
+            Ok(Vec::new())
+        );
+        // So are messages beyond the size limit, once one is kept.
+        assert_eq!(
+            messages(|_, _| {
+                let mut large = message("large");
+                large["text"] = json!("x".repeat(8 * 1024 * 1024));
+                page(vec![message("small"), large], Value::Null)
+            }),
+            Ok(vec!["small".to_owned()])
+        );
+    }
+
+    /// A response larger than any OpenCode sends is refused while it is read, rather than held in memory.
+    #[test]
+    fn an_oversized_response_is_refused() {
+        let port = service(|_, _| {
+            (
+                "200 OK",
+                format!(r#"{{"data":"{}"}}"#, "x".repeat(MAX_JSON_BYTES)),
+            )
+        });
+        with_client(port, async |client, resolved, cancellation, _| {
+            assert_eq!(
+                failed(session_info(client, resolved, "s", cancellation).await),
+                (
+                    Some(200),
+                    "the server's JSON response exceeds the supported size".to_owned()
+                )
+            );
+        });
+    }
+
+    /// Without a service, every call fails without a status, rather than waiting.
+    #[test]
+    fn an_unreachable_service_fails_each_call_without_a_status() {
+        with_client(
+            unreachable_port(),
+            async |client, resolved, cancellation, scheduler| {
+                assert_eq!(
+                    failed(create_session(client, resolved, "/tmp", None, cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(list_sessions(client, resolved, "/tmp", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(session_info(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(active_sessions(client, resolved, cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(child_sessions(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(send_prompt(client, resolved, "s1", "k", "Hi", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(list_agents(client, resolved, "/tmp", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(switch_agent(client, resolved, "s1", "plan", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(put_instruction(client, resolved, "s1", "k", "v", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(delete_instruction(client, resolved, "s1", "k", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(interrupt(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(open_permissions(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(
+                        reply_permission(client, resolved, "s1", "p1", "once", cancellation).await
+                    )
+                    .0,
+                    None
+                );
+                assert_eq!(
+                    failed(open_forms(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(
+                        reply_form(client, resolved, "s1", "f1", &json!({}), cancellation).await
+                    )
+                    .0,
+                    None
+                );
+                assert_eq!(
+                    failed(session_messages(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(session_running(client, resolved, "s1", cancellation, scheduler).await)
+                        .0,
+                    None
+                );
+            },
+        );
+    }
 
     #[test]
     fn session_listing_asks_for_top_level_unarchived_sessions() {
