@@ -1011,6 +1011,83 @@ mod tests {
     }
 
     #[test]
+    fn a_hand_or_controller_that_gives_no_direction_has_no_palm() {
+        let flat = hand(Vec3::ZERO, Vec3::X, Vec3::X * 2.0);
+        assert_eq!(Palm::from_left_hand(&flat), None);
+        assert_eq!(Palm::from_right_hand(&flat), None);
+        for missing in [WRIST, INDEX_KNUCKLE, LITTLE_KNUCKLE] {
+            let mut partial = hand(Vec3::ZERO, Vec3::X, Vec3::Z);
+            partial.joints[missing] = None;
+            assert_eq!(Palm::from_left_hand(&partial), None);
+            assert_eq!(Palm::from_right_hand(&partial), None);
+        }
+        let lost = controller::Pose {
+            position: [0.0; 3],
+            orientation: [f32::NAN; 4],
+        };
+        assert_eq!(Palm::from_left_controller(&lost), None);
+        assert_eq!(Palm::from_right_controller(&lost), None);
+    }
+
+    #[test]
+    fn sections_say_what_they_hold_in_every_state() {
+        let space = SpaceInfo {
+            title:
+                "A space whose title is long enough to wrap onto more lines than the header shows"
+                    .into(),
+            running: "fake in tmp".into(),
+            speech: tomori_protocol::SpeechSetting::Full,
+            ..Default::default()
+        };
+        let model = Model {
+            in_space: true,
+            role: ConnectionRole::Owner,
+            pill: true,
+            space: Some(space),
+            feedback: crate::feedback::Settings {
+                mono: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let shown = items(Some(Section::Space), &model);
+        let shown = texts(&shown);
+        assert!(shown.contains(&"Full: switch to brief"));
+        assert!(shown.contains(&"Status pill: on"));
+        let sound = items(Some(Section::Sound), &model);
+        assert!(texts(&sound).contains(&"Mono audio: on"));
+        // Without a space, the Space section offers only to go back; without instructions, the Agent section says none.
+        let away = Model {
+            in_space: true,
+            ..Default::default()
+        };
+        assert_eq!(texts(&items(Some(Section::Space), &away))[0], "< Back");
+        assert_eq!(texts(&items(Some(Section::Agent), &away))[0], "< Back");
+        let short = Model {
+            in_space: true,
+            instructions: Some(tomori_protocol::AgentInstructions {
+                space: "Be brief.".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let layer = items(Some(Section::Layer(Layer::Space)), &short);
+        assert_eq!(texts(&layer).last(), Some(&"Be brief."));
+        for (state, said) in [
+            (KnockState::Declined, "Your knock was declined"),
+            (KnockState::Expired, "Nobody answered your knock"),
+            (KnockState::Withdrawn, "Your knock was withdrawn"),
+        ] {
+            let knocked = Model {
+                in_space: true,
+                knock: Some(state),
+                ..Default::default()
+            };
+            assert!(texts(&items(Some(Section::PeopleAndSecurity), &knocked)).contains(&said));
+        }
+    }
+
+    #[test]
     fn the_top_level_flashes_people_and_security_while_someone_knocks() {
         let mut model = Model::default();
         let top = items(None, &model);

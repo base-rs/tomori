@@ -91,9 +91,7 @@ trait InputStream {
     /// How many times the device has discarded audio because it was not read
     /// in time. A device that cannot tell reports a constant, such as zero or
     /// an error code, which is never taken as a loss.
-    fn overruns(&self) -> i32 {
-        0
-    }
+    fn overruns(&self) -> i32;
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -594,8 +592,8 @@ mod android {
 #[cfg(test)]
 mod tests {
     use super::{
-        Active, CONNECTION_LOST, Capture, Failed, InputStream, MAX_DRAIN_READS, Recording, Samples,
-        downmix, run_capture,
+        Active, CONNECTION_LOST, Capture, Failed, InputStream, MAX_DRAIN_READS, downmix,
+        run_capture,
     };
     #[cfg(not(target_os = "android"))]
     use super::{Mono, input_failed, protocol_rate};
@@ -623,6 +621,8 @@ mod tests {
     }
 
     struct Fake {
+        /// Whether starting the stream fails.
+        fail_start: bool,
         steps: VecDeque<Step>,
         /// What the device already holds when read without waiting.
         buffered: VecDeque<Result<Vec<f32>, ()>>,
@@ -631,6 +631,9 @@ mod tests {
 
     impl InputStream for Fake {
         fn start(&mut self) -> Result<(), String> {
+            if self.fail_start {
+                return Err("cannot start".into());
+            }
             self.log.borrow_mut().started = true;
             Ok(())
         }
@@ -669,6 +672,7 @@ mod tests {
     fn fake(steps: Vec<Step>, buffered: Vec<Result<Vec<f32>, ()>>) -> (Fake, Rc<RefCell<Log>>) {
         let log = Rc::new(RefCell::new(Log::default()));
         let fake = Fake {
+            fail_start: false,
             steps: steps.into(),
             buffered: buffered.into(),
             log: log.clone(),
@@ -677,7 +681,7 @@ mod tests {
     }
 
     fn run(
-        fake: Fake,
+        fake: Result<Fake, String>,
         stop: &Arc<AtomicBool>,
         active: Option<&Active>,
         during_open: impl FnOnce(),
@@ -687,7 +691,7 @@ mod tests {
         let result = run_capture(
             || {
                 during_open();
-                Ok(fake)
+                fake
             },
             &mut |samples: &[f32]| delivered.extend_from_slice(samples),
             stop,
@@ -704,7 +708,7 @@ mod tests {
         let active: Active = Box::new(move || current.load(Ordering::SeqCst));
         let (device, log) = fake(vec![], vec![]);
         let stop = Arc::new(AtomicBool::new(false));
-        let (result, delivered) = run(device, &stop, Some(&active), || {
+        let (result, delivered) = run(Ok(device), &stop, Some(&active), || {
             connected.store(false, Ordering::SeqCst)
         });
         assert_eq!(result.unwrap_err(), CONNECTION_LOST);
@@ -716,19 +720,80 @@ mod tests {
     fn a_disconnect_before_opening_never_opens_the_device() {
         let active: Active = Box::new(|| false);
         let stop = Arc::new(AtomicBool::new(false));
-        let mut opened = false;
-        let result = run_capture::<Fake>(
-            || {
-                opened = true;
-                unreachable!()
-            },
-            &mut |_| panic!("delivered"),
+        let (result, delivered) = run(
+            Err("never opened".into()),
             &stop,
             Some(&active),
-            &mut [0.0; 8],
+            std::thread::yield_now,
         );
         assert_eq!(result.unwrap_err(), CONNECTION_LOST);
-        assert!(!opened);
+        assert!(delivered.is_empty());
+    }
+
+    #[test]
+    fn a_device_that_cannot_open_or_start_says_why() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (result, _) = run(Err("busy".into()), &stop, None, || {});
+        assert_eq!(result.unwrap_err(), "busy");
+        let (mut device, log) = fake(vec![], vec![]);
+        device.fail_start = true;
+        let (result, _) = run(Ok(device), &stop, None, || {});
+        assert_eq!(result.unwrap_err(), "cannot start");
+        assert!(!log.borrow().stopped);
+    }
+
+    #[test]
+    fn recurring_live_overruns_are_reported_together() {
+        let active: Active = Box::new(|| true);
+        let stop = Arc::new(AtomicBool::new(false));
+        let release = stop.clone();
+        let (device, log) = fake(vec![], vec![]);
+        let overrun = |log: &Rc<RefCell<Log>>| {
+            let log = log.clone();
+            Box::new(move || log.borrow_mut().overruns += 1) as Box<dyn FnOnce()>
+        };
+        let mut device = device;
+        device.steps = vec![
+            Step::Read(vec![0.1; 2], overrun(&log)),
+            Step::Read(vec![0.1; 2], overrun(&log)),
+            Step::Read(
+                vec![0.1; 2],
+                Box::new(move || {
+                    release.store(true, Ordering::Release);
+                }),
+            ),
+        ]
+        .into();
+        let (result, delivered) = run(Ok(device), &stop, Some(&active), || {});
+        assert!(result.is_ok());
+        assert_eq!(delivered.len(), 6);
+        assert_eq!(log.borrow().overruns, 2);
+    }
+
+    #[test]
+    fn a_drain_that_fails_or_outlives_its_connection_says_so() {
+        let released = || {
+            let stop = Arc::new(AtomicBool::new(false));
+            let releasing = stop.clone();
+            let step = Step::Read(
+                vec![0.1; 2],
+                Box::new(move || releasing.store(true, Ordering::Release)),
+            );
+            (stop, step)
+        };
+        let (stop, step) = released();
+        let (device, _) = fake(vec![step], vec![Err(())]);
+        let (result, _) = run(Ok(device), &stop, None, || {});
+        assert_eq!(result.unwrap_err(), "drain failed");
+        // The connection ends while the drain reads what the device held: the sixth time it is asked.
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = asked.clone();
+        let active: Active = Box::new(move || counting.fetch_add(1, Ordering::SeqCst) < 5);
+        let (stop, step) = released();
+        let (device, _) = fake(vec![step], vec![Ok(vec![0.2; 2])]);
+        let (result, delivered) = run(Ok(device), &stop, Some(&active), || {});
+        assert_eq!(result.unwrap_err(), CONNECTION_LOST);
+        assert_eq!(delivered, [0.1; 2]);
     }
 
     #[test]
@@ -748,7 +813,7 @@ mod tests {
             vec![Ok(vec![0.3; 4])],
         );
         let stop = Arc::new(AtomicBool::new(false));
-        let (result, delivered) = run(device, &stop, Some(&active), || {});
+        let (result, delivered) = run(Ok(device), &stop, Some(&active), || {});
         assert_eq!(result.unwrap_err(), CONNECTION_LOST);
         assert_eq!(delivered, vec![0.1; 4]);
         let log = log.borrow();
@@ -772,7 +837,7 @@ mod tests {
             // The device held one full and one partial frame at release.
             vec![Ok(vec![0.3; 8]), Ok(vec![0.4; 3])],
         );
-        let (result, delivered) = run(device, &stop, None, || {});
+        let (result, delivered) = run(Ok(device), &stop, None, || {});
         result.unwrap();
         let mut expected = vec![0.1; 8];
         expected.extend([0.2; 8]);
@@ -796,7 +861,7 @@ mod tests {
             )],
             vec![Ok(vec![0.2; 2]), Err(())],
         );
-        let (result, delivered) = run(device, &stop, None, || {});
+        let (result, delivered) = run(Ok(device), &stop, None, || {});
         assert_eq!(result.unwrap_err(), "drain failed");
         // What was delivered is still pre-boundary audio; the caller cancels
         // the utterance on failure rather than ending it.
@@ -804,7 +869,7 @@ mod tests {
 
         let (device, log) = fake(vec![Step::Fail], vec![]);
         let stop = Arc::new(AtomicBool::new(false));
-        let (result, delivered) = run(device, &stop, None, || {});
+        let (result, delivered) = run(Ok(device), &stop, None, || {});
         assert_eq!(result.unwrap_err(), "read failed");
         assert!(delivered.is_empty());
         assert!(log.borrow().stopped);
@@ -818,6 +883,7 @@ mod tests {
         };
         let log = Rc::new(RefCell::new(Log::default()));
         let device = Fake {
+            fail_start: false,
             steps: vec![
                 Step::Read(vec![0.1; 4], Box::new(|| {})),
                 Step::Read(vec![0.2; 4], overrun(&log)),
@@ -827,7 +893,7 @@ mod tests {
             log: log.clone(),
         };
         let stop = Arc::new(AtomicBool::new(false));
-        let (result, delivered) = run(device, &stop, None, || {});
+        let (result, delivered) = run(Ok(device), &stop, None, || {});
         assert!(result.unwrap_err().contains("lost audio"));
         // The samples after the gap are not delivered.
         assert_eq!(delivered, vec![0.1; 4]);
@@ -836,6 +902,7 @@ mod tests {
         let release = stop.clone();
         stop.store(false, Ordering::Release);
         let device = Fake {
+            fail_start: false,
             steps: vec![
                 Step::Read(vec![0.2; 4], overrun(&log)),
                 Step::Read(
@@ -848,7 +915,7 @@ mod tests {
             log,
         };
         let active: Active = Box::new(|| true);
-        let (result, delivered) = run(device, &stop, Some(&active), || {});
+        let (result, delivered) = run(Ok(device), &stop, Some(&active), || {});
         result.unwrap();
         assert_eq!(delivered.len(), 8);
     }
@@ -859,7 +926,7 @@ mod tests {
         let endless = (0..=MAX_DRAIN_READS).map(|_| Ok(vec![0.0; 1])).collect();
         let (device, _log) = fake(vec![], endless);
         // Stop before the first read still starts nothing.
-        let (result, delivered) = run(device, &stop, None, || {});
+        let (result, delivered) = run(Ok(device), &stop, None, || {});
         result.unwrap();
         assert!(delivered.is_empty());
 
@@ -873,7 +940,7 @@ mod tests {
             )],
             endless,
         );
-        let (result, delivered) = run(device, &stop, None, || {});
+        let (result, delivered) = run(Ok(device), &stop, None, || {});
         assert!(result.unwrap_err().contains("kept delivering"));
         assert_eq!(delivered.len(), MAX_DRAIN_READS);
     }
@@ -922,17 +989,18 @@ mod tests {
 
     #[test]
     fn platforms_without_independently_stoppable_live_capture_refuse_it() {
-        struct Unsupported;
-        impl Capture for Unsupported {
-            fn open(&mut self, _samples: Samples, _failed: Failed) -> Result<Recording, String> {
-                panic!("unsupported live capture must not open the microphone")
-            }
-        }
-        let active: Active = Box::new(|| true);
-        let error = match Unsupported.open_live(Box::new(|_| {}), Box::new(|_| {}), active) {
-            Ok(_) => panic!("live capture unexpectedly opened"),
-            Err(error) => error,
-        };
+        // A capture that opens only for push-to-talk, as the test microphone does.
+        let samples = |_: &[f32]| {};
+        let failed = |_: String| {};
+        let active = || true;
+        // What a capture that opened would call.
+        samples(&[]);
+        failed(String::new());
+        assert!(active());
+        let error = crate::test_support::Silent
+            .open_live(Box::new(samples), Box::new(failed), Box::new(active))
+            .map(drop)
+            .unwrap_err();
         assert!(error.contains("not available"));
     }
 }
