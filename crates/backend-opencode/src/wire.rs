@@ -57,9 +57,14 @@ pub fn event_for(
                 message: message_id(data)?,
             })
         }
+        // A tool can be called after the message's text has started, so its
+        // start is reported whether or not the message has been seen. A tool
+        // that starts a message stands for its start: the space adds the
+        // message it names.
         "session.tool.called" => {
-            first_seen(data, session_id, seen_messages)?;
-            tool_started(data, session_id)
+            let started = tool_started(data, session_id)?;
+            first_seen(data, session_id, seen_messages);
+            Some(started)
         }
         "session.tool.success" => tool_finished(data, session_id, None),
         "session.tool.failed" => tool_finished(data, session_id, Some(data)),
@@ -548,6 +553,41 @@ mod tests {
     /// in `seen_messages`. Previously the arm was gated on `first_seen`, which
     /// returned `None` for an already-seen id and swallowed the completion — so
     /// the reply's final unclosed sentence was never flushed to speech.
+    /// Regression: a tool called after its message's text started was
+    /// swallowed, because the arm returned early once the message had been
+    /// seen, so the tool was never shown working.
+    #[test]
+    fn a_tool_called_after_its_messages_text_is_reported() {
+        let mut seen = std::collections::HashSet::new();
+        let started = serde_json::json!({
+            "type": "session.text.started",
+            "data": {"sessionID": "s", "assistantMessageID": "m"}
+        });
+        let called = serde_json::json!({
+            "type": "session.tool.called",
+            "data": {"sessionID": "s", "assistantMessageID": "m", "id": "t1", "input": {"command": "ls"}}
+        });
+        let tool = Some(Event::ToolStarted {
+            message: "m".into(),
+            tool: String::new(),
+            id: "t1".into(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        assert_eq!(
+            event(&started, "s", &mut seen),
+            Some(Event::MessageStarted {
+                message: "m".into(),
+                role: Role::Assistant
+            })
+        );
+        assert_eq!(event(&called, "s", &mut seen), tool);
+
+        // A tool that starts its message stands for the message's start, which is not reported again.
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(event(&called, "s", &mut seen), tool);
+        assert_eq!(event(&started, "s", &mut seen), None);
+    }
+
     #[test]
     fn text_ended_emits_message_completed_after_text_started() {
         let session = "ses_test";
