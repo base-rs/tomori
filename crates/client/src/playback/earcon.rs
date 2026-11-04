@@ -260,11 +260,8 @@ pub fn probe(sample_rate: u32) -> Vec<f32> {
         .collect();
     let rms =
         (samples.iter().map(|sample| sample * sample).sum::<f64>() / length.max(1) as f64).sqrt();
-    let scale = if rms > 0.0 {
-        f64::from(PROBE_LEVEL) * f64::from(i16::MAX) / rms
-    } else {
-        0.0
-    };
+    // Never divided by zero: silence stays silent.
+    let scale = f64::from(PROBE_LEVEL) * f64::from(i16::MAX) / rms.max(f64::MIN_POSITIVE);
     samples.iter_mut().for_each(|sample| *sample *= scale);
     samples.into_iter().map(|sample| sample as f32).collect()
 }

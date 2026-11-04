@@ -162,6 +162,23 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_receiver_wakes_for_an_event_from_another_thread() {
+        let events = std::sync::Arc::new(Events::new());
+        assert!(events.is_empty());
+        let pushing = std::thread::spawn({
+            let events = events.clone();
+            move || {
+                // Long enough that the receiver is usually waiting already; the result is the same either way.
+                std::thread::sleep(Duration::from_millis(20));
+                events.push(Event::Message(ServerMessage::Left));
+            }
+        });
+        assert_eq!(events.recv(), Ok(Event::Message(ServerMessage::Left)));
+        pushing.join().unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn receivers_fail_once_finished_and_drained() {
         let events = Events::new();
         assert_eq!(

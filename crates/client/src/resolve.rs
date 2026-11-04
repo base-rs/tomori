@@ -27,6 +27,14 @@ pub(crate) fn resolve(address: &str) -> Result<Vec<SocketAddr>, Disconnect> {
         }
         None => (address, DEFAULT_PORT).to_socket_addrs(),
     };
+    found(address, resolved)
+}
+
+/// The addresses a lookup of `address` found, or why there are none.
+fn found(
+    address: &str,
+    resolved: std::io::Result<impl Iterator<Item = SocketAddr>>,
+) -> Result<Vec<SocketAddr>, Disconnect> {
     let resolved: Vec<SocketAddr> = resolved
         .map_err(|error| Disconnect::Address(error.to_string()))?
         .collect();
@@ -144,11 +152,17 @@ mod tests {
     #[test]
     fn rejects_invalid_addresses() {
         for address in ["invalid host name", "localhost:port", "[::1]:x", "::1]:9"] {
+            let error = resolve(address).unwrap_err().to_string();
             assert!(
-                matches!(resolve(address), Err(Disconnect::Address(_))),
-                "{address}"
+                error.starts_with("cannot resolve the server address: "),
+                "{address}: {error}"
             );
         }
+        // A lookup that succeeds without finding an address.
+        assert_eq!(
+            found("nowhere", Ok(std::iter::empty())),
+            Err(Disconnect::Address("nowhere has no addresses".into()))
+        );
     }
 
     #[test]

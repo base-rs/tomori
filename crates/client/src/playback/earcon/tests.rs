@@ -17,14 +17,11 @@ fn every_cue_is_short_quiet_and_never_clips() {
         let spec = earcon.spec();
         let samples = spec.render(RATE);
         // At most a quarter of a second, as `design/feedback.md` asks.
-        assert!(
-            (20..=250).contains(&spec.length()),
-            "{earcon:?} lasts {} ms",
-            spec.length()
-        );
+        let length = spec.length();
+        assert!((20..=250).contains(&length), "{earcon:?} lasts {length} ms");
         assert_eq!(
             samples.len(),
-            spec.length() as usize * RATE as usize / 1000,
+            length as usize * RATE as usize / 1000,
             "{earcon:?}"
         );
         // Peaks at its level, well below full scale and below speech, so it never clips the mix.
@@ -35,16 +32,9 @@ fn every_cue_is_short_quiet_and_never_clips() {
         );
         assert!(spec.level <= 0.15, "{earcon:?}");
         // Starts and ends silently, so it never clicks.
-        assert!(
-            samples[0].abs() < 1.0,
-            "{earcon:?} starts at {}",
-            samples[0]
-        );
-        assert!(
-            samples.last().unwrap().abs() < 50.0,
-            "{earcon:?} ends at {}",
-            samples.last().unwrap()
-        );
+        let (first, last) = (samples[0], samples[samples.len() - 1]);
+        assert!(first.abs() < 1.0, "{earcon:?} starts at {first}");
+        assert!(last.abs() < 50.0, "{earcon:?} ends at {last}");
     }
 }
 
@@ -141,11 +131,8 @@ fn the_echo_probe_rises_and_falls_like_speech_at_its_level_and_never_clips() {
         (part.iter().map(|sample| sample * sample).sum::<f32>() / part.len() as f32).sqrt()
             / f32::from(i16::MAX)
     };
-    assert!(
-        (rms(&samples) - PROBE_LEVEL).abs() < 0.005,
-        "{}",
-        rms(&samples)
-    );
+    let level = rms(&samples);
+    assert!((level - PROBE_LEVEL).abs() < 0.005, "{level}");
     // Like syllables: louder and quieter four times a second, faded at the ends.
     let syllables: Vec<f32> = samples.chunks(2_400).map(rms).collect();
     let (quietest, loudest) = syllables[2..syllables.len() - 2]
@@ -163,4 +150,24 @@ fn the_echo_probe_rises_and_falls_like_speech_at_its_level_and_never_clips() {
     bank.load_probe();
     assert_eq!(bank.probe(), &samples[..]);
     assert!(probe(0).len() <= 2);
+}
+
+#[test]
+fn a_note_rounded_past_the_end_of_its_cue_is_cut_there() {
+    // At 2.5 kHz a note of 1 ms starting at 1 ms rounds to three samples starting at the fourth, past the cue's five.
+    let spec = Spec {
+        notes: vec![Note {
+            start: 1,
+            length: 1,
+            from: 440.0,
+            to: 440.0,
+        }],
+        partials: &[(1.0, 1.0)],
+        attack: 0,
+        level: 0.1,
+    };
+    let samples = spec.render(2_500);
+    assert_eq!(samples.len(), 5);
+    assert_eq!(samples[..4], [0.0; 4]);
+    assert!(samples[4] != 0.0);
 }

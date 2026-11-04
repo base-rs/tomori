@@ -242,3 +242,51 @@ fn a_scene_set_after_a_render_is_written_whole() {
     render(&mut player, FRAME);
     control.set_scene(|scene| assert_eq!(scene.sources, [(1, [1.0, 0.0, 0.0])]));
 }
+
+#[test]
+fn the_callback_never_waits_for_the_scene_or_the_statistics() {
+    let (sender, mut player, control) = player();
+    // A scene still being written when the callback renders is taken at its next render.
+    control.set_scene(|scene| {
+        scene.sources = vec![(1, [1.0, 0.0, 0.0])];
+        render(&mut player, FRAME);
+    });
+    control.set_scene(|scene| assert_eq!(scene.sources, [(1, [1.0, 0.0, 0.0])]));
+    render(&mut player, FRAME);
+    control.set_scene(|scene| assert!(scene.sources.is_empty()));
+
+    // Statistics being read when the callback renders are published by a later render.
+    let held = control.shared.statistics.lock().unwrap();
+    sender.send(frame(2, 0, 1_000)).unwrap();
+    sender.send(frame(2, 0, 1_000)).unwrap();
+    render(&mut player, FRAME);
+    assert_eq!(held.late_frames, 0);
+    drop(held);
+    render(&mut player, FRAME);
+    assert_eq!(control.statistics().late_frames, 1);
+}
+
+#[test]
+fn a_scene_left_poisoned_by_the_application_is_still_taken() {
+    let (sender, mut player, control) = player();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        control.set_scene(|scene| {
+            scene.sources = vec![(1, [1.0, 0.0, 0.0])];
+            panic!("the application failed while writing the scene");
+        })
+    }));
+    assert!(failed.is_err());
+    // The interrupted change was not marked fresh, so the callback keeps its own scene; later changes still reach it.
+    render(&mut player, FRAME);
+    control.set_scene(|scene| scene.sources = vec![(2, [2.0, 0.0, 0.0])]);
+    render(&mut player, FRAME);
+    control.set_scene(|scene| assert!(scene.sources.is_empty()));
+    for sequence in 0..4 {
+        sender.send(frame(2, sequence, 1_000)).unwrap();
+    }
+    assert!(
+        render(&mut player, FRAME * 3)
+            .iter()
+            .any(|sample| *sample != 0)
+    );
+}
