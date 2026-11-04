@@ -349,10 +349,9 @@ impl Step {
         }
         // A chooses the object the ray highlighted last frame, as the trigger does; with nothing highlighted it accepts. Inside a space it never resets the swarm; see `design/interaction.md`.
         match &self.highlighted {
+            // The ray only meets rows that can be chosen.
             Some(arrival::Key::Menu(key)) if buttons.a => {
-                if hand_menu::choosable(key) {
-                    feedback.emit(feedback::Event::Choose, now);
-                }
+                feedback.emit(feedback::Event::Choose, now);
                 if let Some(choice) = self.hand_menu.choose(key) {
                     conversation.choose_menu(choice);
                 }
