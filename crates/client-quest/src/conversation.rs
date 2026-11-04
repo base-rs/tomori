@@ -152,6 +152,12 @@ impl Talk {
             Talk::Recording { utterance, .. } | Talk::Sending { utterance, .. } => utterance,
         }
     }
+
+    fn answering(&self) -> bool {
+        match self {
+            Talk::Recording { answering, .. } | Talk::Sending { answering, .. } => *answering,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -784,12 +790,7 @@ impl Conversation {
                 let ours = self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str());
                 if ours && finished {
                     // The queue entry now shows the words. An earlier utterance's failure stays shown.
-                    let answered = match self.talk.take() {
-                        Some(
-                            Talk::Recording { answering, .. } | Talk::Sending { answering, .. },
-                        ) => answering,
-                        None => false,
-                    };
+                    let answered = self.talk.take().is_some_and(|talk| talk.answering());
                     self.outcome = Some((Outcome::Sent { answered, text }, Instant::now()));
                 } else if ours
                     && let Some(Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) =
@@ -7641,4 +7642,175 @@ mod tests {
             [Action::Connect(choice)] if choice.address == "10.0.0.2:8765"
         ));
     }
+
+    /// More of what the conversation does as the connection and the server tell it things.
+    mod events {
+        use super::*;
+        use crate::scene::fixtures::{joined, lobby, space};
+
+        /// The utterance a press of X began.
+        fn talking(conversation: &mut Conversation) -> String {
+            conversation.talk(true);
+            conversation
+                .take_actions()
+                .into_iter()
+                .find_map(|action| match action {
+                    Action::BeginUtterance(utterance, ..) => Some(utterance),
+                    _ => None,
+                })
+                .expect("recording began")
+        }
+
+        fn failed(utterance: &str, failure: tomori_client::UtteranceFailure) -> Event {
+            Event::UtteranceFailed(tomori_client::FailedUtterance {
+                utterance: utterance.into(),
+                failure,
+            })
+        }
+
+        fn heard(talk: &Talk) -> &str {
+            match talk {
+                Talk::Recording { heard, .. } | Talk::Sending { heard, .. } => heard,
+            }
+        }
+
+        fn disconnected() -> Event {
+            Event::State(ConnectionState::Disconnected {
+                reason: tomori_client::Disconnect::Timeout,
+                retry_in: Duration::from_secs(1),
+            })
+        }
+
+        #[test]
+        fn words_that_could_not_be_sent_say_why_and_others_words_change_nothing() {
+            for (failure, said) in [
+                (tomori_client::UtteranceFailure::Disconnected, LOST),
+                (
+                    tomori_client::UtteranceFailure::Congested,
+                    "Network too slow; your words were not sent.",
+                ),
+            ] {
+                let mut conversation = joined();
+                let utterance = talking(&mut conversation);
+                conversation.apply(failed("someone-else", failure));
+                assert!(conversation.recording().is_some());
+                conversation.apply(failed(&utterance, failure));
+                assert!(conversation.recording().is_none());
+                assert_eq!(conversation.error.as_deref(), Some(said));
+            }
+        }
+
+        #[test]
+        fn words_on_their_way_when_the_connection_drops_are_said_to_be_lost() {
+            let mut conversation = joined();
+            talking(&mut conversation);
+            conversation.talk(false);
+            conversation.apply(disconnected());
+            assert!(conversation.talk.is_none());
+            assert_eq!(
+                conversation.notice.as_deref(),
+                Some("Connection lost while sending your words.")
+            );
+        }
+
+        #[test]
+        fn an_admission_or_pairing_without_a_certificate_keeps_no_token() {
+            let mut conversation = joined();
+            conversation.knock = Some(tomori_protocol::KnockState::Pending);
+            conversation.apply(Event::Message(ServerMessage::Admitted {
+                token: "tomori_t".into(),
+            }));
+            conversation.apply(Event::Message(ServerMessage::Paired {
+                token: "tomori_t".into(),
+            }));
+            assert!(conversation.take_actions().is_empty());
+            assert_eq!(conversation.knock, None);
+        }
+
+        #[test]
+        fn sessions_that_come_too_late_and_a_requested_leave_are_handled() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.apply(Event::Message(ServerMessage::Sessions { sessions: vec![] }));
+            assert_eq!(
+                conversation.error.as_deref(),
+                Some("Too late to show those sessions.")
+            );
+            let mut conversation = joined();
+            conversation.leaving = true;
+            conversation.apply(Event::Message(ServerMessage::Left));
+            assert_eq!(conversation.mode, Mode::Lobby);
+            assert!(conversation.take_actions().is_empty());
+        }
+
+        #[test]
+        fn a_join_refused_for_a_space_nobody_listed_says_the_space_ended() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.join_space("vanished");
+            conversation.apply(Event::Message(ServerMessage::Error {
+                error: "No such space.".into(),
+                space: Some("vanished".into()),
+            }));
+            assert_eq!(conversation.ended.as_deref(), Some("The space has ended."));
+        }
+
+        #[test]
+        fn a_partial_transcript_updates_what_was_heard_and_an_answer_is_marked_answered() {
+            let mut conversation = joined();
+            let utterance = talking(&mut conversation);
+            conversation.apply(Event::Message(ServerMessage::Transcript {
+                utterance: utterance.clone(),
+                text: "fix".into(),
+                finished: false,
+            }));
+            assert_eq!(conversation.talk.as_ref().map(heard), Some("fix"));
+            conversation.apply(Event::Message(ServerMessage::Transcript {
+                utterance,
+                text: "fix it".into(),
+                finished: true,
+            }));
+            assert_eq!(
+                conversation.outcome.map(|(outcome, _)| outcome),
+                Some(Outcome::Sent {
+                    answered: false,
+                    text: "fix it".into()
+                })
+            );
+        }
+
+        #[test]
+        fn a_spaces_list_is_ignored_while_only_pairing() {
+            let mut conversation = lobby(ConnectionRole::Pairing);
+            conversation.apply(Event::Message(ServerMessage::Spaces {
+                spaces: vec![tomori_protocol::SpaceSummary {
+                    id: "s1".into(),
+                    title: "Studio".into(),
+                    backend: "fake".into(),
+                    directory: "/tmp".into(),
+                    environment: String::new(),
+                    activity: tomori_protocol::Activity::Idle,
+                    participants: 0,
+                    attention: None,
+                    attention_age: None,
+                }],
+            }));
+            assert!(conversation.spaces.is_empty());
+        }
+
+        #[test]
+        fn agent_speech_is_logged_rather_than_shown() {
+            crate::test_support::log_everything();
+            let mut conversation = joined();
+            conversation.apply(Event::Message(ServerMessage::Speech {
+                segment: 1,
+                message: "m1".into(),
+                text: "Done.".into(),
+                sample_rate: 24_000,
+                replay: false,
+            }));
+            assert_eq!(conversation.notice, None);
+            conversation.apply(space(|state| state.title = "Renamed".into()));
+            assert_eq!(conversation.space.as_ref().unwrap().title, "Renamed");
+        }
+    }
 }
+
