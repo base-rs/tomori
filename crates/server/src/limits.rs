@@ -472,4 +472,29 @@ mod tests {
         // Cut enough by the text, the title is kept.
         assert_eq!(approval.title, "Bash");
     }
+    #[test]
+    fn escapes_are_counted_as_json_writes_them() {
+        for character in ['"', '\\', '\n', '\r', '\t', '\u{8}', '\u{c}'] {
+            assert_eq!(escaped_len(character), json_len(&character.to_string()) - 2);
+        }
+    }
+
+    #[test]
+    fn a_long_directory_is_cut_between_characters() {
+        let mut spaces = listing(400);
+        for space in &mut spaces {
+            space.directory = format!("/{}", "é".repeat(DIRECTORY_BYTES / 2 - 1));
+        }
+        fit_spaces(&mut spaces);
+        assert!(spaces[0].directory.starts_with('…'));
+        assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
+    }
+
+    #[test]
+    fn attention_of_an_unknown_kind_is_least_urgent() {
+        let mut spaces = listing(2);
+        spaces[0].attention = Some(tomori_protocol::Attention::Unknown);
+        spaces[1].attention = Some(tomori_protocol::Attention::Reply);
+        assert_eq!(least_urgent(&spaces), 0);
+    }
 }
