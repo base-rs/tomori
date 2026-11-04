@@ -36,7 +36,7 @@ fn receive(decoder: &mut FrameDecoder, bytes: &[u8]) -> Result<Vec<ServerMessage
 ## Conversation
 
 1. The client sends `ClientMessage::Hello` with `PROTOCOL_VERSION`, a stable participant identity and a display name. The identity is a secret of the device: it lets the server recognize a reconnect as the same participant, and is never sent to other clients.
-2. The server answers `ServerMessage::Welcome` with the client's audio `source` number, its `ConnectionRole`, the environments a space may be bound to, and, for owners only, the backends and workspace roots.
+2. The server answers `ServerMessage::Welcome` with the client's audio `source` number, its `ConnectionRole`, the environments a space may be bound to, the longest utterance its speech recognition takes (`utterance_limit`, in seconds, absent when there is no limit), and, for owners only, the backends and workspace roots.
 3. The client lists spaces with `ListSpaces`, creates one with `CreateSpace`, or joins one with `Join`. A joined client receives `ServerMessage::Space` with the complete `SpaceState` on joining and whenever it changes, so a client can always draw the latest state without keeping history.
 4. Push-to-talk sends `UtteranceBegin`, audio frames gated `Gate::Agent`, then `UtteranceEnd`; the server answers with `Transcript` messages and queues the final text for the agent. Agent speech arrives as `Speech` announcements followed by audio frames from `AGENT_SOURCE`, or `REPLAY_SOURCE` when played again for one participant.
 5. Approvals and questions in a `SpaceState` are answered with `Decide` and `Answer`. A failed request is reported with `ServerMessage::Error`, and the connection stays open.
