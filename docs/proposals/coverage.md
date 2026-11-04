@@ -1,6 +1,6 @@
 # Proposal: Reaching 100% Region Coverage When Some Code Can't Run in CI
 
-Status: **for discussion**, November 2026. Nothing here is decided or implemented. It covers [#55](https://github.com/ioquatix/tomori/issues/55) and touches stage 3 of [#73](https://github.com/ioquatix/tomori/issues/73), the server and headset builders.
+Status: **partly decided**, November 2026. The maintainer's decisions are recorded below; the change to Bake's coverage task is not decided. It covers [#55](https://github.com/ioquatix/tomori/issues/55) and touches stage 3 of [#73](https://github.com/ioquatix/tomori/issues/73), the server and headset builders.
 
 ## The request
 
@@ -15,59 +15,89 @@ From a conversation in the headset, November 2026:
 - **Agreed in principle.**
   - An explicit crate-level exclusion with a required reason, listed in the summary, is better than a lower target or ignore markers scattered through the code.
   - The excluded crate must stay thin. Logic such as gesture thresholds, panel placement, pose maths, input sampling and haptic mapping moves into covered crates.
-- **Not decided.** "Let's not make any changes yet; analyse the problem and think about the solution space."
+
+## Decisions
+
+From discussion with the maintainer, on this proposal's pull request:
+
+1. **Any crate may be excluded, published or not,** with a required, non-empty reason. The coverage report always names each excluded crate and shows its size. The headset shell will probably be published, because #73 stage 3 turns it into a builder that other projects use.
+2. **There is no size cap,** but exclusion is a last resort, not a convenience. A crate is excluded only where testing it is genuinely impractical in CI: it needs a headset, a display or audio hardware. The default answer to uncovered code is to write tests.
+3. **Crate names** come from the environment framework ([#97](https://github.com/ioquatix/tomori/issues/97)): `tomori-scene` for the shared scene state and frame step, and `tomori-render` for the renderers.
+4. **The frame step** shares only what is genuinely common between the headset and the desktop window, such as turning input into state, the conversation and the shared panels. It doesn't force one UX: the desktop and Quest interfaces may diverge. Platform-specific behaviour lives in covered, per-platform logic modules behind a narrow interface. Only the raw device calls stay in the shell.
+5. **Not decided:** changing Bake's coverage task, in base-rs's `bake-test`, to read the exclusion metadata. The headset's restructuring goes ahead first, since it pays off on its own.
 
 ## Recommendation in brief
 
 - **One exclusion mechanism: a whole crate.** Add `[package.metadata.bake.test.coverage]` to `bake-test`, with `exclude = true` and a required, non-empty `reason`.
+  - Any workspace crate may use it, published or not.
   - The excluded crate's tests still run and must pass. Only its regions stop counting.
   - The summary always names each excluded crate, its reason, its size in regions and how much of it the tests reach anyway. The exclusion can't quietly grow.
-  - No file regexes, no `#[coverage(off)]`, no `cfg(coverage)` stubs.
+  - No size limit, no file regexes, no `#[coverage(off)]`, no `cfg(coverage)` stubs.
 - **Measure only the workspace.** `bake-test` should count only regions under the workspace root. Today it fails on hosts whose standard library sources live outside rustup, such as Arch's `/usr/src/debug/rust`.
 - **Make the excluded crate thin by splitting `tomori-quest`.**
   - A platform shell keeps the `tomori-quest` name, the APK, the binary and every OpenXR, Vulkan-interop, Android, winit, cpal and PipeWire call. It is excluded.
-  - Everything else moves to covered crates: the app logic, with the #73 builder, and the renderers, tested on lavapipe.
-  - The key change is one per-frame step function that takes plain input and returns plain output. The OpenXR loop and the desktop window both feed it. Today that logic is written twice, inside `xr::run` and `desktop_participant::State::frame`, and neither copy is tested.
+  - Everything else moves to covered crates: the scene state and frame step to `tomori-scene`, with the #73 builder, and the renderers to `tomori-render`, tested on lavapipe.
+  - The key change is a shared frame step for what the headset and the desktop window have in common, with each platform's own behaviour in a covered module of its own. Today the frame logic is written twice, inside `xr::run` and `desktop_participant::State::frame`, and neither copy is tested.
 - **Keep it thin with two checks:**
   - a review rule: the shell makes no decisions;
-  - an optional size limit in the same metadata, so growing the shell needs a visible change to `Cargo.toml`.
+  - the dependency direction: the covered crates never depend on a platform crate.
 - **Examples stay unmeasured,** as cargo-llvm-cov already arranges. Anything an example needs beyond argument parsing and printing belongs in a library, where it's covered.
 - **Device and self-hosted runs** can provide evidence, but they don't count toward the gate.
 
 ## What the numbers say
 
-From a coverage run of `origin/main` on 2026-11-04 (`cargo bake --locked test:coverage --all-targets true`, all tests passing):
+### Now
+
+Re-measured on `origin/main` at `3960402` on 2026-11-04, with `cargo llvm-cov --workspace --all-targets` and `cargo llvm-cov report --ignore-filename-regex '^/usr/src/'`, all tests passing, on a host with a GPU:
 
 | | Regions | Uncovered | Covered | Share of the gap |
 | --- | ---: | ---: | ---: | ---: |
-| Workspace | 92,035 | 15,782 | 82.9% | 100% |
-| `tomori-quest` (`crates/client-quest`) | 47,006 | 10,548 | 77.6% | 66.8% |
-| `tomori-server` | 18,791 | 1,713 | 90.9% | 10.9% |
-| `tomori-backend-opencode` | 12,648 | 1,292 | 89.8% | 8.2% |
-| `tomori-speech` | 5,206 | 1,234 | 76.3% | 7.8% |
-| `tomori-environment-sky` | 1,401 | 568 | 59.5% | 3.6% |
-| Others | 6,983 | 427 | 93.9% | 2.7% |
+| Workspace | 100,236 | 9,364 | 90.7% | 100% |
+| `tomori-quest` (`crates/client-quest`) | 50,515 | 7,116 | 85.9% | 76.0% |
+| `tomori-server` | 19,641 | 1,110 | 94.3% | 11.9% |
+| `tomori-speech` | 5,431 | 653 | 88.0% | 7.0% |
+| `tomori-backend-opencode` | 14,499 | 350 | 97.6% | 3.7% |
+| Others | 10,150 | 135 | 98.7% | 1.4% |
 
-CI's figure is 76,322 of 92,022 (82.94%). The small difference is the `unreachable!()` exclusion.
+`tomori-speech`'s figure is lower here than in CI, which fetches Whisper tiny.en for its model tests; this host has only small.en.
 
-The analysis also sorted uncovered functions into categories. This view counts about 17,800 regions, because it includes roughly 2,000 in `examples/` and `tests.rs` files that the gate doesn't measure (see [What is configurable](#what-is-configurable)):
+Since the first measurement, at 82.9%, the rendering tests run on lavapipe in CI, the server, OpenCode backend, client, protocol, security and discovery crates have been tested, and CI fetches and caches the speech models. Three quarters of what remains is in `tomori-quest`:
+
+| File | Regions | Uncovered | Covered |
+| --- | ---: | ---: | ---: |
+| `xr.rs` | 2,570 | 1,864 | 27.5% |
+| `desktop_participant.rs` | 1,077 | 916 | 15.0% |
+| `connection.rs` | 3,367 | 777 | 76.9% |
+| `desktop.rs` | 699 | 500 | 28.5% |
+| `console.rs` | 425 | 377 | 11.3% |
+| `conversation.rs` | 10,048 | 358 | 96.4% |
+| `controller_ui.rs` | 1,099 | 270 | 75.4% |
+| `vulkan.rs` | 244 | 244 | 0% |
+| `main.rs` | 165 | 165 | 0% |
+| `pipewire_video.rs` | 336 | 155 | 53.9% |
+| `spectator_feed.rs` | 428 | 154 | 64.0% |
+| `discover.rs` | 126 | 126 | 0% |
+| `capture.rs`, `playback.rs` | 1,014 | 233 | 77.0% |
+| Others | 28,917 | 977 | 96.6% |
+
+### The first measurement
+
+From the analysis that started this proposal, on 2026-11-04 at `fd2e9ea`, the workspace was at 82.9%. It sorted uncovered functions into categories:
 
 | Category | Share | Where | Can CI run it? |
 | --- | ---: | --- | --- |
 | OpenXR and platform glue | 20% | `xr.rs`, `desktop*.rs`, `vulkan.rs`, `pipewire_video.rs` | Partly. Most of `xr::run` is interaction logic, not OpenXR calls. |
-| Bodies of ignored GPU tests | 19% | inline test modules in `graphics.rs` and `workspace_graphics.rs` | Yes, on lavapipe. In progress. |
-| Networking and error paths | 18% | both `connection.rs` files, `hub.rs`, `wire.rs`, `api.rs` | Yes. Server side in progress. |
-| GPU and rendering | 12% | renderers, `environment-sky` | Yes, on lavapipe. |
+| Bodies of ignored GPU tests | 19% | inline test modules in `graphics.rs` and `workspace_graphics.rs` | Yes, on lavapipe. Done. |
+| Networking and error paths | 18% | both `connection.rs` files, `hub.rs`, `wire.rs`, `api.rs` | Yes. The server side is done. |
+| GPU and rendering | 12% | renderers, `environment-sky` | Yes, on lavapipe. Done. |
 | Examples | 7% | `recognition_benchmark.rs`, `presence_sender.rs`, `connect.rs` | Not measured today. |
-| CLI and `main` | 7% | `tomori-server`'s `main.rs`, `console.rs`, `discover.rs` | Yes, with injected arguments and I/O. |
+| CLI and `main` | 7% | `tomori-server`'s `main.rs`, `console.rs`, `discover.rs` | Yes, with injected arguments and I/O. The server's is done. |
 | Untested pure logic | 5% | `conversation.rs`, `transcript.rs`, `markdown_lite.rs` | Yes. |
-| Speech models and their ignored tests | 7% | `kokoro.rs`, `transducer.rs`, `vad.rs`, `offline.rs` | Yes, if CI fetches and caches the models. |
+| Speech models and their ignored tests | 7% | `kokoro.rs`, `transducer.rs`, `vad.rs`, `offline.rs` | Yes. CI now fetches and caches the models. |
 | Test helpers' unused branches | 3% | various | Yes, or remove the branches. |
-| Audio devices, multicast tests | 2% | `capture.rs`, `playback.rs`, `discovery` | Partly. |
+| Audio devices, multicast tests | 2% | `capture.rs`, `playback.rs`, `discovery` | Partly. Multicast on loopback is done. |
 
-**What lavapipe does.** Run on lavapipe, 10 of the 11 ignored GPU tests pass and close 4,135 regions, which takes the workspace to about 87.4%. The renderer files go from 56.7% to 91.4%. One test, `vulkan_sign_images_include_post_text_and_smooth_fade_in_both_eyes`, fails on llvmpipe only.
-
-**Two things the totals hide:**
+### Two things the totals hide
 
 - **Android-only code is never measured.** About 675 lines under `cfg(target_os = "android")` aren't even compiled by a host coverage run:
   - `android.rs`;
@@ -77,14 +107,16 @@ The analysis also sorted uncovered functions into categories. This view counts a
   Nothing reports them, so they're the silent erosion this proposal wants to prevent.
 - **Some code exists only for Android.** `capture.rs`'s `run_capture`, `drain` and `InputStream`, and `graphics::requested_samples`, are compiled on the host but called only from Android code, so the host build flags them as dead.
 
-**What is truly beyond GitHub CI** comes to about 3,600 regions:
+### What is truly beyond GitHub CI
+
+About 3,600 regions:
 
 - the OpenXR calls in `xr::run`;
 - `vulkan.rs`, the Vulkan device that OpenXR requires;
 - the winit event handlers;
 - PipeWire output.
 
-That's about 4% of the workspace. An exclusion sized to that, and no bigger, is the goal.
+That's under 4% of the workspace. An exclusion sized to that, and no bigger, is the goal. It isn't a cap; it's what decision 2 implies once everything testable is tested.
 
 ## The solution space
 
@@ -102,8 +134,8 @@ The excluded crate is declared in its own `Cargo.toml`, with a reason; the gate 
   - It covers Android cleanly: if every `cfg(target_os = "android")` item lives in the excluded crate, nothing unmeasured remains elsewhere.
 - **Against:**
   - It's coarse: it needs a crate split before it helps.
-  - An excluded crate could grow unnoticed if the summary only says "excluded". So the summary must report its size, and a limit can be set; see below.
-- **Verdict:** recommended. It is the only exclusion mechanism.
+  - An excluded crate could grow unnoticed if the summary only said "excluded". So the summary always reports its size.
+- **Verdict:** decided. It is the only exclusion mechanism.
 
 ### 2. File or module exclusion via `--ignore-filename-regex` from config
 
@@ -115,7 +147,7 @@ A workspace setting, such as `ignore = ["crates/client-quest/src/xr\\.rs"]`, is 
   - Regexes also match files added later.
   - They go stale silently when files move.
   - A module boundary is weaker than a crate's: nothing stops covered code calling into an excluded file, or excluded code growing logic.
-- **Verdict:** not recommended. Reconsider it only if a crate split turns out impossible somewhere. If so, use exact paths, not regexes, each with a reason, reported like crates.
+- **Verdict:** not recommended.
 
 ### 3. `#[coverage(off)]`
 
@@ -170,14 +202,14 @@ Build the `aarch64-linux-android` library with `-C instrument-coverage`, set `LL
 This comes in two forms.
 
 - **(a) Restructure so the logic needs no OpenXR.**
-  - Most of `xr::run` (lines 30–912) decides what buttons, rays, palms and holds mean: hold-to-leave, which wrist wins, when to tick haptics, where panels stand.
-  - `desktop_participant::State::frame` (lines 517–885) repeats much of it for the keyboard and mouse. Its comments often say "as on the headset" or "see `xr::run`".
-  - One shared frame step with plain input removes the duplication and makes all of it testable. The Base testing skill warns against "production abstractions solely to satisfy coverage"; this one also removes a real duplication.
+  - Most of `xr::run` decides what buttons, rays, palms and holds mean: hold-to-leave, which wrist wins, when to tick haptics, where panels stand.
+  - `desktop_participant::State::frame` repeats much of it for the keyboard and mouse. Its comments often say "as on the headset" or "see `xr::run`".
+  - A shared frame step for the common part, with plain input, removes the duplication and makes all of it testable. The Base testing skill warns against "production abstractions solely to satisfy coverage"; this one also removes a real duplication.
 - **(b) A real OpenXR runtime in CI.**
   - Monado, the open-source runtime, has a null compositor and simulated devices.
   - If it runs headless on a GitHub runner with lavapipe, the real `run_xr` path, which already exists for host runtimes, could run as a test, and the shell could shrink further.
   - Whether it does needs a spike.
-- **Verdict:** do (a) as part of the split. Try (b) later; if it works, it shrinks the exclusion, and the metadata stays the same.
+- **Verdict:** do (a), started first; see the staging. Try (b) later; if it works, it shrinks the exclusion, and the metadata stays the same.
 
 ### How examples should count
 
@@ -195,7 +227,7 @@ The same default affects tests themselves:
 
 - An inline `#[cfg(test)] mod tests` is measured, so ignored test bodies and unused helper branches count.
 - Tests in a `tests.rs` file, as `bake-test` and `environment-sky` lay them out, aren't measured.
-- Moving Tomori's inline test modules into `tests.rs` files would make the layout consistent. Their 19% "ignored GPU test bodies" mostly disappears anyway once lavapipe runs them.
+- Moving Tomori's inline test modules into `tests.rs` files would make the layout consistent.
 
 ## How Bake's coverage task works today
 
@@ -240,15 +272,13 @@ It then:
 
 ### The proposed metadata
 
-The metadata goes in the excluded crate's own manifest, under the existing `bake.test` namespace:
+Not decided: this is what `bake-test` would read if the change goes ahead. The metadata goes in the excluded crate's own manifest, under the existing `bake.test` namespace:
 
 ```toml
 # crates/client-quest/Cargo.toml
 [package.metadata.bake.test.coverage]
 exclude = true
-reason = "OpenXR session and frame loop, the Vulkan device OpenXR requires, and the Android activity, AAudio and JNI glue: they need a headset runtime that GitHub CI lacks. Logic lives in tomori-app and tomori-render, which are covered."
-# Optional: fail if the crate grows past this many measured regions.
-limit = 3000
+reason = "OpenXR session and frame loop, the Vulkan device OpenXR requires, the winit event handlers, and the Android activity, AAudio and JNI glue: they need a headset, a display or audio hardware that GitHub CI lacks. Logic lives in tomori-scene and tomori-render, which are covered."
 ```
 
 **Schema.** These rules are enforced by `bake-test`, and an error names the manifest:
@@ -256,15 +286,15 @@ limit = 3000
 | Key | Type | Rule |
 | --- | --- | --- |
 | `exclude` | boolean | Required if the table is present. `false` is allowed, so an exclusion can be switched off without deleting its history. |
-| `reason` | string | Required and non-empty, after trimming, when `exclude = true`. It should say what can't run and where, and where the logic went. |
-| `limit` | positive integer | Optional. If the crate's measured regions exceed it, the gate fails, naming the crate, its size and the limit. |
+| `reason` | string | Required and non-empty, after trimming, when `exclude = true`. It should say what can't run and why, and where the logic went. |
 | anything else | | Rejected, so a typo such as `reasons` fails rather than being ignored. |
+
+There is no size limit (decision 2). The summary's size line, and review, keep the exclusion honest.
 
 **Where the table may appear:**
 
-- Only in a workspace member's `[package.metadata]`.
+- Only in a workspace member's `[package.metadata]`, published or not (decision 1).
 - `[workspace.metadata.bake.test.coverage]` is reserved for workspace-wide settings and has no `exclude`.
-- A suggested rule, not decided: Base allows `exclude = true` only in a `publish = false` crate. A published library should never ship unmeasured code, and an application shell is never published.
 
 **Behaviour:**
 
@@ -279,13 +309,13 @@ limit = 3000
 
 ### The summary
 
-The summary keeps exclusions in view whether the gate passes or fails. The figures below are illustrative:
+The summary keeps exclusions in view whether the gate passes or fails. It always names the excluded crate and its size. The figures below are illustrative:
 
 ```text
-Region coverage passed: 74,630/74,630 measured source regions covered.
+Region coverage passed: 96,630/96,630 measured source regions covered.
   Excluded by unreachable!(): 3 regions.
-  Excluded crate tomori-quest (crates/client-quest): 2,480 regions, 1,104 reached by tests (44.5%), limit 3,000.
-    Reason: OpenXR session and frame loop, the Vulkan device OpenXR requires, and the Android activity, AAudio and JNI glue: …
+  Excluded crate tomori-quest (crates/client-quest): 3,480 regions, 1,104 reached by tests (31.7%).
+    Reason: OpenXR session and frame loop, the Vulkan device OpenXR requires, the winit event handlers, …
   Not measured (cargo-llvm-cov defaults): examples/, tests/, benches/, tests.rs files.
 ```
 
@@ -295,11 +325,11 @@ When the gate fails, the same lines follow the count of uncovered regions, then 
 
 The `base-project-testing` skill and `bake-test`'s `context/testing.md` would gain a short section:
 
-- **When it's allowed.** A crate may be excluded only when its code calls platform interfaces that CI can't provide: XR runtimes, device drivers, mobile operating system services, windowing event loops.
+- **A last resort.** A crate may be excluded only when testing it in CI is genuinely impractical: its code needs hardware CI doesn't have, such as a headset, a display or audio devices. The default answer to uncovered code is to write tests.
 - **Never for:**
   - code that is merely hard to test: injected I/O, fakes and `#[cfg(test)]` shims come first, as the skill already says;
-  - logic;
-  - a published crate.
+  - logic.
+- **Published or not.** A published crate may be excluded, as a headset shell that others build on is. Its reason must say what can't run.
 - **The excluded crate is a shell.** It translates between platform types and plain types, and makes no decisions. Any branch that isn't about a platform call's result belongs in a covered crate.
 - **Platform-specific code.** Code compiled only for a platform the gate doesn't run on, such as `cfg(target_os = "android")`, lives in the excluded crate, or is tested on that platform. This replaces the skill's "run coverage on each supported target" for targets CI can't run tests on.
 - **Reviewing a change to an exclusion.** It needs the same scrutiny as lowering a target would. Reviewers check the reason, the size and whether logic moved in.
@@ -309,15 +339,15 @@ The `base-project-testing` skill and `bake-test`'s `context/testing.md` would ga
 ### The shape
 
 ```text
-tomori-quest  (crates/client-quest; excluded; the APK, the `tomori` binary, the cdylib)
-  ├── tomori-app     (crates/app; covered; the headset app logic, its builder for #73)
+tomori-quest   (crates/client-quest; excluded; the APK, the `tomori` binary, the cdylib; probably published, as #73's headset builder)
+  ├── tomori-scene   (crates/scene; covered; the scene state, the shared frame step, each platform's logic; the builder's core)
   ├── tomori-render  (crates/render; covered on lavapipe; wgpu renderers)
   └── openxr, ash, android-activity, ndk, jni, winit, cpal
-tomori-render ──► tomori-app's plain types, tomori-environment-sky, wgpu
-tomori-app    ──► tomori-client, tomori-protocol, tomori-security, tomori-discovery, glam
+tomori-render ──► tomori-scene's plain types, tomori-environment-sky, wgpu
+tomori-scene  ──► tomori-client, tomori-protocol, tomori-security, tomori-discovery, glam
 ```
 
-**Names.** `tomori-app` is a working name; see the open questions. `tomori-render` is the name `docs/naming.md` already plans for #97, and it can start here as the headset's renderers.
+**Names.** `tomori-scene` and `tomori-render` are the names `docs/naming.md` already plans for #97 (decision 3). They can start here as the headset's scene logic and renderers, and grow into the environment framework.
 
 **Why this shape:**
 
@@ -327,26 +357,26 @@ tomori-app    ──► tomori-client, tomori-protocol, tomori-security, tomori-
   - engagement derived from platform-neutral signals.
 
   The split brings the code in line with that design.
-- **It's what #73 needs.** A downstream headset build registers its environments through a builder in `tomori-app` and uses `tomori-quest`'s shell to run, without forking either.
+- **It's what #73 needs.** A downstream headset build registers its environments through a builder and uses `tomori-quest`'s shell to run, without forking either.
 - **It keeps names stable.** `tomori-quest` keeps its name and its `[package.metadata.android]`, so `scripts/android.sh`, the APK name and the application ID don't change.
 
-### The seam: one frame step
+### The seam: a shared frame step and per-platform logic
 
-- **The new type.** `tomori-app` gains a `Frame` (or `Participant`) type with one step. It takes a `FrameInput`:
-  - session focus and whether the headset is worn;
-  - the display time;
-  - the head and per-eye views as `glam` types;
-  - `Controls`, the existing button and axis struct;
-  - controller poses and hand joints, each optional.
+The headset and the desktop window share some of what they do each frame, but not all of it, and their interfaces may diverge (decision 4). So the seam has three parts:
 
-  It returns a `FrameOutput`:
-  - what the renderer should draw;
-  - haptic pulses;
-  - the listener's pose for spatial audio;
-  - presence to send;
-  - log events.
-- **The shell's part.** It fills the input from OpenXR, or from the keyboard and mouse on the desktop, and carries out the output. That is all it does.
-- **The tests.** They drive the step with scripted input. For example: "hold B in a space for 1 s and the participant leaves", "the left palm facing the head opens the hand menu", "a focus loss during X cancels the utterance".
+- **The shared step,** for what is genuinely common, given plain input:
+  - the controller's buttons as one frame's presses and holds: navigating, the right wrist's transcript, B and holding it to leave, Y and the pinned hand menu, A, push-to-talk, muting and replaying;
+  - letting go of everything held when focus is lost;
+  - arrival's motion, the hand menu, the right wrist's transcript, pointing and choosing;
+  - the swarm, the space's workers and result cards;
+  - the shared panels: the status pill, the recording indicator and the transcript;
+  - what to draw, where the participant hears from, and the presence to send.
+- **Each platform's logic,** in a covered module of its own, behind a narrow interface:
+  - the headset: which hand's palm shows what from controller poses and hand tracking, the pinned menu above the left controller, the live microphone's grip, the waiting cues on the palms, the drawn ray, vibrations and the session's focus;
+  - the desktop window: the keys and mouse as the controller's buttons, the head the mouse turns, the palms held in view while M or T is down, knocks in the title, and which feedback it gives without controllers.
+- **The shell,** with only raw device calls: OpenXR's session, actions, spaces and swapchain, the Vulkan device, winit's events and surface, and the audio devices. It fills the input from the device and carries out the output.
+
+The tests drive the shared step and each platform's logic with scripted input. For example: "hold B in a space for 1 s and the participant leaves", "the right palm within 45° of up for 0.2 s shows the transcript", "a focus loss during X cancels the utterance".
 
 ### What moves where
 
@@ -355,23 +385,24 @@ This is a high-level, file-by-file plan. "Split" means part of the file stays as
 | File | Today | Goes to |
 | --- | --- | --- |
 | `main.rs`, `android.rs` | entry points, Android activity | **shell** |
-| `lib.rs` | module list, `run_*` entry points, `android_main`, `AndroidEventPump` | **shell**: the entry points, which call into `tomori-app` |
-| `xr.rs` | `run`, the session loop and frame body; `Input`, actions and bindings; `HandTracking`; `ControllerModels`; `SceneAnchor` and view maths | **split**: the session, swapchain, action and space calls stay in the **shell**. Into **app**: the frame body's decisions, `Controls::from_actions`, `LiveGrip`, `SceneAnchor`'s maths, `initial_scene_transform`, `head_pose` and `view_projection` (with `glam` input), and `arrival_target` |
+| `lib.rs` | module list, `run_*` entry points, `android_main`, `AndroidEventPump` | **shell**: the entry points, which call into `tomori-scene` |
+| `xr.rs` | `run`, the session loop and frame body; `Input`, actions and bindings; `HandTracking`; `ControllerModels`; `SceneAnchor` and view maths | **split**: the session, swapchain, action and space calls stay in the **shell**. Into **scene**: the frame body's decisions, `Controls::from_actions`, `LiveGrip`, `SceneAnchor`'s maths, `initial_scene_transform`, `head_pose` and `view_projection` (with `glam` input), and `arrival_target` |
 | `vulkan.rs` | the Vulkan instance and device for OpenXR, image import | **shell** |
-| `haptics.rs` | OpenXR haptic action | **split**: the action stays in the **shell**; which pulse for which event goes to **app**, next to `feedback.rs` |
-| `desktop.rs` | winit app, window GPU, `Camera` | **split**: the `ApplicationHandler`, surface and acquisition stay in the **shell**; `Camera` and its ray maths go to **app**, with their tests |
-| `desktop_participant.rs` | winit app, key mapping, `Head`, `State::frame` | **split**: the event handler stays in the **shell**; `Participant::key`, `Input`, `Head`, and the frame body, rewritten to use the shared step, go to **app** |
-| `headless_spectator.rs` | PipeWire loop | **split**: `next_frame_time` and the draw schedule go to **app**; the loop stays in the **shell** |
+| `haptics.rs` | OpenXR haptic action | **split**: the action stays in the **shell**; which pulse for which event goes to **scene**, next to `feedback.rs` |
+| `desktop.rs` | winit app, window GPU, `Camera` | **split**: the `ApplicationHandler`, surface and acquisition stay in the **shell**; `Camera` and its ray maths go to **scene**, with their tests |
+| `desktop_participant.rs` | winit app, key mapping, `Head`, `State::frame` | **split**: the event handler stays in the **shell**; the key mapping, `Head` and the desktop's own frame logic go to **scene**, using the shared step |
+| `headless_spectator.rs` | PipeWire loop | **split**: `next_frame_time` and the draw schedule go to **scene**; the loop stays in the **shell** |
 | `pipewire_video.rs` | GPU readback, gstreamer child | **split**: `pack_rows` and the frame layout go to **render**; `Producer` stays in the **shell** (it is already partly tested through `from_child`) |
-| `capture.rs` | `Capture` trait, downmix, cpal and AAudio modules, `run_capture`, `drain`, `InputStream` | **split**: the trait, `downmix`, `run_capture`, `drain` and `InputStream` go to **app**, tested on the host with a fake stream, which also ends their dead-code warnings; the cpal and AAudio modules stay in the **shell** |
+| `capture.rs` | `Capture` trait, downmix, cpal and AAudio modules, `run_capture`, `drain`, `InputStream` | **split**: the trait, `downmix`, `run_capture`, `drain` and `InputStream` go to **scene**, tested on the host with a fake stream, which also ends their dead-code warnings; the cpal and AAudio modules stay in the **shell** |
 | `playback.rs` | `Playback` trait, channel rendering, cpal and AAudio modules | **split** the same way |
-| `graphics.rs`, `workspace_graphics.rs`, `arrival_graphics.rs`, `controller_graphics.rs`, `controller_ui.rs`, `ui_panel.rs`, `spectator_view.rs` and the `.wgsl` files | wgpu renderers | **render**, covered on lavapipe |
-| `ui_text.rs`, `caption.rs`, `swarm.rs` | text layout, captions, the swarm simulation | **app** if free of wgpu, otherwise **render** |
-| `conversation.rs`, `connection.rs`, `delegation.rs`, `transcript.rs`, `markdown_lite.rs`, `hand_menu.rs`, `arrival.rs`, `arrival_motion.rs`, `controller.rs`, `interaction.rs`, `pointing.rs`, `panel_anchor.rs`, `pill.rs`, `recording.rs`, `feedback.rs`, `spatial_audio.rs`, `speakers.rs`, `server_choice.rs`, `identity.rs`, `log_cadence.rs`, `environment.rs`, `hands.rs` | app logic and state | **app**. Most are already above 95%. `connection.rs`, with 658 uncovered regions, and `conversation.rs`, with 340, are the main gaps to test. |
-| `spectator.rs`, `spectator_feed.rs` | the spectator's options and feed | **app** for now; `crates/client-spectator` later, per `design/clients.md` and #56 |
-| `console.rs`, `discover.rs` | terminal panel, server listing | **app**, with their input and output injected so that `run` is tested; they need no platform |
+| `graphics.rs`, `workspace_graphics.rs`, `arrival_graphics.rs`, `controller_graphics.rs`, `ui_panel.rs`, `spectator_view.rs` and the `.wgsl` files | wgpu renderers | **render**, covered on lavapipe |
+| `controller_ui.rs` | the shared panels' logic and their GPU panels | **split**: what shows, where and with what text goes to **scene**; the panels to **render** |
+| `ui_text.rs`, `caption.rs`, `swarm.rs` | text layout, captions, the swarm simulation | **scene** if free of wgpu, otherwise **render** |
+| `conversation.rs`, `connection.rs`, `delegation.rs`, `transcript.rs`, `markdown_lite.rs`, `hand_menu.rs`, `arrival.rs`, `arrival_motion.rs`, `controller.rs`, `interaction.rs`, `pointing.rs`, `panel_anchor.rs`, `pill.rs`, `recording.rs`, `feedback.rs`, `spatial_audio.rs`, `speakers.rs`, `server_choice.rs`, `identity.rs`, `log_cadence.rs`, `environment.rs`, `hands.rs` | app logic and state | **scene**. Most are already above 95%. `connection.rs`, with 777 uncovered regions, and `conversation.rs`, with 358, are the main gaps to test. |
+| `spectator.rs`, `spectator_feed.rs` | the spectator's options and feed | **scene** for now; `crates/client-spectator` later, per `design/clients.md` and #56 |
+| `console.rs`, `discover.rs` | terminal panel, server listing | **scene**, with their input and output injected so that `run` is tested; they need no platform |
 
-**Estimated shell size.** Roughly 2,000–3,000 measured regions:
+**Estimated shell size.** Roughly 2,000–3,500 measured regions:
 
 - the OpenXR calls left in `xr.rs`;
 - `vulkan.rs` (244);
@@ -385,32 +416,30 @@ That is within the ~3,600 regions the analysis found truly beyond CI, and about 
 
 **Order of the split.** One pull request each, every one leaving the tree green:
 
-1. Extract the frame step from `xr::run` and `desktop_participant::State::frame` into a module inside `tomori-quest`, with tests. This is the only step that changes behaviour-bearing code, and the one with the most value even if nothing else follows.
+1. Draw the device boundary inside `tomori-quest`: extract the shared frame step and each platform's logic from `xr::run` and `desktop_participant::State::frame` into covered modules, with tests, leaving the device files as thin calls. This is the only step that changes behaviour-bearing code, and the one with the most value even if nothing else follows. Started.
 2. Move the renderers into `tomori-render`.
-3. Move the app logic into `tomori-app`. `tomori-quest` is now the shell.
-4. Add the exclusion metadata to `tomori-quest`, once `bake-test` supports it.
+3. Move the scene logic into `tomori-scene`. `tomori-quest` is now the shell.
+4. Add the exclusion metadata to `tomori-quest`, if `bake-test` supports it by then (decision 5).
 
 ### Enforcing thinness
 
 | Option | For | Against |
 | --- | --- | --- |
-| Review checklist only | No tooling | Relies on memory; the shell grew this way in the first place |
-| `limit` in the metadata, set just above the shell's current size | Growth needs a visible `Cargo.toml` change and a reason in review; the summary shows the headroom | One more number to maintain; it's a cap on the exception, not a floor on coverage |
-| Dependency rule: `tomori-app` and `tomori-render` never depend on `openxr`, `ash`, `winit`, `cpal`, `ndk` or `jni` | The compiler enforces the direction; already a validation step in `design/clients.md` | Doesn't limit logic written directly in the shell |
+| Review rule: the shell makes no decisions | No tooling | Relies on memory; the shell grew this way in the first place |
+| The summary's size line for each excluded crate | Every run shows the shell's size and how much tests reach; growth shows in review | Nothing fails on its own |
+| Dependency rule: `tomori-scene` and `tomori-render` never depend on `openxr`, `ash`, `winit`, `cpal`, `ndk` or `jni` | The compiler enforces the direction; already a validation step in `design/clients.md` | Doesn't limit logic written directly in the shell |
 | A lint on the shell, such as limits on branching or function length | Automatic | Crude; branches on platform results are legitimate |
 
-**Recommendation.** Use the dependency rule, which comes free with the crate split, plus `limit`, plus a written rule: the shell makes no decisions. A pull request that raises `limit` says why in its description.
-
-This is not a floor. The covered crates stay at 100%; `limit` only stops the exception from growing.
+**Decided.** No size limit (decision 2). Use the dependency rule, which comes free with the crate split, the review rule, and the summary's size line.
 
 ## Staging
 
 | Stage | What | Where | State |
 | --- | --- | --- | --- |
-| 1 | Run the ignored GPU tests on lavapipe in the coverage job, and fix or adapt the llvmpipe-only failure | Tomori | In progress. About 4,100 regions, reaching ~87.4% |
-| 2 | Server-side tests: `tomori-server`, `tomori-backend-opencode`, `tomori-speech`, `tomori-discovery` and the small crates | Tomori | In progress. About 4,700 regions. The speech models need fetching and caching in CI (a question below). The multicast tests may run on a runner's loopback with multicast enabled. |
-| 3 | `bake-test` 0.4: the exclusion metadata, measuring only the workspace, the summary; the guidance in `base-project-testing` and `context/testing.md` | base-rs `bake-test`, `base-project` | Proposed. Tomori then updates its `bake/` dependency |
-| 4 | The `tomori-quest` split, in the four pull requests above, then the remaining app-logic tests | Tomori | Proposed. Lines up with #73's builders and `design/clients.md`. This is where most of the remaining `tomori-quest` gap closes |
+| 1 | Run the GPU tests on lavapipe in the coverage job | Tomori | Done |
+| 2 | Server-side tests: `tomori-server`, `tomori-backend-opencode`, `tomori-speech`, `tomori-discovery` and the small crates, with the speech models fetched and cached in CI | Tomori | Mostly done; the workspace is at about 91% |
+| 3 | `bake-test` 0.4: the exclusion metadata, measuring only the workspace, the summary; the guidance in `base-project-testing` and `context/testing.md` | base-rs `bake-test`, `base-project` | Not decided (decision 5) |
+| 4 | The `tomori-quest` split, in the four pull requests above, then the remaining tests of the scene logic | Tomori | The first pull request is open. Lines up with #73's builders and `design/clients.md`. This is where most of the remaining `tomori-quest` gap closes |
 | 5 | Make the gate required | Tomori | When the workspace passes. See below |
 
 **Stage 5, making the gate required:**
@@ -418,16 +447,16 @@ This is not a floor. The covered crates stay at 100%; `limit` only stops the exc
 - Move the coverage step into `test.yml` as Base's canonical workflow does, on stable only; the minimum-version matrix entry keeps plain `cargo test`.
 - Add it to `test-result`'s `needs`, so that the ruleset already requiring `test-result` requires it.
 - Delete `coverage.yml`, and its grep step if `bake-test` writes the job summary itself.
-- Set a longer timeout than the current 30 minutes, since the lavapipe and model tests add time.
+- Keep its timeout above the current run time; the lavapipe and model tests add time.
 
-**A possible earlier step, not a floor.** Run `cargo bake test:coverage --package <crate>` as a required job for each crate as soon as it reaches 100% on its own tests, so that finished crates can't slip back while others catch up. Whether `--package` reports only that crate's files under cargo-llvm-cov needs checking, and it's stricter: other crates' tests don't count. Drop these jobs once the workspace gate is required.
+**A possible earlier step, not a floor.** Run `cargo bake test:coverage --package <crate>` as a required job for each crate as soon as it reaches 100% on its own tests, so that finished crates can't slip back while others catch up. `tomori-protocol`, `tomori-security` and `tomori-backend` were at 100% in the measurement above. Whether `--package` reports only that crate's files under cargo-llvm-cov needs checking, and it's stricter: other crates' tests don't count. Drop these jobs once the workspace gate is required.
 
 ## Design documents affected, if adopted
 
-This proposal changes no `design/*.md` file. If it's agreed:
+This proposal changes no `design/*.md` file. As it's carried out:
 
-- **`design/crates.md`:** add `tomori-app` and `tomori-render` to the unpublished table, and record the coverage exclusion rule for `publish = false` crates.
-- **`design/clients.md`:** name `tomori-app` as the headset's platform-neutral core, and add to its validation that the core and render crates depend on no OpenXR, windowing or platform audio crate. It already asks for most of this.
+- **`design/crates.md`:** add `tomori-scene` and `tomori-render`, and say whether each is published; record that any crate may carry a coverage exclusion, with a reason, as a last resort.
+- **`design/clients.md`:** name `tomori-scene` as the headset's and desktop window's platform-neutral core, with the shared frame step and each platform's logic, and add to its validation that the scene and render crates depend on no OpenXR, windowing or platform audio crate. It already asks for most of this.
 - **A testing requirement,** in a new `design/testing.md` or in `readme.md`'s Tests section:
   - 100% of measured regions;
   - the one excluded crate and its reason;
@@ -435,11 +464,13 @@ This proposal changes no `design/*.md` file. If it's agreed:
 
 ## Open questions
 
-1. **One mechanism.** Is a crate-level exclusion the only one Base offers, with no file lists, attributes or `cfg(coverage)`? And should exclusions be limited to `publish = false` crates?
-2. **The limit.** Should `limit` exist, and should Tomori use it? Or is the summary's size line, plus review, enough?
-3. **Names and shape.** Should `tomori-quest` stay the name of the shell, since it is the APK? What should the covered crate be called: `tomori-app`, `tomori-headset` or `tomori-participant`? Should `tomori-render` start now or wait for #97? Does the desktop window glue stay in the same shell, or go to its own `client-desktop` or `client-spectator` shell (#56)?
-4. **Examples.** Keep them unmeasured and thin, as they are now, or run them as smoke tests? Should `recognition_benchmark.rs` become a bench or a binary?
-5. **Speech models in CI.** Fetch and cache them, which costs time and cache space, so that the ignored model tests run? Or test the loaders against small fixtures and leave full models to manual runs?
-6. **Test layout.** Move inline `mod tests` blocks into `tests.rs` files, as Base lays them out, which also takes test code out of the measurement?
-7. **Device evidence.** Is an occasional manual coverage run on the headset worth setting up, or is a thin, reviewed shell enough? Is a Monado spike worth doing to shrink the shell further?
-8. **Ordering.** Should the frame-step extraction (split step 1) come before the `bake-test` work, since it pays off on its own? And should crates get required per-package gates as they reach 100%?
+Answered: the mechanism and who may use it (decision 1), the limit (decision 2), the covered crates' names (decision 3), the frame step's shape (decision 4), fetching the speech models in CI (done), and the ordering: the headset's restructuring comes first, without waiting for Bake (decision 5).
+
+Still open:
+
+1. **The Bake change.** Should `bake-test` read the exclusion metadata as described, and when?
+2. **The shell's name and the desktop window.** Should `tomori-quest` stay the name of the shell, since it is the APK? Does the desktop window's glue stay in the same shell, or go to its own `client-desktop` or `client-spectator` shell (#56)?
+3. **Examples.** Keep them unmeasured and thin, as they are now, or run them as smoke tests? Should `recognition_benchmark.rs` become a bench or a binary?
+4. **Test layout.** Move inline `mod tests` blocks into `tests.rs` files, as Base lays them out, which also takes test code out of the measurement?
+5. **Device evidence.** Is an occasional manual coverage run on the headset worth setting up, or is a thin, reviewed shell enough? Is a Monado spike worth doing to shrink the shell further?
+6. **Per-crate gates.** Should crates get required per-package gates as they reach 100%?
