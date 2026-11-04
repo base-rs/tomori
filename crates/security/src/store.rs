@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fault::{self, Operation};
 use crate::token::{self, TOKEN_PREFIX};
 use crate::{Authenticator, Credentials, Principal, Verdict};
 
@@ -146,8 +147,9 @@ impl TokenStore {
     /// Read the file again, for changes another process made. Returns whether the tokens changed. The file is read whole rather than trusting its modification time, which may not change between two quick writes.
     pub fn reload(&self) -> Result<bool, StoreError> {
         // Under the lock, so that a change being made, here or in another process, is either read whole or not begun. Closing the lock file at the end releases the lock.
-        let lock = File::create(self.path.with_extension("lock"))?;
-        lock.lock_shared()?;
+        let lock_path = self.path.with_extension("lock");
+        let lock = File::create(&lock_path)?;
+        fault::run(Operation::LockShared, &lock_path, || lock.lock_shared())?;
         let entries = read(&self.path)?;
         let mut state = self.write_state();
         let changed = entries != state.entries;
@@ -157,8 +159,9 @@ impl TokenStore {
 
     /// Apply `change` to the entries as they are in the file now, under the lock, and write them back. Closing the lock file at the end releases the lock, so that once the change is written it is never reported as failed.
     fn change(&self, change: impl FnOnce(&mut Vec<Entry>)) -> Result<(), StoreError> {
-        let lock = File::create(self.path.with_extension("lock"))?;
-        lock.lock()?;
+        let lock_path = self.path.with_extension("lock");
+        let lock = File::create(&lock_path)?;
+        fault::run(Operation::Lock, &lock_path, || lock.lock())?;
         let mut entries = read(&self.path)?;
         change(&mut entries);
         write(&self.path, &entries)?;
@@ -224,13 +227,13 @@ fn write(path: &Path, entries: &[Entry]) -> io::Result<()> {
 pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("tmp");
     let mut file = private(&temporary)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
+    fault::run(Operation::Write, &temporary, || file.write_all(contents))?;
+    fault::run(Operation::Sync, &temporary, || file.sync_all())?;
     fs::rename(&temporary, path)
 }
 
 /// Create (or truncate) a file readable and writable only by its user.
-pub(crate) fn private(path: &Path) -> io::Result<File> {
+fn private(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -294,11 +297,11 @@ mod tests {
 
         // The store survives reopening, as after a restart.
         let reopened = TokenStore::open(&directory).unwrap();
-        assert_eq!(reopened.entries(), [entry]);
-        assert!(matches!(
+        assert_eq!(reopened.entries(), std::slice::from_ref(&entry));
+        assert_eq!(
             reopened.authenticate(&presented(&token)),
-            Verdict::Authenticated(_)
-        ));
+            Verdict::Authenticated(entry.principal())
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -335,10 +338,10 @@ mod tests {
         assert_eq!(server.authenticate(&presented(&token)), Verdict::Pass);
         assert!(server.reload().unwrap());
         assert!(!server.reload().unwrap());
-        assert!(matches!(
+        assert_eq!(
             server.authenticate(&presented(&token)),
-            Verdict::Authenticated(_)
-        ));
+            Verdict::Authenticated(entry.principal())
+        );
 
         assert!(command.revoke(&entry.id).unwrap());
         assert!(!command.revoke(&entry.id).unwrap());
@@ -377,12 +380,119 @@ mod tests {
                 .starts_with("the token store is malformed"),
             "{error}"
         );
+        assert_eq!(io_kind(&error), None);
 
         fs::remove_file(directory.join(TOKENS_FILE)).unwrap();
         fs::create_dir(directory.join(TOKENS_FILE)).unwrap();
         let error = TokenStore::open(&directory).err().unwrap();
-        assert!(matches!(error, StoreError::Io(_)), "{error}");
+        assert!(io_kind(&error).is_some(), "{error}");
         assert!(!error.to_string().is_empty());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The kind of an I/O error from the store, or `None` if the store is malformed.
+    fn io_kind(error: &StoreError) -> Option<io::ErrorKind> {
+        match error {
+            StoreError::Io(error) => Some(error.kind()),
+            StoreError::Format(_) => None,
+        }
+    }
+
+    fn names(store: &TokenStore) -> Vec<String> {
+        store
+            .entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect()
+    }
+
+    #[test]
+    fn a_store_whose_directory_cannot_be_created_is_an_error() {
+        let directory = directory("blocked");
+        create_private_directory(&directory).unwrap();
+        let file = directory.join("file");
+        fs::write(&file, "").unwrap();
+        let error = TokenStore::open(&file.join("state")).err().unwrap();
+        assert!(io_kind(&error).is_some(), "{error}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_change_that_cannot_be_written_leaves_the_store_as_it_was() {
+        let directory = directory("unwritten");
+        let store = TokenStore::open(&directory).unwrap();
+        let (kept, _) = store.issue("kept", Grant::Owner).unwrap();
+        let path = directory.join(TOKENS_FILE);
+        let temporary = path.with_extension("tmp");
+        let written = fs::read_to_string(&path).unwrap();
+        let unchanged = || {
+            assert_eq!(names(&store), ["kept"]);
+            assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        };
+        for (operation, at) in [
+            (Operation::Lock, path.with_extension("lock")),
+            (Operation::Write, temporary.clone()),
+            (Operation::Sync, temporary.clone()),
+        ] {
+            let _failing = fault::inject(operation, &at);
+            let message = format!("injected {operation:?} failure");
+            let error = store.issue("lost", Grant::Owner).err().unwrap();
+            assert_eq!(error.to_string(), message);
+            unchanged();
+            let error = store.revoke(&kept.id).err().unwrap();
+            assert_eq!(error.to_string(), message);
+            unchanged();
+        }
+
+        // A failed write leaves its temporary file, which the next write replaces. The temporary file cannot be created where a directory has its name.
+        fs::remove_file(&temporary).unwrap();
+        fs::create_dir(&temporary).unwrap();
+        let error = store.issue("lost", Grant::Owner).err().unwrap();
+        assert!(io_kind(&error).is_some(), "{error}");
+        unchanged();
+        fs::remove_dir(&temporary).unwrap();
+
+        // Once writing works again, so do changes, and they keep the earlier token.
+        store.issue("added", Grant::Owner).unwrap();
+        assert_eq!(
+            names(&TokenStore::open(&directory).unwrap()),
+            ["kept", "added"]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_store_whose_files_cannot_be_read_or_locked_keeps_the_tokens_it_has() {
+        let directory = directory("unreadable");
+        let store = TokenStore::open(&directory).unwrap();
+        store.issue("kept", Grant::Owner).unwrap();
+        let path = directory.join(TOKENS_FILE);
+
+        {
+            let _failing = fault::inject(Operation::LockShared, &path.with_extension("lock"));
+            let error = store.reload().err().unwrap();
+            assert_eq!(error.to_string(), "injected LockShared failure");
+        }
+
+        // The file cannot be read where a directory has its name.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        for error in [
+            store.reload().err().unwrap(),
+            store.issue("lost", Grant::Owner).err().unwrap(),
+        ] {
+            assert!(io_kind(&error).is_some(), "{error}");
+        }
+        assert_eq!(names(&store), ["kept"]);
+
+        // Without its directory, the lock file cannot be created.
+        fs::remove_dir_all(&directory).unwrap();
+        for error in [
+            store.reload().err().unwrap(),
+            store.issue("lost", Grant::Owner).err().unwrap(),
+        ] {
+            assert_eq!(io_kind(&error), Some(io::ErrorKind::NotFound), "{error}");
+        }
+        assert_eq!(names(&store), ["kept"]);
     }
 }

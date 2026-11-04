@@ -8,6 +8,8 @@
 mod authenticate;
 #[cfg(feature = "issue")]
 mod certificate;
+#[cfg(feature = "issue")]
+mod fault;
 mod fingerprint;
 mod hex;
 pub mod pairing;

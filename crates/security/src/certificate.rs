@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use rustls::crypto::ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use crate::Fingerprint;
-use crate::store::{create_private_directory, private};
+use crate::store::{create_private_directory, write_private};
 
 const CERTIFICATE_FILE: &str = "certificate.der";
 const KEY_FILE: &str = "key.der";
@@ -36,9 +36,7 @@ impl ServerCertificate {
         }
         create_private_directory(directory)?;
         let generated = Self::generate();
-        let mut file = private(&key_path)?;
-        file.write_all(&generated.key)?;
-        file.sync_all()?;
+        write_private(&key_path, &generated.key)?;
         fs::write(&certificate_path, &generated.certificate)?;
         Ok(generated)
     }
@@ -61,7 +59,8 @@ impl ServerCertificate {
     /// A TLS server configuration presenting this certificate.
     pub fn server_config(&self) -> Result<Arc<ServerConfig>, rustls::Error> {
         let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()?
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
             .with_no_client_auth()
             .with_single_cert(
                 vec![CertificateDer::from(self.certificate.clone())],
@@ -114,7 +113,9 @@ mod tests {
                 let mut buffer = Vec::new();
                 client.write_tls(&mut buffer).unwrap();
                 server.read_tls(&mut buffer.as_slice()).unwrap();
-                server.process_new_packets()?;
+                server.process_new_packets().expect(
+                    "the server accepts what the client sends before the client refuses it",
+                );
                 let mut buffer = Vec::new();
                 server.write_tls(&mut buffer).unwrap();
                 client.read_tls(&mut buffer.as_slice()).unwrap();
@@ -172,10 +173,70 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_certificate_is_an_error() {
+    fn an_unreadable_certificate_or_key_is_an_error() {
         let directory = directory("unreadable");
         fs::create_dir_all(directory.join(CERTIFICATE_FILE)).unwrap();
         assert!(ServerCertificate::load_or_create(&directory).is_err());
+        fs::remove_dir_all(&directory).unwrap();
+
+        // A missing certificate is generated again, but a key that cannot be read is not replaced.
+        fs::create_dir_all(directory.join(KEY_FILE)).unwrap();
+        assert!(ServerCertificate::load_or_create(&directory).is_err());
+        assert!(directory.join(KEY_FILE).is_dir());
+        assert!(!directory.join(CERTIFICATE_FILE).exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_certificate_that_cannot_be_stored_is_an_error() {
+        let parent = directory("unstored");
+        fs::create_dir_all(&parent).unwrap();
+
+        // The key cannot be written where a directory has its temporary file's name, and then no certificate is written either.
+        let directory = parent.join("state");
+        fs::create_dir_all(directory.join(KEY_FILE).with_extension("tmp")).unwrap();
+        assert!(ServerCertificate::load_or_create(&directory).is_err());
+        assert!(!directory.join(KEY_FILE).exists());
+        assert!(!directory.join(CERTIFICATE_FILE).exists());
+        fs::remove_dir(directory.join(KEY_FILE).with_extension("tmp")).unwrap();
+
+        #[cfg(unix)]
+        {
+            // The directory cannot be created where a link to a missing one has its name, though nothing can be read there either.
+            let linked = parent.join("linked");
+            std::os::unix::fs::symlink(parent.join("missing"), &linked).unwrap();
+            assert!(ServerCertificate::load_or_create(&linked).is_err());
+            assert!(!parent.join("missing").exists());
+
+            // The certificate cannot be written through a link to a directory that does not exist.
+            std::os::unix::fs::symlink(
+                parent.join("missing").join(CERTIFICATE_FILE),
+                directory.join(CERTIFICATE_FILE),
+            )
+            .unwrap();
+            assert!(ServerCertificate::load_or_create(&directory).is_err());
+            fs::remove_file(directory.join(CERTIFICATE_FILE)).unwrap();
+        }
+
+        // Once it can be stored, it is.
+        let certificate = ServerCertificate::load_or_create(&directory).unwrap();
+        assert_eq!(
+            ServerCertificate::load_or_create(&directory)
+                .unwrap()
+                .fingerprint(),
+            certificate.fingerprint()
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn a_corrupted_key_cannot_be_served() {
+        let directory = directory("corrupted");
+        let certificate = ServerCertificate::load_or_create(&directory).unwrap();
+        fs::write(directory.join(KEY_FILE), b"not a key").unwrap();
+        let loaded = ServerCertificate::load_or_create(&directory).unwrap();
+        assert_eq!(loaded.fingerprint(), certificate.fingerprint());
+        assert!(loaded.server_config().is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -67,7 +67,14 @@ mod tests {
 
     #[test]
     fn rejects_other_text() {
-        for text in ["", "abc", &"g".repeat(64), &"0".repeat(63), &"0".repeat(65)] {
+        for text in [
+            "",
+            "abc",
+            &"g".repeat(64),
+            &"0g".repeat(32),
+            &"0".repeat(63),
+            &"0".repeat(65),
+        ] {
             assert_eq!(text.parse::<Fingerprint>(), Err(FingerprintError), "{text}");
         }
         assert_eq!(
