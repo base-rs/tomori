@@ -1308,15 +1308,15 @@ impl Conversation {
                 self.notice = Some("This agent takes no instructions from Tomori.".into());
             }
             Some(_) => {
-                if self.send(ClientMessage::SetInstructions {
+                // An owner takes part, so this is always sent.
+                self.send(ClientMessage::SetInstructions {
                     text: text.to_owned(),
-                }) {
-                    self.notice = Some(if text.is_empty() {
-                        "Removing this space's instructions.".into()
-                    } else {
-                        "Giving the agent this space's instructions.".into()
-                    });
-                }
+                });
+                self.notice = Some(if text.is_empty() {
+                    "Removing this space's instructions.".into()
+                } else {
+                    "Giving the agent this space's instructions.".into()
+                });
             }
             None => {
                 self.next_instructions = (!text.is_empty()).then(|| text.to_owned());
@@ -7811,6 +7811,170 @@ mod tests {
             conversation.apply(space(|state| state.title = "Renamed".into()));
             assert_eq!(conversation.space.as_ref().unwrap().title, "Renamed");
         }
+
+        fn summary(
+            id: &str,
+            attention: Option<tomori_protocol::Attention>,
+        ) -> tomori_protocol::SpaceSummary {
+            tomori_protocol::SpaceSummary {
+                id: id.into(),
+                title: "Deploy".into(),
+                backend: "fake".into(),
+                directory: "/tmp".into(),
+                environment: String::new(),
+                activity: tomori_protocol::Activity::Idle,
+                participants: 0,
+                attention,
+                attention_age: None,
+            }
+        }
+
+        #[test]
+        fn the_lobby_says_what_the_most_urgent_space_needs() {
+            use tomori_protocol::Attention;
+            for (attention, said) in [
+                (Attention::Problem, "Deploy has a problem"),
+                (Attention::Reply, "Deploy has a new reply"),
+                (Attention::Unknown, "Deploy needs attention"),
+            ] {
+                let mut conversation = lobby(ConnectionRole::Owner);
+                conversation.apply(Event::Message(ServerMessage::Spaces {
+                    spaces: vec![summary("s1", Some(attention))],
+                }));
+                assert_eq!(conversation.attention_status().as_deref(), Some(said));
+            }
+        }
+
+        #[test]
+        fn hearing_a_reply_again_or_pairing_needs_a_space_or_a_connection() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.replay();
+            assert_eq!(
+                conversation.notice.as_deref(),
+                Some("Join a space to hear a reply again.")
+            );
+            let mut conversation = joined();
+            conversation.certificate = Some(tomori_security::Fingerprint::of(b"server"));
+            conversation.role = ConnectionRole::Visitor;
+            assert!(conversation.pairable());
+            // Pairing in a space keeps the problem shown there.
+            conversation.error = Some("A problem.".into());
+            conversation.pair();
+            assert_eq!(conversation.error.as_deref(), Some("A problem."));
+            conversation.apply(disconnected());
+            assert!(!conversation.pairable());
+        }
+
+        #[test]
+        fn the_menu_names_the_mode_and_its_choices_act() {
+            use crate::hand_menu::Choice;
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.apply(space(|state| {
+                state.modes = vec![
+                    tomori_protocol::Mode {
+                        id: "build".into(),
+                        name: "Build".into(),
+                        description: Some("Writes code".into()),
+                    },
+                    tomori_protocol::Mode {
+                        id: "plan".into(),
+                        name: "Plan".into(),
+                        description: None,
+                    },
+                ];
+                state.mode = Some("build".into());
+            }));
+            let shown = conversation.menu_model().space.unwrap();
+            assert_eq!(shown.mode.as_deref(), Some("Build"));
+            assert_eq!(shown.modes[0].2.as_deref(), Some("Writes code"));
+            conversation.apply(space(|state| {
+                state.modes = vec![tomori_protocol::Mode {
+                    id: "plan".into(),
+                    name: "Plan".into(),
+                    description: None,
+                }];
+                state.mode = Some("custom".into());
+            }));
+            assert_eq!(
+                conversation.menu_model().space.unwrap().mode.as_deref(),
+                Some("custom")
+            );
+            for choice in [
+                Choice::Knock,
+                Choice::Admit("k1".into()),
+                Choice::Decline("k1".into()),
+                Choice::Pair,
+                Choice::ClearInstructions,
+                Choice::Mono,
+            ] {
+                conversation.choose_menu(choice);
+            }
+            assert!(conversation.feedback.mono);
+            // Outside a space, speech and leaving do nothing.
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.choose_menu(Choice::Speech);
+            conversation.choose_menu(Choice::Leave);
+            assert!(conversation.take_actions().is_empty());
+            conversation.instruct("");
+            assert_eq!(
+                conversation.notice.as_deref(),
+                Some("The next space you create has no instructions of its own.")
+            );
+        }
+
+        #[test]
+        fn a_request_in_a_space_with_messages_focuses_the_wrist_on_it() {
+            let mut conversation = joined();
+            conversation.apply(space(|state| {
+                state.messages = vec![tomori_protocol::Message {
+                    id: "m1".into(),
+                    role: tomori_protocol::Role::Assistant,
+                    text: "Running.".into(),
+                    completed: true,
+                }];
+                state.approval = Some(Approval {
+                    id: "p1".into(),
+                    title: "Bash".into(),
+                    text: "make".into(),
+                    options: Vec::new(),
+                });
+            }));
+            assert_eq!(
+                conversation.wrist.focus,
+                Some(crate::transcript::Focus::Card(0))
+            );
+        }
+
+        #[test]
+        fn the_space_menu_stays_on_an_entry_when_the_list_shrinks() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            let modes = |count: usize| {
+                (0..count)
+                    .map(|n| tomori_protocol::Mode {
+                        id: format!("mode-{n}"),
+                        name: format!("Mode {n}"),
+                        description: None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            conversation.apply(space(|state| {
+                state.modes = modes(3);
+                state.mode = Some("mode-2".into());
+            }));
+            conversation.refresh();
+            assert_eq!(conversation.space_menu, Some(2));
+            conversation.apply(space(|state| state.modes = modes(1)));
+            assert_eq!(conversation.space_menu, Some(0));
+        }
+
+        #[test]
+        fn engagement_is_not_reported_while_disconnected() {
+            let mut conversation = lobby(ConnectionRole::Owner);
+            conversation.apply(space(|state| state.speech = SpeechSetting::Full));
+            conversation.take_actions();
+            conversation.apply(disconnected());
+            conversation.set_engagement(tomori_protocol::Engagement::Away);
+            assert!(conversation.take_actions().is_empty());
+        }
     }
 }
-
