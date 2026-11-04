@@ -2568,4 +2568,216 @@ mod tests {
         });
         assert_eq!(space.state(Vec::new(), "").messages[0].text, "[Bash: done]");
     }
+
+    /// The rarer events, refusals and repeats.
+    mod rarer {
+        use super::*;
+        use tomori_backend::{Field, FieldKind, Question, WorkerState};
+
+        fn backend_worker(id: &str, state: WorkerState) -> tomori_backend::Worker {
+            tomori_backend::Worker {
+                id: id.into(),
+                parent: None,
+                title: format!("{id} title"),
+                state,
+            }
+        }
+
+        fn question(id: &str, kind: FieldKind) -> Question {
+            Question {
+                id: id.into(),
+                title: "Which?".into(),
+                fields: vec![Field {
+                    key: "name".into(),
+                    title: "Name".into(),
+                    description: None,
+                    kind,
+                    options: Vec::new(),
+                    custom: false,
+                }],
+            }
+        }
+
+        #[test]
+        fn a_worker_pointed_at_is_described_in_each_state() {
+            let pointed = PointedWorker {
+                id: "w".into(),
+                title: "Build".into(),
+            };
+            for (state, said) in [
+                (WorkerState::Running, "running"),
+                (WorkerState::Waiting, "waiting"),
+                (WorkerState::Idle, "idle"),
+                (WorkerState::Completed, "completed"),
+                (WorkerState::Error, "failed"),
+                (WorkerState::Stopped, "stopped"),
+                (WorkerState::Unknown, "state unknown"),
+            ] {
+                let workers = [worker(backend_worker("w", state), "fake-1")];
+                let context = pointing_context("fake", &pointed, &workers);
+                assert!(context.ends_with(&format!(", {said})]")), "{context}");
+            }
+        }
+
+        #[test]
+        fn snapshot_messages_keep_their_role_and_text_but_not_reasoning_or_what_is_too_long() {
+            let message = message_model(tomori_backend::SnapshotMessage {
+                id: "u".into(),
+                role: tomori_backend::Role::User,
+                parts: vec![
+                    Part::Reasoning {
+                        text: "thinking".into(),
+                    },
+                    Part::Text {
+                        text: "é".repeat(MESSAGE_TEXT_LIMIT + 1),
+                    },
+                ],
+                completed: true,
+            });
+            assert_eq!(message.role, tomori_protocol::Role::User);
+            assert_eq!(message.display().chars().count(), MESSAGE_TEXT_LIMIT);
+        }
+
+        #[test]
+        fn only_the_latest_messages_are_kept() {
+            let mut space = model();
+            for index in 0..=MESSAGE_LIMIT {
+                reply(&mut space, &format!("m{index}"), "Done.");
+            }
+            let messages = space.state(Vec::new(), "").messages;
+            assert_eq!(messages.len(), MESSAGE_LIMIT);
+            assert_eq!(messages[0].id, "m1");
+        }
+
+        #[test]
+        fn what_names_nothing_the_space_has_changes_nothing() {
+            let mut space = model();
+            space.apply(Event::ToolFinished {
+                id: "unknown".into(),
+                error: None,
+            });
+            space.sent("unknown", Err("lost".into()));
+            space.decided("unknown");
+            space.restore_approval("unknown");
+            space.answered("unknown");
+            space.restore_question("unknown");
+            assert!(space.state(Vec::new(), "").messages.is_empty());
+            assert_eq!(space.state(Vec::new(), "").error, None);
+            // Queued again under the same key, it is not queued twice.
+            assert!(space.enqueue_pointing("a".into(), 1, "Ada".into(), "hi".into(), None));
+            assert!(!space.enqueue_pointing("a".into(), 1, "Ada".into(), "hi".into(), None));
+        }
+
+        #[test]
+        fn a_closed_space_does_not_reconnect() {
+            let mut space = model();
+            space.apply(Event::Closed { reason: None });
+            space.apply(Event::Reconnecting {
+                reason: "lost".into(),
+            });
+            assert!(!space.is_reconnecting());
+        }
+
+        #[test]
+        fn an_answer_is_taken_only_for_a_question_tomori_can_ask_and_its_current_field() {
+            let mut space = model();
+            space.apply(Event::QuestionAsked(question("q", FieldKind::Unsupported)));
+            assert_eq!(
+                space.answer("q", "name", "Ada"),
+                Err("Complete this question outside Tomori.".to_owned())
+            );
+            space.apply(Event::QuestionResolved { id: "q".into() });
+            space.apply(Event::QuestionAsked(question("r", FieldKind::Text)));
+            assert_eq!(
+                space.answer("r", "Other", "Ada"),
+                Err("The question changed; read the current field and answer again.".to_owned())
+            );
+        }
+
+        #[test]
+        fn a_question_being_answered_is_forgotten_once_resolved_or_no_longer_listed() {
+            let mut space = model();
+            space.apply(Event::QuestionAsked(question("q", FieldKind::Text)));
+            let Ok(AnswerOutcome::Complete(_)) = space.answer("q", "name", "Ada") else {
+                unreachable!("one field completes the question");
+            };
+            space.apply(Event::QuestionResolved { id: "q".into() });
+            space.answered("q");
+            space.apply(Event::QuestionAsked(question("r", FieldKind::Text)));
+            let Ok(AnswerOutcome::Complete(_)) = space.answer("r", "name", "Ada") else {
+                unreachable!("one field completes the question");
+            };
+            // Read again without it, it is no longer being answered.
+            space.apply(Event::Resynchronized {
+                snapshot: Snapshot {
+                    busy: Some(false),
+                    ..Snapshot::default()
+                },
+            });
+            space.restore_question("r");
+            assert!(space.state(Vec::new(), "").question.is_none());
+        }
+
+        #[test]
+        fn pointing_for_input_that_will_not_be_delivered_is_forgotten() {
+            let mut space = model();
+            space.apply(Event::WorkersChanged {
+                workers: vec![backend_worker("w", WorkerState::Running)],
+            });
+            let pointed = || space.pointed_worker("w");
+            let (first, second) = (pointed(), pointed());
+            space.enqueue_pointing("a".into(), 1, "Ada".into(), "one".into(), first);
+            space.enqueue_pointing("b".into(), 1, "Ada".into(), "two".into(), second);
+            let prompt = space.next_prompt().unwrap();
+            assert!(prompt.text.contains("Pointing at worker"));
+            assert_eq!(space.pointing.len(), 1);
+        }
+
+        #[test]
+        fn a_reply_restored_while_busy_waits_for_the_turn_to_end_and_keeps_its_tools() {
+            let mut space = model();
+            space.apply(Event::Busy);
+            space.apply(Event::MessageStarted {
+                message: "m".into(),
+                role: tomori_backend::Role::Assistant,
+            });
+            space.apply(Event::ToolStarted {
+                message: "m".into(),
+                tool: "Bash".into(),
+                id: "t".into(),
+                input: serde_json::Value::Null,
+            });
+            space.apply(Event::MessageRestored {
+                message: tomori_backend::SnapshotMessage {
+                    id: "m".into(),
+                    role: tomori_backend::Role::Assistant,
+                    parts: vec![
+                        Part::Tool {
+                            id: "t".into(),
+                            tool: "Bash".into(),
+                            input: serde_json::Value::Null,
+                            finished: true,
+                        },
+                        Part::Text {
+                            text: "Done.".into(),
+                        },
+                    ],
+                    completed: true,
+                },
+            });
+            let message = &space.state(Vec::new(), "").messages[0];
+            assert_eq!(message.text, "Done.");
+            assert_eq!(space.attention(), None);
+        }
+
+        #[test]
+        fn backend_workers_idle_or_stopped_are_shown_so() {
+            for (state, shown) in [
+                (WorkerState::Idle, tomori_protocol::WorkerState::Idle),
+                (WorkerState::Stopped, tomori_protocol::WorkerState::Stopped),
+            ] {
+                assert_eq!(worker(backend_worker("w", state), "fake-1").state, shown);
+            }
+        }
+    }
 }
