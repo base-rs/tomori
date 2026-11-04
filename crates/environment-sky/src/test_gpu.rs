@@ -4,14 +4,17 @@
 //! A device for tests that render offscreen, and WGSL validation for every shader, shared by this crate's tests and `tomori-quest`'s through the `test-gpu` feature.
 //!
 //! A real GPU is preferred, and a software adapter such as Mesa's lavapipe is used when there is none, as on CI runners. Where there is no adapter at all, the test is skipped with a message on standard error, unless `TOMORI_REQUIRE_GPU` is set to anything but `0` or the empty string, as CI sets it, so that a missing driver fails the tests rather than silently skipping them.
+//!
+//! Every test in a test binary shares one instance, adapter and device, which are created by the first test to ask and are never dropped. Tests run on parallel threads, and before version 1.4.346 the Vulkan loader looked up a device, when one thread named an object, without the lock that another thread held while creating or destroying a device, and so read freed memory. wgpu names objects through `VK_EXT_debug_utils` in debug builds, and Ubuntu 26.04's loader, 1.4.341, crashed CI's rendering tests with SIGSEGV this way about half of the time. See <https://github.com/KhronosGroup/Vulkan-Loader/issues/1863>, fixed by <https://github.com/KhronosGroup/Vulkan-Loader/pull/1866>. With one device, nothing creates or destroys a device while tests run, and nothing is torn down at process exit. Error scopes are per thread, so tests on the same device do not see each other's errors.
 
 use std::io::Write;
-use std::sync::Once;
+use std::sync::OnceLock;
 
 /// The environment variable that makes a missing adapter fail the test instead of skipping it.
 pub const REQUIRE_GPU: &str = "TOMORI_REQUIRE_GPU";
 
-/// The adapter a test renders with, and a device and queue created on it with default limits and features.
+/// The adapter a test renders with, and a device and queue created on it with default limits and features, shared by every test in the binary.
+#[derive(Clone)]
 pub struct Gpu {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
@@ -34,48 +37,51 @@ fn report(message: impl std::fmt::Display) {
     let _ = writeln!(std::io::stderr(), "{message}");
 }
 
-/// Opens the preferred adapter, or returns `None` after saying why the calling test is skipped.
+/// Opens the preferred adapter and a device on it, or returns why there is no adapter.
 ///
 /// # Panics
 ///
-/// If no adapter is found while [`REQUIRE_GPU`] is set, or if the adapter refuses a device.
-pub async fn open() -> Option<Gpu> {
+/// If the adapter refuses a device.
+fn create() -> Result<Gpu, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         // Metal only when built with `--features wgpu/metal`, to preview on a Mac.
         backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     // High performance orders discrete and integrated GPUs first and software (`DeviceType::Cpu`) adapters last, so a software adapter is only chosen when it is the only one.
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })
-        .await;
-    let adapter = match adapter {
-        Ok(adapter) => adapter,
-        Err(error) => {
-            report(missing(&error, std::env::var(REQUIRE_GPU).ok().as_deref()));
-            return None;
-        }
-    };
-    static ANNOUNCE: Once = Once::new();
-    ANNOUNCE.call_once(|| {
-        let info = adapter.get_info();
-        report(format_args!(
-            "GPU tests use {} ({:?}, {}).",
-            info.name, info.device_type, info.driver
-        ));
-    });
-    let (device, queue) = adapter
-        .request_device(&Default::default())
-        .await
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .map_err(|error| error.to_string())?;
+    let info = adapter.get_info();
+    report(format_args!(
+        "GPU tests use {} ({:?}, {}).",
+        info.name, info.device_type, info.driver
+    ));
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))
         .expect("the adapter must provide a device");
-    Some(Gpu {
+    Ok(Gpu {
         adapter,
         device,
         queue,
     })
+}
+
+/// The binary's shared adapter, device and queue, created on first use, or `None` after saying why the calling test is skipped.
+///
+/// # Panics
+///
+/// If no adapter is found while [`REQUIRE_GPU`] is set, or if the adapter refuses a device.
+pub fn open() -> Option<Gpu> {
+    static GPU: OnceLock<Result<Gpu, String>> = OnceLock::new();
+    match GPU.get_or_init(create) {
+        Ok(gpu) => Some(gpu.clone()),
+        Err(error) => {
+            report(missing(error, std::env::var(REQUIRE_GPU).ok().as_deref()));
+            None
+        }
+    }
 }
 
 /// The `.wgsl` files directly in `directory`, by file name and in name order, with their source.

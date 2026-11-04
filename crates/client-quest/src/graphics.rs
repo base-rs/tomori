@@ -796,7 +796,7 @@ mod tests {
         pollster::block_on(async {
             const WIDTH: u32 = 768;
             const HEIGHT: u32 = 512;
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1107,7 +1107,7 @@ mod tests {
     #[test]
     fn conversational_states_render_distinct_images() {
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     fn both_controller_poses_change_the_offscreen_image() {
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1428,7 +1428,7 @@ mod tests {
     #[test]
     fn workspace_pages_render_stereo_recenter_and_clear() {
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1734,7 +1734,7 @@ mod tests {
         const WIDTH: u32 = 640;
         const HEIGHT: u32 = 480;
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1916,7 +1916,7 @@ mod tests {
         const WIDTH: u32 = 320;
         const HEIGHT: u32 = 200;
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -2098,7 +2098,7 @@ mod tests {
                 adapter,
                 device,
                 queue,
-            }) = test_gpu::open().await
+            }) = test_gpu::open()
             else {
                 return;
             };
@@ -2330,7 +2330,7 @@ mod tests {
     #[test]
     fn renders_stereo_offscreen() {
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
