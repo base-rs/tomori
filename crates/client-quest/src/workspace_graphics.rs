@@ -2207,7 +2207,7 @@ mod tests {
     #[test]
     fn vulkan_sign_images_include_post_text_and_smooth_fade_in_both_eyes() {
         pollster::block_on(async {
-            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
                 return;
             };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

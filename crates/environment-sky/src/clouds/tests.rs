@@ -63,7 +63,7 @@ fn read_image(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Textur
 #[test]
 fn clouds_are_translucent_stereo_stable_and_occluded_by_foreground_depth() {
     pollster::block_on(async {
-        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
             return;
         };
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

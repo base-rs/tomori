@@ -30,7 +30,7 @@ fn cached_moon_shadows_occlude_scenery_preserve_emission_and_survive_resize() {
     pollster::block_on(async {
         const WIDTH: u32 = 512;
         const HEIGHT: u32 = 512;
-        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+        let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open() else {
             return;
         };
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
