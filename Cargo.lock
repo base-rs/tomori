@@ -3525,6 +3525,7 @@ dependencies = [
 name = "tomori-discovery"
 version = "0.1.0"
 dependencies = [
+ "flume",
  "mdns-sd",
  "tomori-protocol",
 ]

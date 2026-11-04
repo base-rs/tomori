@@ -127,19 +127,61 @@ fn found(service: &ResolvedService) -> Event {
 mod tests {
     use super::*;
 
+    /// A browser receiving `events`, as from a querier that has found what a test sends.
+    fn browsing(events: Receiver<ServiceEvent>) -> Browser {
+        Browser {
+            daemon: ServiceDaemon::new().expect("the daemon starts"),
+            events,
+        }
+    }
+
     #[test]
-    fn a_browser_whose_querier_stopped_has_no_more_events() {
-        let browser = browse().expect("the querier starts");
+    fn browsing_starts_a_querier() {
+        drop(browse().expect("the querier starts"));
+    }
+
+    #[test]
+    fn a_browser_reports_what_its_querier_finds_until_it_stops() {
+        let (sender, events) = flume::unbounded();
+        let browser = browsing(events);
         assert_eq!(format!("{browser:?}"), "Browser { .. }");
-        let stopped = browser.daemon.shutdown().unwrap();
-        let _ = stopped.recv_timeout(STOP_TIMEOUT);
-        // Whatever it found before it stopped, such as another server on this network, ends.
-        while browser.recv().is_some() {}
-        assert_eq!((&browser).next(), None);
+        let lost = || {
+            // Its own searches are not events.
+            sender
+                .send(ServiceEvent::SearchStarted(SERVICE_TYPE.to_owned()))
+                .unwrap();
+            sender
+                .send(ServiceEvent::ServiceRemoved(
+                    SERVICE_TYPE.to_owned(),
+                    format!("Studio.{SERVICE_TYPE}"),
+                ))
+                .unwrap();
+        };
+        let studio = Event::Lost {
+            instance: "Studio".to_owned(),
+        };
+        lost();
+        assert_eq!(browser.recv(), Some(studio.clone()));
+        lost();
+        assert_eq!((&browser).next(), Some(studio.clone()));
+        lost();
+        assert_eq!(
+            browser.recv_timeout(Duration::from_secs(1)),
+            Ok(studio.clone())
+        );
+        lost();
+        assert_eq!(browser.try_recv(), Ok(studio));
+        assert_eq!(browser.try_recv(), Err(TryRecvError::Empty));
+        // Stopped, it has no more.
+        drop(sender);
+        assert_eq!(browser.recv(), None);
         assert_eq!(
             browser.recv_timeout(Duration::from_secs(1)),
             Err(RecvTimeoutError::Disconnected)
         );
         assert_eq!(browser.try_recv(), Err(TryRecvError::Disconnected));
+        // Dropped once its daemon has stopped, it stops nothing more.
+        let stopped = browser.daemon.shutdown().unwrap();
+        let _ = stopped.recv_timeout(STOP_TIMEOUT);
     }
 }
