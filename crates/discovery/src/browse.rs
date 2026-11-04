@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use mdns_sd::{Receiver, ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent};
 
+use crate::daemon;
+
 use crate::record::{addresses, instance, resolved};
 use crate::{Error, Event, RecvTimeoutError, SERVICE_TYPE, TryRecvError};
 
@@ -27,14 +29,7 @@ impl std::fmt::Debug for Browser {
 ///
 /// On Android, the application must hold a Wi-Fi multicast lock first; see the crate documentation.
 pub fn browse() -> Result<Browser, Error> {
-    let daemon = ServiceDaemon::new()?;
-    match daemon.browse(SERVICE_TYPE) {
-        Ok(events) => Ok(Browser { daemon, events }),
-        Err(error) => {
-            let _ = daemon.shutdown();
-            Err(error.into())
-        }
-    }
+    daemon::querier().map(|(daemon, events)| Browser { daemon, events })
 }
 
 impl Browser {
@@ -126,4 +121,25 @@ fn found(service: &ResolvedService) -> Event {
         service.port,
         |key| service.txt_properties.get_property_val_str(key),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_browser_whose_querier_stopped_has_no_more_events() {
+        let browser = browse().expect("the querier starts");
+        assert_eq!(format!("{browser:?}"), "Browser { .. }");
+        let stopped = browser.daemon.shutdown().unwrap();
+        let _ = stopped.recv_timeout(STOP_TIMEOUT);
+        // Whatever it found before it stopped, such as another server on this network, ends.
+        while browser.recv().is_some() {}
+        assert_eq!((&browser).next(), None);
+        assert_eq!(
+            browser.recv_timeout(Duration::from_secs(1)),
+            Err(RecvTimeoutError::Disconnected)
+        );
+        assert_eq!(browser.try_recv(), Err(TryRecvError::Disconnected));
+    }
 }

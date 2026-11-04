@@ -54,6 +54,7 @@
 
 mod advertise;
 mod browse;
+mod daemon;
 mod record;
 mod servers;
 

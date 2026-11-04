@@ -13,3 +13,7 @@ categories = ["network-programming"]
 [dependencies]
 mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 tomori-protocol = { version = "0.1.0", path = "../protocol" }
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/daemon.rs"
+reason = "Starts the multicast DNS responder and querier, whose failures come only from the system, such as running out of descriptors."

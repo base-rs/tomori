@@ -5,6 +5,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
+
+use crate::daemon;
 use tomori_protocol::PROTOCOL_VERSION;
 
 use crate::record::{INSTANCE_LIMIT, properties, truncate};
@@ -31,13 +33,15 @@ struct Service {
 }
 
 impl Service {
-    fn info(&self, counts: Counts) -> Result<ServiceInfo, mdns_sd::Error> {
+    fn info(&self, counts: Counts) -> ServiceInfo {
         let properties = properties(
             &self.name,
             PROTOCOL_VERSION,
             counts,
             self.fingerprint.as_deref(),
         );
+        // The record's keys are ASCII without `=`, and its strings are cut to fit.
+        const VALID: &str = "the record's properties are valid TXT strings";
         if self.address.is_unspecified() {
             let mut service = ServiceInfo::new(
                 SERVICE_TYPE,
@@ -46,12 +50,13 @@ impl Service {
                 (),
                 self.port,
                 properties.as_slice(),
-            )?
+            )
+            .expect(VALID)
             .enable_addr_auto();
             if self.address.is_ipv4() {
                 service.set_interfaces(vec![IfKind::IPv4]);
             }
-            Ok(service)
+            service
         } else {
             let mut service = ServiceInfo::new(
                 SERVICE_TYPE,
@@ -60,9 +65,10 @@ impl Service {
                 self.address,
                 self.port,
                 properties.as_slice(),
-            )?;
+            )
+            .expect(VALID);
             service.set_interfaces(vec![IfKind::Addr(self.address)]);
-            Ok(service)
+            service
         }
     }
 }
@@ -87,7 +93,7 @@ impl Advertisement {
     /// `mdns_sd` probes a changed record before announcing it, which takes about a second, and a browser flushes a cached record only once it has held it for a second (RFC 6762, section 10.2), so a count that changes back within a second can leave browsers showing the one in between. Update at most every couple of seconds, coalescing the changes in between.
     pub fn update(&self, counts: Counts) -> Result<(), Error> {
         // Registering the same service again re-announces it, under the instance and host names the responder settled on.
-        self.daemon.register(self.service.info(counts)?)?;
+        self.daemon.register(self.service.info(counts))?;
         Ok(())
     }
 }
@@ -128,18 +134,9 @@ pub fn advertise(
         address,
         fingerprint,
     };
-    let daemon = ServiceDaemon::new()?;
-    if address.is_unspecified() {
-        // Loopback interfaces only reach this computer, and may carry many alias addresses.
-        daemon.disable_interface(vec![IfKind::LoopbackV4, IfKind::LoopbackV6])?;
-    }
-    let info = service.info(counts)?;
+    let info = service.info(counts);
     let fullname = info.get_fullname().to_owned();
-    if let Err(error) = daemon.register(info) {
-        let _ = daemon.shutdown();
-        return Err(error.into());
-    }
-    Ok(Advertisement {
+    daemon::responder(info, address.is_unspecified()).map(|daemon| Advertisement {
         daemon,
         fullname,
         service,
@@ -172,6 +169,49 @@ fn host_name(instance: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn advertises_on_every_interface_or_one_address_and_updates_its_counts() {
+        for address in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ] {
+            let advertisement = advertise(
+                "  ",
+                48766,
+                address,
+                Counts::default(),
+                Some("ab".repeat(32)),
+            )
+            .expect("the responder starts");
+            assert_eq!(advertisement.instance(), "Tomori");
+            assert!(format!("{advertisement:?}").starts_with("Advertisement"));
+            advertisement
+                .update(Counts {
+                    spaces: 1,
+                    ..Counts::default()
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn an_advertisement_whose_responder_stopped_neither_updates_nor_withdraws() {
+        let advertisement = advertise(
+            "Stopped",
+            48767,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Counts::default(),
+            None,
+        )
+        .expect("the responder starts");
+        let stopped = advertisement.daemon.shutdown().unwrap();
+        let _ = stopped.recv_timeout(GOODBYE_TIMEOUT);
+        assert!(advertisement.update(Counts::default()).is_err());
+    }
 
     #[test]
     fn derives_a_host_name_label() {
