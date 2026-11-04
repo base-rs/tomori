@@ -252,6 +252,29 @@ mod tests {
         )
     }
 
+    /// The server a service resolved with the TXT properties `txt` is reported as, and whether it is compatible.
+    fn reported(txt: &HashMap<String, String>) -> (bool, Server) {
+        match event(txt) {
+            Event::Found(server) => (true, server),
+            Event::Incompatible(server) => (false, server),
+            Event::Lost { .. } => unreachable!("a resolved service is found, compatible or not"),
+        }
+    }
+
+    /// The server `txt` is reported as, which must be compatible.
+    fn found(txt: &HashMap<String, String>) -> Server {
+        let (compatible, server) = reported(txt);
+        assert!(compatible, "{server:?}");
+        server
+    }
+
+    /// The server `txt` is reported as, which must be incompatible.
+    fn incompatible(txt: &HashMap<String, String>) -> Server {
+        let (compatible, server) = reported(txt);
+        assert!(!compatible, "{server:?}");
+        server
+    }
+
     #[test]
     fn encodes_the_protocol_version_name_and_counts() {
         let counts = Counts {
@@ -279,19 +302,13 @@ mod tests {
     fn decodes_a_valid_fingerprint_only() {
         let protocol = PROTOCOL_VERSION.to_string();
         let fingerprint = |value: &str| {
-            let Event::Found(server) =
-                event(&lookup(&[("protocol", &protocol), ("fingerprint", value)]))
-            else {
-                panic!("expected Found");
-            };
+            let server = found(&lookup(&[("protocol", &protocol), ("fingerprint", value)]));
             server.fingerprint
         };
         assert_eq!(fingerprint(&"AB".repeat(32)), Some("ab".repeat(32)));
         assert_eq!(fingerprint(&"ab".repeat(31)), None);
         assert_eq!(fingerprint(&"zz".repeat(32)), None);
-        let Event::Found(server) = event(&lookup(&[("protocol", &protocol)])) else {
-            panic!("expected Found");
-        };
+        let server = found(&lookup(&[("protocol", &protocol)]));
         assert_eq!(server.fingerprint, None);
     }
 
@@ -318,9 +335,7 @@ mod tests {
         let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts, None)
             .into_iter()
             .collect();
-        let Event::Found(server) = event(&txt) else {
-            panic!("expected Found");
-        };
+        let server = found(&txt);
         assert_eq!(
             (server.waiting, server.problems, server.replies),
             (Some(1), Some(0), Some(2))
@@ -338,9 +353,7 @@ mod tests {
                 .iter()
                 .all(|(key, _)| !["waiting", "problems", "replies"].contains(&key.as_str()))
         );
-        let Event::Found(server) = event(&encoded.into_iter().collect()) else {
-            panic!("expected Found");
-        };
+        let server = found(&encoded.into_iter().collect());
         assert_eq!(
             (server.waiting, server.problems, server.replies),
             (None, None, None)
@@ -349,14 +362,12 @@ mod tests {
 
         // Each is read on its own, with the same rule as the other counts.
         let protocol = PROTOCOL_VERSION.to_string();
-        let Event::Found(server) = event(&lookup(&[
+        let server = found(&lookup(&[
             ("protocol", &protocol),
             ("waiting", "-1"),
             ("problems", " 3 "),
             ("replies", "many"),
-        ])) else {
-            panic!("expected Found");
-        };
+        ]));
         assert_eq!(
             (server.waiting, server.problems, server.replies),
             (None, Some(3), None)
@@ -373,9 +384,7 @@ mod tests {
         let txt: HashMap<String, String> = properties("Studio", PROTOCOL_VERSION, counts, None)
             .into_iter()
             .collect();
-        let Event::Found(server) = event(&txt) else {
-            panic!("expected Found");
-        };
+        let server = found(&txt);
         assert_eq!(server.spaces, Some(3));
         assert_eq!(server.participants, Some(u32::MAX));
     }
@@ -384,18 +393,14 @@ mod tests {
     fn missing_or_malformed_counts_are_unknown() {
         let protocol = PROTOCOL_VERSION.to_string();
         // A server from before the counts were advertised is still found.
-        let Event::Found(server) = event(&lookup(&[("protocol", &protocol)])) else {
-            panic!("expected Found");
-        };
+        let server = found(&lookup(&[("protocol", &protocol)]));
         assert_eq!((server.spaces, server.participants), (None, None));
         for value in ["", "two", "-1", "1.5", "4294967296", "0x2"] {
-            let Event::Found(server) = event(&lookup(&[
+            let server = found(&lookup(&[
                 ("protocol", &protocol),
                 ("spaces", value),
                 ("participants", value),
-            ])) else {
-                panic!("expected Found");
-            };
+            ]));
             assert_eq!(
                 (server.spaces, server.participants),
                 (None, None),
@@ -403,13 +408,11 @@ mod tests {
             );
         }
         // Each count is read on its own.
-        let Event::Found(server) = event(&lookup(&[
+        let server = found(&lookup(&[
             ("protocol", &protocol),
             ("spaces", " 0 "),
             ("participants", "many"),
-        ])) else {
-            panic!("expected Found");
-        };
+        ]));
         assert_eq!((server.spaces, server.participants), (Some(0), None));
     }
 
@@ -424,12 +427,10 @@ mod tests {
 
     #[test]
     fn reports_a_matching_protocol_as_found() {
-        let Event::Found(server) = event(&lookup(&[
+        let server = found(&lookup(&[
             ("protocol", &PROTOCOL_VERSION.to_string()),
             ("name", "Samuel's Studio"),
-        ])) else {
-            panic!("expected Found");
-        };
+        ]));
         assert_eq!(server.instance, "Studio");
         assert_eq!(server.name, "Samuel's Studio");
         assert_eq!(server.protocol, Some(PROTOCOL_VERSION));
@@ -439,9 +440,7 @@ mod tests {
     #[test]
     fn reports_another_protocol_as_incompatible() {
         let other = (PROTOCOL_VERSION + 1).to_string();
-        let Event::Incompatible(server) = event(&lookup(&[("protocol", &other)])) else {
-            panic!("expected Incompatible");
-        };
+        let server = incompatible(&lookup(&[("protocol", &other)]));
         assert_eq!(server.protocol, Some(PROTOCOL_VERSION + 1));
         assert!(!server.is_compatible());
     }
@@ -449,9 +448,7 @@ mod tests {
     #[test]
     fn reports_a_missing_or_invalid_protocol_as_incompatible() {
         for txt in [lookup(&[]), lookup(&[("protocol", "one")])] {
-            let Event::Incompatible(server) = event(&txt) else {
-                panic!("expected Incompatible");
-            };
+            let server = incompatible(&txt);
             assert_eq!(server.protocol, None);
         }
     }
@@ -463,9 +460,7 @@ mod tests {
             lookup(&[("protocol", &protocol)]),
             lookup(&[("protocol", &protocol), ("name", "")]),
         ] {
-            let Event::Found(server) = event(&txt) else {
-                panic!("expected Found");
-            };
+            let server = found(&txt);
             assert_eq!(server.name, "Studio");
         }
     }
@@ -477,6 +472,8 @@ mod tests {
             r"Studio.lan\b"
         );
         assert_eq!(instance("Samuel's Mac._tomori._tcp.local."), "Samuel's Mac");
+        // An escape with nothing after it is dropped.
+        assert_eq!(instance(r"Studio\"), "Studio");
     }
 
     #[test]
@@ -488,6 +485,7 @@ mod tests {
                 (IpAddr::V6(link_local), 4),
                 (IpAddr::V4(Ipv4Addr::new(169, 254, 0, 2)), 4),
                 (IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+                (IpAddr::V6(Ipv6Addr::LOCALHOST), 1),
                 (IpAddr::V6(global), 4),
                 (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 4),
                 (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 5),
@@ -503,6 +501,7 @@ mod tests {
                 "169.254.0.2:8765",
                 "[fe80::1%4]:8765",
                 "127.0.0.1:8765",
+                "[::1]:8765",
             ]
         );
         // The client parses the printed form back, scope included.

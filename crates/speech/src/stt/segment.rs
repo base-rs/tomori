@@ -139,9 +139,8 @@ pub fn cut(samples: &[i16], start: usize, speech: &[Range<usize>]) -> Cut {
         return Cut::Pause(point);
     }
 
-    let Some((point, _, level)) = quietest(&mut candidates.iter()) else {
-        return Cut::Hard(limit);
-    };
+    let (point, _, level) =
+        quietest(&mut candidates.iter()).expect("the search has at least one candidate");
     let mut levels: Vec<f64> = candidates.iter().map(|candidate| candidate.2).collect();
     levels.sort_by(f64::total_cmp);
     let typical = levels[levels.len() / 2];
@@ -193,6 +192,14 @@ mod tests {
         index as f64 / f64::from(RATE)
     }
 
+    /// Where `cut` ends a segment at a pause, in seconds, or `None` if it ends it anywhere else.
+    fn paused_at(cut: Cut) -> Option<f64> {
+        match cut {
+            Cut::Pause(end) => Some(seconds(end)),
+            Cut::Rest(_) | Cut::Hard(_) => None,
+        }
+    }
+
     #[test]
     fn a_clip_that_fits_is_one_segment() {
         let samples = voice(20.0, 8000.0);
@@ -208,14 +215,8 @@ mod tests {
     fn splits_at_the_pause_before_the_limit() {
         let mut samples = voice(50.0, 8000.0);
         quieten(&mut samples, 22.3, 22.8, 0.0);
-        let Cut::Pause(end) = cut(&samples, 0, &[]) else {
-            panic!("expected a pause");
-        };
-        assert!(
-            (22.4..=22.7).contains(&seconds(end)),
-            "cut at {}",
-            seconds(end)
-        );
+        let end = paused_at(cut(&samples, 0, &[])).unwrap();
+        assert!((22.4..=22.7).contains(&end), "cut at {end}");
         for segment in segments(&samples) {
             assert!(segment.len() <= MAX_SEGMENT, "{segment:?}");
         }
@@ -228,13 +229,8 @@ mod tests {
         quieten(&mut samples, 19.0, 19.6, 600.0);
         quieten(&mut samples, 21.0, 21.5, 60.0);
         quieten(&mut samples, 25.0, 25.05, 0.0);
-        let end = cut(&samples, 0, &[]);
-        assert!(matches!(end, Cut::Pause(_)), "{end:?}");
-        assert!(
-            (21.1..=21.4).contains(&seconds(end.end())),
-            "cut at {}",
-            seconds(end.end())
-        );
+        let end = paused_at(cut(&samples, 0, &[])).unwrap();
+        assert!((21.1..=21.4).contains(&end), "cut at {end}");
     }
 
     #[test]
@@ -243,18 +239,15 @@ mod tests {
         // Too early: a segment ending here would be shorter than it needs to be.
         quieten(&mut samples, 10.0, 11.0, 0.0);
         quieten(&mut samples, 26.0, 26.4, 300.0);
-        let end = cut(&samples, 0, &[]).end();
-        assert!(
-            (26.0..=26.4).contains(&seconds(end)),
-            "cut at {}",
-            seconds(end)
-        );
+        let end = seconds(cut(&samples, 0, &[]).end());
+        assert!((26.0..=26.4).contains(&end), "cut at {end}");
     }
 
     #[test]
     fn audio_without_a_pause_is_cut_at_the_limit() {
         let samples = voice(70.0, 8000.0);
         assert_eq!(cut(&samples, 0, &[]), Cut::Hard(MAX_SEGMENT));
+        assert_eq!(paused_at(cut(&samples, 0, &[])), None);
         assert_eq!(
             segments(&samples),
             vec![
@@ -293,20 +286,11 @@ mod tests {
         quieten(&mut samples, 24.0, 24.5, 50.0);
         let at = |seconds: f64| (seconds * f64::from(RATE)) as usize;
         let speech = [0..at(19.9), at(20.6)..samples.len()];
-        let end = cut(&samples, 0, &speech);
-        assert!(matches!(end, Cut::Pause(_)), "{end:?}");
-        assert!(
-            (20.0..=20.5).contains(&seconds(end.end())),
-            "cut at {}",
-            seconds(end.end())
-        );
+        let end = paused_at(cut(&samples, 0, &speech)).unwrap();
+        assert!((20.0..=20.5).contains(&end), "cut at {end}");
         // Without the detector, the soft word is the quietest point.
-        let end = cut(&samples, 0, &[]).end();
-        assert!(
-            (24.0..=24.5).contains(&seconds(end)),
-            "cut at {}",
-            seconds(end)
-        );
+        let end = seconds(cut(&samples, 0, &[]).end());
+        assert!((24.0..=24.5).contains(&end), "cut at {end}");
     }
 
     #[test]
@@ -316,13 +300,8 @@ mod tests {
         // The detector merged the pause into the speech around it, but one point overlaps less speech than the rest.
         let at = |seconds: f64| (seconds * f64::from(RATE)) as usize;
         let speech = [0..at(26.0), at(26.1)..samples.len()];
-        let end = cut(&samples, 0, &speech);
-        assert!(matches!(end, Cut::Pause(_)), "{end:?}");
-        assert!(
-            (23.0..=23.5).contains(&seconds(end.end())),
-            "cut at {}",
-            seconds(end.end())
-        );
+        let end = paused_at(cut(&samples, 0, &speech)).unwrap();
+        assert!((23.0..=23.5).contains(&end), "cut at {end}");
         // With no pause at all, it is cut at the limit, not where the detector heard least speech.
         let samples = voice(40.0, 8000.0);
         assert_eq!(cut(&samples, 0, &speech), Cut::Hard(MAX_SEGMENT));
