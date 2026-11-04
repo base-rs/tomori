@@ -401,12 +401,132 @@ impl Feed {
 mod tests {
     use super::*;
     use crate::server_choice::{Choice, Source};
+    use crate::test_support::{Nowhere, Server, Silent};
     use tomori_client::{ConnectionState, Event};
-    use tomori_protocol::{Activity, SpaceState};
+    use tomori_protocol::{Activity, ClientMessage, SpaceState};
+
+    fn feed(options: SpectatorOptions) -> Feed {
+        Feed::with_audio(options, Box::new(Silent), Box::new(Nowhere))
+    }
+
+    /// Poll `feed` until `done` says so, returning the last frame.
+    fn until(feed: &mut Feed, mut done: impl FnMut(&Feed, &Frame) -> bool) -> Frame {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let frame = feed.poll(16.0 / 9.0);
+            if done(feed, &frame) {
+                return frame;
+            }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn pose(x: f32) -> tomori_protocol::Pose {
+        tomori_protocol::Pose {
+            position: [x, 1.6, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    fn presence(right: Option<tomori_protocol::Pose>) -> ClientMessage {
+        ClientMessage::Presence {
+            head: pose(0.5),
+            left: None,
+            right,
+            hands: Some(Box::new([None, None])),
+        }
+    }
+
+    #[test]
+    fn the_spectator_follows_a_participant_by_name_from_their_head() {
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space.clone()),
+            follow: Some("Bea".into()),
+            token: None,
+        });
+        // Until Bea is seen, the spectator waits for her, looking at the scene.
+        let frame = until(&mut feed, |feed, _| {
+            feed.conversation.joined_space().is_some()
+        });
+        assert_eq!(frame.controllers, [None, None]);
+        assert_eq!(feed.following, None);
+        assert_eq!(feed.following_name.as_deref(), Some("Bea"));
+        bea.send(presence(Some(pose(0.7))));
+        let frame = until(&mut feed, |feed, _| feed.following.is_some());
+        assert_eq!(frame.caption, "SPECTATOR\nFollowing Bea");
+        assert_eq!(frame.head[12], 0.5);
+        assert!(frame.controllers[crate::controller::RIGHT].is_some());
+        // The followed participant's right controller stands in for the spectator's marker.
+        tomori_environment_sky::test_gpu::with(|gpu| {
+            let mut renderer = crate::graphics::Renderer::new(
+                &gpu.device,
+                &gpu.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                64,
+                48,
+            );
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("spectator"),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 48,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            crate::spectator_view::SpectatorView::new(feed).render(
+                crate::spectator_view::RenderInputs {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    renderer: &mut renderer,
+                    swarm: &mut Swarm::new(),
+                    target: target.create_view(&Default::default()),
+                    aspect: 4.0 / 3.0,
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn without_a_name_the_spectator_follows_the_first_participant_it_sees_until_they_leave() {
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space),
+            follow: None,
+            token: None,
+        });
+        let frame = until(&mut feed, |feed, _| {
+            feed.conversation.joined_space().is_some()
+        });
+        assert_eq!(
+            frame.caption,
+            "SPECTATOR\nIn space, waiting for a participant..."
+        );
+        bea.send(presence(None));
+        let frame = until(&mut feed, |feed, _| feed.following.is_some());
+        assert_eq!(frame.caption, "SPECTATOR\nFollowing Bea");
+        // Bea leaves the space: the spectator lets go of her.
+        bea.send(ClientMessage::Leave);
+        until(&mut feed, |feed, _| feed.following.is_none());
+        assert_eq!(feed.following_name, None);
+    }
 
     #[test]
     fn frames_follow_the_joined_spaces_activity() {
-        let mut feed = Feed::new(SpectatorOptions::default());
+        let mut feed = feed(SpectatorOptions::default());
         feed.conversation
             .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
         feed.conversation
@@ -450,7 +570,7 @@ mod tests {
 
     #[test]
     fn frames_show_the_joined_space_s_environment_as_it_changes() {
-        let mut feed = Feed::new(SpectatorOptions::default());
+        let mut feed = feed(SpectatorOptions::default());
         feed.environment = Environment::Sky;
         feed.conversation
             .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
