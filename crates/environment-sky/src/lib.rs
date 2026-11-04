@@ -12,6 +12,8 @@ mod light_bake;
 mod lightmap;
 mod mesh;
 mod shadows;
+#[cfg(any(test, feature = "test-gpu"))]
+pub mod test_gpu;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -246,5 +248,37 @@ impl Sky {
         pass.set_bind_group(2, &self.lightmap.binding, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_gpu;
+
+    #[test]
+    fn every_shader_is_valid_wgsl() {
+        let files = test_gpu::wgsl_files(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let names: Vec<_> = files.iter().map(|(name, _)| name.as_str()).collect();
+        // A new shader is added here, with how it is compiled.
+        assert_eq!(
+            names,
+            [
+                "cloud_common.wgsl",
+                "cloud_composite.wgsl",
+                "cloud_volume.wgsl",
+                "shadow.wgsl",
+                "sky.wgsl"
+            ]
+        );
+        for (name, source) in files {
+            // The cloud passes are compiled after `cloud_common.wgsl`, which is also valid alone.
+            let source = match name.as_str() {
+                "cloud_volume.wgsl" | "cloud_composite.wgsl" => {
+                    crate::clouds::shader_source(&source)
+                }
+                _ => source,
+            };
+            test_gpu::validate_wgsl(&name, &source);
+        }
     }
 }

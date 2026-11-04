@@ -55,6 +55,7 @@ libc = "0.2"
 
 [dev-dependencies]
 pollster = "0.4"
+tomori-environment-sky = { version = "0.1.0", path = "../environment-sky", features = ["test-gpu"] }
 
 [package.metadata.android]
 package = "io.github.ioquatix.tomori"

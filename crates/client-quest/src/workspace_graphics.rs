@@ -1264,6 +1264,7 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
 mod tests {
     use super::*;
     use crate::delegation::{Node, Scene};
+    use tomori_environment_sky::test_gpu;
 
     fn node(id: &str, state: State) -> Node {
         Node {
@@ -1329,6 +1330,26 @@ mod tests {
         assert_eq!(last[0].lines[0], "Result e");
         assert!(last[0].lines[2].contains("5/5"));
         assert_eq!(first[0].origin, last[0].origin);
+    }
+
+    #[test]
+    fn empty_and_stale_cards_and_control_characters_say_so() {
+        let mut empty = card("a");
+        empty.text.clear();
+        assert_eq!(content_pages(&empty), [["[Empty content]"]]);
+        empty.kind = Kind::Table;
+        assert_eq!(content_pages(&empty), [["[Empty table]"]]);
+        let workspace = Workspace {
+            presentations: vec![card("a")],
+            stale: true,
+            ..Default::default()
+        };
+        let (panels, _) = test_layout(&workspace, &[], 0, 0);
+        assert!(panels[0].lines[2].ends_with(" [STALE]"));
+        assert_eq!(
+            label_lines("tab\there\nnewline", "IDLE"),
+            ["tab here newline", "IDLE"]
+        );
     }
 
     #[test]
@@ -1851,6 +1872,7 @@ mod tests {
             State::Waiting,
             State::Running,
             State::Idle,
+            State::Stopped,
             State::Unknown,
         ];
         let mut shapes = Vec::new();
@@ -2169,16 +2191,25 @@ mod tests {
         assert_ne!(projected[0], projected[1]);
     }
 
+    /// The pixels of two RGBA images that differ by more than one step in any channel.
+    ///
+    /// Recentering draws with `(matrix * transform.inverse()) * transform`, which differs from `matrix` only by float rounding, about 1e-7. Lavapipe carries that into interpolated colours that round one step differently, in up to about 300 pixels of a 512×512 image, while NVIDIA and RADV draw identical images; a moved edge, a changed order or a wrong transform differs by far more than one step.
+    fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
+        assert_eq!(a.len(), b.len());
+        a.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0)
+            .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 1))
+            .count()
+    }
+
     #[test]
-    #[ignore = "requires a Vulkan adapter"]
     fn vulkan_sign_images_include_post_text_and_smooth_fade_in_both_eyes() {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let Some(test_gpu::Gpu { device, queue, .. }) = test_gpu::open().await else {
+                return;
+            };
             let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: None,
@@ -2480,15 +2511,8 @@ mod tests {
                 graphics.update(&device, &queue, &workspace, std::slice::from_ref(&station));
                 let compensated =
                     capture(&graphics, (matrix * transform.inverse()) * transform, false);
-                assert!(
-                    full.as_chunks::<4>()
-                        .0
-                        .iter()
-                        .zip(compensated.as_chunks::<4>().0.iter())
-                        .filter(|(a, b)| a != b)
-                        .count()
-                        < 256
-                );
+                let changed = changed_pixels(&full, &compensated);
+                assert!(changed < 256, "recenter changed the sign: {changed} pixels");
                 eye_images.push(full);
             }
             assert_ne!(eye_images[0], eye_images[1]);
@@ -2600,13 +2624,7 @@ mod tests {
                                 (matrix * transform.inverse()) * transform,
                                 false,
                             );
-                            let changed = forward
-                                .as_chunks::<4>()
-                                .0
-                                .iter()
-                                .zip(recentered.as_chunks::<4>().0)
-                                .filter(|(a, b)| a != b)
-                                .count();
+                            let changed = changed_pixels(&forward, &recentered);
                             assert!(changed < 128, "recenter changed overlap: {changed} pixels");
                         }
                     }

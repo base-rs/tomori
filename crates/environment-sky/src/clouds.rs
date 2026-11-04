@@ -118,7 +118,7 @@ impl Clouds {
         });
         let pipeline =
             |fragment: &str, source: &str, textures: &wgpu::BindGroupLayout, composite: bool| {
-                let source = format!("{}\n{source}", include_str!("cloud_common.wgsl"));
+                let source = shader_source(source);
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(fragment),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -268,6 +268,11 @@ impl Clouds {
         pass.set_bind_group(1, &self.targets[eye].binding, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// A cloud pass's shader: `cloud_common.wgsl`, which defines the camera, the ray and the vertex stage, followed by the pass's own `source`.
+pub(super) fn shader_source(source: &str) -> String {
+    format!("{}\n{source}", include_str!("cloud_common.wgsl"))
 }
 
 #[cfg(test)]
