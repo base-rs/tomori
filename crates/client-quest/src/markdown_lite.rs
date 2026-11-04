@@ -134,23 +134,12 @@ impl Builder {
     }
 }
 
-/// `text`'s blocks. Text that cannot be parsed is one paragraph as written.
-pub fn parse(text: &str) -> Vec<Block> {
-    parse_events(text).unwrap_or_else(|| {
-        text.split("\n\n")
-            .filter(|paragraph| !paragraph.trim().is_empty())
-            .map(|paragraph| Block {
-                kind: Kind::Paragraph,
-                text: vec![(paragraph.trim().to_owned(), Inline::Plain)],
-            })
-            .collect()
-    })
-}
-
-fn parse_events(source: &str) -> Option<Vec<Block>> {
+/// `text`'s blocks.
+///
+/// The parser reports errors only from custom event producers, and a text's ranges only into that text, which is never one of them, so neither error happens here: an event that failed would be left out, and a range that failed would be empty.
+pub fn parse(source: &str) -> Vec<Block> {
     let mut builder = Builder::default();
-    for event in EventParser::new(source, &OPTIONS) {
-        let event = event.ok()?;
+    for event in EventParser::new(source, &OPTIONS).filter_map(Result::ok) {
         match event.kind {
             EventKind::Start(tag) => match tag {
                 Tag::Paragraph { .. } => {
@@ -223,18 +212,18 @@ fn parse_events(source: &str) -> Option<Vec<Block>> {
                 _ => {}
             },
             EventKind::Text(text) => {
-                let text = text.resolve(source).ok()?.to_owned();
+                let text = text.resolve(source).unwrap_or_default().to_owned();
                 let inline = builder.inline();
                 builder.push(&text, inline);
             }
             EventKind::SoftBreak(_) => builder.push(" ", Inline::Plain),
             EventKind::HardBreak => builder.push("\n", Inline::Plain),
             EventKind::Code { value, .. } => {
-                let value = value.resolve(source).ok()?.to_owned();
+                let value = value.resolve(source).unwrap_or_default().to_owned();
                 builder.push(&value, Inline::Code);
             }
             EventKind::CodeBlock { value, .. } => {
-                let value = value.resolve(source).ok()?;
+                let value = value.resolve(source).unwrap_or_default();
                 builder.open(Kind::Code);
                 builder.push(value.trim_end_matches('\n'), Inline::Code);
                 builder.flush();
@@ -247,14 +236,14 @@ fn parse_events(source: &str) -> Option<Vec<Block>> {
                 builder.push(if done { "[x] " } else { "[ ] " }, Inline::Plain)
             }
             EventKind::Html { value, .. } | EventKind::Math(value) => {
-                let value = value.resolve(source).ok()?.to_owned();
+                let value = value.resolve(source).unwrap_or_default().to_owned();
                 builder.push(&value, Inline::Plain);
             }
             _ => {}
         }
     }
     builder.flush();
-    Some(builder.blocks)
+    builder.blocks
 }
 
 #[cfg(test)]
@@ -337,6 +326,31 @@ mod tests {
                 (Kind::TableRow { header: false }, "1 │ 2".into()),
                 (Kind::Quote, "quoted".into()),
                 (Kind::Rule, String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn emphasis_html_and_empty_items_are_kept() {
+        let blocks = parse("*soft* and **firm**\nnext <b>tag</b>\n\n-\n- after\n");
+        assert_eq!(
+            blocks[0].text,
+            [
+                ("soft".into(), Inline::Emphasis),
+                (" and ".into(), Inline::Plain),
+                ("firm".into(), Inline::Strong),
+                (" next <b>tag</b>".into(), Inline::Plain),
+            ]
+        );
+        let item = |marker: Option<&str>| Kind::Item {
+            depth: 1,
+            marker: marker.map(str::to_owned),
+        };
+        assert_eq!(
+            plain(&blocks[1..]),
+            [
+                (item(Some("•")), String::new()),
+                (item(Some("•")), "after".into()),
             ]
         );
     }
