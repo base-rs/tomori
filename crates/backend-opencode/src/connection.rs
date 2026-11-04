@@ -842,10 +842,13 @@ impl Registration {
         }
         self.install_workers(&mut snapshot.workers)?;
         if opening {
-            let held: Vec<Event> = std::mem::take(&mut self.opening.events)
+            let held = std::mem::take(&mut self.opening.events);
+            let recorded = recorded_text(snapshot, &held);
+            let held: Vec<Event> = held
                 .into_iter()
-                .map(|(_, event)| event)
-                .filter(|event| !shown(snapshot, event))
+                .enumerate()
+                .filter(|(index, (_, event))| !recorded.contains(index) && !shown(snapshot, event))
+                .map(|(_, (_, event))| event)
                 .collect();
             let mut running = match snapshot.busy {
                 Some(true) => RunningState::Running,
@@ -2395,6 +2398,53 @@ fn shown(snapshot: &Snapshot, event: &Event) -> bool {
             .any(|listed| listed.id == *message && listed.completed),
         event => reflected(snapshot, event),
     }
+}
+
+/// The places in `held` of the text deltas whose text `snapshot` already
+/// records for a message it lists still being written. OpenCode records a
+/// message's text when the text ends, before the message itself completes,
+/// as when a tool follows it, while text still streaming is in no record. So
+/// of a message's held deltas, those whose text, run together from the first,
+/// ends its recorded text are shown; the deltas after them are not.
+fn recorded_text(snapshot: &Snapshot, held: &[(u64, Event)]) -> HashSet<usize> {
+    let mut recorded = HashSet::new();
+    for message in snapshot
+        .messages
+        .iter()
+        .filter(|message| !message.completed)
+    {
+        let text: String = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                tomori_backend::Part::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        let deltas: Vec<(usize, &str)> = held
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, event))| match event {
+                Event::TextDelta { message: id, text } if *id == message.id => {
+                    Some((index, text.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut joined = String::new();
+        let mut shown = 0;
+        for (count, (_, delta)) in deltas.iter().enumerate() {
+            joined.push_str(delta);
+            if text.ends_with(&joined) {
+                shown = count + 1;
+            }
+        }
+        recorded.extend(deltas[..shown].iter().map(|(index, _)| *index));
+    }
+    recorded
 }
 
 /// Whether `event` changes the pending permissions or questions, which a read
@@ -7711,8 +7761,15 @@ mod tests {
             state.sessions.insert("attached".into(), Vec::new());
             state.messages.insert(
                 "attached".into(),
-                // Newest first, as OpenCode lists them.
+                // Newest first, as OpenCode lists them. "stepped" has
+                // recorded its first text, which ended before a tool, but not
+                // its second, which is still streaming.
                 json!([
+                    {"id":"stepped","type":"assistant","time":{"created":4},"content":[
+                        {"type":"text","text":"Looking."},
+                        {"type":"tool","id":"t1","name":"bash","state":{"status":"running","input":{}}},
+                        {"type":"text","text":""},
+                    ]},
                     {"id":"live","type":"assistant","time":{"created":3},"content":[{"type":"text","text":""}]},
                     {"id":"done","type":"assistant","time":{"created":1,"completed":2},"content":[{"type":"text","text":"Finished."}]},
                 ]),
@@ -7761,6 +7818,30 @@ mod tests {
             "session.text.delta",
             json!({"assistantMessageID":"live","delta":"Still going"}),
         ));
+        service.send(event(
+            "session.text.started",
+            json!({"assistantMessageID":"stepped"}),
+        ));
+        service.send(event(
+            "session.text.delta",
+            json!({"assistantMessageID":"stepped","delta":"Look"}),
+        ));
+        service.send(event(
+            "session.text.delta",
+            json!({"assistantMessageID":"stepped","delta":"ing."}),
+        ));
+        service.send(event(
+            "session.text.ended",
+            json!({"assistantMessageID":"stepped"}),
+        ));
+        service.send(event(
+            "session.tool.called",
+            json!({"assistantMessageID":"stepped","id":"t1","input":{}}),
+        ));
+        service.send(event(
+            "session.text.delta",
+            json!({"assistantMessageID":"stepped","delta":"Found it."}),
+        ));
         service.send(json!({"type":"session.execution.started","data":{"sessionID":other}}));
         until(&other_events, "the other session's event", |event| {
             matches!(event, Event::Busy)
@@ -7776,12 +7857,12 @@ mod tests {
                 .iter()
                 .map(|message| (message.id.as_str(), message.completed))
                 .collect::<Vec<_>>(),
-            [("done", true), ("live", false)]
+            [("done", true), ("live", false), ("stepped", false)]
         );
         let seen = until(
             &watched,
-            "the live message's text",
-            |event| matches!(event, Event::TextDelta { message, .. } if message == "live"),
+            "the stepped message's new text",
+            |event| matches!(event, Event::TextDelta { message, .. } if message == "stepped"),
         );
         // Workers travel on their own lane.
         let ordinary: Vec<_> = seen
@@ -7798,7 +7879,18 @@ mod tests {
                 Event::TextDelta {
                     message: "live".into(),
                     text: "Still going".into(),
-                }
+                },
+                Event::MessageStarted {
+                    message: "stepped".into(),
+                    role: tomori_backend::Role::Assistant,
+                },
+                Event::MessageCompleted {
+                    message: "stepped".into()
+                },
+                Event::TextDelta {
+                    message: "stepped".into(),
+                    text: "Found it.".into(),
+                },
             ],
             "only what the snapshot does not show follows it"
         );
@@ -7993,5 +8085,37 @@ mod tests {
             events.try_recv().unwrap().into_current(),
             Some(Event::Busy)
         ));
+    }
+
+    /// A session's running state is not reconciled until its initial state
+    /// has been read, which reports it, so nothing reaches its space before.
+    #[test]
+    fn a_session_not_yet_read_is_not_reconciled() {
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| {
+            state.sessions.insert("unread".into(), Vec::new());
+        });
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        let events = block_on(commands.reply_with(|reply| Command::Attach {
+            id: "unread".into(),
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap();
+        let watched = watch(&events);
+        // Longer than the reconciliation cadence.
+        assert!(
+            watched
+                .recv_timeout(RECONCILE_INTERVAL + Duration::from_millis(500))
+                .is_err(),
+            "an event reached the session before its initial state"
+        );
+        let snapshot = read_snapshot(&commands, "unread", &events).unwrap();
+        assert_eq!(snapshot.busy, Some(false));
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
     }
 }
