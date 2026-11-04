@@ -313,6 +313,7 @@ mod tests {
     fn typographic_characters_tabs_and_line_breaks_are_drawn_plainly() {
         assert_eq!(shown('\u{201c}'), '"');
         assert_eq!(shown('\u{2014}'), '-');
+        assert_eq!(shown('\u{a0}'), ' ');
         let style = Style::plain([1.0; 4]);
         let cells = cut(&[Span::new("a\tb\nc", style)], 10);
         assert_eq!(cells.iter().map(|(ch, _)| *ch).collect::<String>(), "a b c");

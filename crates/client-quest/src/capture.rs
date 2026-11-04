@@ -623,6 +623,8 @@ mod tests {
     struct Fake {
         /// Whether starting the stream fails.
         fail_start: bool,
+        /// Whether the device reports an overrun when what it holds is read.
+        overrun_on_drain: bool,
         steps: VecDeque<Step>,
         /// What the device already holds when read without waiting.
         buffered: VecDeque<Result<Vec<f32>, ()>>,
@@ -640,7 +642,10 @@ mod tests {
 
         fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String> {
             let next = if timeout_ns == 0 {
-                self.log.borrow_mut().drain_reads += 1;
+                let mut log = self.log.borrow_mut();
+                log.drain_reads += 1;
+                log.overruns += i32::from(self.overrun_on_drain);
+                drop(log);
                 match self.buffered.pop_front() {
                     None => return Ok(0),
                     Some(Err(())) => return Err("drain failed".into()),
@@ -673,6 +678,7 @@ mod tests {
         let log = Rc::new(RefCell::new(Log::default()));
         let fake = Fake {
             fail_start: false,
+            overrun_on_drain: false,
             steps: steps.into(),
             buffered: buffered.into(),
             log: log.clone(),
@@ -794,6 +800,12 @@ mod tests {
         let (result, delivered) = run(Ok(device), &stop, Some(&active), || {});
         assert_eq!(result.unwrap_err(), CONNECTION_LOST);
         assert_eq!(delivered, [0.1; 2]);
+        // Push-to-talk loses what the device overran while it drained.
+        let (stop, step) = released();
+        let (mut device, _) = fake(vec![step], vec![Ok(vec![0.2; 2])]);
+        device.overrun_on_drain = true;
+        let (result, _) = run(Ok(device), &stop, None, || {});
+        assert_eq!(result.unwrap_err(), "Microphone lost audio; not sent.");
     }
 
     #[test]
@@ -884,6 +896,7 @@ mod tests {
         let log = Rc::new(RefCell::new(Log::default()));
         let device = Fake {
             fail_start: false,
+            overrun_on_drain: false,
             steps: vec![
                 Step::Read(vec![0.1; 4], Box::new(|| {})),
                 Step::Read(vec![0.2; 4], overrun(&log)),
@@ -903,6 +916,7 @@ mod tests {
         stop.store(false, Ordering::Release);
         let device = Fake {
             fail_start: false,
+            overrun_on_drain: false,
             steps: vec![
                 Step::Read(vec![0.2; 4], overrun(&log)),
                 Step::Read(

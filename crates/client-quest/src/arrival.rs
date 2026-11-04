@@ -806,10 +806,9 @@ mod tests {
                     (position.z - CENTRE.z).abs() < 1e-5,
                     "facing the participant"
                 );
-                // With the create object alone, the next is itself, a whole turn on.
+                // There is always the create object and at least one space.
                 let next = positions[(index + 1) % positions.len()];
                 let turn = clockwise(around(*position), around(next));
-                let turn = if turn == 0.0 { TAU } else { turn };
                 assert!((turn - step).abs() < 1e-4, "{count}: {turn} not {step}");
             }
         }

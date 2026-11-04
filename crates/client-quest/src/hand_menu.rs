@@ -1021,6 +1021,9 @@ mod tests {
             assert_eq!(Palm::from_left_hand(&partial), None);
             assert_eq!(Palm::from_right_hand(&partial), None);
         }
+        // Nor is there a way to the head from the wrist itself.
+        let palm = Palm::from_left_hand(&hand(Vec3::ZERO, Vec3::X, -Vec3::Z)).unwrap();
+        assert_eq!(palm.angle_to(palm.wrist), None);
         let lost = controller::Pose {
             position: [0.0; 3],
             orientation: [f32::NAN; 4],
@@ -1071,6 +1074,7 @@ mod tests {
             }),
             ..Default::default()
         };
+        assert!(texts(&items(Some(Section::Agent), &short)).contains(&"This space's: Be brief."));
         let layer = items(Some(Section::Layer(Layer::Space)), &short);
         assert_eq!(texts(&layer).last(), Some(&"Be brief."));
         for (state, said) in [

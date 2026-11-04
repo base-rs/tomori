@@ -341,5 +341,6 @@ mod tests {
         );
         report(&some, Some(&[space]));
         report(&none, None);
+        report(&some, Some(&[]));
     }
 }

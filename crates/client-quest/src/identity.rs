@@ -325,9 +325,9 @@ mod tests {
 
     #[test]
     fn a_long_name_is_cut_between_characters() {
-        let long = "\u{e9}".repeat(NAME_BYTES);
+        let long = format!("a{}", "\u{e9}".repeat(NAME_BYTES));
         let cut = name(&long).unwrap();
-        assert!(cut.len() <= NAME_BYTES && cut.chars().all(|ch| ch == '\u{e9}'));
+        assert_eq!(cut.len(), NAME_BYTES - 1);
     }
 
     #[test]
