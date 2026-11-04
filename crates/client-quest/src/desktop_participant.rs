@@ -4,18 +4,15 @@
 //! The desktop window as a participant: it connects to a Tomori server and presents arrival, the space and the hand menu as the headset does, seen from a head at standing height that the mouse turns, with the keyboard for the controller's buttons and the mouse for its ray. See `design/desktop.md`.
 
 use crate::{
-    arrival, arrival_graphics, arrival_motion,
     connection::Connection,
-    controller,
     conversation::Conversation,
     desktop::{WindowGpu, acquire},
     graphics::Renderer,
-    hand_menu::{HandMenu, Palm},
-    pointing::{Pointer, Ray},
-    swarm::Swarm,
+    scene::desktop::{Button, Desktop, Direction, Key, KeyResult, TITLE},
+    scene_graphics::{self, Panels},
 };
 use anyhow::Result;
-use glam::{EulerRot, Mat4, Quat, Vec2, Vec3};
+use glam::{Mat4, Vec2};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -23,13 +20,11 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
-
-const TITLE: &str = "Tomori";
 
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
 pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left button: choose what is pointed at, or attract the swarm; right drag: look around.\n\
@@ -39,10 +34,34 @@ V: mute spoken replies (left stick click). R: play the latest reply again, or st
 M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
 Esc: close the hand menu, or quit.";
 
-/// How far the stick must move before it counts, as on the headset.
-const STICK: f32 = 0.6;
-/// How far the head turns, in radians, for each pixel the mouse is dragged.
-const LOOK_SPEED: f32 = 0.004;
+/// The key that `code` stands for, as `CONTROLS` describes.
+fn key(code: KeyCode) -> Option<Key> {
+    Some(match code {
+        KeyCode::Space => Key::Talk,
+        KeyCode::Backspace => Key::Back,
+        KeyCode::Enter | KeyCode::NumpadEnter => Key::A,
+        KeyCode::Tab => Key::Y,
+        KeyCode::KeyV => Key::Mute,
+        KeyCode::KeyR => Key::Replay,
+        KeyCode::ArrowUp => Key::Left(Direction::Up),
+        KeyCode::ArrowDown => Key::Left(Direction::Down),
+        KeyCode::ArrowLeft => Key::Left(Direction::Left),
+        KeyCode::ArrowRight => Key::Left(Direction::Right),
+        KeyCode::PageUp => Key::Right(Direction::Up),
+        KeyCode::PageDown => Key::Right(Direction::Down),
+        KeyCode::BracketLeft => Key::Right(Direction::Left),
+        KeyCode::BracketRight => Key::Right(Direction::Right),
+        KeyCode::KeyM => Key::Menu,
+        KeyCode::KeyT => Key::Transcript,
+        KeyCode::KeyG => Key::Grip,
+        KeyCode::KeyK => Key::Knock,
+        KeyCode::KeyP => Key::Pair,
+        KeyCode::Equal | KeyCode::NumpadAdd => Key::Admit,
+        KeyCode::Minus | KeyCode::NumpadSubtract => Key::Decline,
+        KeyCode::Escape => Key::Escape,
+        _ => return None,
+    })
+}
 
 /// Open a desktop window connected as `conversation` and `connection` describe, until it is closed.
 pub fn run(conversation: Conversation, connection: Connection) -> Result<()> {
@@ -99,46 +118,47 @@ impl ApplicationHandler for App {
         if id != state.window.id() {
             return;
         }
+        let (p, desktop) = (&mut state.participant, &mut state.desktop);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size),
-            WindowEvent::Focused(focused) => state.participant.set_focused(focused),
+            WindowEvent::Focused(focused) => {
+                if desktop.set_focused(focused, &mut p.conversation) {
+                    p.connection.request_microphone();
+                }
+            }
             WindowEvent::Occluded(occluded) => {
                 state.occluded = occluded;
-                state.participant.set_visible(!occluded);
+                desktop.set_visible(!occluded, &mut p.conversation);
                 if !occluded {
                     state.window.request_redraw();
                 }
             }
-            WindowEvent::CursorLeft { .. } => {
-                state.participant.input.cursor = None;
-                state.participant.input.looking = false;
-            }
+            WindowEvent::CursorLeft { .. } => desktop.cursor_left(),
             WindowEvent::CursorMoved { position, .. } => {
-                let cursor = Vec2::new(position.x as f32, position.y as f32);
-                let input = &mut state.participant.input;
-                if input.looking
-                    && let Some(last) = input.cursor
-                {
-                    state.participant.head.look(cursor - last);
-                }
-                state.participant.input.cursor = Some(cursor);
+                desktop.cursor_moved(Vec2::new(position.x as f32, position.y as f32));
             }
             WindowEvent::MouseInput {
                 state: pressed,
                 button,
                 ..
             } => {
-                let pressed = pressed == ElementState::Pressed;
-                match button {
-                    MouseButton::Left => state.participant.input.trigger = pressed,
-                    MouseButton::Right => state.participant.input.looking = pressed,
-                    _ => {}
-                }
+                let button = match button {
+                    MouseButton::Left => Button::Left,
+                    MouseButton::Right => Button::Right,
+                    _ => return,
+                };
+                desktop.mouse(button, pressed == ElementState::Pressed);
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Esc lets go of a pinned hand menu before it quits.
-                if state.participant.key(&event) == KeyResult::Quit && !state.hand_menu.unpin() {
+                let PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
+                let Some(key) = key(code) else {
+                    return;
+                };
+                let pressed = event.state == ElementState::Pressed;
+                if desktop.key(key, pressed, event.repeat, &mut p.conversation) == KeyResult::Quit {
                     event_loop.exit();
                 }
             }
@@ -177,251 +197,18 @@ impl ApplicationHandler for App {
     }
 }
 
-#[derive(PartialEq)]
-enum KeyResult {
-    Handled,
-    Quit,
-}
-
-/// The keyboard and mouse as the headset's controls; see `CONTROLS`.
-#[derive(Default)]
-struct Input {
-    cursor: Option<Vec2>,
-    trigger: bool,
-    looking: bool,
-    talk: bool,
-    back_held: bool,
-    /// Presses since the last frame, which it consumes.
-    a: bool,
-    back: bool,
-    y: bool,
-    mute: bool,
-    replay: bool,
-    left: [bool; 4],
-    right: [bool; 4],
-    /// G, held: the right grip.
-    grip: bool,
-}
-
-impl Input {
-    /// Release everything held, as on losing focus.
-    fn release(&mut self) {
-        let cursor = self.cursor;
-        *self = Self {
-            cursor,
-            ..Self::default()
-        };
-    }
-
-    fn stick(keys: [bool; 4]) -> Vec2 {
-        let [up, down, left, right] = keys.map(f32::from);
-        Vec2::new(right - left, up - down)
-    }
-}
-
-/// The participant's head, standing at arrival's home and turned by the mouse.
-struct Head {
-    yaw: f32,
-    pitch: f32,
-}
-
-impl Default for Head {
-    fn default() -> Self {
-        // Arrival is laid out ahead, along -Z, and a little below the eyes.
-        Self {
-            yaw: 0.0,
-            pitch: -0.12,
-        }
-    }
-}
-
-impl Head {
-    fn look(&mut self, delta: Vec2) {
-        self.yaw -= delta.x * LOOK_SPEED;
-        self.pitch = (self.pitch - delta.y * LOOK_SPEED).clamp(-1.4, 1.4);
-    }
-
-    fn rotation(&self) -> Quat {
-        Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0)
-    }
-
-    /// The head's pose in the scene, as the headset's views give it.
-    fn transform(&self) -> Mat4 {
-        Mat4::from_rotation_translation(self.rotation(), arrival::HOME)
-    }
-
-    fn view_projection(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.05, 50.0) * self.transform().inverse()
-    }
-
-    /// The ray from the eye through the cursor, as the right controller's aim on the headset.
-    fn ray(&self, cursor: Vec2, size: Vec2) -> Option<Ray> {
-        let ndc = Vec2::new(cursor.x / size.x * 2.0 - 1.0, 1.0 - cursor.y / size.y * 2.0);
-        let inverse = self.view_projection(size.x / size.y).inverse();
-        let near = inverse.project_point3(ndc.extend(0.0));
-        let far = inverse.project_point3(ndc.extend(1.0));
-        Ray::new(near, far - near)
-    }
-
-    /// A right palm turned up in front of the participant, where the transcript shows while it is open.
-    fn right_palm(&self) -> Palm {
-        let wrist = arrival::HOME + self.rotation() * Vec3::new(0.05, -0.2, -0.42);
-        Palm {
-            wrist,
-            normal: Vec3::Y,
-        }
-    }
-
-    /// A left palm held up in front of the participant, facing them, where the hand menu shows while it is open.
-    fn palm(&self) -> Palm {
-        let wrist = arrival::HOME + self.rotation() * Vec3::new(-0.06, -0.14, -0.45);
-        Palm {
-            wrist,
-            normal: (arrival::HOME - wrist).normalize(),
-        }
-    }
-}
-
-/// The conversation with the server, and everything the headset's frame loop keeps between frames, without the headset.
+/// The conversation with the server, until the window exists.
 struct Participant {
     conversation: Conversation,
     connection: Connection,
-    input: Input,
-    head: Head,
-    focused: bool,
-    visible: bool,
-    engagement: tomori_client::engagement::Tracker,
-    microphone_requested: bool,
-    menu_open: bool,
-    /// Whether the right wrist's transcript is turned up, with T.
-    wrist_open: bool,
-    stick_latched: bool,
-    back_since: Option<Instant>,
-    was_talking: bool,
-    talk_blocked: bool,
-    highlighted: Option<arrival::Key>,
-    menu_was_shown: bool,
-    knocks: usize,
 }
 
 impl Participant {
-    fn new(mut conversation: Conversation, connection: Connection) -> Self {
-        let engagement = tomori_client::engagement::Tracker::new();
-        conversation.set_engagement(engagement.engagement());
+    fn new(conversation: Conversation, connection: Connection) -> Self {
         Self {
             conversation,
             connection,
-            input: Input::default(),
-            head: Head::default(),
-            focused: false,
-            visible: true,
-            engagement,
-            microphone_requested: false,
-            menu_open: false,
-            wrist_open: false,
-            stick_latched: false,
-            back_since: None,
-            was_talking: false,
-            talk_blocked: false,
-            highlighted: None,
-            menu_was_shown: false,
-            knocks: 0,
         }
-    }
-
-    fn set_focused(&mut self, focused: bool) {
-        if self.focused && !focused {
-            // As the headset does on losing focus: nothing held carries over.
-            self.input.release();
-            self.stick_latched = false;
-            self.back_since = None;
-            self.conversation.hold_back(None);
-            self.was_talking = false;
-            self.talk_blocked = true;
-            self.conversation.stop_live();
-            self.conversation.stop_talking();
-            self.highlighted = None;
-        }
-        self.focused = focused;
-        if focused && !self.microphone_requested {
-            self.microphone_requested = true;
-            self.connection.request_microphone();
-        }
-        self.report_engagement();
-    }
-
-    fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-        self.report_engagement();
-    }
-
-    /// A focused window has input, an unfocused one is only seen, and a hidden one is neither; a desktop has no sensor for being worn.
-    fn report_engagement(&mut self) {
-        use tomori_client::engagement::Focus;
-        let focus = match (self.visible, self.focused) {
-            (false, _) => Focus::Hidden,
-            (true, true) => Focus::Focused,
-            (true, false) => Focus::Visible,
-        };
-        if let Some(changed) = self.engagement.set_focus(focus) {
-            log::info!("Engagement: {changed:?}, as the window is {focus:?}");
-            self.conversation.set_engagement(changed);
-        }
-    }
-
-    fn key(&mut self, event: &KeyEvent) -> KeyResult {
-        let PhysicalKey::Code(code) = event.physical_key else {
-            return KeyResult::Handled;
-        };
-        let pressed = event.state == ElementState::Pressed;
-        let press = pressed && !event.repeat;
-        let input = &mut self.input;
-        match code {
-            KeyCode::Space => input.talk = pressed,
-            KeyCode::Backspace => {
-                input.back_held = pressed;
-                input.back |= press;
-            }
-            KeyCode::Enter | KeyCode::NumpadEnter => input.a |= press,
-            KeyCode::Tab => input.y |= press,
-            KeyCode::KeyV => input.mute |= press,
-            KeyCode::KeyR => input.replay |= press,
-            KeyCode::ArrowUp => input.left[0] = pressed,
-            KeyCode::ArrowDown => input.left[1] = pressed,
-            KeyCode::ArrowLeft => input.left[2] = pressed,
-            KeyCode::ArrowRight => input.left[3] = pressed,
-            KeyCode::PageUp => input.right[0] = pressed,
-            KeyCode::PageDown => input.right[1] = pressed,
-            KeyCode::BracketLeft => input.right[2] = pressed,
-            KeyCode::BracketRight => input.right[3] = pressed,
-            KeyCode::KeyM if press => self.menu_open = !self.menu_open,
-            KeyCode::KeyT if press => self.wrist_open = !self.wrist_open,
-            KeyCode::KeyG => input.grip = pressed,
-            KeyCode::KeyK if press => self.conversation.knock(),
-            KeyCode::KeyP if press => self.conversation.pair(),
-            KeyCode::Equal | KeyCode::NumpadAdd | KeyCode::Minus | KeyCode::NumpadSubtract
-                if press =>
-            {
-                let admit = matches!(code, KeyCode::Equal | KeyCode::NumpadAdd);
-                match self
-                    .conversation
-                    .knocks()
-                    .first()
-                    .map(|knock| knock.id.clone())
-                {
-                    Some(id) => self.conversation.decide_knock(&id, admit),
-                    None => log::info!("No knock is waiting."),
-                }
-            }
-            KeyCode::Escape if press => {
-                if !self.menu_open {
-                    return KeyResult::Quit;
-                }
-                self.menu_open = false;
-            }
-            _ => {}
-        }
-        KeyResult::Handled
     }
 }
 
@@ -429,29 +216,17 @@ struct State {
     window: Arc<Window>,
     gpu: WindowGpu,
     renderer: Renderer,
-    pill: crate::controller_ui::Pill,
-    indicator: crate::controller_ui::Indicator,
-    wrist: crate::controller_ui::Wrist,
+    panels: Panels,
     size: PhysicalSize<u32>,
     occluded: bool,
     participant: Participant,
-    swarm: Swarm,
-    signals: crate::interaction::Signals,
-    pointer: Pointer<arrival::Key>,
-    hand_menu: HandMenu,
-    motion: arrival_motion::Motion,
-    arrival_time: f32,
-    delegation_scene: crate::delegation::Scene,
-    workers: crate::delegation::Workers,
-    coordinator_samples: Vec<[f32; 3]>,
-    presentation_navigation: crate::workspace_graphics::CardNavigation,
-    panel: crate::panel_anchor::PanelAnchor,
-    last_frame: Instant,
+    /// The desktop's logic, whose first frame steps from when the window was ready.
+    desktop: Desktop,
     first_frame: bool,
 }
 
 impl State {
-    async fn new(window: Arc<Window>, participant: Participant) -> Result<Self> {
+    async fn new(window: Arc<Window>, mut participant: Participant) -> Result<Self> {
         let gpu = WindowGpu::new(window.clone()).await?;
         let size = window.inner_size();
         let samples = gpu.samples(gpu.config.format);
@@ -463,37 +238,23 @@ impl State {
             gpu.config.height,
             samples,
         );
-        let pill = crate::controller_ui::Pill::new(&gpu.device, &renderer);
-        let indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
-        let wrist = crate::controller_ui::Wrist::new(&gpu.device, &renderer);
+        let panels = Panels::new(&gpu.device, &renderer);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,
             gpu.config.width,
             gpu.config.height
         );
+        let desktop = Desktop::new(&mut participant.conversation, Instant::now());
         Ok(Self {
             window,
             gpu,
             renderer,
-            pill,
-            indicator,
-            wrist,
+            panels,
             size,
             occluded: false,
             participant,
-            swarm: Swarm::new(),
-            signals: Default::default(),
-            pointer: Pointer::default(),
-            hand_menu: HandMenu::default(),
-            motion: arrival_motion::Motion::default(),
-            arrival_time: 0.0,
-            delegation_scene: crate::delegation::Scene::new(),
-            workers: Default::default(),
-            coordinator_samples: Vec::with_capacity(crate::swarm::AGENT_COUNT),
-            presentation_navigation: Default::default(),
-            panel: Default::default(),
-            last_frame: Instant::now(),
+            desktop,
             first_frame: true,
         })
     }
@@ -513,342 +274,38 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// One pass of the headset's frame loop (`xr::run`), from the keyboard and mouse instead of the controllers, drawing it if `render`.
+    /// One frame of the desktop's logic, drawing it if `render`.
     fn frame(&mut self, render: bool) -> Result<()> {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
-        self.last_frame = now;
-        let p = &mut self.participant;
-        let focused = p.focused;
-        p.connection.poll(focused, &mut p.conversation);
-        let conversation = &mut p.conversation;
-        let input = &mut p.input;
-        let (a, back, y, mute, replay) = (
-            std::mem::take(&mut input.a),
-            std::mem::take(&mut input.back),
-            std::mem::take(&mut input.y),
-            std::mem::take(&mut input.mute),
-            std::mem::take(&mut input.replay),
-        );
-        // As on the headset, approvals are decided and queued entries removed on the right wrist.
-        conversation.decide_on_wrist();
-        let stick = Input::stick(input.left);
-        let moving = stick.x.abs() > STICK || stick.y.abs() > STICK;
-        if moving && !p.stick_latched && conversation.joined_space().is_none() {
-            if stick.y.abs() >= stick.x.abs() {
-                conversation.navigate(0, if stick.y > 0.0 { -1 } else { 1 });
-            } else {
-                conversation.navigate(if stick.x > 0.0 { 1 } else { -1 }, 0);
-            }
-        }
-        p.stick_latched = moving;
-        // While the right wrist's transcript shows, the right stick, A and B act on it; see `xr::run`.
-        let wrist_active = self.wrist.state().active();
-        let right = Input::stick(input.right);
-        // B lets go of a menu pinned with Tab (Y) first.
-        let unpinned = back && self.hand_menu.unpin();
-        let wrist_input = self.wrist.input(
-            conversation,
-            right,
-            a && !p.menu_was_shown,
-            back && !unpinned,
-            now,
-        );
-        // Without controllers, only choosing on the transcript is heard; see `design/feedback.md`.
-        if wrist_input.chose {
-            p.connection
-                .feedback()
-                .emit(crate::feedback::Event::Choose, now);
-        }
-        if wrist_input.on_request {
-            p.connection.feedback().request_opened();
-        }
-        let back_taken = wrist_input.back || unpinned;
-        if back && !back_taken {
-            conversation.back();
-        }
-        // Only a hold whose press is in a space can leave it, as on the headset.
-        if back && conversation.joined_space().is_some() {
-            p.back_since = Some(now);
-        }
-        match p.back_since {
-            Some(since) if input.back_held && conversation.joined_space().is_some() => {
-                // Without controllers to ramp, only leaving is cued, by its sound.
-                if conversation.hold_back(Some(now.duration_since(since))) {
-                    p.connection
-                        .feedback()
-                        .emit(crate::feedback::Event::Left, now);
-                }
-            }
-            Some(_) => {
-                p.back_since = None;
-                conversation.hold_back(None);
-            }
-            None => {}
-        }
-        conversation.tick_space(now);
-        if conversation.joined_space().is_none() {
-            self.hand_menu.unpin();
-        }
-        if y {
-            if conversation.joined_space().is_some() {
-                self.hand_menu.toggle_pin();
-            } else {
-                conversation.refresh();
-            }
-        }
-        // A chooses what was pointed at last frame, and only in the hand menu while it shows; see `xr::run`.
-        match &p.highlighted {
-            Some(arrival::Key::Menu(key)) if a => {
-                if crate::hand_menu::choosable(key) {
-                    p.connection
-                        .feedback()
-                        .emit(crate::feedback::Event::Choose, now);
-                }
-                if let Some(choice) = self.hand_menu.choose(key) {
-                    conversation.choose_menu(choice);
-                }
-            }
-            _ if p.menu_was_shown || wrist_active => {}
-            _ if a => {
-                let chose =
-                    !conversation.press_a(p.highlighted.as_ref()) && !conversation.a_refused();
-                if chose {
-                    p.connection
-                        .feedback()
-                        .emit(crate::feedback::Event::Choose, now);
-                }
-            }
-            _ => {}
-        }
-        if focused && !input.talk {
-            p.talk_blocked = false;
-        }
-        let talking = focused && input.talk && !p.talk_blocked;
-        if talking != p.was_talking {
-            conversation.talk(talking);
-        }
-        p.was_talking = talking;
-        if mute {
-            conversation.toggle_mute();
-        }
-        if replay {
-            conversation.replay();
-        }
-        self.presentation_navigation.update(
-            None,
-            &crate::delegation::Workspace::default(),
-            if wrist_active { 0.0 } else { right.x },
-            if wrist_active { 0.0 } else { right.y },
-        );
-        // Knocks are announced in the title as well, since there is no wrist to cue while the menu is closed.
-        let knocks = conversation.knocks().len();
-        if knocks != p.knocks {
-            p.knocks = knocks;
-            for knock in conversation.knocks() {
-                log::info!("{} is knocking: + admits, - declines.", knock.name);
-            }
-            self.window.set_title(&match conversation.knocks().first() {
-                Some(knock) => {
-                    format!("{TITLE} — {} is knocking: + admits, - declines", knock.name)
-                }
-                None => TITLE.to_owned(),
-            });
-        }
-        let queue = &self.gpu.queue;
-        let visual = self.signals.update(
-            crate::interaction::Inputs {
-                session: if focused {
-                    conversation.activity()
-                } else {
-                    crate::interaction::SessionActivity::Unknown
-                },
-                ..Default::default()
-            },
-            dt,
-        );
-        self.swarm.set_visual(visual, dt);
-
+        let (p, desktop) = (&mut self.participant, &mut self.desktop);
+        p.connection.poll(desktop.focused(), &mut p.conversation);
         let size = Vec2::new(
             self.size.width.max(1) as f32,
             self.size.height.max(1) as f32,
         );
-        let head = p.head.transform();
-        let ray = p
-            .input
-            .cursor
-            .filter(|_| focused)
-            .and_then(|cursor| p.head.ray(cursor, size));
-        self.arrival_time += dt;
-        self.motion
-            .update(&crate::xr::arrival_target(conversation), self.arrival_time);
-        let mut scene = self.motion.scene(self.arrival_time);
-        let palm = (p.menu_open || self.hand_menu.pinned()).then(|| p.head.palm());
-        let eye = arrival::HOME;
-        let menu_shown = focused
-            && self.hand_menu.update(
-                palm.filter(|_| !self.wrist.state().on_hand()),
-                Some(eye),
-                Instant::now(),
-            );
-        p.menu_was_shown = menu_shown;
-        let in_space = conversation.joined_space().is_some();
-        let wrist_opened = self.wrist.update(
-            queue,
-            conversation,
-            crate::controller_ui::WristFrame {
-                palm: p
-                    .wrist_open
-                    .then(|| p.head.right_palm())
-                    .filter(|_| focused),
-                hands_only: false,
-                head: Some(head),
-                viewer: Some(eye),
-                in_space,
-                menu_shown,
-                menu_pinned: self.hand_menu.pinned(),
-                pointing: p.input.trigger,
-                grip: Some(if p.input.grip { 1.0 } else { 0.0 }),
-            },
-            crate::controller_ui::Moment {
-                now,
-                dt,
-                time: self.arrival_time,
-            },
-        );
-        if wrist_opened {
-            p.connection.feedback().request_opened();
+        let drawn = desktop.frame(&mut p.conversation, p.connection.feedback(), now, size);
+        if let Some(title) = &drawn.title {
+            self.window.set_title(title);
         }
-        let wrist_shown = self.wrist.state().on_hand();
-        // What the mouse pointed at last frame, so that a mode's description shows beneath it.
-        let pointed = match &p.highlighted {
-            Some(arrival::Key::Menu(key)) => Some(key.clone()),
-            _ => None,
-        };
-        let menu = |hand_menu: &HandMenu, conversation: &Conversation| match palm {
-            Some(palm) if menu_shown => {
-                let mut model = conversation.menu_model();
-                model.pointed = pointed.clone();
-                hand_menu.objects(&palm, &model, eye)
-            }
-            _ => Vec::new(),
-        };
-        scene.objects.extend(menu(&self.hand_menu, conversation));
-        scene.viewer = Some(eye);
-        let targets: Vec<_> = scene
-            .targets()
-            .into_iter()
-            .filter(|target| !menu_shown || matches!(target.key, arrival::Key::Menu(_)))
-            .collect();
-        let trigger = focused.then_some(if p.input.trigger { 1.0 } else { 0.0 });
-        let pointing = self.pointer.update(ray, trigger, &targets);
-        p.highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
-        if let Some(key) = &pointing.chosen {
-            p.connection
-                .feedback()
-                .emit(crate::feedback::Event::Choose, now);
-            match key {
-                arrival::Key::Menu(key) => {
-                    if let Some(choice) = self.hand_menu.choose(key) {
-                        conversation.choose_menu(choice);
-                    }
-                }
-                key => conversation.choose_object(key),
-            }
-            self.motion
-                .update(&crate::xr::arrival_target(conversation), self.arrival_time);
-            scene = self.motion.scene(self.arrival_time);
-            scene.objects.extend(menu(&self.hand_menu, conversation));
-            scene.viewer = Some(eye);
-        }
-        let in_arrival = conversation.arrival().is_some();
-        // A desktop has no controllers, so the recording indicator stands low in the view.
-        self.indicator.update(
-            queue,
-            conversation,
-            crate::recording::Trackers {
-                view: Some(crate::controller_ui::view_spot(head)),
-                ..Default::default()
-            },
-            Some(eye),
-            crate::controller_ui::Moment {
-                now,
-                dt,
-                time: self.arrival_time,
-            },
-        );
-        self.renderer
-            .set_scenery(self.motion.scenery(self.arrival_time));
-        let attracting = pointing.attracting && !menu_shown && !self.wrist.state().active();
-        // The mouse attracts the swarm to a point along its ray, at about arm's length further than a controller would be.
-        let attractor = ray.map(|ray| ray.at(1.2)).filter(|_| attracting);
-        self.swarm.step(dt, attractor);
-        self.renderer
-            .update(queue, &self.swarm, attractor, attracting);
-        // The mouse points at workers in a space as the headset's ray does; see `xr::run`.
-        let in_space = focused
-            && !in_arrival
-            && !menu_shown
-            && !self.wrist.state().active()
-            && conversation.joined_space().is_some();
-        conversation.point_at(self.delegation_scene.point(ray.filter(|_| in_space)));
-        let (root, current_workspace) = self.workers.update(conversation.joined_space());
-        self.renderer
-            .set_presentation_page(self.presentation_navigation.card);
-        self.renderer
-            .set_presentation_content_page(self.presentation_navigation.content);
-        self.coordinator_samples.clear();
-        self.coordinator_samples.extend(
-            self.swarm
-                .agents
-                .iter()
-                .map(|agent| agent.position.to_array()),
-        );
-        self.delegation_scene
-            .set_coordinator_samples(&self.coordinator_samples);
-        self.delegation_scene.update(root, current_workspace, dt);
-        self.renderer.update_workspace(
+        scene_graphics::draw(
+            &mut self.renderer,
             &self.gpu.device,
-            queue,
-            self.delegation_scene.cubes(),
-            self.delegation_scene.stations(),
-            current_workspace,
+            &self.gpu.queue,
+            &mut self.panels,
+            &drawn.frame,
         );
-        if in_arrival || menu_shown || !scene.objects.is_empty() || scene.heading.is_some() {
-            self.renderer.update_arrival(
-                &self.gpu.device,
-                queue,
-                &arrival_graphics::Frame {
-                    scene: &scene,
-                    hovered: pointing.hit.as_ref().map(|hit| &hit.key),
-                    // The mouse cursor already shows where it points, so no ray is drawn from the eye.
-                    ray: None,
-                    time: self.arrival_time,
-                },
+        // Every source is heard from where it is, relative to this participant's head; see `design/spatial-audio.md`.
+        p.connection
+            .listen(drawn.frame.listener, drawn.frame.agent, &p.conversation);
+        if let Some(presence) = drawn.frame.presence {
+            p.connection.send_presence(
+                presence.head,
+                presence.left,
+                presence.right,
+                presence.hands,
             );
         }
-        // Every source is heard from where it is, relative to this participant's head; see `design/spatial-audio.md`.
-        p.connection.listen(
-            controller::Pose::from_transform(head),
-            crate::spatial_audio::centre(&self.coordinator_samples),
-            conversation,
-        );
-        // The others in a space see this participant's head; a desktop has no controllers or hands to report. Visitors send no presence; see `design/security.md`.
-        if conversation.role().participates()
-            && let Some(pose) = controller::Pose::from_transform(head)
-        {
-            p.connection.send_presence(pose, None, None, [None, None]);
-        }
-        if in_arrival {
-            self.panel.reset();
-        }
-        let panel_pose = self.panel.update(head, dt);
-        self.pill.update(
-            queue,
-            &mut p.conversation,
-            now,
-            in_arrival || menu_shown || wrist_shown,
-        );
+        let view_projection = drawn.view_projection;
         if !render {
             return Ok(());
         }
@@ -860,17 +317,9 @@ impl State {
             &self.gpu.device,
             &self.gpu.queue,
             &[target],
-            &[p.head.view_projection(size.x / size.y)],
+            &[view_projection],
             Mat4::IDENTITY,
-            // As on the headset: arrival has no panel, and the hand menu hides it.
-            // As on the headset: arrival has no pill, and a hand's panel hides it.
-            &self
-                .pill
-                .panels(panel_pose)
-                .into_iter()
-                .chain(self.indicator.panels(Mat4::IDENTITY))
-                .chain(self.wrist.panels(Mat4::IDENTITY))
-                .collect::<Vec<_>>(),
+            &self.panels.list(Mat4::IDENTITY),
         );
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
@@ -887,62 +336,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_head_starts_at_home_looking_towards_arrival() {
-        let head = Head::default();
-        let transform = head.transform();
-        assert!(transform.w_axis.truncate().distance(arrival::HOME) < 1e-6);
-        let forward = transform.transform_vector3(-Vec3::Z);
-        // Ahead, along -Z, where arrival's objects are, and a little downwards.
-        assert!(forward.z < -0.9);
-        assert!(forward.y < 0.0);
-    }
-
-    #[test]
-    fn the_centre_of_the_window_points_where_the_head_looks() {
-        let head = Head {
-            yaw: 0.7,
-            pitch: 0.2,
-        };
-        let size = Vec2::new(1280.0, 800.0);
-        let ray = head.ray(size * 0.5, size).unwrap();
-        let forward = head.transform().transform_vector3(-Vec3::Z);
-        assert!(ray.direction.dot(forward) > 0.999);
-        // From the eye, give or take the near plane.
-        assert!(ray.origin.distance(arrival::HOME) < 0.1);
-    }
-
-    #[test]
-    fn looking_turns_the_head_and_never_past_straight_up_or_down() {
-        let mut head = Head::default();
-        head.look(Vec2::new(100.0, 0.0));
-        assert!(head.yaw < 0.0, "dragging right turns right");
-        head.look(Vec2::new(0.0, -100_000.0));
-        assert!(head.pitch <= 1.4);
-        head.look(Vec2::new(0.0, 100_000.0));
-        assert!(head.pitch >= -1.4);
-    }
-
-    #[test]
-    fn the_hand_menu_palm_is_in_view_and_faces_the_eye() {
-        let head = Head {
-            yaw: -1.2,
-            pitch: 0.3,
-        };
-        let palm = head.palm();
-        let to_eye = (arrival::HOME - palm.wrist).normalize();
-        assert!(palm.normal.dot(to_eye) > 0.999);
-        // Within the 60° vertical field of view, so the menu shows in the window.
-        let size = Vec2::new(1280.0, 800.0);
-        let clip = head
-            .view_projection(size.x / size.y)
-            .project_point3(palm.wrist);
-        assert!(clip.x.abs() < 1.0 && clip.y.abs() < 1.0 && (0.0..1.0).contains(&clip.z));
-    }
-
-    #[test]
-    fn arrow_keys_and_brackets_are_sticks() {
-        assert_eq!(Input::stick([true, false, false, false]), Vec2::Y);
-        assert_eq!(Input::stick([false, false, false, true]), Vec2::X);
-        assert_eq!(Input::stick([true, true, true, true]), Vec2::ZERO);
+    fn every_control_has_a_key_and_other_keys_do_nothing() {
+        let bound = [
+            (KeyCode::Space, Key::Talk),
+            (KeyCode::Backspace, Key::Back),
+            (KeyCode::Enter, Key::A),
+            (KeyCode::NumpadEnter, Key::A),
+            (KeyCode::Tab, Key::Y),
+            (KeyCode::KeyV, Key::Mute),
+            (KeyCode::KeyR, Key::Replay),
+            (KeyCode::ArrowUp, Key::Left(Direction::Up)),
+            (KeyCode::ArrowDown, Key::Left(Direction::Down)),
+            (KeyCode::ArrowLeft, Key::Left(Direction::Left)),
+            (KeyCode::ArrowRight, Key::Left(Direction::Right)),
+            (KeyCode::PageUp, Key::Right(Direction::Up)),
+            (KeyCode::PageDown, Key::Right(Direction::Down)),
+            (KeyCode::BracketLeft, Key::Right(Direction::Left)),
+            (KeyCode::BracketRight, Key::Right(Direction::Right)),
+            (KeyCode::KeyM, Key::Menu),
+            (KeyCode::KeyT, Key::Transcript),
+            (KeyCode::KeyG, Key::Grip),
+            (KeyCode::KeyK, Key::Knock),
+            (KeyCode::KeyP, Key::Pair),
+            (KeyCode::Equal, Key::Admit),
+            (KeyCode::NumpadAdd, Key::Admit),
+            (KeyCode::Minus, Key::Decline),
+            (KeyCode::NumpadSubtract, Key::Decline),
+            (KeyCode::Escape, Key::Escape),
+        ];
+        for (code, expected) in bound {
+            assert_eq!(key(code), Some(expected), "{code:?}");
+        }
+        assert_eq!(key(KeyCode::KeyQ), None);
     }
 }

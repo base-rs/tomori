@@ -1,19 +1,22 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+//! The headset's OpenXR shell: the instance, session, swapchain, actions and spaces, and the frame loop that reads them into [`crate::scene::headset`]'s plain types and carries out what it decides. Only device calls belong here.
+
 use crate::{
-    arrival, arrival_graphics, arrival_motion, controller,
+    controller::{self, Pose},
     graphics::Renderer,
-    hand_menu::{self, HandMenu, Palm},
     hands,
     log_cadence::{self, Cadence},
-    pointing::{Pointer, Ray},
-    swarm::Swarm,
+    scene::headset::{
+        Action, Actions, Controls, Fov, Headset, Joint, Lifecycle, Location, SessionState, View,
+    },
+    scene_graphics::{self, Panels},
     vulkan::Gpu,
 };
 use anyhow::{Context, Result, ensure};
 use ash::vk;
-use glam::{Mat4, Quat, Vec3, Vec4};
+use glam::{Vec2, Vec3};
 use openxr as xr;
 use std::{
     sync::mpsc,
@@ -23,8 +26,6 @@ use std::{
 
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
-/// How often an applied recenter is logged at info, when the runtime repeats them.
-const RECENTER_LOG: Duration = Duration::from_secs(60);
 
 /// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot.
 pub fn run(
@@ -140,7 +141,6 @@ pub fn run(
     };
     let space = session.create_reference_space(space_type, offset)?;
     log::info!("Recenterable reference space: {space_type:?}");
-    let mut scene_anchor = SceneAnchor::new();
     let formats = session.enumerate_swapchain_formats()?;
     let (vk_format, format) = [
         (
@@ -178,53 +178,14 @@ pub fn run(
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
     // What is left of the floating panel in a space: the status pill. See `design/interaction.md`.
-    let mut pill = crate::controller_ui::Pill::new(&gpu.device, &renderer);
-    // The recording indicator and the live badge on the left controller.
-    let mut indicator = crate::controller_ui::Indicator::new(&gpu.device, &renderer);
-    // The conversation on the right wrist, where approvals are decided and queued entries removed. See `design/wrist-transcript.md`.
-    let mut wrist = crate::controller_ui::Wrist::new(&gpu.device, &renderer);
-    conversation.decide_on_wrist();
+    let mut panels = Panels::new(&gpu.device, &renderer);
+    let mut headset = Headset::new(&mut conversation, connection.feedback(), Instant::now());
     // Runs on every return/unwind, before imported image wrappers and the XR
     // swapchain are dropped, including if a frame fails after queue submission.
     let _gpu_idle = WaitForGpu(&gpu.device);
-    let mut swarm = Swarm::new();
     let mut event_buffer = xr::EventDataBuffer::new();
-    let mut running = false;
-    let mut focused = false;
-    let mut last_frame = Instant::now();
     let mut frames = 0_u64;
     let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
-    let mut stick_latched = false;
-    let mut audience_toggle = LiveGrip::default();
-    // When B was pressed, while it is held: holding it leaves a space.
-    let mut back_since: Option<Instant> = None;
-    let mut was_talking = false;
-    // After focus loss, X must be released before it records again, so that holding it through a system menu does not start a recording.
-    let mut talk_blocked = false;
-    // Ask for the microphone when the session first has focus, where the
-    // headset can show the request, instead of on the first recording.
-    let mut microphone_requested = false;
-    // The arrival object the ray met on the last frame, which A chooses.
-    let mut highlighted = None;
-    let mut signals = crate::interaction::Signals::default();
-    let mut pointer = Pointer::<arrival::Key>::default();
-    let mut hand_menu = HandMenu::default();
-    // Whether the hand menu showed last frame, when A is read, so that A then chooses only in it.
-    let mut menu_was_shown = false;
-    let mut arrival_time = 0.0_f32;
-    let mut motion = arrival_motion::Motion::default();
-    let mut delegation_scene = crate::delegation::Scene::new();
-    let mut workers = crate::delegation::Workers::default();
-    let mut coordinator_samples = Vec::with_capacity(crate::swarm::AGENT_COUNT);
-    let mut presentation_navigation = crate::workspace_graphics::CardNavigation::default();
-    // In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
-    let mut panel = crate::panel_anchor::PanelAnchor::default();
-    // Whether the headset is worn and Tomori has input, reported to the server; see `design/spaces.md`.
-    let mut engagement = tomori_client::engagement::Tracker::new();
-    conversation.set_engagement(engagement.engagement());
-    // The controllers vibrate as things change, and the ray ticks as it enters a target; see `design/interaction.md`.
-    connection.feedback().set_haptics(true);
-    let mut hover = crate::feedback::Hover::default();
     log::info!(
         "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose.",
         images.len()
@@ -238,59 +199,27 @@ pub fn run(
                 xr::Event::SessionStateChanged(event) => {
                     let state = event.state();
                     log::info!("XR state: {state:?}");
-                    if focused && state != xr::SessionState::FOCUSED {
-                        // Do not lose a real focus-loss transition if the
-                        // runtime also queues a refocus in this poll batch.
-                        stick_latched = false;
-                        audience_toggle.blur();
-                        back_since = None;
-                        conversation.hold_back(None);
-                        was_talking = false;
-                        talk_blocked = true;
-                        conversation.stop_live();
-                        conversation.stop_talking();
-                        pointer.release();
-                        highlighted = None;
-                        presentation_navigation.release();
-                    }
-                    focused = state == xr::SessionState::FOCUSED;
-                    let focus = match state {
-                        xr::SessionState::FOCUSED => tomori_client::engagement::Focus::Focused,
-                        xr::SessionState::VISIBLE => tomori_client::engagement::Focus::Visible,
-                        _ => tomori_client::engagement::Focus::Hidden,
-                    };
-                    if let Some(changed) = engagement.set_focus(focus) {
-                        log::info!("Engagement: {changed:?}, as the session is {state:?}");
-                        conversation.set_engagement(changed);
-                    }
-                    if focused && !microphone_requested {
-                        microphone_requested = true;
+                    let change =
+                        headset.session(session_state(state), &mut conversation, Instant::now());
+                    if change.request_microphone {
                         connection.request_microphone();
                     }
-                    match state {
-                        xr::SessionState::READY => {
+                    match change.lifecycle {
+                        Lifecycle::Begin => {
                             session.begin(STEREO)?;
-                            running = true;
-                            last_frame = Instant::now();
                         }
-                        xr::SessionState::STOPPING => {
+                        Lifecycle::End => {
                             session.end()?;
-                            running = false;
                         }
-                        xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => break 'main,
-                        _ => {}
+                        Lifecycle::Exit => break 'main,
+                        Lifecycle::Continue => {}
                     }
                 }
                 xr::Event::InstanceLossPending(_) => break 'main,
                 xr::Event::UserPresenceChangedEXT(change)
                     if change.session() == session.as_raw() =>
                 {
-                    let worn = change.is_user_present();
-                    log::info!("Headset {}", if worn { "put on" } else { "taken off" });
-                    if let Some(changed) = engagement.set_worn(worn) {
-                        log::info!("Engagement: {changed:?}");
-                        conversation.set_engagement(changed);
-                    }
+                    headset.worn(change.is_user_present(), &mut conversation);
                 }
                 xr::Event::InteractionProfileChanged(_) => {
                     input.log_interaction_profiles(&instance, &session);
@@ -304,28 +233,14 @@ pub fn run(
                         "Reference space change pending at {:?}",
                         change.change_time()
                     );
-                    scene_anchor.schedule(change.change_time());
-                    // A recentre places the panel in front of the participant again.
-                    panel.reset();
+                    headset.recentre(change.change_time().as_nanos());
                 }
                 _ => {}
             }
         }
-        connection.poll(focused && running, &mut conversation);
-        if !focused || !running {
-            stick_latched = false;
-            audience_toggle.blur();
-            back_since = None;
-            conversation.hold_back(None);
-            was_talking = false;
-            talk_blocked = true;
-            conversation.stop_live();
-            conversation.stop_talking();
-            pointer.release();
-            highlighted = None;
-            presentation_navigation.release();
-        }
-        if !running {
+        connection.poll(headset.focused() && headset.running(), &mut conversation);
+        headset.idle(&mut conversation);
+        if !headset.running() {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
@@ -333,511 +248,77 @@ pub fn run(
         let frame = waiter.wait()?;
         stream.begin()?;
         let now = Instant::now();
-        let dt = now.duration_since(last_frame).as_secs_f32();
-        last_frame = now;
-        // Button/axis actions and their consumers run on every running frame,
-        // even if the compositor or head/controller tracking cannot render.
-        // Only actual session focus loss cancels an utterance; an X release
-        // while still focused must finalize/send it instead.
+        let dt = headset.tick(now);
+        let focused = headset.focused();
         let mut controls = input.sample_actions(&session, focused)?;
-        if audience_toggle.update(
-            focused,
-            controls.audience_grip_active,
-            controls.audience_grip > 0.75,
-        ) {
-            conversation.toggle_live();
-        }
-        let stick = controls.navigation;
-        let moving = stick.x.abs() > 0.6 || stick.y.abs() > 0.6;
-        let navigate = moving && !stick_latched;
-        stick_latched = moving;
-        // In a space the left stick is free: the panel it paged is now the transcript on the right wrist.
-        if navigate && conversation.joined_space().is_none() {
-            if stick.y.abs() >= stick.x.abs() {
-                conversation.navigate(0, if stick.y > 0.0 { -1 } else { 1 });
-            } else {
-                conversation.navigate(if stick.x > 0.0 { 1 } else { -1 }, 0);
-            }
-        }
-        // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
-        let wrist_active = wrist.state().active();
-        let right = controls.presentation_navigation;
-        // B lets go of a menu pinned with Y first.
-        let unpinned = controls.back && hand_menu.unpin();
-        let wrist_input = wrist.input(
-            &mut conversation,
-            glam::Vec2::new(right.x, right.y),
-            controls.reset && !menu_was_shown,
-            controls.back && !unpinned,
-            now,
-        );
-        // Moving the transcript's focus onto a turn, a request's button or a queued entry ticks as hover does, and A choosing taps; see `design/feedback.md`.
-        if wrist_input.moved {
-            connection
-                .feedback()
-                .emit(crate::feedback::Event::Hover, now);
-        }
-        if wrist_input.on_request {
-            connection.feedback().request_opened();
-        }
-        if wrist_input.chose {
-            connection
-                .feedback()
-                .emit(crate::feedback::Event::Choose, now);
-        }
-        let back_taken = wrist_input.back || unpinned;
-        if controls.back && !back_taken {
-            conversation.back();
-        }
-        // Only a hold whose press is in a space can leave it, so B held while joining does not.
-        if controls.back && conversation.joined_space().is_some() {
-            back_since = Some(now);
-        }
-        match back_since {
-            // A hold ends with the space it began in, so that it never leaves the next one.
-            Some(since) if controls.back_held && conversation.joined_space().is_some() => {
-                let held = now.duration_since(since);
-                connection.feedback().hold_to_leave(Some(
-                    held.as_secs_f32() / crate::conversation::LEAVE_HOLD.as_secs_f32(),
-                ));
-                if conversation.hold_back(Some(held)) {
-                    connection
-                        .feedback()
-                        .emit(crate::feedback::Event::Left, now);
-                }
-            }
-            Some(_) => {
-                back_since = None;
-                conversation.hold_back(None);
-            }
-            None => {}
-        }
-        if back_since.is_none() {
-            connection.feedback().hold_to_leave(None);
-        }
-        conversation.tick_space(now);
-        // Y in a space pins the hand menu open at its Space section, until Y or B; elsewhere it browses or lists again. See `design/hand-menu.md`.
-        if conversation.joined_space().is_none() {
-            hand_menu.unpin();
-        }
-        if controls.refresh {
-            if conversation.joined_space().is_some() {
-                hand_menu.toggle_pin();
-                if hand_menu.pinned() {
-                    connection.feedback().emit(
-                        crate::feedback::Event::Shown(crate::feedback::Hand::Left),
-                        now,
-                    );
-                }
-            } else {
-                conversation.refresh();
-            }
-        }
-        // A chooses the object the ray highlighted last frame, as the
-        // trigger does; with nothing highlighted it accepts. Inside a space it
-        // never resets the swarm; see `design/interaction.md`.
-        match &highlighted {
-            Some(arrival::Key::Menu(key)) if controls.reset => {
-                if hand_menu::choosable(key) {
-                    connection
-                        .feedback()
-                        .emit(crate::feedback::Event::Choose, now);
-                }
-                if let Some(choice) = hand_menu.choose(key) {
-                    conversation.choose_menu(choice);
-                }
-            }
-            // While the hand menu shows, A chooses only in it: nothing behind it, such as an approval; and while the transcript shows, only in that.
-            _ if menu_was_shown || wrist_active => {}
-            _ if controls.reset => {
-                let chose =
-                    !conversation.press_a(highlighted.as_ref()) && !conversation.a_refused();
-                if chose {
-                    connection
-                        .feedback()
-                        .emit(crate::feedback::Event::Choose, now);
-                }
-            }
-            _ => {}
-        }
-        // Hold X to talk to the agent; releasing it while focused sends the utterance.
-        if focused && !controls.talk {
-            talk_blocked = false;
-        }
-        let talking = controls.talk && !talk_blocked;
-        if talking != was_talking {
-            conversation.talk(talking);
-        }
-        was_talking = talking;
-        // Left stick click mutes spoken replies locally; right stick click plays the latest reply again, or stops it.
-        if controls.sound_toggle {
-            conversation.toggle_mute();
-        }
-        if controls.replay {
-            conversation.replay();
-        }
-        // Otherwise the right stick pages result cards.
-        presentation_navigation.update(
-            None,
-            &crate::delegation::Workspace::default(),
-            if wrist_active { 0.0 } else { right.x },
-            if wrist_active { 0.0 } else { right.y },
-        );
+        headset.buttons(&controls, &mut conversation, connection.feedback(), now);
         if !frame.should_render {
             stream.end(frame.predicted_display_time, BLEND, &[])?;
             continue;
         }
-        let (flags, views) = session.locate_views(STEREO, frame.predicted_display_time, &space)?;
-        if views.len() != 2
-            || !flags.contains(
-                xr::ViewStateFlags::POSITION_VALID | xr::ViewStateFlags::ORIENTATION_VALID,
-            )
-        {
-            stream.end(frame.predicted_display_time, BLEND, &[])?;
-            continue;
-        }
-        scene_anchor.update(&views, frame.predicted_display_time);
-        if focused {
+        let (flags, located) =
+            session.locate_views(STEREO, frame.predicted_display_time, &space)?;
+        let views: [View; 2] = match located.as_slice() {
+            [left, right]
+                if flags.contains(
+                    xr::ViewStateFlags::POSITION_VALID | xr::ViewStateFlags::ORIENTATION_VALID,
+                ) =>
+            {
+                [view(left), view(right)]
+            }
+            _ => {
+                stream.end(frame.predicted_display_time, BLEND, &[])?;
+                continue;
+            }
+        };
+        let hands = if focused {
             input.sample_poses(
                 &session,
                 &space,
                 frame.predicted_display_time,
                 &mut controls,
             );
-        }
-        {
-            let visual = signals.update(
-                crate::interaction::Inputs {
-                    session: if focused {
-                        conversation.activity()
-                    } else {
-                        crate::interaction::SessionActivity::Unknown
-                    },
-                    ..Default::default()
-                },
-                dt,
-            );
-            // Follows the agent's activity, which can change many times a minute.
-            if visual.mode != swarm.visual.mode {
-                log::debug!(
-                    "Swarm interaction: {:?}, session_working={}",
-                    visual.mode,
-                    visual.working
-                );
-            }
-            swarm.set_visual(visual, dt);
-        }
-        // The simulation stays in its own coordinates; tracked controller
-        // positions must be transformed into that same space after recenter.
-        let controller = controls.controller.map(|p| scene_anchor.to_scene(p));
-        let controller_poses = controls
-            .controller_poses
-            .map(|pose| pose.and_then(|pose| scene_anchor.to_scene_pose(pose)));
-        let tracked_hands = if focused {
-            hand_tracking.sample(&space, frame.predicted_display_time, &scene_anchor)
+            hand_tracking.sample(&space, frame.predicted_display_time)
         } else {
             [None, None]
         };
-        // Outside a space, arrival's objects are pointed at with the right controller's aim ray. A trigger pull that begins on one of them chooses it; any other pull attracts the swarm, as it does inside a space, where there is nothing to point at.
-        let ray = controls
-            .aim
-            .and_then(|pose| scene_anchor.to_scene_pose(pose))
-            .and_then(|pose| {
-                Ray::from_pose(
-                    Vec3::from_array(pose.position),
-                    glam::Quat::from_array(pose.orientation),
-                )
-            });
-        // Arrival's objects move between its steps rather than cutting, and are pointed at where they are now. See `design/arrival.md`.
-        arrival_time += dt;
-        motion.update(&arrival_target(&conversation), arrival_time);
-        let mut scene = motion.scene(arrival_time);
-        // The hand menu shows above the left wrist while the left palm faces the head, from hand tracking or else the left controller. While it shows, the trigger chooses only in it. See `design/hand-menu.md`.
-        let scene_head = scene_anchor
-            .to_scene_transform(head_pose(&views))
-            .map(|pose| pose.transform());
-        // What faces the head faces the middle of it, which stays put as the head turns, rather than the eyes, which swing about the neck.
-        let head = scene_head.map(hand_menu::head_centre);
-        let left_trackers = crate::recording::Trackers {
-            grip: controller_poses[controller::LEFT],
-            wrist: tracked_hands[controller::LEFT]
-                .as_ref()
-                .and_then(|hand| hand.joints[1])
-                .map(|joint| Vec3::from_array(joint.position)),
-            view: scene_head.map(crate::controller_ui::view_spot),
-        };
-        // Pinned with Y, the menu stands above the left controller facing the head, whatever its angle.
-        let palm = if hand_menu.pinned() {
-            left_trackers
-                .target(Vec3::new(0.0, 0.03, 0.0))
-                .zip(head)
-                .and_then(|(at, head)| {
-                    Some(Palm {
-                        wrist: at,
-                        normal: (head - at).try_normalize()?,
-                    })
-                })
-        } else {
-            tracked_hands[controller::LEFT]
-                .as_ref()
-                .and_then(Palm::from_left_hand)
-                .or_else(|| {
-                    controller_poses[controller::LEFT]
-                        .as_ref()
-                        .and_then(Palm::from_left_controller)
-                })
-        };
-        // While recording, the indicator rises from the left controller, or the left wrist, or else stands low in the view. See `design/hand-menu.md`.
-        indicator.update(
-            &gpu.queue,
-            &conversation,
-            left_trackers,
-            head,
-            crate::controller_ui::Moment {
-                now,
-                dt,
-                time: arrival_time,
-            },
-        );
-        // The right palm shows the transcript, from the right controller, or else hand tracking, which only reads.
-        let right_controller = controller_poses[controller::RIGHT]
-            .as_ref()
-            .and_then(Palm::from_right_controller);
-        let right_hand = tracked_hands[controller::RIGHT]
-            .as_ref()
-            .and_then(Palm::from_right_hand);
-        let right_palm = right_controller.or(right_hand);
-        // Whichever of the left menu and the right transcript shows first wins.
-        let menu_shown = focused
-            && hand_menu.update(
-                palm.filter(|_| !wrist.state().on_hand()),
-                head,
-                Instant::now(),
-            );
-        menu_was_shown = menu_shown;
-        let in_space = conversation.joined_space().is_some();
-        let wrist_opened = wrist.update(
-            &gpu.queue,
+        let drawn = headset.update(
+            &views,
+            frame.predicted_display_time.as_nanos(),
+            &controls,
+            hands,
             &mut conversation,
-            crate::controller_ui::WristFrame {
-                palm: right_palm.filter(|_| focused),
-                hands_only: right_controller.is_none(),
-                head: scene_head,
-                viewer: head,
-                in_space,
-                menu_shown,
-                menu_pinned: hand_menu.pinned(),
-                pointing: controls.trigger.is_some_and(|trigger| trigger > 0.2)
-                    || matches!(highlighted, Some(arrival::Key::Menu(_))),
-                grip: controls.transcript_grip,
-            },
-            crate::controller_ui::Moment {
-                now,
-                dt,
-                time: arrival_time,
-            },
-        );
-        // The transcript appearing on the wrist ticks very lightly, and counts as looking at a request it shows.
-        if wrist_opened {
-            connection.feedback().request_opened();
-            connection.feedback().emit(
-                crate::feedback::Event::Shown(crate::feedback::Hand::Right),
-                now,
-            );
-        }
-        let wrist_shown = wrist.state().on_hand();
-        let wrist_active = wrist.state().active();
-        // What the ray pointed at last frame, so that a mode's description shows beneath it.
-        let pointed = match &highlighted {
-            Some(arrival::Key::Menu(key)) => Some(key.clone()),
-            _ => None,
-        };
-        let menu = |hand_menu: &HandMenu, conversation: &crate::conversation::Conversation| {
-            let mut model = conversation.menu_model();
-            model.pointed = pointed.clone();
-            let mut objects = match palm {
-                Some(palm) if menu_shown => {
-                    hand_menu.objects(&palm, &model, head.unwrap_or(arrival::HOME))
-                }
-                Some(palm) if model.waiting() => vec![hand_menu::cue(&palm)],
-                _ => Vec::new(),
-            };
-            // A cue on the right wrist while the transcript is closed and something waits on it.
-            if let (Some(palm), Some(problem), false) =
-                (right_palm, conversation.wrist_waiting(), wrist_active)
-            {
-                objects.push(hand_menu::wrist_cue(&palm, problem));
-            }
-            objects
-        };
-        scene.objects.extend(menu(&hand_menu, &conversation));
-        // Labels and forms face the participant's head, in steps of 5 cm so that they are not rebuilt every frame as the head sways.
-        let viewer = head.map(|head| (head * 20.0).round() / 20.0);
-        scene.viewer = viewer;
-        let targets: Vec<_> = scene
-            .targets()
-            .into_iter()
-            .filter(|target| !menu_shown || matches!(target.key, arrival::Key::Menu(_)))
-            .collect();
-        let pointing = pointer.update(ray, controls.trigger, &targets);
-        highlighted = pointing.hit.as_ref().map(|hit| hit.key.clone());
-        if let Some(key) = &pointing.chosen {
-            connection
-                .feedback()
-                .emit(crate::feedback::Event::Choose, now);
-            match key {
-                arrival::Key::Menu(key) => {
-                    if let Some(choice) = hand_menu.choose(key) {
-                        conversation.choose_menu(choice);
-                    }
-                }
-                key => conversation.choose_object(key),
-            }
-            motion.update(&arrival_target(&conversation), arrival_time);
-            scene = motion.scene(arrival_time);
-            scene.objects.extend(menu(&hand_menu, &conversation));
-            scene.viewer = viewer;
-        }
-        let in_arrival = conversation.arrival().is_some();
-        // Arrival and the lobby show the grid, and a space its own environment, growing out of the space's object as it is entered; no control switches it. See `design/environments.md`.
-        renderer.set_scenery(motion.scenery(arrival_time));
-        // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
-        let attracting = pointing.attracting && !menu_shown && !wrist_active;
-        swarm.step(dt, controller.filter(|_| attracting));
-        renderer.update(
-            &gpu.queue,
-            &swarm,
-            if controller_poses[controller::RIGHT].is_some()
-                || tracked_hands[controller::RIGHT].is_some()
-            {
-                None
-            } else {
-                controller
-            },
-            attracting,
-        );
-        // In a space, the ray points at workers too, which only highlights them: the trigger still attracts the swarm, and holding X sends the worker pointed at with the words. See `design/interaction.md`. While the transcript shows, the ray is hidden and points at nothing.
-        let in_space = focused
-            && !in_arrival
-            && !menu_shown
-            && !wrist_active
-            && conversation.joined_space().is_some();
-        let pointed = delegation_scene.point(ray.filter(|_| in_space));
-        // Entering a new target, an arrival object, a hand menu row or a worker, ticks very lightly, but not while the trigger pulls the swarm.
-        let target = highlighted
-            .as_ref()
-            .map(crate::feedback::key)
-            .or_else(|| pointed.map(crate::feedback::key));
-        if hover.update(target, attracting) {
-            connection
-                .feedback()
-                .emit(crate::feedback::Event::Hover, now);
-        }
-        conversation.point_at(pointed);
-        let (root, current_workspace) = workers.update(conversation.joined_space());
-        {
-            renderer.set_presentation_page(presentation_navigation.card);
-            renderer.set_presentation_content_page(presentation_navigation.content);
-            coordinator_samples.clear();
-            coordinator_samples.extend(swarm.agents.iter().map(|agent| agent.position.to_array()));
-            delegation_scene.set_coordinator_samples(&coordinator_samples);
-            delegation_scene.update(root, current_workspace, dt);
-            renderer.update_workspace(
-                &gpu.device,
-                &gpu.queue,
-                delegation_scene.cubes(),
-                delegation_scene.stations(),
-                current_workspace,
-            );
-        }
-        // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
-        let beam = if in_arrival || menu_shown {
-            ray.zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
-                .map(|(ray, end)| arrival_graphics::Beam {
-                    origin: ray.origin,
-                    end,
-                    hit: pointing.hit.is_some(),
-                })
-        } else {
-            let hit = delegation_scene.hit_point();
-            ray.filter(|_| in_space).map(|ray| arrival_graphics::Beam {
-                origin: ray.origin,
-                end: hit.unwrap_or_else(|| ray.at(arrival_graphics::SPACE_RAY_LENGTH)),
-                hit: hit.is_some(),
-            })
-        };
-        // Arrival's objects are still drawn as they leave on entering a space.
-        if in_arrival
-            || menu_shown
-            || beam.is_some()
-            || !scene.objects.is_empty()
-            || scene.heading.is_some()
-        {
-            renderer.update_arrival(
-                &gpu.device,
-                &gpu.queue,
-                &arrival_graphics::Frame {
-                    scene: &scene,
-                    hovered: pointing.hit.as_ref().map(|hit| &hit.key),
-                    ray: beam,
-                    time: arrival_time,
-                },
-            );
-        }
-        renderer.update_controllers(&gpu.queue, controller_poses, tracked_hands);
-        // The runtime ignores vibrations while another application has focus, so they are dropped rather than felt late.
-        for (hand, haptic) in connection.feedback().haptics(now) {
-            if focused {
-                input.haptics.apply(&session, hand, haptic);
-            }
-        }
-        // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
-        connection.listen(
-            scene_anchor.to_scene_transform(head_pose(&views)),
-            crate::spatial_audio::centre(&coordinator_samples),
-            &conversation,
-        );
-        // Report this participant's head, controllers and hands to the server, in
-        // the space's scene coordinates, so the others in the space can render them.
-        // Visitors send no presence; see `design/security.md`.
-        if conversation.role().participates()
-            && let Some(head) = scene_anchor.to_scene_transform(head_pose(&views))
-        {
-            connection.send_presence(
-                head,
-                controller_poses[controller::LEFT],
-                controller_poses[controller::RIGHT],
-                tracked_hands,
-            );
-        }
-        // Arrival hides the panel; entering a space places it in front of the participant again.
-        if in_arrival {
-            panel.reset();
-        }
-        let panel_pose = panel.update(head_pose(&views), dt);
-        pill.update(
-            &gpu.queue,
-            &mut conversation,
+            connection.feedback(),
             now,
-            in_arrival || menu_shown || wrist_shown,
+            dt,
         );
+        scene_graphics::draw(
+            &mut renderer,
+            &gpu.device,
+            &gpu.queue,
+            &mut panels,
+            &drawn.frame,
+        );
+        renderer.update_controllers(&gpu.queue, drawn.controllers, drawn.hands);
+        // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
+        connection.listen(drawn.frame.listener, drawn.frame.agent, &conversation);
+        // Report this participant's head, controllers and hands to the server, so the others in the space can render them.
+        if let Some(presence) = drawn.frame.presence {
+            connection.send_presence(presence.head, presence.left, presence.right, presence.hands);
+        }
+        let (scene_to_space, projections) = (drawn.scene_to_space, drawn.projections);
+        for (hand, haptic) in headset.haptics(connection.feedback(), now) {
+            input.haptics.apply(&session, hand, haptic);
+        }
         let image = swapchain.acquire_image()? as usize;
         swapchain.wait_image(xr::Duration::INFINITE)?;
         let submission = renderer.render(
             &gpu.device,
             &gpu.queue,
             &images[image].views,
-            &[view_projection(&views[0]), view_projection(&views[1])],
-            scene_anchor.transform(),
-            // Arrival is shown in the world, with its own labels, rather than on the panel.
-            // The heads-up panel is hidden while the hand menu shows, so that it does not cover it.
-            // Arrival has no pill, and it hides while a hand's panel shows, so that it does not cover it.
-            &pill
-                .panels(panel_pose)
-                .into_iter()
-                .chain(indicator.panels(scene_anchor.transform()))
-                .chain(wrist.panels(scene_anchor.transform()))
-                .collect::<Vec<_>>(),
+            &projections,
+            scene_to_space,
+            &panels.list(scene_to_space),
         );
         // A deliberately simple, conservative bridge: finish GPU work before
         // handing images back to XR. Rendering leaves COLOR_ATTACHMENT_OPTIMAL,
@@ -848,7 +329,7 @@ pub fn run(
         });
         swapchain.release_image()?;
         completed.context("waiting for XR rendering")?;
-        let projection_views: Vec<_> = views
+        let projection_views: Vec<_> = located
             .iter()
             .enumerate()
             .map(|(eye, view)| {
@@ -891,7 +372,7 @@ pub fn run(
             }
         }
     }
-    if running && session.request_exit().is_ok() {
+    if headset.running() && session.request_exit().is_ok() {
         // xrEndSession is legal only after the runtime enters STOPPING.
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -958,53 +439,35 @@ impl HandTracking {
         Self { trackers }
     }
 
+    /// Each hand's joints in the reference space, where it is tracked.
     fn sample(
         &self,
         space: &xr::Space,
         time: xr::Time,
-        anchor: &SceneAnchor,
-    ) -> [Option<hands::Hand>; 2] {
-        let scene_from_space = anchor.transform().inverse();
+    ) -> [Option<[Joint; hands::JOINT_COUNT]>; 2] {
         std::array::from_fn(|hand| {
             let tracker = self.trackers[hand].as_ref()?;
             let joints = match space.locate_hand_joints(tracker, time) {
-                Ok(Some(joints)) => joints,
-                Ok(None) => return None,
+                Ok(joints) => joints?,
                 Err(error) => {
                     log::debug!("Hand tracking unavailable for frame: {error}");
                     return None;
                 }
             };
-            let mut out = hands::Hand {
-                joints: [None; hands::JOINT_COUNT],
-            };
-            for (index, joint) in joints.iter().enumerate() {
-                if !joint
-                    .location_flags
-                    .contains(xr::SpaceLocationFlags::POSITION_VALID)
-                {
-                    continue;
+            Some(std::array::from_fn(|index| {
+                let joint = joints[index];
+                Joint {
+                    position: Vec3::new(
+                        joint.pose.position.x,
+                        joint.pose.position.y,
+                        joint.pose.position.z,
+                    ),
+                    radius: joint.radius,
+                    position_valid: joint
+                        .location_flags
+                        .contains(xr::SpaceLocationFlags::POSITION_VALID),
                 }
-                let position = joint.pose.position;
-                let scene_position = scene_from_space
-                    .transform_point3(Vec3::new(position.x, position.y, position.z));
-                let radius = if joint.radius.is_finite() && joint.radius > 0.0 {
-                    joint.radius.clamp(0.001, 0.1)
-                } else {
-                    0.006
-                };
-                let value = hands::Joint {
-                    position: scene_position.to_array(),
-                    radius,
-                };
-                if value.valid() {
-                    out.joints[index] = Some(value);
-                }
-            }
-            hands::BONES
-                .iter()
-                .any(|(a, b)| out.joints[*a].is_some() && out.joints[*b].is_some())
-                .then_some(out)
+            }))
         })
     }
 }
@@ -1169,146 +632,6 @@ struct Input {
     last_diagnostic: Instant,
 }
 
-/// A held grip toggles once; after focus loss it must be released first.
-#[derive(Default)]
-struct LiveGrip {
-    held: bool,
-    blocked: bool,
-}
-
-impl LiveGrip {
-    fn blur(&mut self) {
-        self.held = false;
-        self.blocked = true;
-    }
-
-    fn update(&mut self, focused: bool, active: bool, pressed: bool) -> bool {
-        if !focused || !active {
-            self.blur();
-            return false;
-        }
-        if !pressed {
-            self.blocked = false;
-        }
-        let toggle = pressed && !self.held && !self.blocked;
-        self.held = pressed;
-        toggle
-    }
-}
-
-/// A single synchronized action snapshot. No pose/tracking state participates
-/// in interpreting held buttons, press edges, or inactive/disconnected actions.
-struct ActionInputs {
-    trigger: xr::ActionState<f32>,
-    reset: xr::ActionState<bool>,
-    talk: xr::ActionState<bool>,
-    back: xr::ActionState<bool>,
-    refresh: xr::ActionState<bool>,
-    navigation: xr::ActionState<xr::Vector2f>,
-    presentation_navigation: xr::ActionState<xr::Vector2f>,
-    sound_toggle: xr::ActionState<bool>,
-    replay: xr::ActionState<bool>,
-    audience_grip: xr::ActionState<f32>,
-    transcript_grip: xr::ActionState<f32>,
-}
-
-#[derive(Default)]
-struct Controls {
-    controller: Option<Vec3>,
-    controller_poses: [Option<xr::Posef>; 2],
-    /// The right controller's aim pose, while tracked.
-    aim: Option<xr::Posef>,
-    /// The trigger's value, while its action is active; the pointer decides whether a pull attracts or chooses.
-    trigger: Option<f32>,
-    reset: bool,
-    talk: bool,
-    talk_active: bool,
-    back: bool,
-    back_held: bool,
-    refresh: bool,
-    navigation: xr::Vector2f,
-    presentation_navigation: xr::Vector2f,
-    sound_toggle: bool,
-    replay: bool,
-    audience_grip: f32,
-    audience_grip_active: bool,
-    /// The right grip's value, while its action is active.
-    transcript_grip: Option<f32>,
-}
-
-impl Controls {
-    fn from_actions(actions: ActionInputs, focused: bool) -> Self {
-        if !focused {
-            return Self::default();
-        }
-        let held = |state: xr::ActionState<bool>| state.is_active && state.current_state;
-        let pressed = |state: xr::ActionState<bool>| held(state) && state.changed_since_last_sync;
-        let axis = |state: xr::ActionState<xr::Vector2f>| {
-            if state.is_active {
-                state.current_state
-            } else {
-                xr::Vector2f::default()
-            }
-        };
-        Self {
-            trigger: actions
-                .trigger
-                .is_active
-                .then_some(actions.trigger.current_state),
-            reset: pressed(actions.reset),
-            talk: held(actions.talk),
-            talk_active: actions.talk.is_active,
-            back: pressed(actions.back),
-            back_held: held(actions.back),
-            refresh: pressed(actions.refresh),
-            navigation: axis(actions.navigation),
-            presentation_navigation: axis(actions.presentation_navigation),
-            sound_toggle: pressed(actions.sound_toggle),
-            replay: pressed(actions.replay),
-            audience_grip_active: actions.audience_grip.is_active,
-            transcript_grip: actions
-                .transcript_grip
-                .is_active
-                .then_some(actions.transcript_grip.current_state),
-            audience_grip: if actions.audience_grip.is_active {
-                actions.audience_grip.current_state
-            } else {
-                0.0
-            },
-            ..Self::default()
-        }
-    }
-
-    fn set_locations(&mut self, locations: [xr::Result<Option<xr::SpaceLocation>>; 2]) {
-        // A missing/invalid pose or a failed optional locate must never discard
-        // this frame's button release or press. Do not reuse previous poses.
-        let locations = locations.map(|location| location.ok().flatten());
-        self.controller = locations[controller::RIGHT]
-            .filter(|location| {
-                location
-                    .location_flags
-                    .contains(xr::SpaceLocationFlags::POSITION_VALID)
-            })
-            .map(|location| {
-                Vec3::new(
-                    location.pose.position.x,
-                    location.pose.position.y,
-                    location.pose.position.z,
-                )
-            });
-        self.controller_poses = locations.map(|location| {
-            location
-                .filter(|location| {
-                    location.location_flags.contains(
-                        xr::SpaceLocationFlags::POSITION_VALID
-                            | xr::SpaceLocationFlags::ORIENTATION_VALID,
-                    )
-                })
-                .map(|location| location.pose)
-        });
-    }
-}
-
 impl Input {
     fn new(instance: &xr::Instance, session: &xr::Session<xr::Vulkan>) -> Result<Self> {
         let set = instance.create_action_set("swarm", "Swarm", 0)?;
@@ -1457,21 +780,27 @@ impl Input {
             return Ok(Controls::default());
         }
         session.sync_actions(&[(&self.set).into()])?;
+        let vector = |state: xr::ActionState<xr::Vector2f>| Action {
+            value: Vec2::new(state.current_state.x, state.current_state.y),
+            active: state.is_active,
+            changed: state.changed_since_last_sync,
+        };
         Ok(Controls::from_actions(
-            ActionInputs {
-                trigger: self.trigger.state(session, xr::Path::NULL)?,
-                reset: self.reset.state(session, xr::Path::NULL)?,
-                talk: self.talk.state(session, xr::Path::NULL)?,
-                back: self.back.state(session, xr::Path::NULL)?,
-                refresh: self.refresh.state(session, xr::Path::NULL)?,
-                navigation: self.navigation.state(session, xr::Path::NULL)?,
-                presentation_navigation: self
-                    .presentation_navigation
-                    .state(session, xr::Path::NULL)?,
-                sound_toggle: self.sound_toggle.state(session, xr::Path::NULL)?,
-                replay: self.replay.state(session, xr::Path::NULL)?,
-                audience_grip: self.audience_grip.state(session, xr::Path::NULL)?,
-                transcript_grip: self.transcript_grip.state(session, xr::Path::NULL)?,
+            Actions {
+                trigger: action(self.trigger.state(session, xr::Path::NULL)?),
+                reset: action(self.reset.state(session, xr::Path::NULL)?),
+                talk: action(self.talk.state(session, xr::Path::NULL)?),
+                back: action(self.back.state(session, xr::Path::NULL)?),
+                refresh: action(self.refresh.state(session, xr::Path::NULL)?),
+                navigation: vector(self.navigation.state(session, xr::Path::NULL)?),
+                presentation_navigation: vector(
+                    self.presentation_navigation
+                        .state(session, xr::Path::NULL)?,
+                ),
+                sound_toggle: action(self.sound_toggle.state(session, xr::Path::NULL)?),
+                replay: action(self.replay.state(session, xr::Path::NULL)?),
+                audience_grip: action(self.audience_grip.state(session, xr::Path::NULL)?),
+                transcript_grip: action(self.transcript_grip.state(session, xr::Path::NULL)?),
             },
             focused,
         ))
@@ -1508,18 +837,13 @@ impl Input {
                 self.location_errors[hand] = error;
             }
         }
-        controls.set_locations(locations);
+        controls.set_locations(locations.map(|location| location.ok().flatten().map(location_of)));
         // Pointing is optional: an aim pose that cannot be located only hides the ray.
         controls.aim = locate(&self.aim, &self.aim_space)
             .ok()
             .flatten()
-            .filter(|location| {
-                location.location_flags.contains(
-                    xr::SpaceLocationFlags::POSITION_VALID
-                        | xr::SpaceLocationFlags::ORIENTATION_VALID,
-                )
-            })
-            .map(|location| location.pose);
+            .map(location_of)
+            .and_then(Location::tracked);
         // State-change-only and rate-limited: enough to distinguish an absent
         // model from a runtime action/profile switch during a headset check.
         // Debug only: poses come and go whenever a controller is put down or
@@ -1542,514 +866,54 @@ impl Input {
     }
 }
 
-/// Positions the simulation once at startup, then follows explicit runtime
-/// reference-space changes only at their effective predicted display time.
-/// It does not re-anchor on focus/visibility changes or normal head movement.
-struct SceneAnchor {
-    scene_to_space: Option<Mat4>,
-    pending: Vec<xr::Time>,
-    recenter_log: Cadence,
-}
-
-impl SceneAnchor {
-    fn new() -> Self {
-        Self {
-            scene_to_space: None,
-            pending: Vec::new(),
-            recenter_log: Cadence::new(RECENTER_LOG),
-        }
-    }
-
-    fn schedule(&mut self, time: xr::Time) {
-        self.pending.push(time);
-    }
-
-    fn update(&mut self, views: &[xr::View], display_time: xr::Time) {
-        let recentered = self
-            .pending
-            .iter()
-            .any(|time| time.as_nanos() <= display_time.as_nanos());
-        self.pending
-            .retain(|time| time.as_nanos() > display_time.as_nanos());
-        if recentered && self.scene_to_space.is_some() {
-            // A system recenter makes the new local origin face the user's
-            // current forward direction. Reset the startup offset so the
-            // existing swarm appears in front, without resetting its state.
-            self.scene_to_space = Some(Mat4::IDENTITY);
-            // The runtime can repeat reference-space changes; log at most one a minute at info.
-            match self.recenter_log.record(Instant::now()) {
-                Some(due) if due.skipped > 0 => log::info!(
-                    "Applied OpenXR recenter at display time {display_time:?}, and {} more since the last logged",
-                    due.skipped
-                ),
-                Some(_) => log::info!("Applied OpenXR recenter at display time {display_time:?}"),
-                None => log::debug!("Applied OpenXR recenter at display time {display_time:?}"),
-            }
-        } else if self.scene_to_space.is_none() {
-            self.scene_to_space = initial_scene_transform(views);
-            if self.scene_to_space.is_some() {
-                log::info!("Aligned scene to initial headset direction");
-            }
-        }
-    }
-
-    fn transform(&self) -> Mat4 {
-        self.scene_to_space.unwrap_or(Mat4::IDENTITY)
-    }
-    fn to_scene(&self, point: Vec3) -> Vec3 {
-        self.transform().inverse().transform_point3(point)
-    }
-
-    fn to_scene_pose(&self, pose: xr::Posef) -> Option<controller::Pose> {
-        let pose = controller::Pose {
-            position: [pose.position.x, pose.position.y, pose.position.z],
-            orientation: [
-                pose.orientation.x,
-                pose.orientation.y,
-                pose.orientation.z,
-                pose.orientation.w,
-            ],
-        };
-        pose.valid()
-            .then(|| self.transform().inverse() * pose.transform())
-            .and_then(controller::Pose::from_transform)
-    }
-
-    /// A reference-space transform, such as the head, as a validated pose in the space's scene coordinates.
-    fn to_scene_transform(&self, transform: Mat4) -> Option<controller::Pose> {
-        let reference = controller::Pose::from_transform(transform)?;
-        controller::Pose::from_transform(self.transform().inverse() * reference.transform())
+fn action<T: xr::ActionInput>(state: xr::ActionState<T>) -> Action<T> {
+    Action {
+        value: state.current_state,
+        active: state.is_active,
+        changed: state.changed_since_last_sync,
     }
 }
 
-fn initial_scene_transform(views: &[xr::View]) -> Option<Mat4> {
-    let head = head_pose(views);
-    let forward = head.transform_vector3(-Vec3::Z);
-    let horizontal = Vec3::new(forward.x, 0.0, forward.z);
-    // Looking straight up/down has no well-defined horizontal heading. Wait
-    // for a valid orientation rather than generating an unstable yaw.
-    if !horizontal.is_finite() || horizontal.length_squared() < 0.0001 {
-        return None;
-    }
-    let yaw = (-horizontal.x).atan2(-horizontal.z);
-    let eye = head.transform_point3(Vec3::ZERO);
-    if !eye.is_finite() {
-        return None;
-    }
-    Some(Mat4::from_rotation_translation(
-        Quat::from_rotation_y(yaw),
-        Vec3::new(eye.x, 0.0, eye.z),
-    ))
-}
-
-/// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
-/// Where arrival's objects are heading for the conversation's current step, which the desktop window shares.
-pub(crate) fn arrival_target(conversation: &crate::conversation::Conversation) -> arrival::Scene {
-    match conversation.arrival() {
-        Some(view) => arrival::Scene::layout(&view),
-        None => arrival::Scene::entered(conversation.entered(), conversation.environment()),
+fn pose(pose: xr::Posef) -> Pose {
+    let (p, q) = (pose.position, pose.orientation);
+    Pose {
+        position: [p.x, p.y, p.z],
+        orientation: [q.x, q.y, q.z, q.w],
     }
 }
 
-fn head_pose(views: &[xr::View]) -> Mat4 {
-    let left = views[0].pose.position;
-    let right = views[1].pose.position;
-    let q = views[0].pose.orientation;
-    Mat4::from_rotation_translation(
-        Quat::from_xyzw(q.x, q.y, q.z, q.w),
-        Vec3::new(left.x + right.x, left.y + right.y, left.z + right.z) * 0.5,
-    )
+fn location_of(location: xr::SpaceLocation) -> Location {
+    Location {
+        pose: pose(location.pose),
+        position_valid: location
+            .location_flags
+            .contains(xr::SpaceLocationFlags::POSITION_VALID),
+        orientation_valid: location
+            .location_flags
+            .contains(xr::SpaceLocationFlags::ORIENTATION_VALID),
+    }
 }
 
-fn view_projection(view: &xr::View) -> Mat4 {
-    let fov = view.fov;
-    let (left, right, down, up) = (
-        fov.angle_left.tan(),
-        fov.angle_right.tan(),
-        fov.angle_down.tan(),
-        fov.angle_up.tan(),
-    );
-    let (near, far) = (0.05, 50.0);
-    // Asymmetric OpenXR frustum, right-handed -Z forward, WebGPU depth 0..1.
-    // wgpu's Vulkan backend handles the framebuffer Y convention itself.
-    let projection = Mat4::from_cols(
-        Vec4::new(2.0 / (right - left), 0.0, 0.0, 0.0),
-        Vec4::new(0.0, 2.0 / (up - down), 0.0, 0.0),
-        Vec4::new(
-            (right + left) / (right - left),
-            (up + down) / (up - down),
-            -far / (far - near),
-            -1.0,
-        ),
-        Vec4::new(0.0, 0.0, -(far * near) / (far - near), 0.0),
-    );
-    let p = view.pose.position;
-    let q = view.pose.orientation;
-    projection
-        * Mat4::from_rotation_translation(
-            Quat::from_xyzw(q.x, q.y, q.z, q.w),
-            Vec3::new(p.x, p.y, p.z),
-        )
-        .inverse()
+fn view(view: &xr::View) -> View {
+    View {
+        pose: pose(view.pose),
+        fov: Fov {
+            left: view.fov.angle_left,
+            right: view.fov.angle_right,
+            down: view.fov.angle_down,
+            up: view.fov.angle_up,
+        },
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn action<T: xr::ActionInput>(value: T, active: bool, changed: bool) -> xr::ActionState<T> {
-        xr::ActionState {
-            current_state: value,
-            changed_since_last_sync: changed,
-            last_change_time: xr::Time::from_nanos(1),
-            is_active: active,
-        }
-    }
-
-    fn actions(held: bool, active: bool, changed: bool) -> ActionInputs {
-        ActionInputs {
-            trigger: action(if held { 1.0 } else { 0.0 }, active, changed),
-            reset: action(held, active, changed),
-            talk: action(held, active, changed),
-            back: action(held, active, changed),
-            refresh: action(held, active, changed),
-            navigation: action(xr::Vector2f { x: 0.8, y: -0.7 }, active, changed),
-            presentation_navigation: action(xr::Vector2f { x: -0.9, y: 0.6 }, active, changed),
-            sound_toggle: action(held, active, changed),
-            replay: action(held, active, changed),
-            audience_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
-            transcript_grip: action(if held { 1.0 } else { 0.0 }, active, changed),
-        }
-    }
-
-    fn location(flags: xr::SpaceLocationFlags) -> xr::Result<Option<xr::SpaceLocation>> {
-        Ok(Some(xr::SpaceLocation {
-            location_flags: flags,
-            pose: xr::Posef::IDENTITY,
-        }))
-    }
-
-    fn assert_press_edges(controls: &Controls, expected: bool) {
-        assert_eq!(controls.reset, expected);
-        assert_eq!(controls.back, expected);
-        assert_eq!(controls.refresh, expected);
-        assert_eq!(controls.sound_toggle, expected);
-        assert_eq!(controls.replay, expected);
-    }
-
-    #[test]
-    fn held_x_survives_tracking_loss_and_releases_while_untracked() {
-        let valid =
-            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
-        let frames = [
-            (true, true, [location(valid), location(valid)]),
-            // The runtime can supply invalid locations, no active pose, or a
-            // locate error without losing the independent X action.
-            (
-                true,
-                false,
-                [location(xr::SpaceLocationFlags::EMPTY), Ok(None)],
-            ),
-            (
-                true,
-                false,
-                [Err(xr::sys::Result::ERROR_POSE_INVALID), Ok(None)],
-            ),
-            (false, true, [Ok(None), Ok(None)]),
-        ];
-        for (held, changed, locations) in frames {
-            let mut controls = Controls::from_actions(actions(held, true, changed), true);
-            controls.set_locations(locations);
-            assert_eq!(controls.talk, held);
-            assert_eq!(controls.audience_grip, if held { 1.0 } else { 0.0 });
-            assert_press_edges(&controls, held && changed);
-        }
-    }
-
-    #[test]
-    fn new_untracked_presses_and_menu_axes_do_not_require_poses() {
-        for locations in [
-            [Ok(None), Ok(None)],
-            [
-                location(xr::SpaceLocationFlags::EMPTY),
-                location(xr::SpaceLocationFlags::EMPTY),
-            ],
-            [
-                Err(xr::sys::Result::ERROR_TIME_INVALID),
-                Err(xr::sys::Result::ERROR_POSE_INVALID),
-            ],
-        ] {
-            let mut controls = Controls::from_actions(actions(true, true, true), true);
-            controls.set_locations(locations);
-            assert!(controls.talk && controls.trigger == Some(1.0));
-            assert_press_edges(&controls, true);
-            assert_eq!(controls.audience_grip, 1.0);
-            assert_eq!(controls.navigation.x, 0.8);
-            assert_eq!(controls.presentation_navigation.x, -0.9);
-            assert!(controls.controller.is_none());
-            assert!(controls.controller_poses.iter().all(Option::is_none));
-        }
-    }
-
-    #[test]
-    fn pose_validity_only_changes_spatial_controls_and_never_reuses_old_poses() {
-        let mut controls = Controls::from_actions(actions(true, true, true), true);
-        let valid =
-            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
-        controls.set_locations([location(valid), location(valid)]);
-        assert!(controls.controller_poses.iter().all(Option::is_some));
-        controls.set_locations([
-            location(xr::SpaceLocationFlags::ORIENTATION_VALID),
-            location(xr::SpaceLocationFlags::POSITION_VALID),
-        ]);
-        assert!(controls.controller.is_some());
-        assert!(controls.controller_poses.iter().all(Option::is_none));
-        controls.set_locations([Ok(None), Err(xr::sys::Result::ERROR_POSE_INVALID)]);
-        assert!(controls.controller.is_none());
-        assert!(controls.controller_poses.iter().all(Option::is_none));
-        assert!(controls.talk);
-        assert_press_edges(&controls, true);
-    }
-
-    #[test]
-    fn one_hand_location_error_does_not_hide_the_other_controller() {
-        let mut controls = Controls::from_actions(actions(true, true, true), true);
-        let valid =
-            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
-        controls.set_locations([Err(xr::sys::Result::ERROR_POSE_INVALID), location(valid)]);
-        assert!(controls.controller_poses[controller::LEFT].is_none());
-        assert!(controls.controller_poses[controller::RIGHT].is_some());
-        assert!(controls.controller.is_some());
-        assert!(controls.talk);
-        assert_press_edges(&controls, true);
-    }
-
-    #[test]
-    fn inactive_actions_and_focus_loss_clear_held_buttons_axes_and_edges() {
-        for (active, focused) in [(false, true), (true, false), (false, false)] {
-            // Deliberately stale held/changed values: neither a disconnected
-            // controller nor an unfocused session may keep recording alive.
-            let controls = Controls::from_actions(actions(true, active, true), focused);
-            assert!(!controls.talk && controls.trigger.is_none());
-            assert!(!controls.talk_active);
-            assert_press_edges(&controls, false);
-            assert_eq!(controls.audience_grip, 0.0);
-            assert_eq!((controls.navigation.x, controls.navigation.y), (0.0, 0.0));
-            assert_eq!(
-                (
-                    controls.presentation_navigation.x,
-                    controls.presentation_navigation.y
-                ),
-                (0.0, 0.0)
-            );
-        }
-        // Refocusing samples fresh action state, not a cached button. Held X
-        // is level-triggered; one-shot menu actions still require a new edge.
-        let controls = Controls::from_actions(actions(true, true, false), true);
-        assert!(controls.talk);
-        assert_press_edges(&controls, false);
-        let released = Controls::from_actions(actions(false, true, true), true);
-        assert!(!released.talk);
-        assert_press_edges(&released, false);
-    }
-
-    #[test]
-    fn audience_grip_does_not_start_push_to_talk() {
-        let mut input = actions(false, true, false);
-        input.audience_grip = action(1.0, true, true);
-        let controls = Controls::from_actions(input, true);
-        assert_eq!(controls.audience_grip, 1.0);
-        assert!(!controls.talk);
-        assert_press_edges(&controls, false);
-    }
-
-    #[test]
-    fn live_grip_requires_release_after_focus_loss() {
-        let mut grip = LiveGrip::default();
-        assert!(grip.update(true, true, true));
-        assert!(!grip.update(true, true, true));
-        assert!(!grip.update(false, true, true));
-        assert!(!grip.update(true, true, true));
-        assert!(!grip.update(true, true, false));
-        assert!(grip.update(true, true, true));
-        // An inactive action is not evidence that the grip was released.
-        assert!(!grip.update(true, false, false));
-        assert!(!grip.update(true, true, true));
-        assert!(!grip.update(true, true, false));
-        assert!(grip.update(true, true, true));
-    }
-
-    #[test]
-    fn controller_pose_preserves_position_and_orientation_through_scene_anchor() {
-        let scene_to_space =
-            Mat4::from_rotation_translation(Quat::from_rotation_y(0.7), Vec3::new(1.0, 0.0, -2.0));
-        let anchor = SceneAnchor {
-            scene_to_space: Some(scene_to_space),
-            ..SceneAnchor::new()
-        };
-        let q = Quat::from_rotation_x(0.4) * Quat::from_rotation_y(-0.2);
-        let pose = xr::Posef {
-            orientation: xr::Quaternionf {
-                x: q.x,
-                y: q.y,
-                z: q.z,
-                w: q.w,
-            },
-            position: xr::Vector3f {
-                x: 0.3,
-                y: 1.2,
-                z: -0.8,
-            },
-        };
-        let scene_pose = anchor.to_scene_pose(pose).unwrap();
-        let expected = Mat4::from_rotation_translation(q, Vec3::new(0.3, 1.2, -0.8));
-        assert!((scene_to_space * scene_pose.transform()).abs_diff_eq(expected, 1e-5));
-        let invalid = xr::Posef {
-            orientation: xr::Quaternionf {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-                w: 0.0,
-            },
-            ..pose
-        };
-        assert!(anchor.to_scene_pose(invalid).is_none());
-    }
-
-    fn stereo(position: Vec3, orientation: Quat) -> Vec<xr::View> {
-        let q = xr::Quaternionf {
-            x: orientation.x,
-            y: orientation.y,
-            z: orientation.z,
-            w: orientation.w,
-        };
-        [-0.032, 0.032]
-            .into_iter()
-            .map(|x| {
-                let p = position + orientation * Vec3::X * x;
-                xr::View {
-                    pose: xr::Posef {
-                        orientation: q,
-                        position: xr::Vector3f {
-                            x: p.x,
-                            y: p.y,
-                            z: p.z,
-                        },
-                    },
-                    fov: xr::Fovf {
-                        angle_left: -0.7,
-                        angle_right: 0.7,
-                        angle_down: -0.7,
-                        angle_up: 0.7,
-                    },
-                }
-            })
-            .collect()
-    }
-
-    #[test]
-    fn startup_scene_aligns_with_head_yaw_and_position_but_not_pitch() {
-        for yaw in [0.0, 0.7, -1.5, std::f32::consts::PI] {
-            let orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(0.35);
-            let views = stereo(Vec3::new(2.0, 1.7, -3.0), orientation);
-            let transform = initial_scene_transform(&views).unwrap();
-            let scene_forward = transform.transform_vector3(-Vec3::Z);
-            let expected = Quat::from_rotation_y(yaw) * -Vec3::Z;
-            assert!(scene_forward.distance(expected) < 0.0001);
-            assert!(
-                transform
-                    .transform_point3(Vec3::ZERO)
-                    .distance(Vec3::new(2.0, 0.0, -3.0))
-                    < 0.0001
-            );
-            assert!(
-                (transform.transform_point3(crate::swarm::CENTER).y - crate::swarm::CENTER.y).abs()
-                    < 0.0001
-            );
-        }
-        assert!(
-            initial_scene_transform(&stereo(
-                Vec3::Y,
-                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)
-            ))
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn recenter_waits_until_runtime_change_time_and_preserves_simulation_coordinates() {
-        let mut anchor = SceneAnchor::new();
-        let views = stereo(Vec3::new(2.0, 1.6, 1.0), Quat::from_rotation_y(1.0));
-        anchor.update(&views, xr::Time::from_nanos(10));
-        let original = anchor.transform();
-        let controller = Vec3::new(0.2, 1.0, -0.4);
-        assert!(
-            anchor
-                .to_scene(original.transform_point3(controller))
-                .distance(controller)
-                < 0.0001
-        );
-        anchor.schedule(xr::Time::from_nanos(40));
-        anchor.schedule(xr::Time::from_nanos(20));
-        anchor.update(&views, xr::Time::from_nanos(19));
-        assert_eq!(anchor.transform(), original);
-        anchor.update(&views, xr::Time::from_nanos(20));
-        assert_eq!(anchor.transform(), Mat4::IDENTITY);
-        assert_eq!(anchor.pending.len(), 1);
-        anchor.update(&views, xr::Time::from_nanos(40));
-        assert!(anchor.pending.is_empty());
-        assert_eq!(anchor.to_scene(controller), controller);
-    }
-    #[test]
-    fn caption_uses_midpoint_between_the_eyes() {
-        let q = xr::Quaternionf {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            w: 1.0,
-        };
-        let views: Vec<_> = [-0.032, 0.032]
-            .into_iter()
-            .map(|x| xr::View {
-                pose: xr::Posef {
-                    orientation: q,
-                    position: xr::Vector3f { x, y: 1.6, z: 0.4 },
-                },
-                fov: xr::Fovf {
-                    angle_left: -0.7,
-                    angle_right: 0.7,
-                    angle_down: -0.7,
-                    angle_up: 0.7,
-                },
-            })
-            .collect();
-        assert!(
-            head_pose(&views)
-                .transform_point3(Vec3::ZERO)
-                .distance(Vec3::new(0.0, 1.6, 0.4))
-                < 0.0001
-        );
-    }
-
-    #[test]
-    fn xr_projection_maps_frustum_and_depth_correctly() {
-        let view = xr::View {
-            pose: xr::Posef::IDENTITY,
-            fov: xr::Fovf {
-                angle_left: -0.7,
-                angle_right: 0.9,
-                angle_down: -0.8,
-                angle_up: 0.75,
-            },
-        };
-        let m = view_projection(&view);
-        for (x, y, z, expected) in [
-            (view.fov.angle_left.tan(), 0.0, -1.0, -1.0),
-            (view.fov.angle_right.tan(), 0.0, -1.0, 1.0),
-        ] {
-            assert!((m.project_point3(Vec3::new(x, y, z)).x - expected).abs() < 0.0001);
-        }
-        assert!(m.project_point3(Vec3::new(0.0, 0.0, -0.05)).z.abs() < 0.0001);
-        assert!((m.project_point3(Vec3::new(0.0, 0.0, -50.0)).z - 1.0).abs() < 0.0001);
+fn session_state(state: xr::SessionState) -> SessionState {
+    match state {
+        xr::SessionState::READY => SessionState::Ready,
+        xr::SessionState::VISIBLE => SessionState::Visible,
+        xr::SessionState::FOCUSED => SessionState::Focused,
+        xr::SessionState::STOPPING => SessionState::Stopping,
+        xr::SessionState::EXITING => SessionState::Exiting,
+        xr::SessionState::LOSS_PENDING => SessionState::LossPending,
+        _ => SessionState::Other,
     }
 }

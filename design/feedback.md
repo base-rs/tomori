@@ -41,7 +41,7 @@ In November 2026 the user, speaking from the headset, asked for the audio to be 
 
 ## Scope
 
-`crates/client-quest`'s feedback model (`feedback.rs`), the haptic action (`haptics.rs`, `xr.rs`), where events are reported (`connection.rs`, `xr.rs`, `desktop_participant.rs`) and the Sound section and console; and the sound cues in `crates/client`'s player.
+`crates/client-quest`'s feedback model (`feedback.rs`), the haptic action (`haptics.rs`, `xr.rs`, `scene/headset.rs`), where events are reported (`connection.rs`, `scene.rs`) and the Sound section and console; and the sound cues in `crates/client`'s player.
 
 ## Validation
 

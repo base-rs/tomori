@@ -1,19 +1,18 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The panels held by the controllers, shared by the headset's and the desktop window's frame loops: the recording indicator and the `LIVE` badge on the left controller (see `design/hand-menu.md`), and the transcript on the right wrist (see `design/wrist-transcript.md`).
+//! What the panels held by the controllers show and where, shared by the headset's and the desktop window's frame steps: the recording indicator and the `LIVE` badge on the left controller (see `design/hand-menu.md`), the status pill, and the transcript on the right wrist (see `design/wrist-transcript.md`). The panels that draw them are [`crate::scene_graphics::Panels`].
 
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec2, Vec3};
 
 use crate::conversation::Conversation;
-use crate::graphics::Renderer;
 use crate::hand_menu::{Palm, Visibility};
 use crate::panel_anchor::PanelAnchor;
 use crate::recording::{self, Anchor, Trackers};
 use crate::transcript::{DETACHED_COLUMNS, WRIST_COLUMNS};
-use crate::ui_panel::{Canvas, Panel};
+use crate::ui_panel::Canvas;
 
 /// When a frame is, for the panels that move and animate.
 #[derive(Clone, Copy, Debug)]
@@ -26,77 +25,67 @@ pub struct Moment {
 }
 
 /// Each panel's most vertices.
-const CAPACITY: usize = 24_000;
+pub const CAPACITY: usize = 24_000;
 
-/// The recording indicator and the `LIVE` badge, with where they are.
+/// One panel this frame: what it shows now, to upload, and its model, while it is drawn.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sheet {
+    pub canvas: Option<Canvas>,
+    pub model: Option<Mat4>,
+}
+
+/// Where the recording indicator and the `LIVE` badge are.
+#[derive(Clone, Debug, Default)]
 pub struct Indicator {
-    card: Panel,
-    badge: Panel,
     anchor: Anchor,
     badge_anchor: Anchor,
-    /// The card's and the badge's models in the scene, while shown.
-    shown: [Option<Mat4>; 2],
 }
 
 impl Indicator {
-    pub fn new(device: &wgpu::Device, renderer: &Renderer) -> Self {
-        Self {
-            card: renderer.panel(device, CAPACITY),
-            badge: renderer.panel(device, CAPACITY / 8),
-            anchor: Anchor::default(),
-            badge_anchor: Anchor::default(),
-            shown: [None, None],
-        }
-    }
-
-    /// Follow the conversation at `moment`, placing the indicator by `trackers` facing `head`, both in the scene.
+    /// Follow the conversation at `moment`, placing the indicator by `trackers` facing `head`, both in the scene. Returns the card and the badge, each with its model in the scene while it shows.
     pub fn update(
         &mut self,
-        queue: &wgpu::Queue,
         conversation: &Conversation,
         trackers: Trackers,
         head: Option<Vec3>,
         moment: Moment,
-    ) {
+    ) -> [Sheet; 2] {
         let Moment { now, dt, time } = moment;
         let pulse = 0.5 + 0.5 * (time * 5.0).sin();
         let phase = conversation.recording_phase(now);
         let head = head.unwrap_or(crate::arrival::HOME);
-        self.shown[0] = match (&phase, trackers.target(recording::GRIP_OFFSET)) {
+        let card = match (&phase, trackers.target(recording::GRIP_OFFSET)) {
             (Some(phase), Some(target)) => {
                 let canvas = recording::canvas(phase, conversation.utterance_limit(), pulse);
-                self.card.set(queue, &canvas);
                 let (position, scale) = self.anchor.update(target, dt);
-                Some(recording::facing(position, head, scale))
+                Sheet {
+                    canvas: Some(canvas),
+                    model: Some(recording::facing(position, head, scale)),
+                }
             }
             _ => {
                 self.anchor.hide();
-                None
+                Sheet::default()
             }
         };
         // The badge stays on the controller while the live microphone is on, except while the card shows.
         let badge = trackers
             .grip
             .and_then(|_| trackers.target(recording::BADGE_OFFSET));
-        self.shown[1] = match badge {
-            Some(target) if conversation.live() && self.shown[0].is_none() => {
-                self.badge.set(queue, &recording::badge(pulse));
+        let badge = match badge {
+            Some(target) if conversation.live() && card.model.is_none() => {
                 let (position, scale) = self.badge_anchor.update(target, dt);
-                Some(recording::facing(position, head, scale))
+                Sheet {
+                    canvas: Some(recording::badge(pulse)),
+                    model: Some(recording::facing(position, head, scale)),
+                }
             }
             _ => {
                 self.badge_anchor.hide();
-                None
+                Sheet::default()
             }
         };
-    }
-
-    /// The panels to draw, with `scene_to_space` taking the scene to the eyes' space.
-    pub fn panels(&self, scene_to_space: Mat4) -> impl Iterator<Item = (&Panel, Mat4)> {
-        [&self.card, &self.badge]
-            .into_iter()
-            .zip(self.shown)
-            .filter_map(move |(panel, model)| model.map(|model| (panel, scene_to_space * model)))
+        [card, badge]
     }
 }
 
@@ -108,48 +97,19 @@ pub fn view_spot(head: Mat4) -> Vec3 {
 /// Where the status pill's top edge stands from the pose the floating panel is placed at: about 20° below eye level, 1.6 m away.
 pub const PILL_OFFSET: Vec3 = Vec3::new(0.0, -0.5, -1.5);
 
-/// The status pill, which stands in the world, placed lazily in front of the participant. See `design/interaction.md`.
-pub struct Pill {
-    panel: Panel,
-    /// Its height, so that its top edge stays put as its second row comes and goes.
-    height: Option<f32>,
-}
-
-impl Pill {
-    pub fn new(device: &wgpu::Device, renderer: &Renderer) -> Self {
-        Self {
-            panel: renderer.panel(device, CAPACITY),
-            height: None,
-        }
-    }
-
-    /// Follow the conversation at `now`, unless `hidden`, as while a hand's panel shows.
-    pub fn update(
-        &mut self,
-        queue: &wgpu::Queue,
-        conversation: &mut Conversation,
-        now: Instant,
-        hidden: bool,
-    ) {
-        let status = conversation.pill_status(now).filter(|_| !hidden);
-        self.height = status.map(|status| {
-            let mut canvas = Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
-            canvas.rows = crate::pill::rows(&status);
-            canvas.padding = (10, 6);
-            canvas.background = [0.008, 0.018, 0.035, 0.82];
-            self.panel.set(queue, &canvas);
-            canvas.size().1
-        });
-    }
-
-    /// The pill to draw, placed relative to `pose`, the floating panel's, in the eyes' space.
-    pub fn panels(&self, pose: Mat4) -> Option<(&Panel, Mat4)> {
-        self.height.map(|height| {
-            (
-                &self.panel,
-                pose * Mat4::from_translation(PILL_OFFSET - Vec3::Y * (height / 2.0)),
-            )
-        })
+/// The status pill, which stands in the world, placed lazily in front of the participant, following the conversation at `now`, unless `hidden`, as while a hand's panel shows. Its model is relative to `pose`, the floating panel's, in the eyes' space, with its top edge kept put as its second row comes and goes. See `design/interaction.md`.
+pub fn pill(conversation: &mut Conversation, now: Instant, hidden: bool, pose: Mat4) -> Sheet {
+    let Some(status) = conversation.pill_status(now).filter(|_| !hidden) else {
+        return Sheet::default();
+    };
+    let mut canvas = Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+    canvas.rows = crate::pill::rows(&status);
+    canvas.padding = (10, 6);
+    canvas.background = [0.008, 0.018, 0.035, 0.82];
+    let height = canvas.size().1;
+    Sheet {
+        canvas: Some(canvas),
+        model: Some(pose * Mat4::from_translation(PILL_OFFSET - Vec3::Y * (height / 2.0))),
     }
 }
 
@@ -357,8 +317,8 @@ pub struct WristInput {
 }
 
 /// The right wrist's transcript, with its controls and where it is.
+#[derive(Clone, Debug, Default)]
 pub struct Wrist {
-    panel: Panel,
     state: WristState,
     stick: Repeat,
     squeeze: Squeeze,
@@ -367,16 +327,6 @@ pub struct Wrist {
 }
 
 impl Wrist {
-    pub fn new(device: &wgpu::Device, renderer: &Renderer) -> Self {
-        Self {
-            panel: renderer.panel(device, CAPACITY * 4),
-            state: WristState::default(),
-            stick: Repeat::default(),
-            squeeze: Squeeze::default(),
-            model: None,
-        }
-    }
-
     pub fn state(&self) -> &WristState {
         &self.state
     }
@@ -415,14 +365,13 @@ impl Wrist {
         }
     }
 
-    /// Show, place and draw it for `frame` at `moment`. Returns whether it just opened on the wrist.
+    /// Show and place it for `frame` at `moment`. Returns whether it just opened on the wrist, and what it shows, with its model in the scene while it is drawn.
     pub fn update(
         &mut self,
-        queue: &wgpu::Queue,
         conversation: &mut Conversation,
         frame: WristFrame,
         moment: Moment,
-    ) -> bool {
+    ) -> (bool, Sheet) {
         let opened = self.state.show(&frame, moment.now);
         if opened {
             conversation.wrist_opened();
@@ -434,7 +383,7 @@ impl Wrist {
         }
         if !self.state.active() {
             self.model = None;
-            return opened;
+            return (opened, Sheet::default());
         }
         let detached = self.state.detached();
         let (columns, pixel) = if detached {
@@ -447,7 +396,6 @@ impl Wrist {
         canvas.padding = (6, 5);
         canvas.background = [0.01, 0.02, 0.04, 0.88];
         canvas.border = Some([0.12, 0.85, 1.0, 0.35]);
-        self.panel.set(queue, &canvas);
         let (_, height) = canvas.size();
         self.model = match (&mut self.state.detached, frame.head) {
             (Some(anchor), Some(head)) => {
@@ -459,13 +407,13 @@ impl Wrist {
                 .map(|(palm, viewer)| on_wrist(&palm, viewer, height)),
             _ => self.model,
         };
-        opened
-    }
-
-    /// The panel to draw, with `scene_to_space` taking the scene to the eyes' space.
-    pub fn panels(&self, scene_to_space: Mat4) -> Option<(&Panel, Mat4)> {
-        self.model
-            .map(|model| (&self.panel, scene_to_space * model))
+        (
+            opened,
+            Sheet {
+                canvas: Some(canvas),
+                model: self.model,
+            },
+        )
     }
 }
 
@@ -731,6 +679,10 @@ mod tests {
         // So does the grip again.
         state.toggle_detached(Some(centre), Some(head));
         state.toggle_detached(None, None);
+        assert!(!state.detached());
+        // It cannot be detached from nowhere, or to face no one.
+        state.toggle_detached(None, Some(head));
+        state.toggle_detached(Some(centre), None);
         assert!(!state.detached());
         // Leaving the space forgets it.
         state.toggle_detached(Some(centre), Some(head));
