@@ -151,9 +151,9 @@ fn serve(
                 if let Some(rest) = line.trim_start().strip_prefix("environment ") {
                     conversation.change_environment(rest.trim());
                     poll(conversation);
-                    if let Some(notice) = conversation.menu_model().notice {
-                        say!(out, "({notice})");
-                    }
+                    // Changing always says what happened.
+                    let notice = conversation.menu_model().notice.unwrap_or_default();
+                    say!(out, "({notice})");
                     continue;
                 }
                 // The Feedback setting; the rest of the line says which half, and to what.
