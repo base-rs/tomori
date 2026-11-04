@@ -1,0 +1,791 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! The desktop window's own logic as a participant: the keyboard and mouse as the controller's buttons and ray, a head at standing height that the mouse turns, the palms held up in view while their panels are open, the window's focus, and knocks announced in the title. `desktop_participant.rs` turns winit's events into these calls and draws what they return. See `design/desktop.md`.
+
+use std::time::Instant;
+
+use glam::{EulerRot, Mat4, Quat, Vec2, Vec3};
+use tomori_client::engagement::{Focus, Tracker};
+
+use super::{Buttons, Frame, Marker, Senses, Step};
+use crate::{
+    arrival, controller::Pose, conversation::Conversation, feedback::Feedback, hand_menu::Palm,
+    pointing::Ray, recording::Trackers,
+};
+
+/// The window's title, followed by any knock waiting.
+pub const TITLE: &str = "Tomori";
+/// How far the head turns, in radians, for each pixel the mouse is dragged.
+const LOOK_SPEED: f32 = 0.004;
+/// The longest step, in seconds, so that a window hidden for a while does not jump.
+const MAX_STEP: f32 = 0.1;
+/// How far along the mouse's ray the swarm is attracted to: about arm's length further than a controller would be.
+const ATTRACT_AT: f32 = 1.2;
+
+/// A key that stands for one of the headset's controls; `desktop_participant.rs` binds them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    /// X, held: push-to-talk.
+    Talk,
+    /// B; held for a second, it leaves the space.
+    Back,
+    A,
+    Y,
+    /// The left stick click.
+    Mute,
+    /// The right stick click.
+    Replay,
+    /// The left stick: up, down, left and right.
+    Left(Direction),
+    /// The right stick.
+    Right(Direction),
+    /// Open or close the hand menu.
+    Menu,
+    /// Show or hide the transcript on the right wrist.
+    Transcript,
+    /// The right grip, held.
+    Grip,
+    Knock,
+    Pair,
+    /// Admit the first knock waiting.
+    Admit,
+    /// Decline the first knock waiting.
+    Decline,
+    /// Close the hand menu, or quit.
+    Escape,
+}
+
+/// A stick's direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// What a key did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyResult {
+    Handled,
+    Quit,
+}
+
+/// The mouse's buttons that act.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    /// The trigger: choose what is pointed at, or attract the swarm.
+    Left,
+    /// Drag to look around.
+    Right,
+}
+
+/// The keyboard and mouse as the headset's controls.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Input {
+    cursor: Option<Vec2>,
+    trigger: bool,
+    looking: bool,
+    talk: bool,
+    back_held: bool,
+    /// Presses since the last frame, which it consumes.
+    a: bool,
+    back: bool,
+    y: bool,
+    mute: bool,
+    replay: bool,
+    left: [bool; 4],
+    right: [bool; 4],
+    /// The right grip, held.
+    grip: bool,
+}
+
+impl Input {
+    /// Release everything held, as on losing focus.
+    fn release(&mut self) {
+        let cursor = self.cursor;
+        *self = Self {
+            cursor,
+            ..Self::default()
+        };
+    }
+
+    fn stick(keys: [bool; 4]) -> Vec2 {
+        let [up, down, left, right] = keys.map(f32::from);
+        Vec2::new(right - left, up - down)
+    }
+
+    /// This frame's buttons, consuming the presses since the last.
+    fn take(&mut self) -> Buttons {
+        Buttons {
+            a: std::mem::take(&mut self.a),
+            back: std::mem::take(&mut self.back),
+            back_held: self.back_held,
+            y: std::mem::take(&mut self.y),
+            talk: self.talk,
+            mute: std::mem::take(&mut self.mute),
+            replay: std::mem::take(&mut self.replay),
+            left_stick: Self::stick(self.left),
+            right_stick: Self::stick(self.right),
+        }
+    }
+}
+
+/// The participant's head, standing at arrival's home and turned by the mouse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Head {
+    yaw: f32,
+    pitch: f32,
+}
+
+impl Default for Head {
+    fn default() -> Self {
+        // Arrival is laid out ahead, along -Z, and a little below the eyes.
+        Self {
+            yaw: 0.0,
+            pitch: -0.12,
+        }
+    }
+}
+
+impl Head {
+    fn look(&mut self, delta: Vec2) {
+        self.yaw -= delta.x * LOOK_SPEED;
+        self.pitch = (self.pitch - delta.y * LOOK_SPEED).clamp(-1.4, 1.4);
+    }
+
+    fn rotation(&self) -> Quat {
+        Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0)
+    }
+
+    /// The head's pose in the scene, as the headset's views give it.
+    pub fn transform(&self) -> Mat4 {
+        Mat4::from_rotation_translation(self.rotation(), arrival::HOME)
+    }
+
+    pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        Mat4::perspective_rh(60_f32.to_radians(), aspect, 0.05, 50.0) * self.transform().inverse()
+    }
+
+    /// The ray from the eye through the cursor, as the right controller's aim on the headset.
+    fn ray(&self, cursor: Vec2, size: Vec2) -> Option<Ray> {
+        let ndc = Vec2::new(cursor.x / size.x * 2.0 - 1.0, 1.0 - cursor.y / size.y * 2.0);
+        let inverse = self.view_projection(size.x / size.y).inverse();
+        let near = inverse.project_point3(ndc.extend(0.0));
+        let far = inverse.project_point3(ndc.extend(1.0));
+        Ray::new(near, far - near)
+    }
+
+    /// A right palm turned up in front of the participant, where the transcript shows while it is open.
+    fn right_palm(&self) -> Palm {
+        let wrist = arrival::HOME + self.rotation() * Vec3::new(0.05, -0.2, -0.42);
+        Palm {
+            wrist,
+            normal: Vec3::Y,
+        }
+    }
+
+    /// A left palm held up in front of the participant, facing them, where the hand menu shows while it is open.
+    fn palm(&self) -> Palm {
+        let wrist = arrival::HOME + self.rotation() * Vec3::new(-0.06, -0.14, -0.45);
+        Palm {
+            wrist,
+            normal: (arrival::HOME - wrist).normalize(),
+        }
+    }
+}
+
+/// What a desktop frame draws and reports.
+pub struct Drawn<'a> {
+    pub frame: Frame<'a>,
+    /// The window's new title, when the knocks waiting change.
+    pub title: Option<String>,
+    /// The head's view and projection.
+    pub view_projection: Mat4,
+}
+
+/// The conversation's participant in a window, and everything the frame step keeps between frames, without the headset.
+pub struct Desktop {
+    step: Step,
+    input: Input,
+    head: Head,
+    focused: bool,
+    visible: bool,
+    engagement: Tracker,
+    microphone_requested: bool,
+    menu_open: bool,
+    /// Whether the right wrist's transcript is turned up, with T.
+    wrist_open: bool,
+    knocks: usize,
+    last_frame: Instant,
+}
+
+impl Desktop {
+    pub fn new(conversation: &mut Conversation, now: Instant) -> Self {
+        let engagement = Tracker::new();
+        conversation.set_engagement(engagement.engagement());
+        Self {
+            step: Step::default(),
+            input: Input::default(),
+            head: Head::default(),
+            focused: false,
+            visible: true,
+            engagement,
+            microphone_requested: false,
+            menu_open: false,
+            wrist_open: false,
+            knocks: 0,
+            last_frame: now,
+        }
+    }
+
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+
+    /// The window gained or lost focus. Returns whether to ask for the microphone, which happens once, on first gaining focus.
+    pub fn set_focused(&mut self, focused: bool, conversation: &mut Conversation) -> bool {
+        if self.focused && !focused {
+            // As the headset does on losing focus: nothing held carries over.
+            self.input.release();
+            self.step.blur(conversation);
+        }
+        self.focused = focused;
+        let request = focused && !self.microphone_requested;
+        self.microphone_requested |= request;
+        self.report_engagement(conversation);
+        request
+    }
+
+    /// The window was shown or hidden.
+    pub fn set_visible(&mut self, visible: bool, conversation: &mut Conversation) {
+        self.visible = visible;
+        self.report_engagement(conversation);
+    }
+
+    /// A focused window has input, an unfocused one is only seen, and a hidden one is neither; a desktop has no sensor for being worn.
+    fn report_engagement(&mut self, conversation: &mut Conversation) {
+        let focus = match (self.visible, self.focused) {
+            (false, _) => Focus::Hidden,
+            (true, true) => Focus::Focused,
+            (true, false) => Focus::Visible,
+        };
+        if let Some(changed) = self.engagement.set_focus(focus) {
+            log::info!("Engagement: {changed:?}, as the window is {focus:?}");
+            conversation.set_engagement(changed);
+        }
+    }
+
+    /// The cursor left the window: it points at nothing, and a drag ends.
+    pub fn cursor_left(&mut self) {
+        self.input.cursor = None;
+        self.input.looking = false;
+    }
+
+    /// The cursor moved to `cursor`, in pixels; dragging with the right button turns the head.
+    pub fn cursor_moved(&mut self, cursor: Vec2) {
+        if self.input.looking
+            && let Some(last) = self.input.cursor
+        {
+            self.head.look(cursor - last);
+        }
+        self.input.cursor = Some(cursor);
+    }
+
+    pub fn mouse(&mut self, button: Button, pressed: bool) {
+        match button {
+            Button::Left => self.input.trigger = pressed,
+            Button::Right => self.input.looking = pressed,
+        }
+    }
+
+    /// `key` was pressed or released, `repeat` if the key is held and repeating.
+    pub fn key(
+        &mut self,
+        key: Key,
+        pressed: bool,
+        repeat: bool,
+        conversation: &mut Conversation,
+    ) -> KeyResult {
+        let press = pressed && !repeat;
+        let input = &mut self.input;
+        let index = |direction| match direction {
+            Direction::Up => 0,
+            Direction::Down => 1,
+            Direction::Left => 2,
+            Direction::Right => 3,
+        };
+        match key {
+            Key::Talk => input.talk = pressed,
+            Key::Back => {
+                input.back_held = pressed;
+                input.back |= press;
+            }
+            Key::A => input.a |= press,
+            Key::Y => input.y |= press,
+            Key::Mute => input.mute |= press,
+            Key::Replay => input.replay |= press,
+            Key::Left(direction) => input.left[index(direction)] = pressed,
+            Key::Right(direction) => input.right[index(direction)] = pressed,
+            Key::Grip => input.grip = pressed,
+            _ if !press => {}
+            Key::Menu => self.menu_open = !self.menu_open,
+            Key::Transcript => self.wrist_open = !self.wrist_open,
+            Key::Knock => conversation.knock(),
+            Key::Pair => conversation.pair(),
+            Key::Admit | Key::Decline => {
+                match conversation.knocks().first().map(|knock| knock.id.clone()) {
+                    Some(id) => conversation.decide_knock(&id, key == Key::Admit),
+                    None => log::info!("No knock is waiting."),
+                }
+            }
+            // Esc closes the hand menu, then lets go of a pinned one, before it quits.
+            Key::Escape => {
+                if self.menu_open {
+                    self.menu_open = false;
+                } else if !self.step.unpin() {
+                    return KeyResult::Quit;
+                }
+            }
+        }
+        KeyResult::Handled
+    }
+
+    /// One frame at `now`, in a window `size` pixels large: the controller's buttons from the keys, then the scene, as the headset's frame, from the keyboard and mouse instead of the controllers.
+    pub fn frame(
+        &mut self,
+        conversation: &mut Conversation,
+        feedback: &mut Feedback,
+        now: Instant,
+        size: Vec2,
+    ) -> Drawn<'_> {
+        let dt = now
+            .duration_since(self.last_frame)
+            .as_secs_f32()
+            .min(MAX_STEP);
+        self.last_frame = now;
+        let focused = self.focused;
+        let buttons = self.input.take();
+        // As on the headset, approvals are decided and queued entries removed on the right wrist.
+        conversation.decide_on_wrist();
+        self.step
+            .buttons(&buttons, focused, conversation, feedback, now);
+        // Knocks are announced in the title as well, since there is no wrist to cue while the menu is closed.
+        let knocks = conversation.knocks().len();
+        let title = (knocks != self.knocks).then(|| {
+            self.knocks = knocks;
+            for knock in conversation.knocks() {
+                log::info!("{} is knocking: + admits, - declines.", knock.name);
+            }
+            match conversation.knocks().first() {
+                Some(knock) => {
+                    format!("{TITLE} — {} is knocking: + admits, - declines", knock.name)
+                }
+                None => TITLE.to_owned(),
+            }
+        });
+        let head = self.head.transform();
+        let ray = self
+            .input
+            .cursor
+            .filter(|_| focused)
+            .and_then(|cursor| self.head.ray(cursor, size));
+        let senses = Senses {
+            focused,
+            head: Some(head),
+            head_pose: Pose::from_transform(head),
+            // The head turns about the eye, so what faces the head faces the eye.
+            viewer: Some(arrival::HOME),
+            space_head: head,
+            ray,
+            trigger: focused.then_some(if self.input.trigger { 1.0 } else { 0.0 }),
+            pointing: self.input.trigger,
+            left_palm: (self.menu_open || self.step.pinned()).then(|| self.head.palm()),
+            right_palm: self.wrist_open.then(|| self.head.right_palm()),
+            hands_only: false,
+            grip: Some(if self.input.grip { 1.0 } else { 0.0 }),
+            // A desktop has no controllers, so the recording indicator stands low in the view.
+            trackers: Trackers {
+                view: Some(crate::controller_ui::view_spot(head)),
+                ..Default::default()
+            },
+            attractor: ray.map(|ray| ray.at(ATTRACT_AT)),
+            marker: Marker::WhileAttracting,
+            // The others see this participant's head; a desktop has no controllers or hands to report.
+            controllers: [None, None],
+            hands: [None, None],
+            // There are no palms to cue on, and the mouse cursor already shows where it points, so no ray is drawn from the eye.
+            cues: false,
+            beam: false,
+        };
+        let view_projection = self.head.view_projection(size.x / size.y);
+        Drawn {
+            frame: self.step.update(&senses, conversation, feedback, now, dt),
+            title,
+            view_projection,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{conversation::Action, hand_menu::HOLD, scene::fixtures::*};
+    use std::time::Duration;
+    use tomori_protocol::{ClientMessage, ConnectionRole, Engagement};
+
+    const SIZE: Vec2 = Vec2::new(1280.0, 800.0);
+
+    #[test]
+    fn the_head_starts_at_home_looking_towards_arrival() {
+        let transform = Head::default().transform();
+        assert!(transform.w_axis.truncate().distance(arrival::HOME) < 1e-6);
+        let forward = transform.transform_vector3(-Vec3::Z);
+        // Ahead, along -Z, where arrival's objects are, and a little downwards.
+        assert!(forward.z < -0.9);
+        assert!(forward.y < 0.0);
+    }
+
+    #[test]
+    fn the_centre_of_the_window_points_where_the_head_looks() {
+        let head = Head {
+            yaw: 0.7,
+            pitch: 0.2,
+        };
+        let ray = head.ray(SIZE * 0.5, SIZE).unwrap();
+        let forward = head.transform().transform_vector3(-Vec3::Z);
+        assert!(ray.direction.dot(forward) > 0.999);
+        // From the eye, give or take the near plane.
+        assert!(ray.origin.distance(arrival::HOME) < 0.1);
+    }
+
+    #[test]
+    fn looking_turns_the_head_and_never_past_straight_up_or_down() {
+        let mut head = Head::default();
+        head.look(Vec2::new(100.0, 0.0));
+        assert!(head.yaw < 0.0, "dragging right turns right");
+        head.look(Vec2::new(0.0, -100_000.0));
+        assert_eq!(head.pitch, 1.4);
+        head.look(Vec2::new(0.0, 100_000.0));
+        assert_eq!(head.pitch, -1.4);
+    }
+
+    #[test]
+    fn the_palms_are_in_view_the_left_facing_the_eye_and_the_right_turned_up() {
+        let head = Head {
+            yaw: -1.2,
+            pitch: 0.3,
+        };
+        let palm = head.palm();
+        let to_eye = (arrival::HOME - palm.wrist).normalize();
+        assert!(palm.normal.dot(to_eye) > 0.999);
+        let right = head.right_palm();
+        assert_eq!(right.normal, Vec3::Y);
+        // Within the 60° vertical field of view, so the menu shows in the window.
+        for wrist in [palm.wrist, right.wrist] {
+            let clip = head.view_projection(SIZE.x / SIZE.y).project_point3(wrist);
+            assert!(clip.x.abs() < 1.0 && clip.y.abs() < 1.0 && (0.0..1.0).contains(&clip.z));
+        }
+    }
+
+    #[test]
+    fn arrow_keys_and_brackets_are_sticks() {
+        assert_eq!(Input::stick([true, false, false, false]), Vec2::Y);
+        assert_eq!(Input::stick([false, false, false, true]), Vec2::X);
+        assert_eq!(Input::stick([true, true, true, true]), Vec2::ZERO);
+    }
+
+    fn desktop(conversation: &mut Conversation) -> Desktop {
+        let mut desktop = Desktop::new(conversation, Instant::now());
+        assert!(
+            desktop.set_focused(true, conversation),
+            "asks for the microphone"
+        );
+        desktop
+    }
+
+    fn tap(desktop: &mut Desktop, key: Key, conversation: &mut Conversation) -> KeyResult {
+        let result = desktop.key(key, true, false, conversation);
+        desktop.key(key, false, false, conversation);
+        result
+    }
+
+    #[test]
+    fn keys_press_once_hold_while_down_and_ignore_repeats() {
+        let mut conversation = joined();
+        let mut desktop = desktop(&mut conversation);
+        for key in [Key::A, Key::Y, Key::Mute, Key::Replay] {
+            desktop.key(key, true, true, &mut conversation);
+        }
+        assert_eq!(
+            desktop.input.take(),
+            Buttons::default(),
+            "repeats are not presses"
+        );
+        desktop.key(Key::Back, true, false, &mut conversation);
+        for key in [Key::A, Key::Y, Key::Mute, Key::Replay, Key::Talk, Key::Grip] {
+            desktop.key(key, true, false, &mut conversation);
+        }
+        for direction in [Direction::Up, Direction::Right] {
+            desktop.key(Key::Left(direction), true, false, &mut conversation);
+            desktop.key(Key::Right(direction), true, false, &mut conversation);
+        }
+        let expected = Buttons {
+            a: true,
+            back: true,
+            back_held: true,
+            y: true,
+            talk: true,
+            mute: true,
+            replay: true,
+            left_stick: Vec2::new(1.0, 1.0),
+            right_stick: Vec2::new(1.0, 1.0),
+        };
+        assert_eq!(desktop.input.take(), expected);
+        assert!(desktop.input.grip);
+        // Presses are consumed by a frame; what is held stays.
+        assert_eq!(
+            desktop.input.take(),
+            Buttons {
+                a: false,
+                back: false,
+                y: false,
+                mute: false,
+                replay: false,
+                ..expected
+            }
+        );
+        for direction in [Direction::Down, Direction::Left] {
+            desktop.key(Key::Left(direction), true, false, &mut conversation);
+        }
+        assert_eq!(desktop.input.take().left_stick, Vec2::ZERO);
+        // Releasing a key lets go of what it holds.
+        for key in [
+            Key::Talk,
+            Key::Back,
+            Key::Grip,
+            Key::Left(Direction::Up),
+            Key::Left(Direction::Down),
+            Key::Left(Direction::Left),
+            Key::Left(Direction::Right),
+            Key::Right(Direction::Up),
+            Key::Right(Direction::Right),
+        ] {
+            desktop.key(key, false, false, &mut conversation);
+        }
+        assert_eq!(desktop.input.take(), Buttons::default());
+        assert!(!desktop.input.grip);
+        // Losing focus lets go of everything but where the cursor is.
+        desktop.cursor_moved(Vec2::new(10.0, 20.0));
+        desktop.set_focused(false, &mut conversation);
+        assert_eq!(
+            desktop.input,
+            Input {
+                cursor: Some(Vec2::new(10.0, 20.0)),
+                ..Input::default()
+            }
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_menu_then_lets_go_of_a_pinned_one_then_quits() {
+        let mut conversation = joined();
+        let mut desktop = desktop(&mut conversation);
+        tap(&mut desktop, Key::Menu, &mut conversation);
+        assert!(desktop.menu_open);
+        assert_eq!(
+            tap(&mut desktop, Key::Escape, &mut conversation),
+            KeyResult::Handled
+        );
+        assert!(!desktop.menu_open);
+        tap(&mut desktop, Key::Y, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), Instant::now(), SIZE);
+        assert!(desktop.step.pinned());
+        assert_eq!(
+            tap(&mut desktop, Key::Escape, &mut conversation),
+            KeyResult::Handled
+        );
+        assert!(!desktop.step.pinned());
+        assert_eq!(
+            tap(&mut desktop, Key::Escape, &mut conversation),
+            KeyResult::Quit
+        );
+        // Releasing Escape does nothing.
+        assert_eq!(
+            desktop.key(Key::Escape, false, false, &mut conversation),
+            KeyResult::Handled
+        );
+    }
+
+    #[test]
+    fn knocks_are_admitted_or_declined_first_come_and_announced_in_the_title() {
+        let mut conversation = joined();
+        let mut desktop = desktop(&mut conversation);
+        let now = Instant::now();
+        tap(&mut desktop, Key::Admit, &mut conversation);
+        assert!(conversation.take_actions().is_empty(), "no knock waiting");
+        assert!(
+            desktop
+                .frame(&mut conversation, &mut felt(), now, SIZE)
+                .title
+                .is_none()
+        );
+        knock(&mut conversation, "knock-1", "Grace");
+        let title = desktop
+            .frame(&mut conversation, &mut felt(), now, SIZE)
+            .title;
+        assert_eq!(
+            title.as_deref(),
+            Some("Tomori — Grace is knocking: + admits, - declines")
+        );
+        assert!(
+            desktop
+                .frame(&mut conversation, &mut felt(), now, SIZE)
+                .title
+                .is_none(),
+            "once"
+        );
+        for (key, admit) in [(Key::Admit, true), (Key::Decline, false)] {
+            tap(&mut desktop, key, &mut conversation);
+            let sent = conversation.take_actions();
+            assert!(
+                sent.iter().any(|action| matches!(
+                    action,
+                    Action::Send(ClientMessage::DecideKnock { knock, admit: a, .. }) if knock == "knock-1" && *a == admit
+                )),
+                "{sent:?}"
+            );
+        }
+        conversation.apply(tomori_client::Event::Message(
+            tomori_protocol::ServerMessage::Knocks { knocks: vec![] },
+        ));
+        assert_eq!(
+            desktop
+                .frame(&mut conversation, &mut felt(), now, SIZE)
+                .title
+                .as_deref(),
+            Some(TITLE)
+        );
+        // P pairs this device as an owner, which it already is, so nothing is sent.
+        tap(&mut desktop, Key::Pair, &mut conversation);
+        assert!(conversation.take_actions().is_empty());
+        // A visitor watching a space knocks with K.
+        let mut visitor = lobby(ConnectionRole::Visitor);
+        visitor.apply(space(|_| {}));
+        visitor.take_actions();
+        let mut desktop = Desktop::new(&mut visitor, now);
+        tap(&mut desktop, Key::Knock, &mut visitor);
+        let sent = visitor.take_actions();
+        assert!(
+            sent.iter()
+                .any(|action| matches!(action, Action::Send(ClientMessage::Knock))),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn focus_and_visibility_report_engagement_and_the_microphone_is_asked_for_once() {
+        let mut conversation = joined();
+        let mut desktop = Desktop::new(&mut conversation, Instant::now());
+        assert!(!desktop.focused());
+        assert!(desktop.set_focused(true, &mut conversation));
+        assert_eq!(desktop.engagement.engagement(), Engagement::Engaged);
+        assert!(!desktop.set_focused(false, &mut conversation));
+        assert_eq!(desktop.engagement.engagement(), Engagement::Distracted);
+        desktop.set_visible(false, &mut conversation);
+        assert_eq!(desktop.engagement.engagement(), Engagement::Away);
+        assert!(!desktop.set_focused(true, &mut conversation));
+    }
+
+    #[test]
+    fn the_mouse_points_only_with_focus_and_dragging_looks() {
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let mut desktop = desktop(&mut conversation);
+        let now = Instant::now();
+        desktop.cursor_moved(SIZE * 0.5);
+        desktop.mouse(Button::Left, true);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert!(drawn.frame.attracting, "a pull on nothing attracts");
+        // The attractor is along the ray, and drawn only while it attracts.
+        let marker = drawn.frame.marker.expect("drawn");
+        assert!((marker.distance(arrival::HOME) - ATTRACT_AT).abs() < 0.1);
+        desktop.mouse(Button::Left, false);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(drawn.frame.marker, None);
+        // Dragging with the right button turns the head.
+        desktop.mouse(Button::Right, true);
+        desktop.cursor_moved(SIZE * 0.5 + Vec2::new(100.0, 0.0));
+        assert!(desktop.head.yaw < 0.0);
+        desktop.mouse(Button::Right, false);
+        let yaw = desktop.head.yaw;
+        desktop.cursor_moved(SIZE * 0.5);
+        assert_eq!(
+            desktop.head.yaw, yaw,
+            "moving without the button only points"
+        );
+        desktop.cursor_left();
+        assert!(desktop.input.cursor.is_none());
+        desktop.mouse(Button::Right, true);
+        desktop.cursor_moved(SIZE * 0.5);
+        assert_eq!(
+            desktop.head.yaw, yaw,
+            "a drag starting outside does not jump"
+        );
+        // Unfocused, the trigger does nothing.
+        desktop.mouse(Button::Left, true);
+        desktop.set_focused(false, &mut conversation);
+        desktop.mouse(Button::Left, true);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert!(!drawn.frame.attracting);
+    }
+
+    #[test]
+    fn m_holds_up_the_left_palm_and_t_turns_up_the_right() {
+        let mut conversation = joined();
+        let mut desktop = desktop(&mut conversation);
+        let start = Instant::now();
+        tap(&mut desktop, Key::Menu, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD, SIZE);
+        assert!(
+            drawn
+                .frame
+                .arrival
+                .is_some_and(|arrival| !arrival.scene.objects.is_empty())
+        );
+        tap(&mut desktop, Key::Menu, &mut conversation);
+        tap(&mut desktop, Key::Transcript, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 2, SIZE);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 3, SIZE);
+        assert!(drawn.frame.panels.wrist.model.is_some());
+        // G detaches it into the world.
+        desktop.key(Key::Grip, true, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 4, SIZE);
+        assert!(desktop.step.wrist.state().detached());
+    }
+
+    #[test]
+    fn a_frame_steps_at_most_a_tenth_of_a_second_and_draws_from_the_head() {
+        let mut conversation = joined();
+        let start = Instant::now();
+        let mut desktop = Desktop::new(&mut conversation, start);
+        let drawn = desktop.frame(
+            &mut conversation,
+            &mut felt(),
+            start + Duration::from_secs(5),
+            SIZE,
+        );
+        assert_eq!(
+            drawn.view_projection,
+            Head::default().view_projection(SIZE.x / SIZE.y)
+        );
+        assert_eq!(
+            drawn.frame.listener,
+            Pose::from_transform(Head::default().transform())
+        );
+        let presence = drawn.frame.presence.expect("a participant");
+        assert_eq!((presence.left, presence.right), (None, None));
+        assert!((desktop.step.arrival_time - MAX_STEP).abs() < 1e-6);
+    }
+}

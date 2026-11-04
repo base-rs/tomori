@@ -43,6 +43,8 @@ mod pipewire_video;
 mod playback;
 mod pointing;
 mod recording;
+mod scene;
+mod scene_graphics;
 mod server_choice;
 mod spatial_audio;
 mod speakers;

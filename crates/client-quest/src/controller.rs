@@ -16,7 +16,7 @@ const MAX_NODES: usize = 10_000;
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TEXTURES: usize = 8;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
     pub position: [f32; 3],
     pub orientation: [f32; 4],

@@ -6,14 +6,24 @@ use crate::{caption::COLUMNS, connection::Connection, conversation::Conversation
 use anyhow::Result;
 use std::{
     io::BufRead,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     time::Duration,
 };
+
+/// Where the console writes, a line at a time.
+type Out<'a> = dyn FnMut(String) + 'a;
+
+/// Write a formatted line to `out`.
+macro_rules! say {
+    ($out:expr, $($format:tt)*) => {
+        $out(format!($($format)*))
+    };
+}
 
 const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
 
 /// `feedback` shows the Feedback setting, and `feedback sounds LEVEL` or `feedback vibration LEVEL` changes one half of it, as the hand menu's Sound section does. See `design/feedback.md`.
-fn feedback(conversation: &mut Conversation, argument: &str) {
+fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
     let words: Vec<&str> = argument.split_whitespace().collect();
     let level = |word: &str| crate::feedback::Level::parse(word);
     match words[..] {
@@ -27,12 +37,16 @@ fn feedback(conversation: &mut Conversation, argument: &str) {
         ["mono", "on"] => conversation.set_mono(true),
         ["mono", "off"] => conversation.set_mono(false),
         _ => {
-            println!("(feedback sounds|vibration full|reduced|off, or feedback mono on|off)");
+            say!(
+                out,
+                "(feedback sounds|vibration full|reduced|off, or feedback mono on|off)"
+            );
             return;
         }
     }
     let settings = conversation.menu_model().feedback;
-    println!(
+    say!(
+        out,
         "  Sounds: {}; vibration: {}; mono audio: {}",
         settings.sounds.label(),
         settings.vibration.label(),
@@ -43,7 +57,7 @@ fn feedback(conversation: &mut Conversation, argument: &str) {
 /// `point` lists the space's workers by number, `point N` points at the `N`th until another `point`, and `point off`
 /// points at nothing. While recording, the worker pointed at is sent with the words, as on the headset; see
 /// `design/interaction.md`.
-fn point(conversation: &mut Conversation, argument: &str) {
+fn point(conversation: &mut Conversation, argument: &str, out: &mut Out) {
     let workers: Vec<(String, String)> = conversation
         .joined_space()
         .map(|(space, _)| {
@@ -57,7 +71,7 @@ fn point(conversation: &mut Conversation, argument: &str) {
     match argument {
         "" => {
             if workers.is_empty() {
-                println!("(No workers to point at here.)");
+                say!(out, "(No workers to point at here.)");
             }
             for (number, (id, title)) in workers.iter().enumerate() {
                 let marker = if conversation.pointing_at() == Some(id.as_str()) {
@@ -65,12 +79,12 @@ fn point(conversation: &mut Conversation, argument: &str) {
                 } else {
                     " "
                 };
-                println!("{marker} {}: {title}", number + 1);
+                say!(out, "{marker} {}: {title}", number + 1);
             }
         }
         "off" => {
             conversation.point_at(None);
-            println!("(Pointing at nothing.)");
+            say!(out, "(Pointing at nothing.)");
         }
         number => match number
             .parse::<usize>()
@@ -79,9 +93,9 @@ fn point(conversation: &mut Conversation, argument: &str) {
         {
             Some((id, title)) => {
                 conversation.point_at(Some(id));
-                println!("(Pointing at {title}.)");
+                say!(out, "(Pointing at {title}.)");
             }
-            None => println!("(No such worker: point lists them.)"),
+            None => say!(out, "(No such worker: point lists them.)"),
         },
     }
 }
@@ -98,11 +112,27 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                 }
             }
         })?;
-    println!("{HELP}");
+    serve(
+        &mut conversation,
+        |conversation| connection.poll(true, conversation),
+        &input,
+        &mut |line| println!("{line}"),
+    );
+    Ok(())
+}
+
+/// Read commands from `input` and write the panel to `out` as it changes, with `poll` keeping the conversation's connection going, until `q` or the end of the input.
+fn serve(
+    conversation: &mut Conversation,
+    mut poll: impl FnMut(&mut Conversation),
+    input: &Receiver<String>,
+    out: &mut Out,
+) {
+    say!(out, "{HELP}");
     let mut shown = String::new();
     let mut knocks = Vec::new();
     loop {
-        connection.poll(true, &mut conversation);
+        poll(conversation);
         conversation.tick_space(std::time::Instant::now());
         match input.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
@@ -111,9 +141,9 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                     && (text.is_empty() || text.starts_with(char::is_whitespace))
                 {
                     conversation.instruct(text);
-                    connection.poll(true, &mut conversation);
+                    poll(conversation);
                     if let Some(notice) = conversation.menu_model().notice {
-                        println!("({notice})");
+                        say!(out, "({notice})");
                     }
                     continue;
                 }
@@ -121,14 +151,14 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                 if let Some(rest) = line.trim_start().strip_prefix("feedback")
                     && (rest.is_empty() || rest.starts_with(char::is_whitespace))
                 {
-                    feedback(&mut conversation, rest);
+                    feedback(conversation, rest, out);
                     continue;
                 }
                 // Pointing at a worker, as the headset's ray does; the rest of the line is its number.
                 if let Some(rest) = line.trim_start().strip_prefix("point")
                     && (rest.is_empty() || rest.starts_with(char::is_whitespace))
                 {
-                    point(&mut conversation, rest.trim());
+                    point(conversation, rest.trim(), out);
                     continue;
                 }
                 for command in line.split_whitespace() {
@@ -143,7 +173,7 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                         "v" => conversation.select_queued(1),
                         "a" => {
                             if conversation.accept() {
-                                println!("(A has nothing to choose here.)");
+                                say!(out, "(A has nothing to choose here.)");
                             }
                         }
                         "b" => conversation.back(),
@@ -170,27 +200,27 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                             .into_iter()
                             .skip(1)
                             {
-                                println!("  {}", item.text);
+                                say!(out, "  {}", item.text);
                             }
                         }
                         // The hand menu's header and Space section; see `design/hand-menu.md`.
                         "s" => match conversation.menu_model() {
-                            model if !model.in_space => println!("(Join a space first.)"),
+                            model if !model.in_space => say!(out, "(Join a space first.)"),
                             model => {
                                 for line in crate::hand_menu::text(
                                     Some(crate::hand_menu::Section::Space),
                                     &model,
                                 ) {
-                                    println!("  {line}");
+                                    say!(out, "  {line}");
                                 }
                             }
                         },
                         // The hand menu's Agent section, with each layer in full; see `design/hand-menu.md`.
                         "i" => match conversation.menu_model() {
-                            model if !model.in_space => println!("(Join a space first.)"),
+                            model if !model.in_space => say!(out, "(Join a space first.)"),
                             crate::hand_menu::Model {
                                 instructions: None, ..
-                            } => println!("  This agent takes no instructions from Tomori."),
+                            } => say!(out, "  This agent takes no instructions from Tomori."),
                             crate::hand_menu::Model {
                                 instructions: Some(layers),
                                 ..
@@ -201,17 +231,17 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                                     ("This space's", &layers.space),
                                 ] {
                                     let text = if text.trim().is_empty() { "none" } else { text };
-                                    println!("  {label}: {text}");
+                                    say!(out, "  {label}: {text}");
                                 }
                                 if let Some(error) = &layers.error {
-                                    println!("  {error}");
+                                    say!(out, "  {error}");
                                 }
                             }
                         },
                         "+" | "-" => {
                             match conversation.knocks().first().map(|knock| knock.id.clone()) {
                                 Some(id) => conversation.decide_knock(&id, command == "+"),
-                                None => println!("(No knock is waiting.)"),
+                                None => say!(out, "(No knock is waiting.)"),
                             }
                         }
                         // The right wrist's transcript, for a terminal without hands; see `design/wrist-transcript.md`.
@@ -232,46 +262,47 @@ pub fn run(mut conversation: Conversation, mut connection: Connection) -> Result
                             print_rows(
                                 &conversation
                                     .transcript(crate::transcript::DETACHED_COLUMNS, false),
+                                out,
                             );
                         }
                         "mute" => conversation.toggle_mute(),
                         "replay" => conversation.replay(),
-                        "q" => return Ok(()),
-                        _ => println!("{HELP}"),
+                        "q" => return,
+                        _ => say!(out, "{HELP}"),
                     }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
             // Standard input ended.
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => return,
         }
-        connection.poll(true, &mut conversation);
+        poll(conversation);
         if conversation.knocks() != knocks.as_slice() {
             knocks = conversation.knocks().to_vec();
             for knock in &knocks {
-                println!("{} is knocking: + admits, - declines.", knock.name);
+                say!(out, "{} is knocking: + admits, - declines.", knock.name);
             }
         }
         let text = conversation.text();
         if text != shown {
             let border = format!("+{}+", "-".repeat(COLUMNS));
-            println!("{border}");
+            say!(out, "{border}");
             for line in text.lines() {
-                println!("|{line:<COLUMNS$}|");
+                say!(out, "|{line:<COLUMNS$}|");
             }
-            println!("{border} {:?}", conversation.activity());
+            say!(out, "{border} {:?}", conversation.activity());
             shown = text;
         }
     }
 }
 
 /// Rows of a panel in a frame, as the console shows the hand's panels.
-fn print_rows(rows: &[crate::ui_text::Row]) {
+fn print_rows(rows: &[crate::ui_text::Row], out: &mut Out) {
     if rows.is_empty() {
-        println!("(Join a space first.)");
-        return;
+        say!(out, "(Join a space first.)");
+    } else {
+        say!(out, "{}", framed(rows).trim_end_matches('\n'));
     }
-    print!("{}", framed(rows));
 }
 
 /// `rows` in a frame as wide as the widest.
@@ -290,7 +321,251 @@ fn framed(rows: &[crate::ui_text::Row]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::fixtures::{joined, knock, lobby, space};
     use crate::ui_text::{Row, Style};
+    use tomori_protocol::{AgentInstructions, ConnectionRole, Worker, WorkerState};
+
+    /// What the console writes for `lines`, typed into `conversation`, with how often it polled.
+    fn session(conversation: &mut Conversation, lines: &[&str]) -> (String, usize) {
+        let (sender, input) = mpsc::channel();
+        for line in lines {
+            sender.send((*line).to_owned()).unwrap();
+        }
+        drop(sender);
+        let mut out = String::new();
+        let mut polls = 0;
+        serve(conversation, |_| polls += 1, &input, &mut |line| {
+            out.push_str(&line);
+            out.push('\n');
+        });
+        (out, polls)
+    }
+
+    fn workers() -> Vec<Worker> {
+        ["Parser", "Tests"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| Worker {
+                id: format!("worker-{index}"),
+                parent: None,
+                title: title.into(),
+                state: WorkerState::Running,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn it_shows_the_help_and_the_panel_and_stops_at_q_or_the_end_of_the_input() {
+        let mut conversation = joined();
+        let (out, polls) = session(&mut conversation, &["q", "x"]);
+        assert!(out.starts_with(HELP));
+        assert!(polls >= 1);
+        // What follows q is never read.
+        assert!(conversation.recording().is_none());
+        let (out, _) = session(&mut conversation, &[]);
+        assert!(out.starts_with(HELP));
+        // The panel is drawn in a frame as it changes, and an unknown command shows the help again.
+        let (out, _) = session(&mut conversation, &["nonsense"]);
+        assert_eq!(out.matches(HELP).count(), 2);
+        assert!(out.contains(&format!("+{}+", "-".repeat(COLUMNS))));
+    }
+
+    #[test]
+    fn a_slow_line_is_waited_for() {
+        let mut conversation = joined();
+        let (sender, input) = mpsc::channel();
+        let typist = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            sender.send("q".to_owned()).unwrap();
+        });
+        let mut polls = 0;
+        serve(&mut conversation, |_| polls += 1, &input, &mut |_| {});
+        typist.join().unwrap();
+        assert!(polls >= 3, "polled while waiting: {polls}");
+    }
+
+    #[test]
+    fn the_feedback_setting_is_shown_and_changed_half_at_a_time() {
+        let mut conversation = joined();
+        let (out, _) = session(
+            &mut conversation,
+            &[
+                "feedback",
+                "feedback sounds off",
+                "feedback vibration reduced",
+                "feedback mono on",
+                "feedback mono off",
+                "feedback loud",
+            ],
+        );
+        assert!(
+            out.contains("  Sounds: full; vibration: full; mono audio: off"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  Sounds: off; vibration: full; mono audio: off"),
+            "{out}"
+        );
+        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: off"));
+        assert!(out.contains("  Sounds: off; vibration: reduced; mono audio: on"));
+        assert!(
+            out.contains("(feedback sounds|vibration full|reduced|off, or feedback mono on|off)")
+        );
+        // A word that only starts with it is not the command.
+        let (out, _) = session(&mut conversation, &["feedbacks"]);
+        assert_eq!(out.matches(HELP).count(), 2);
+    }
+
+    #[test]
+    fn point_lists_the_workers_and_points_at_one_by_number_until_off() {
+        let mut lobby = lobby(ConnectionRole::Owner);
+        let (out, _) = session(&mut lobby, &["point"]);
+        assert!(out.contains("(No workers to point at here.)"));
+        let mut conversation = lobby;
+        conversation.apply(space(|state| state.workers = workers()));
+        let (out, _) = session(
+            &mut conversation,
+            &["point 2", "point", "point 3", "point x"],
+        );
+        assert!(out.contains("(Pointing at Tests.)"));
+        assert!(out.contains("  1: Parser\n* 2: Tests\n"), "{out}");
+        assert_eq!(
+            out.matches("(No such worker: point lists them.)").count(),
+            2
+        );
+        assert_eq!(conversation.pointing_at(), Some("worker-1"));
+        let (out, _) = session(&mut conversation, &["point off"]);
+        assert!(out.contains("(Pointing at nothing.)"));
+        assert_eq!(conversation.pointing_at(), None);
+        let (out, _) = session(&mut conversation, &["point 0"]);
+        assert!(out.contains("(No such worker"));
+    }
+
+    #[test]
+    fn instruct_gives_an_owners_instructions_and_says_what_happened() {
+        let mut conversation = joined();
+        let (out, polls) = session(&mut conversation, &["instruct Be brief.", "instructs"]);
+        assert!(
+            out.contains("(This agent takes no instructions from Tomori.)"),
+            "{out}"
+        );
+        assert!(polls >= 3);
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| {
+            state.instructions = Some(AgentInstructions {
+                tomori: "Converse.".into(),
+                environment: String::new(),
+                space: String::new(),
+                error: Some("The agent refused them.".into()),
+            })
+        }));
+        let (out, _) = session(&mut conversation, &["instruct Be brief.", "i"]);
+        assert!(
+            out.contains("(Giving the agent this space's instructions.)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  Tomori's: Converse.\n  The environment's: none\n"),
+            "{out}"
+        );
+        assert!(out.contains("  The agent refused them."));
+        let (out, _) = session(&mut conversation, &["instruct"]);
+        assert!(
+            out.contains("(Removing this space's instructions.)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_menus_sections_are_listed_in_a_space() {
+        let mut lobby = lobby(ConnectionRole::Owner);
+        let (out, _) = session(&mut lobby, &["s", "i"]);
+        assert_eq!(out.matches("(Join a space first.)").count(), 2);
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["m"]);
+        let model = conversation.menu_model();
+        let people: Vec<String> =
+            crate::hand_menu::items(Some(crate::hand_menu::Section::PeopleAndSecurity), &model)
+                .into_iter()
+                .skip(1)
+                .map(|item| format!("  {}\n", item.text))
+                .collect();
+        assert!(!people.is_empty());
+        assert!(out.contains(&people.concat()), "{out}");
+        let (out, _) = session(&mut conversation, &["s"]);
+        let space: String = crate::hand_menu::text(Some(crate::hand_menu::Section::Space), &model)
+            .into_iter()
+            .map(|line| format!("  {line}\n"))
+            .collect();
+        assert!(out.contains(&space), "{out}");
+        let (out, _) = session(&mut conversation, &["i"]);
+        assert!(out.contains("  This agent takes no instructions from Tomori."));
+    }
+
+    #[test]
+    fn knocks_are_announced_and_admitted_or_declined_first_come() {
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["+"]);
+        assert!(out.contains("(No knock is waiting.)"));
+        knock(&mut conversation, "knock-1", "Grace");
+        let (out, _) = session(&mut conversation, &["+ -"]);
+        assert!(out.contains("Grace is knocking: + admits, - declines."));
+        let sent: Vec<_> = conversation.take_actions();
+        assert_eq!(
+            sent.iter()
+                .filter(|action| matches!(
+                    action,
+                    crate::conversation::Action::Send(
+                        tomori_protocol::ClientMessage::DecideKnock { .. }
+                    )
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_wrist_transcript_is_shown_and_moved_on_in_a_space() {
+        let mut lobby = lobby(ConnectionRole::Owner);
+        let (out, _) = session(&mut lobby, &["t"]);
+        assert!(out.contains("(Join a space first.)"));
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["t tu td tl tr ta tb"]);
+        // Each command shows the transcript again, in a frame of its own.
+        assert_eq!(out.matches("|↑ read back").count(), 7, "{out}");
+    }
+
+    #[test]
+    fn the_controllers_buttons_are_commands() {
+        let mut conversation = joined();
+        let muted = conversation.menu_model().muted;
+        session(&mut conversation, &["u d l r < > ^ v b y p k mute replay"]);
+        assert_ne!(conversation.menu_model().muted, muted, "mute");
+        let sent = conversation.take_actions();
+        assert!(
+            sent.contains(&crate::conversation::Action::SetAgentMuted(true)),
+            "{sent:?}"
+        );
+        // X starts recording, and x again sends it.
+        session(&mut conversation, &["x"]);
+        assert!(conversation.recording().is_some());
+        session(&mut conversation, &["x"]);
+        assert!(conversation.recording().is_none());
+        // A with nothing to choose says so; with something, it chooses it.
+        let (out, _) = session(&mut conversation, &["a"]);
+        assert!(out.contains("(A has nothing to choose here.)"), "{out}");
+        let mut servers = Conversation::new("Ada");
+        servers.set_servers(vec![crate::server_choice::Choice::new(
+            "Studio",
+            "10.0.0.1:8765",
+            crate::server_choice::Source::Discovered,
+        )]);
+        let (out, _) = session(&mut servers, &["a"]);
+        assert!(!out.contains("(A has nothing"), "{out}");
+        // Holding B to leave is a command of its own.
+        session(&mut conversation, &["leave"]);
+        assert!(conversation.joined_space().is_none());
+    }
 
     #[test]
     fn panels_are_framed_as_wide_as_their_widest_row() {
