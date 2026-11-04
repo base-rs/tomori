@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tomori_backend::{Event, Session};
-use tomori_protocol::{ClientMessage, ConnectionRole, ServerMessage, SpaceSummary};
+use tomori_protocol::{ClientMessage, ConnectionRole, Keepalive, ServerMessage, SpaceSummary};
 use tomori_security::Grant;
 use tomori_server::fake::FakeBackend;
 use tomori_server::kept::{KeptSpace, SPACES_FILE, SpaceStore};
@@ -161,39 +161,45 @@ fn spaces_survive_a_restart() {
 }
 
 #[test]
-fn a_space_s_changed_environment_is_kept_across_a_restart() {
+fn a_space_s_changed_environment_is_kept_when_it_changes_and_across_a_restart() {
     let state = State::new("environment");
     let backend = FakeBackend::new();
-    // Sky and a second environment, since this build offers only Sky.
-    let start = |backend: &FakeBackend| {
-        let store = Arc::new(SpaceStore::open(&state.0).expect("the spaces open"));
-        TestServer::with_server(backend.clone(), move |backends| {
-            Server::new(backends, Arc::new(TextTranscriber::default()))
-                .with_environments(
-                    ["sky", "minimal"]
-                        .into_iter()
-                        .map(|id| tomori_protocol::EnvironmentInfo {
-                            id: id.into(),
-                            label: id.into(),
-                        })
-                        .collect(),
-                )
-                .with_kept_spaces(store)
-        })
-    };
     let id = {
-        let server = start(&backend);
+        let store = Arc::new(SpaceStore::open(&state.0).expect("the spaces open"));
+        let kept = store.clone();
+        // The periodic sweep and leaving keep the spaces too, so no sweep runs here and Ada stays connected: only the change itself can keep the new environment.
+        let never = Duration::from_secs(3600);
+        let server = TestServer::with_server(backend.clone(), move |backends| {
+            Server::new(backends, Arc::new(TextTranscriber::default()))
+                .with_keepalive(Keepalive {
+                    interval: never,
+                    timeout: never,
+                })
+                .with_request_timeout(never)
+                .with_participant_retention(never)
+                .with_kept_spaces(store)
+        });
         let mut ada = server.connect("ada", "Ada");
-        let id = ada.create_space("Shrine").id;
+        let created = ada.create_space("Shrine");
+        assert_eq!(created.environment, "sky");
+        let id = created.id;
         ada.send(&ClientMessage::SetEnvironment {
             environment: "minimal".into(),
         });
         ada.space(|space| space.environment == "minimal");
+        let deadline = std::time::Instant::now() + tomori_server::test_support::TIMEOUT;
+        while kept.spaces()[0].environment != "minimal" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the change was not kept when it was made"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         id
     };
     assert_eq!(state.kept()[0].environment, "minimal");
 
-    let server = start(&backend);
+    let server = start(&backend, &state.0, None);
     let mut ada = server.connect("ada", "Ada");
     ada.send(&ClientMessage::ListSpaces);
     assert_eq!(listed(&ada, &id).environment, "minimal");

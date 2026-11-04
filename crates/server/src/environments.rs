@@ -8,12 +8,18 @@ use tomori_protocol::EnvironmentInfo;
 /// The moonlit sky, rendered by `crates/environment-sky`. The identifier is the one clients map to that renderer.
 pub const SKY: &str = "sky";
 
-/// The environments offered to clients in `Welcome`. Today that is only Sky.
+/// The plain floor grid, which clients also show outside any space. The identifier is the one clients map to that scenery.
+pub const MINIMAL: &str = "minimal";
+
+/// The environments offered to clients in `Welcome`: Sky, first, so that a space whose creator names none is bound to it, and the Minimal grid.
 pub fn offered() -> Vec<EnvironmentInfo> {
-    vec![EnvironmentInfo {
-        id: SKY.to_owned(),
-        label: "Sky".to_owned(),
-    }]
+    [(SKY, "Sky"), (MINIMAL, "Grid")]
+        .into_iter()
+        .map(|(id, label)| EnvironmentInfo {
+            id: id.to_owned(),
+            label: label.to_owned(),
+        })
+        .collect()
 }
 
 /// What the environment `id` tells the agent about what it presents and how to use it, its layer of a space's instructions; see `design/spaces.md`. Every environment, Sky included, contributes none until environments can.
@@ -52,13 +58,14 @@ mod tests {
     #[test]
     fn only_offered_environments_are_bound() {
         let offered = offered();
-        assert_eq!(offered.len(), 1);
+        assert_eq!(offered.len(), 2);
         assert_eq!(choose(&offered, Some(SKY)), Ok(SKY.to_owned()));
+        assert_eq!(choose(&offered, Some(MINIMAL)), Ok(MINIMAL.to_owned()));
+        // A space whose creator names none is bound to Sky.
         assert_eq!(choose(&offered, None), Ok(SKY.to_owned()));
         let refused = choose(&offered, Some("observe")).unwrap_err();
-        assert_eq!(refused, "Unknown environment; available: sky.");
-        // Minimal is the arrival grid, not an environment a space is bound to.
-        assert!(choose(&offered, Some("minimal")).is_err());
+        assert_eq!(refused, "Unknown environment; available: sky, minimal.");
+        assert!(choose(&offered, Some("Minimal")).is_err());
         assert_eq!(
             choose(&[], None),
             Err("The server offers no environments.".to_owned())

@@ -229,7 +229,7 @@ pub struct Hub {
     /// The directories a space may run in, sent to clients in `Welcome` so they can choose one without typing a path.
     roots: RwLock<Vec<WorkspaceRoot>>,
     /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
-    environments: RwLock<Vec<EnvironmentInfo>>,
+    environments: Vec<EnvironmentInfo>,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
@@ -1000,7 +1000,7 @@ impl Hub {
             jobs,
             slots,
             roots: RwLock::new(roots),
-            environments: RwLock::new(environments::offered()),
+            environments: environments::offered(),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
@@ -1021,23 +1021,6 @@ impl Hub {
             .roots
             .write()
             .expect("workspace roots are never left poisoned") = roots;
-    }
-
-    /// Offer `environments` in place of the ones this build has, as in [`crate::Server::with_environments`].
-    #[cfg(feature = "fake")]
-    pub(crate) fn set_environments(&self, environments: Vec<EnvironmentInfo>) {
-        *self
-            .environments
-            .write()
-            .expect("environments are never left poisoned") = environments;
-    }
-
-    /// The environments a space may be bound to.
-    fn environments(&self) -> Vec<EnvironmentInfo> {
-        self.environments
-            .read()
-            .expect("environments are never left poisoned")
-            .clone()
     }
 
     /// Pair devices with this setup; see `design/security.md`.
@@ -1761,7 +1744,7 @@ impl Hub {
             role,
             backends,
             roots,
-            environments: self.environments(),
+            environments: self.environments.clone(),
             utterance_limit: self
                 .transcriber
                 .utterance_limit()
@@ -1838,7 +1821,7 @@ impl Hub {
                     return;
                 }
                 let environment =
-                    match environments::choose(&self.environments(), environment.as_deref()) {
+                    match environments::choose(&self.environments, environment.as_deref()) {
                         Ok(environment) => environment,
                         Err(error) => {
                             state.error(participant, error);
@@ -2466,14 +2449,14 @@ impl Hub {
                     state.error(participant, error);
                     return;
                 }
-                let environment =
-                    match environments::choose(&self.environments(), Some(&environment)) {
-                        Ok(environment) => environment,
-                        Err(error) => {
-                            state.error(participant, error);
-                            return;
-                        }
-                    };
+                let environment = match environments::choose(&self.environments, Some(&environment))
+                {
+                    Ok(environment) => environment,
+                    Err(error) => {
+                        state.error(participant, error);
+                        return;
+                    }
+                };
                 let Some(space) = in_space(state) else {
                     return;
                 };

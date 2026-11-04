@@ -142,7 +142,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         _ => None,
     });
     let ids: Vec<&str> = offered.iter().map(|offered| offered.id.as_str()).collect();
-    assert_eq!(ids, ["sky"]);
+    assert_eq!(ids, ["sky", "minimal"]);
 
     // An environment the server doesn't offer is refused, naming those it does, and no space is created.
     ada.send(&ClientMessage::CreateSpace {
@@ -153,7 +153,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         environment: Some("observe".into()),
         instructions: None,
     });
-    assert_eq!(ada.error(), "Unknown environment; available: sky.");
+    assert_eq!(ada.error(), "Unknown environment; available: sky, minimal.");
     ada.send(&ClientMessage::ListSpaces);
     let spaces = ada.wait_for(|message| match message {
         ServerMessage::Spaces { spaces } => Some(spaces.clone()),
@@ -172,7 +172,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
     assert_eq!(listed.environment, "sky");
     assert_eq!(join(&mut bob, &space.id, 2).environment, "sky");
 
-    // A request from a client that predates environments binds the first offered.
+    // A request from a client that predates environments binds the first offered, Sky.
     bob.send(&ClientMessage::CreateSpace {
         title: "Older".into(),
         backend: "fake".into(),
