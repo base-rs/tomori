@@ -119,6 +119,14 @@ impl Builder {
         }
     }
 
+    /// Whether the open block's text ends with a line break.
+    fn ends_line(&self) -> bool {
+        self.current
+            .as_ref()
+            .and_then(|block| block.text.last())
+            .is_some_and(|(text, _)| text.ends_with('\n'))
+    }
+
     fn flush(&mut self) {
         if let Some(mut block) = self.current.take() {
             if let Some((last, _)) = block.text.last_mut() {
@@ -216,6 +224,8 @@ pub fn parse(source: &str) -> Vec<Block> {
                 let inline = builder.inline();
                 builder.push(&text, inline);
             }
+            // The parser reports a hard break's line ending as a soft break after it, which must not start the next line with a space.
+            EventKind::SoftBreak(_) if builder.ends_line() => {}
             EventKind::SoftBreak(_) => builder.push(" ", Inline::Plain),
             EventKind::HardBreak => builder.push("\n", Inline::Plain),
             EventKind::Code { value, .. } => {
@@ -232,8 +242,9 @@ pub fn parse(source: &str) -> Vec<Block> {
                 builder.open(Kind::Rule);
                 builder.flush();
             }
+            // The space after the marker is in the text that follows it.
             EventKind::TaskMarker(done) => {
-                builder.push(if done { "[x] " } else { "[ ] " }, Inline::Plain)
+                builder.push(if done { "[x]" } else { "[ ]" }, Inline::Plain)
             }
             EventKind::Html { value, .. } | EventKind::Math(value) => {
                 let value = value.resolve(source).unwrap_or_default().to_owned();
@@ -352,6 +363,24 @@ mod tests {
                 (item(Some("•")), String::new()),
                 (item(Some("•")), "after".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_hard_break_starts_the_next_line_without_a_space() {
+        let blocks = parse("first  \nsecond\\\nthird");
+        assert_eq!(blocks[0].plain(), "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn a_task_marker_is_followed_by_one_space() {
+        let item = Kind::Item {
+            depth: 1,
+            marker: Some("•".into()),
+        };
+        assert_eq!(
+            plain(&parse("- [x] done\n- [ ] todo\n")),
+            [(item.clone(), "[x] done".into()), (item, "[ ] todo".into())]
         );
     }
 
