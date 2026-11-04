@@ -211,4 +211,33 @@ mod tests {
         assert_eq!(listed, "No tokens are issued.\n");
         let _ = std::fs::remove_dir_all(state);
     }
+
+    #[test]
+    fn a_store_that_cannot_be_opened_or_written_is_said_so() {
+        // A file where the state directory should be.
+        let state =
+            std::env::temp_dir().join(format!("tomori-auth-unusable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let _ = std::fs::remove_file(&state);
+        std::fs::write(&state, "not a directory").unwrap();
+        for arguments in [
+            &["mint", "--owner", "--name", "Ada"][..],
+            &["list"][..],
+            &["revoke", "abc"][..],
+        ] {
+            let error = run_in(&state, arguments).unwrap_err();
+            assert!(
+                error.starts_with("Could not open the token store"),
+                "{error}"
+            );
+        }
+        std::fs::remove_file(&state).unwrap();
+        // A store whose writes are refused.
+        std::fs::create_dir_all(state.join("tokens.tmp")).unwrap();
+        let error = run_in(&state, &["mint", "--owner", "--name", "Ada"]).unwrap_err();
+        assert!(error.starts_with("Could not issue the token"), "{error}");
+        let error = run_in(&state, &["revoke", "abc"]).unwrap_err();
+        assert!(error.starts_with("Could not revoke the token"), "{error}");
+        std::fs::remove_dir_all(&state).unwrap();
+    }
 }
