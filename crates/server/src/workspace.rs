@@ -77,7 +77,12 @@ impl WorkspaceRoots {
 
     /// The default: the server's current working directory alone, so that where the operator starts the server is where agents may work, as with an agent's own terminal interface.
     pub fn current() -> Result<Self, String> {
-        let current = std::env::current_dir().map_err(|error| {
+        Self::implicit_in(std::env::current_dir())
+    }
+
+    /// [`current`](Self::current), with the current directory given as `current`.
+    fn implicit_in(current: std::io::Result<PathBuf>) -> Result<Self, String> {
+        let current = current.map_err(|error| {
             format!("could not determine the current directory: {error}; give --workspace-root")
         })?;
         Self::implicit(current)
@@ -192,17 +197,14 @@ impl WorkspaceRoots {
         let (sender, receiver) = async_channel::bounded(1);
         let roots = self.clone();
         let requested = directory.to_owned();
-        // If the thread cannot start, the closure and the place it holds are dropped.
+        // As the server's other threads, a thread the system cannot start is not survived.
         std::thread::Builder::new()
             .name("tomori-directory".to_owned())
             .spawn(move || {
                 let _place = place;
                 let _ = sender.try_send(roots.resolve_str(&requested));
             })
-            .map_err(|error| {
-                log::warn!("Refused directory {directory:?}: could not start a check: {error}.");
-                Unavailable
-            })?;
+            .expect("spawn a directory check");
         Ok(receiver)
     }
 }
@@ -292,24 +294,11 @@ impl SpaceSlots {
 
     /// Take a place, or `None` if the limit is reached.
     pub fn acquire(self: &Arc<Self>) -> Option<SpaceSlot> {
-        let limit = self.limit();
-        let mut running = self.running.load(Ordering::Acquire);
-        while running < limit {
-            match self.running.compare_exchange_weak(
-                running,
-                running + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Some(SpaceSlot {
-                        slots: self.clone(),
-                    });
-                }
-                Err(actual) => running = actual,
-            }
-        }
-        None
+        // The place is taken first, and given back as it drops if the limit was reached, so concurrent requests cannot pass the limit together.
+        let slot = SpaceSlot {
+            slots: self.clone(),
+        };
+        (self.running.fetch_add(1, Ordering::AcqRel) < self.limit()).then_some(slot)
     }
 
     #[cfg(test)]
@@ -576,5 +565,38 @@ mod tests {
         });
         assert_eq!(taken.iter().filter(|slot| slot.is_some()).count(), 3);
         assert_eq!(slots.running(), 3);
+    }
+
+    #[test]
+    fn a_current_directory_that_cannot_be_read_or_is_gone_is_no_root() {
+        let error = WorkspaceRoots::implicit_in(Err(std::io::Error::other("gone"))).unwrap_err();
+        assert!(error.starts_with("could not determine the current directory"));
+        assert!(WorkspaceRoots::implicit_in(Ok(PathBuf::from("/nonexistent/tomori"))).is_err());
+    }
+
+    #[test]
+    fn a_directory_whose_canonical_path_is_not_utf_8_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let scratch = Scratch::new("utf-8");
+        let named = scratch.0.join(std::ffi::OsStr::from_bytes(b"\xff"));
+        std::fs::create_dir(&named).unwrap();
+        std::os::unix::fs::symlink(&named, scratch.0.join("link")).unwrap();
+        let roots = WorkspaceRoots::new([&scratch.0]).unwrap();
+        let link = scratch.0.join("link");
+        assert_eq!(roots.resolve_str(text(&link)), Err(Unavailable));
+    }
+
+    #[test]
+    fn checks_beyond_the_limit_are_refused_and_a_dot_is_no_component() {
+        let scratch = Scratch::new("limit");
+        let roots = WorkspaceRoots::new([&scratch.0]).unwrap();
+        let busy = Arc::new(Resolving(AtomicUsize::new(MAX_RESOLVING)));
+        assert!(
+            roots
+                .resolve_in_background(text(&scratch.0), &busy)
+                .is_err()
+        );
+        let dotted = format!("{}/./", text(&scratch.0));
+        assert_eq!(normalize(Path::new(&dotted)), Some(scratch.0.clone()));
     }
 }
