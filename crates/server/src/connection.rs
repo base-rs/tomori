@@ -177,6 +177,8 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
                 futures_lite::future::yield_now().await;
             }
             self.take_ready_input(cancellation)?;
+            // Listening before draining, so that a frame queued after the drain wakes the wait below.
+            let listener = self.outbox.listen();
             let mut output = Vec::new();
             let open = self.drain(&mut output);
             if !output.is_empty() {
@@ -193,10 +195,6 @@ impl<B: ReadableBody> ReadableBody for ConnectionBody<B> {
                 // The client finished its upload, or the server ended the connection: end the response once drained.
                 self.finished = true;
                 return Ok(BodyFrame::End);
-            }
-            let listener = self.outbox.listen();
-            if self.outbox.is_ready() {
-                continue;
             }
             // When outgoing frames win, the pending read is dropped, losing no input; the next wait reads again from the same position.
             let received = match select(pin!(listener), pin!(self.request.read(cancellation))).await
@@ -348,7 +346,7 @@ mod tests {
             }
             match self.frames.pop_front() {
                 Some(frame) => frame,
-                None => std::future::pending().await,
+                None => unreachable!("the test reads no further than its script"),
             }
         }
     }
