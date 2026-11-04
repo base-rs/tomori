@@ -299,15 +299,72 @@ fn random_participant() -> String {
 #[cfg(not(target_os = "android"))]
 pub fn host_name() -> Option<String> {
     let output = std::process::Command::new("hostname").output().ok()?;
-    let host = String::from_utf8(output.stdout).ok()?;
-    // `studio.local` reads better as `studio`.
-    let host = host.trim().split('.').next()?.to_owned();
-    (!host.is_empty()).then_some(host)
+    host_from(&output.stdout)
+}
+
+/// The host name `hostname` printed.
+#[cfg(not(target_os = "android"))]
+fn host_from(printed: &[u8]) -> Option<String> {
+    // `studio.local` reads better as `studio`; `split` always gives at least one part.
+    let host = String::from_utf8_lossy(printed);
+    let host = host.trim().split('.').next().unwrap_or_default();
+    (!host.is_empty()).then(|| host.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn the_host_name_is_its_first_part() {
+        assert_eq!(host_from(b"studio.local\n").as_deref(), Some("studio"));
+        assert_eq!(host_from(b"\n"), None);
+        assert_eq!(host_from(b"caf\xc3\xa9").as_deref(), Some("caf\u{e9}"));
+    }
+
+    #[test]
+    fn a_long_name_is_cut_between_characters() {
+        let long = "\u{e9}".repeat(NAME_BYTES);
+        let cut = name(&long).unwrap();
+        assert!(cut.len() <= NAME_BYTES && cut.chars().all(|ch| ch == '\u{e9}'));
+    }
+
+    #[test]
+    fn what_cannot_be_stored_is_logged_and_the_rest_goes_on() {
+        crate::test_support::log_everything();
+        // A file where the directory should be.
+        let blocked = directory("blocked");
+        fs::write(&blocked, "a file").unwrap();
+        let store = Store::new(Some(blocked.clone()));
+        store.remember_server("Studio");
+        assert_eq!(store.server(), None);
+        fs::remove_file(&blocked).unwrap();
+        // A directory where the temporary file should be.
+        let busy = directory("busy");
+        fs::create_dir_all(busy.join(format!("{SERVER_FILE}.tmp"))).unwrap();
+        let store = Store::new(Some(busy.clone()));
+        store.remember_server("Studio");
+        assert_eq!(store.server(), None);
+        fs::remove_dir_all(&busy).unwrap();
+        // Remembering the same server again writes nothing.
+        let kept = directory("kept");
+        let store = Store::new(Some(kept.clone()));
+        store.remember_server("Studio");
+        store.remember_server("Studio");
+        assert_eq!(store.server().as_deref(), Some("Studio"));
+        fs::remove_dir_all(&kept).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_full_disk_leaves_the_stored_value_as_it_was() {
+        let full = directory("full");
+        fs::create_dir_all(&full).unwrap();
+        std::os::unix::fs::symlink("/dev/full", full.join(format!("{SERVER_FILE}.tmp"))).unwrap();
+        assert!(write(&full, SERVER_FILE, "Studio").is_err());
+        fs::remove_dir_all(&full).unwrap();
+    }
 
     fn directory(name: &str) -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
