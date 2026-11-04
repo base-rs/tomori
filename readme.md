@@ -311,7 +311,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-security`](crates/security/readme.md): tokens, pairing and certificate pinning.
 - [`tomori-backend`](crates/backend/readme.md) and [`tomori-backend-opencode`](crates/backend-opencode/readme.md): the agent backend interface, and its OpenCode implementation.
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
-- [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`.
+- [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
 
 `tomori-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
@@ -350,4 +350,4 @@ Please open an issue or pull request on [GitHub](https://github.com/ioquatix/tom
 
 Run `cargo bake agent:context:install` to install shared context and skills. Use `cargo bake agent:context:list` and `cargo bake agent:context:show` to discover relevant guides, follow `agents.md` if present, and apply skills under `.agents/skills/`. The installer preserves repository-owned `agents.md`; it does not create or regenerate that file.
 
-Tomori's published crates provide context of their own for projects that depend on them, in [crates/protocol/context/](crates/protocol/context/) and [crates/client/context/](crates/client/context/).
+Tomori's published crates provide context of their own for projects that depend on them, in [crates/protocol/context/](crates/protocol/context/), [crates/client/context/](crates/client/context/) and [crates/server/context/](crates/server/context/).

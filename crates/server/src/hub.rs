@@ -16,14 +16,13 @@ use event_listener::{Event as Notify, EventListener};
 use tomori_backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use tomori_discovery::{AttentionCounts, Counts};
 use tomori_protocol::{
-    Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, EnvironmentInfo, Frame,
-    FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting,
-    WorkspaceRoot,
+    Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, Frame, FrameKind, Gate,
+    Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting, WorkspaceRoot,
 };
 
 use crate::access::{self, Access, Grant};
 use crate::backends::Backends;
-use crate::environments;
+use crate::environments::Environments;
 use crate::limits;
 use crate::outbox::{Outbox, Outgoing};
 use crate::retention::{Delivery, Item, Retention};
@@ -229,7 +228,7 @@ pub struct Hub {
     /// The directories a space may run in, sent to clients in `Welcome` so they can choose one without typing a path.
     roots: RwLock<Vec<WorkspaceRoot>>,
     /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
-    environments: Vec<EnvironmentInfo>,
+    environments: RwLock<Environments>,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
@@ -1000,7 +999,7 @@ impl Hub {
             jobs,
             slots,
             roots: RwLock::new(roots),
-            environments: environments::offered(),
+            environments: RwLock::new(Environments::default()),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
@@ -1013,6 +1012,21 @@ impl Hub {
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             this: this.clone(),
         })
+    }
+
+    /// Offer `environments` for spaces, as in [`crate::Server::with_environments`].
+    pub(crate) fn set_environments(&self, environments: Environments) {
+        *self
+            .environments
+            .write()
+            .expect("environments are never left poisoned") = environments;
+    }
+
+    /// The environments offered for spaces.
+    fn environments(&self) -> std::sync::RwLockReadGuard<'_, Environments> {
+        self.environments
+            .read()
+            .expect("environments are never left poisoned")
     }
 
     /// Set the workspace roots a client can choose from, as in [`crate::Server::with_workspace_roots`].
@@ -1744,7 +1758,7 @@ impl Hub {
             role,
             backends,
             roots,
-            environments: self.environments.clone(),
+            environments: self.environments().info(),
             utterance_limit: self
                 .transcriber
                 .utterance_limit()
@@ -1820,14 +1834,13 @@ impl Hub {
                     );
                     return;
                 }
-                let environment =
-                    match environments::choose(&self.environments, environment.as_deref()) {
-                        Ok(environment) => environment,
-                        Err(error) => {
-                            state.error(participant, error);
-                            return;
-                        }
-                    };
+                let environment = match self.environments().choose(environment.as_deref()) {
+                    Ok(environment) => environment,
+                    Err(error) => {
+                        state.error(participant, error);
+                        return;
+                    }
+                };
                 // Refuse early when the limit is already reached. The supervisor checks the directory outside the lock and only then takes a place, so that a refused directory never holds one.
                 if self.slots.is_full() {
                     state.error(participant, self.slots.full_error());
@@ -2449,8 +2462,7 @@ impl Hub {
                     state.error(participant, error);
                     return;
                 }
-                let environment = match environments::choose(&self.environments, Some(&environment))
-                {
+                let environment = match self.environments().choose(Some(&environment)) {
                     Ok(environment) => environment,
                     Err(error) => {
                         state.error(participant, error);
@@ -2460,9 +2472,11 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
+                let instructions = self.environments().instructions(&environment).to_owned();
                 let record = state.space_mut(&space).expect("checked above");
                 match record.model.set_environment(environment) {
                     Ok(true) => {
+                        record.model.set_environment_instructions(&instructions);
                         log::info!(
                             "Space {space} is now in the {} environment.",
                             record.model.environment
@@ -2773,6 +2787,7 @@ impl Hub {
             request.instructions.trim().to_owned(),
             self.takes_instructions(&request.backend),
         );
+        model.set_environment_instructions(self.environments().instructions(&model.environment));
         log::info!(
             "Space {id} {:?} is bound to {} session {} in the {} environment.",
             model.title,
@@ -2867,6 +2882,9 @@ impl Hub {
                 }
                 let takes = self.takes_instructions(&kept.backend);
                 model.set_instructions(kept.instructions, takes);
+                model.set_environment_instructions(
+                    self.environments().instructions(&model.environment),
+                );
                 let (commands, receiver) = async_channel::unbounded();
                 match kept.closed {
                     Some(reason) => {

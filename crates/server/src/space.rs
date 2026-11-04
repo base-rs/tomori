@@ -79,6 +79,8 @@ pub struct SpaceModel {
     takes_instructions: bool,
     /// Why the agent may not have the instructions shown, until they are next given successfully.
     instructions_error: Option<String>,
+    /// The layer of the agent's instructions from the space's environment, empty when it contributes none.
+    environment_instructions: String,
     /// The worker each waiting queue entry's speaker pointed at, by entry key, as the space knew it when the entry
     /// was queued. Told to the agent with the entry. See `design/interaction.md`.
     pointing: BTreeMap<String, PointedWorker>,
@@ -333,6 +335,7 @@ impl SpaceModel {
             instructions: String::new(),
             takes_instructions: false,
             instructions_error: None,
+            environment_instructions: String::new(),
             pointing: BTreeMap::new(),
         };
         model.load_messages(snapshot.messages);
@@ -577,6 +580,11 @@ impl SpaceModel {
         self.takes_instructions = takes;
     }
 
+    /// The space's environment tells the agent `instructions`, its layer of the space's instructions, empty when it contributes none. Set whenever the space is bound to an environment, since a server is built with the environments it offers.
+    pub fn set_environment_instructions(&mut self, instructions: &str) {
+        instructions.clone_into(&mut self.environment_instructions);
+    }
+
     /// The space's own instructions, empty when it has none.
     pub fn space_instructions(&self) -> &str {
         &self.instructions
@@ -586,7 +594,7 @@ impl SpaceModel {
     pub fn instructions(&self) -> Option<tomori_protocol::AgentInstructions> {
         self.takes_instructions.then(|| {
             crate::instructions::layers(
-                &self.environment,
+                &self.environment_instructions,
                 &self.instructions,
                 self.instructions_error.clone(),
             )

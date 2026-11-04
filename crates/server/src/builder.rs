@@ -1,0 +1,350 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+use std::process::ExitCode;
+use std::time::Instant;
+
+use tomori_backend::Backend;
+
+use crate::command::{self, Arguments, ENGINE_STOP, Engines};
+use crate::environments::{Environment, Environments};
+use crate::{AnyBackend, Server};
+
+/// Makes the backend registered under a name, from the command line.
+type Constructor = Box<dyn Fn(&Arguments) -> Result<AnyBackend, String>>;
+
+/// Changes a server once the command line has configured it.
+type Hook = Box<dyn FnOnce(Server) -> Server>;
+
+/// Builds and runs a Tomori server from the `tomori-server` command line, with the backends and environments registered on it.
+///
+/// [`Server::builder`] starts with Tomori's own: the `fake` and `opencode` backends, as their Cargo features allow, and the Sky and Minimal grid environments. Another project builds its own server by registering more, or others in their place, without changing Tomori. Its executable then takes the same command line as `tomori-server`, including `auth`, serves the same way, with token authentication, TLS, Bonjour and speech, and offers what it registered: `--backend NAME` names a registered backend, and clients are offered every registered environment.
+///
+/// ```no_run
+/// use std::process::ExitCode;
+///
+/// use tomori_server::{Environment, Server};
+///
+/// fn main() -> ExitCode {
+///     Server::builder()
+///         .environment(
+///             Environment::new("observe", "Observe")
+///                 .with_instructions("The space shows the service's topology."),
+///         )
+///         .configure(|server| server.with_max_visitors(8))
+///         .main()
+/// }
+/// ```
+///
+/// Environments here are what the server knows of them today: an identifier and label offered to clients, and their layer of a space's instructions. Their server halves, data sources and tools, planned in [#75](https://github.com/ioquatix/tomori/issues/75), [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
+pub struct Builder {
+    /// Each backend's name and how to make it, in the order `--help` lists them.
+    backends: Vec<(String, Constructor)>,
+    environments: Environments,
+    hooks: Vec<Hook>,
+}
+
+impl Default for Builder {
+    /// Tomori's own backends and environments, as `tomori-server` offers them.
+    fn default() -> Self {
+        let builder = Self {
+            backends: Vec::new(),
+            environments: Environments::default(),
+            hooks: Vec::new(),
+        };
+        #[cfg(feature = "fake")]
+        let builder = builder.with_constructor(
+            "fake",
+            Box::new(|_| Ok(AnyBackend::new(crate::fake::FakeBackend::new()))),
+        );
+        builder.with_constructor("opencode", Box::new(opencode))
+    }
+}
+
+/// The OpenCode backend, reaching `opencode serve` where the command line says.
+#[cfg(feature = "opencode")]
+fn opencode(arguments: &Arguments) -> Result<AnyBackend, String> {
+    Ok(AnyBackend::new(tomori_backend_opencode::OpenCode::new(
+        tomori_backend_opencode::Config {
+            url: arguments.opencode_url.clone(),
+        },
+    )))
+}
+
+/// Named, so that `--backend opencode` says what is missing rather than that it is unknown.
+#[cfg(not(feature = "opencode"))]
+fn opencode(_arguments: &Arguments) -> Result<AnyBackend, String> {
+    Err("the opencode backend needs a server built with the opencode feature".to_owned())
+}
+
+impl Server {
+    /// A builder for a server with Tomori's own backends and environments, to register more on and run; see [`Builder`].
+    pub fn builder() -> Builder {
+        Builder::default()
+    }
+}
+
+impl Builder {
+    /// Offer the backend `name`, made by `create` when the command line names it with `--backend`, in place of one already registered under that name. `create` reads any configuration of its own, such as environment variables, and fails with a message that the server reports as it stops. The backend's [`Backend::name`] must be `name`, which clients name it by.
+    ///
+    /// ```
+    /// use tomori_server::Server;
+    /// use tomori_server::fake::FakeBackend;
+    ///
+    /// // `tomori-server --backend fake` offers the scripted backend, which tests use.
+    /// let builder = Server::builder().backend("fake", || Ok(FakeBackend::new()));
+    /// ```
+    pub fn backend<B: Backend + 'static>(
+        self,
+        name: impl Into<String>,
+        create: impl Fn() -> Result<B, String> + 'static,
+    ) -> Self {
+        self.with_constructor(name, Box::new(move |_| create().map(AnyBackend::new)))
+    }
+
+    fn with_constructor(mut self, name: impl Into<String>, constructor: Constructor) -> Self {
+        let name = name.into();
+        match self
+            .backends
+            .iter_mut()
+            .find(|(registered, _)| *registered == name)
+        {
+            Some((_, registered)) => *registered = constructor,
+            None => self.backends.push((name, constructor)),
+        }
+        self
+    }
+
+    /// Offer `environment` for spaces, in place of one with the same identifier, or else after those already offered. The first offered, Sky unless replaced, is the one a space whose creator names none is bound to. See [`Environment`].
+    pub fn environment(mut self, environment: Environment) -> Self {
+        self.environments = self.environments.with(environment);
+        self
+    }
+
+    /// Change the server once the command line has configured it, and before it serves, with `hook`, such as to set a limit with one of [`Server`]'s `with_` methods. Hooks run in the order they were given. Serving replaces the server's [`Server::with_counts`] callback with the one that advertises them.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use tomori_server::Server;
+    ///
+    /// let builder = Server::builder()
+    ///     .configure(|server| server.with_participant_retention(Duration::from_secs(60 * 60)));
+    /// ```
+    pub fn configure(mut self, hook: impl FnOnce(Server) -> Server + 'static) -> Self {
+        self.hooks.push(Box::new(hook));
+        self
+    }
+
+    /// Run the command line `command`, the arguments after the program's name, as `tomori-server` does: serve until SIGINT or SIGTERM, or manage tokens with `auth`. Problems are reported on standard error, and the exit code says whether it succeeded. Once the server has drained, its speech engines are stopped, and if they do not stop in time, the process exits at once, as `design/server.md` describes.
+    pub fn run(self, command: impl IntoIterator<Item = String>) -> ExitCode {
+        let mut engines = Engines::default();
+        let code = command::run(
+            self,
+            command.into_iter(),
+            command::default_state_directory(),
+            &mut engines,
+        );
+        let stopped = engines.stop(Instant::now() + ENGINE_STOP);
+        #[cfg(unix)]
+        let exit = command::exit_now;
+        // Elsewhere, the server waits for the engines.
+        #[cfg(not(unix))]
+        let exit = |_| ();
+        command::finish(code, stopped, exit)
+    }
+
+    /// Run the process's command line, as [`run`](Self::run) does, logging to standard error at `info` and above unless `RUST_LOG` says otherwise, unless the program has already set up logging. This is all `tomori-server`'s `main` does.
+    pub fn main(self) -> ExitCode {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init();
+        self.run(std::env::args().skip(1))
+    }
+
+    /// The command line's usage, naming the registered backends.
+    pub(crate) fn usage(&self) -> String {
+        let names: Vec<&str> = self
+            .backends
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        command::usage(&names.join(", "))
+    }
+
+    /// The backend registered as `name`, made as `arguments` say.
+    pub(crate) fn backend_named(
+        &self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<AnyBackend, String> {
+        let (_, constructor) = self
+            .backends
+            .iter()
+            .find(|(registered, _)| registered == name)
+            .ok_or_else(|| format!("unknown backend {name:?}"))?;
+        let backend = constructor(arguments)?;
+        if backend.name() != name {
+            return Err(format!(
+                "the backend registered as {name:?} is named {:?}",
+                backend.name()
+            ));
+        }
+        Ok(backend)
+    }
+
+    /// The environments to offer and the hooks to run, once the backends are made.
+    pub(crate) fn into_parts(self) -> (Vec<Environment>, Vec<Hook>) {
+        (self.environments.into_vec(), self.hooks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::fake::FakeBackend;
+
+    /// The command line `list` parsed for `builder`.
+    fn arguments(builder: &Builder, list: &[&str]) -> Arguments {
+        command::parse(
+            list.iter().map(|argument| argument.to_string()),
+            &builder.usage(),
+        )
+        .unwrap()
+    }
+
+    /// An empty directory of its own for the test named `name`.
+    fn directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "tomori-server-builder-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn registered_backends_are_offered_by_name_after_tomoris() {
+        let builder = Server::builder()
+            .backend("scripted", || Ok(FakeBackend::new()))
+            .backend("broken", || {
+                Err::<FakeBackend, _>("No agent here.".to_owned())
+            })
+            // In place of Tomori's own, keeping its place.
+            .backend("fake", || Ok(FakeBackend::new()));
+        assert!(
+            builder
+                .usage()
+                .contains("Available: fake, opencode, scripted, broken.")
+        );
+        let parsed = arguments(&builder, &[]);
+        assert_eq!(
+            builder.backend_named("fake", &parsed).unwrap().name(),
+            "fake"
+        );
+        assert_eq!(
+            builder.backend_named("broken", &parsed).err().as_deref(),
+            Some("No agent here.")
+        );
+        // A backend must be registered under its own name, which clients name it by.
+        assert_eq!(
+            builder.backend_named("scripted", &parsed).err().as_deref(),
+            Some("the backend registered as \"scripted\" is named \"fake\"")
+        );
+        assert_eq!(
+            builder.backend_named("claude", &parsed).err().as_deref(),
+            Some("unknown backend \"claude\"")
+        );
+        // Tomori's own build lists its own.
+        assert!(Server::builder().usage().contains(
+            "--backend NAME       Offer a backend; repeat for several. Available: fake, opencode.\n"
+        ));
+    }
+
+    #[test]
+    fn registered_environments_are_offered_after_tomoris_and_replace_those_they_name() {
+        let observe =
+            Environment::new("observe", "Observe").with_instructions("Mind the topology.");
+        let night = Environment::new("sky", "Night");
+        let (environments, _) = Server::builder()
+            .environment(observe.clone())
+            .environment(night.clone())
+            .into_parts();
+        assert_eq!(
+            environments,
+            [night, Environment::new("minimal", "Grid"), observe]
+        );
+    }
+
+    #[test]
+    fn hooks_change_the_configured_server_in_order() {
+        let directory = directory("hooks");
+        let root = directory.to_str().unwrap();
+        let ran = Rc::new(RefCell::new(Vec::new()));
+        let builder = Server::builder()
+            .configure({
+                let ran = ran.clone();
+                move |server| {
+                    ran.borrow_mut().push("first");
+                    server.with_max_visitors(1)
+                }
+            })
+            .configure({
+                let ran = ran.clone();
+                move |server| {
+                    ran.borrow_mut().push("second");
+                    server
+                }
+            });
+        let parsed = arguments(
+            &builder,
+            &[
+                "--auth",
+                "open",
+                "--state-directory",
+                root,
+                "--workspace-root",
+                root,
+            ],
+        );
+        let mut engines = Engines::default();
+        assert!(command::configure(builder, &parsed, None, &mut engines).is_ok());
+        assert!(engines.stop(Instant::now()));
+        assert_eq!(*ran.borrow(), ["first", "second"]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_command_line_that_cannot_serve_ends_with_a_failure() {
+        assert_eq!(
+            Server::builder().run(["--help".to_owned()]),
+            ExitCode::FAILURE
+        );
+        assert_eq!(
+            Server::builder().run(["--backend".to_owned(), "claude".to_owned()]),
+            ExitCode::FAILURE
+        );
+    }
+
+    #[test]
+    fn engines_that_do_not_stop_end_the_process_at_once_with_its_status() {
+        let exited = RefCell::new(Vec::new());
+        let exit = |code| exited.borrow_mut().push(code);
+        assert_eq!(
+            command::finish(ExitCode::SUCCESS, true, exit),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            command::finish(ExitCode::FAILURE, true, exit),
+            ExitCode::FAILURE
+        );
+        assert!(exited.borrow().is_empty());
+        command::finish(ExitCode::SUCCESS, false, exit);
+        command::finish(ExitCode::FAILURE, false, exit);
+        assert_eq!(*exited.borrow(), [0, 1]);
+    }
+}

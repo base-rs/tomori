@@ -14,7 +14,7 @@ tomori-server --backend opencode
 
 Speech recognition and synthesis also need their models, which `scripts/fetch-asr-model.sh` and `scripts/fetch-tts-model.sh` fetch into `.tools/` under the directory they run in, and `--speech-root` names that directory; without it, the server runs without speech. To build without the speech libraries at all, install with `--no-default-features --features opencode`. `tomori-server --help` lists its options, and `tomori-server auth mint --owner --name NAME` makes a token for a headset or desktop client. Spaces run only in or beneath each `--workspace-root`, or, without one, in or beneath the directory the server starts in. The server and its options are described in Tomori's [readme](https://github.com/ioquatix/tomori#join-a-space-on-a-tomori-server) and [`design/server.md`](https://github.com/ioquatix/tomori/blob/main/design/server.md).
 
-The library is the server itself, which the executable configures and runs. Its interface for registering backends, environments, data sources and tools is planned in [#73](https://github.com/ioquatix/tomori/issues/73), and is not stable yet.
+The library is the server itself, and the executable is the default build of its `Builder`. Another project builds a server of its own by registering more backends and environments on `Server::builder()`, which then takes the same command line and serves the same way; see the [Building a Tomori Server](context/getting-started.md) guide and the [example server](https://github.com/ioquatix/tomori/tree/main/examples/server). Data sources, tools and environments' server halves will be registered there once Tomori has them ([#73](https://github.com/ioquatix/tomori/issues/73)). The interface is not stable yet.
 
 ### Features
 
