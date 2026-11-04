@@ -52,7 +52,8 @@ pub fn options(permission: &Permission) -> Vec<tomori_protocol::ApprovalOption> 
     permission
         .options
         .iter()
-        .filter(|option| !option.grants.is_empty())
+        // An option a reply could not name cannot be chosen.
+        .filter(|option| !option.grants.is_empty() && option.id.len() <= limits::IDENTIFIER_BYTES)
         .map(|option| tomori_protocol::ApprovalOption {
             id: option.id.clone(),
             label: grant_label(&option.grants),
