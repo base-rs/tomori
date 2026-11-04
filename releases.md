@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `tomori-server` no longer presents an approval or question whose identifier is longer than 1 KiB, which no client could name in its reply and which could push a space's snapshot over its budget. The space says to answer it in the agent's own interface instead, and later requests are presented as usual. An approval's "don't ask again" option with such an identifier is not offered (#50).
+
 - A sub-agent deleted while Tomori was reconnecting to OpenCode now leaves its space once the space is read again, rather than staying until the space is attached again. It is removed only when OpenCode confirms that it no longer exists.
 
 - An OpenCode space no longer repeats a reply that finished while it was opening. Its events wait for its initial state and follow it, except those the state already shows. Text from the OpenCode event stream with a character split between two reads, such as Japanese or an emoji, is no longer garbled. An event larger than 16 MiB now makes the backend reconnect and read each space again, rather than growing without limit.

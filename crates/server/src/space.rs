@@ -293,16 +293,9 @@ impl SpaceModel {
             user_messages: HashSet::new(),
             queue: InputQueue::default(),
             in_flight: None,
-            approvals: snapshot.permissions.into_iter().collect(),
+            approvals: VecDeque::new(),
             deciding: Vec::new(),
-            questions: snapshot
-                .questions
-                .into_iter()
-                .map(|question| PendingQuestion {
-                    question,
-                    answers: Vec::new(),
-                })
-                .collect(),
+            questions: VecDeque::new(),
             submitting: Vec::new(),
             workers,
             workers_authoritative: true,
@@ -321,6 +314,12 @@ impl SpaceModel {
             pointing: BTreeMap::new(),
         };
         model.load_messages(snapshot.messages);
+        for permission in snapshot.permissions {
+            model.apply(Event::PermissionRequested(permission));
+        }
+        for question in snapshot.questions {
+            model.apply(Event::QuestionAsked(question));
+        }
         model
     }
 
@@ -473,6 +472,17 @@ impl SpaceModel {
     pub fn attend(&mut self) {
         self.unattended = None;
         self.unheard = false;
+    }
+
+    /// The agent made a request, `what`, whose identifier is longer than any a client may name in a reply. Nobody
+    /// could answer it here, and presenting it could exceed the snapshot budget, so it is not presented; the space says
+    /// so instead. See `design/server.md`.
+    fn refuse_request(&mut self, what: &str) {
+        self.error = Some(format!(
+            "The agent asked {what} with an identifier too long for Tomori to answer; answer it in the agent's own \
+             interface."
+        ));
+        self.unattended_problem();
     }
 
     /// Something failed while nobody was in the space.
@@ -733,6 +743,11 @@ impl SpaceModel {
                     tool.state = if error.is_some() { "failed" } else { "done" };
                 }
             }
+            Event::PermissionRequested(permission)
+                if permission.id.len() > limits::IDENTIFIER_BYTES =>
+            {
+                self.refuse_request("for an approval");
+            }
             Event::PermissionRequested(permission) => {
                 // Parallel tool calls produce several requests; each waits its turn.
                 let known = self
@@ -747,6 +762,9 @@ impl SpaceModel {
             Event::PermissionResolved { id } => {
                 self.approvals.retain(|pending| pending.id != id);
                 self.deciding.retain(|pending| pending.id != id);
+            }
+            Event::QuestionAsked(question) if question.id.len() > limits::IDENTIFIER_BYTES => {
+                self.refuse_request("a question");
             }
             Event::QuestionAsked(question) => {
                 let known = self
@@ -1669,6 +1687,47 @@ mod tests {
         space.apply(Event::PermissionResolved { id: "p2".into() });
         space.apply(Event::QuestionResolved { id: "q2".into() });
         assert_eq!(space.activity(), Activity::Idle);
+    }
+
+    #[test]
+    fn an_initial_snapshot_presents_no_request_a_reply_could_not_name() {
+        let question = |id: &str| tomori_backend::Question {
+            id: id.into(),
+            title: id.into(),
+            fields: Vec::new(),
+        };
+        let longest = "i".repeat(limits::IDENTIFIER_BYTES);
+        let oversized = "i".repeat(limits::IDENTIFIER_BYTES + 1);
+        let space = SpaceModel::new(
+            "s1".into(),
+            "Title".into(),
+            "fake".into(),
+            "/tmp".into(),
+            "sky".into(),
+            "fake-1".into(),
+            Snapshot {
+                busy: Some(false),
+                permissions: vec![permission(&oversized), permission(&longest)],
+                questions: vec![question(&oversized)],
+                ..Snapshot::default()
+            },
+        );
+        let state = space.state(Vec::new());
+        // The longest identifier a reply may name is still presented.
+        assert_eq!(state.approval.unwrap().id, longest);
+        assert!(state.question.is_none());
+        assert_eq!(
+            state.error.as_deref(),
+            Some(
+                "The agent asked a question with an identifier too long for Tomori to answer; answer it in the \
+                 agent's own interface."
+            )
+        );
+        // Nobody was in the space to see it.
+        assert_eq!(space.attention(), Some(Attention::Input));
+        let mut space = space;
+        space.apply(Event::PermissionResolved { id: longest });
+        assert_eq!(space.attention(), Some(Attention::Problem));
     }
 
     #[test]
