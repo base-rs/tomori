@@ -1807,6 +1807,124 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_JAPANESE_PREVIEW` to a PNG path to save what this renders: a result card and a worker's sign with Japanese titles, close up, and the sign from where it stands.
+    #[test]
+    fn japanese_signs_and_cards_draw_their_titles_whole() {
+        const SIZE: u32 = 512;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("japanese test eye"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(
+                &device,
+                &queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                SIZE,
+                SIZE,
+            );
+            let mut swarm = Swarm::default();
+            swarm.agents.clear();
+            renderer.update(&queue, &swarm, None, false);
+            let capture = |renderer: &Renderer, matrix: Mat4| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &[],
+                );
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("japanese test readback"),
+                    size: u64::from(SIZE * SIZE * 4),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(SIZE * 4),
+                            rows_per_image: Some(SIZE),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                image::RgbaImage::from_raw(SIZE, SIZE, data).unwrap()
+            };
+            let eye = glam::Vec3::new(0.0, 1.6, 0.0);
+            let look = |target: glam::Vec3, fov: f32| {
+                Mat4::perspective_rh(fov, 1.0, 0.05, 50.0)
+                    * Mat4::look_at_rh(eye, target, glam::Vec3::Y)
+            };
+            let workspace = crate::delegation::Workspace {
+                nodes: vec![crate::delegation::Node {
+                    id: "worker".into(),
+                    parent_id: Some("root".into()),
+                    title:
+                        "東京の天気を調べて、週末の予定を立てる。Tomoriは日本語も表示できます 🎉"
+                            .into(),
+                    state: crate::delegation::State::Completed,
+                }],
+                presentations: vec![crate::delegation::Presentation {
+                    id: "card".into(),
+                    title: "検索結果：東京の天気と週末の予定について、詳しくまとめました".into(),
+                    source_id: "ワーカー".into(),
+                    source_message_id: "message".into(),
+                    text: "Sunny on Saturday, rain on Sunday.".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut scene = crate::delegation::Scene::new();
+            for _ in 0..30 {
+                scene.update(Some("root"), &workspace, 0.05);
+            }
+            renderer.update_workspace(&device, &queue, &[], scene.stations(), &workspace);
+            let station = glam::Vec3::from_array(scene.stations()[0].position);
+            let card = look(glam::Vec3::new(-3.4, 2.45, -3.35), 0.5);
+            let sign = look(station + glam::Vec3::new(0.0, 0.32, 0.0), 0.32);
+            let far = look(station + glam::Vec3::new(0.0, 0.32, 0.0), 1.0);
+            let tiles = [
+                capture(&renderer, card),
+                capture(&renderer, sign),
+                capture(&renderer, far),
+            ];
+            // Text that lights pixels in each: the card's and the sign's titles and the sign seen from afar.
+            for (index, tile) in tiles.iter().enumerate() {
+                let lit = tile.pixels().filter(|pixel| pixel[1] > 150).count();
+                assert!(lit > 40, "{index}: {lit}");
+            }
+            let mut sheet = image::RgbaImage::new(SIZE * 3, SIZE);
+            for (index, tile) in tiles.iter().enumerate() {
+                image::imageops::replace(&mut sheet, tile, i64::from(SIZE) * index as i64, 0);
+            }
+            crate::test_support::preview("TOMORI_JAPANESE_PREVIEW", &sheet);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// Set `TOMORI_ARRIVAL_PREVIEW` to a PNG path to save what this renders.
     #[test]
     fn arrival_renders_objects_ray_and_world_labels() {

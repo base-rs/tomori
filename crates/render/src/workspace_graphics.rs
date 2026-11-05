@@ -57,10 +57,13 @@ struct Panel {
 #[derive(Default)]
 struct PageCache {
     panels: Vec<Panel>,
-    meshes: Vec<(Panel, Vec<Vertex>)>,
+    /// Each panel's mesh, with whether it has every glyph, rather than lacking some that waited for a later frame's budget.
+    meshes: Vec<(Panel, Vec<Vertex>, bool)>,
     vertices: Vec<Vertex>,
     ranges: Vec<PanelRange>,
     builds: usize,
+    /// Whether every mesh has every glyph.
+    complete: bool,
 }
 
 struct PanelRange {
@@ -283,7 +286,7 @@ impl Panel {
 
 impl PageCache {
     fn update(&mut self, panels: Vec<Panel>) -> bool {
-        if self.panels == panels {
+        if self.complete && self.panels == panels {
             return false;
         }
         // Match by source before comparing the bounded text/geometry key. This
@@ -308,20 +311,22 @@ impl PageCache {
             key.opacity = 1.0;
             let entry = if let Some(entry) = old
                 .remove(&mesh_id(&key))
-                .filter(|(cached, _)| *cached == key)
+                .filter(|(cached, _, complete)| *complete && *cached == key)
             {
                 entry
             } else {
+                let waited = tomori_text::atlas::waited();
                 let mut vertices = Vec::new();
                 panel_mesh(&key, &mut vertices);
                 self.builds += 1;
-                (key, vertices)
+                (key, vertices, tomori_text::atlas::waited() == waited)
             };
             self.meshes.push(entry);
         }
+        self.complete = self.meshes.iter().all(|(_, _, complete)| *complete);
         self.vertices.clear();
         self.ranges.clear();
-        for (panel, (_, mesh)) in panels.iter().zip(&self.meshes) {
+        for (panel, (_, mesh, _)) in panels.iter().zip(&self.meshes) {
             let start = self.vertices.len() as u32;
             assert!(
                 self.vertices.len() + mesh.len() <= MAX_VERTICES,
@@ -675,7 +680,7 @@ fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
     };
     let right = [normal[2], 0.0, -normal[0]];
     let pixel = 0.0038;
-    let half_width = (28 * 9) as f32 * pixel * 0.5;
+    let half_width = (SIGN_COLUMNS * 9) as f32 * pixel * 0.5;
     Panel {
         origin: [
             sx + normal[0] * 0.10 - right[0] * half_width,
@@ -683,7 +688,7 @@ fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
             sz + normal[2] * 0.10 - right[2] * half_width,
         ],
         pixel,
-        columns: 28,
+        columns: SIGN_COLUMNS,
         lines: label_lines(&station.title, state_text),
         accent,
         opacity: station.opacity,
@@ -697,16 +702,20 @@ fn station_panel(station: &Station, position: [f32; 3], state: State) -> Panel {
     }
 }
 
+/// The cells across a worker's sign.
+const SIGN_COLUMNS: usize = 28;
+/// The most rows of a sign's title: room for 160 Latin characters, the most a title has. A longer title in cells, such as one in Japanese, two cells a character, ends with "…".
+const SIGN_TITLE_ROWS: usize = 6;
+
+/// A sign's rows: its title on one line, wrapped by the one rule for every panel, counted in cells as drawn, then its status.
+/// The style rows are laid out in, whose colour the panel gives instead.
+const ROW_STYLE: crate::ui_text::Style = crate::ui_text::Style::plain([1.0; 4]);
+
 fn label_lines(title: &str, status: &str) -> Vec<String> {
-    let mut lines = vec![String::new()];
-    for ch in title.chars().take(160) {
-        if lines.last().unwrap().chars().count() == 28 {
-            lines.push(String::new());
-        }
-        lines
-            .last_mut()
-            .unwrap()
-            .push(if ch.is_control() { ' ' } else { ch });
+    let title: String = title.chars().take(160).collect();
+    let mut lines = crate::ui_text::lines(&clip(&title, usize::MAX), SIGN_COLUMNS, SIGN_TITLE_ROWS);
+    if lines.is_empty() {
+        lines.push(String::new());
     }
     lines.push(status.into());
     lines
@@ -998,10 +1007,14 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
         } else {
             WHITE
         });
-        let cells: Vec<(char, ())> = crate::ui_text::drawn(line)
-            .take(panel.columns)
-            .map(|ch| (ch, ()))
-            .collect();
+        // Cut by the cells it takes as drawn, with "…", never leaving half a wide character.
+        let cells: Vec<(char, ())> = crate::ui_text::cut(
+            &[crate::ui_text::Span::new(line.as_str(), ROW_STYLE)],
+            panel.columns,
+        )
+        .into_iter()
+        .map(|(ch, _)| (ch, ()))
+        .collect();
         let top = (row * 11) as f32;
         for (glyph, ()) in crate::ui_text::quads(&cells, 0.0, top, 11.0, |()| false) {
             textured(
@@ -1108,6 +1121,124 @@ mod tests {
         )
     }
 
+    /// The glyphs `panel`'s mesh draws, as its quads that sample a glyph rather than the solid block.
+    fn glyph_quads(panel: &Panel) -> usize {
+        let mut mesh = Vec::new();
+        panel_mesh(panel, &mut mesh);
+        mesh.iter().filter(|vertex| vertex.uv != SOLID).count() / 6
+    }
+
+    /// The glyphs `lines` should draw on a panel `columns` wide: every cell but spaces and the second halves of wide characters, once each line is cut to fit.
+    fn glyphs_in(lines: &[String], columns: usize) -> usize {
+        lines
+            .iter()
+            .take(ROWS)
+            .map(|line| {
+                crate::ui_text::cut(
+                    &[crate::ui_text::Span::new(line.as_str(), ROW_STYLE)],
+                    columns,
+                )
+                .iter()
+                .filter(|(ch, _)| *ch != ' ' && *ch != crate::ui_text::WIDE)
+                .count()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn signs_and_cards_cut_japanese_and_mixed_titles_by_the_cells_they_take() {
+        use crate::ui_text::width;
+        let titles = [
+            "日本語のタイトルです。".repeat(4),
+            "Tomoriは日本語 🎉 mixed text ".repeat(6),
+            "🎤".repeat(160),
+            "日本語".repeat(60),
+            format!("{}日本", "x".repeat(27)),
+            "完了".into(),
+        ];
+        for title in &titles {
+            // A sign: rows of at most its width in cells, never more than its most rows, and a title that does not fit them ends with "…".
+            let lines = label_lines(title, "COMPLETED");
+            let (status, rows) = lines.split_last().unwrap();
+            assert_eq!(status, "COMPLETED");
+            assert!(rows.len() <= SIGN_TITLE_ROWS, "{lines:?}");
+            assert!(
+                rows.iter().all(|row| width(row) <= SIGN_COLUMNS),
+                "{lines:?}"
+            );
+            let kept: String = rows.concat().chars().filter(|ch| *ch != ' ').collect();
+            let whole: String = crate::ui_text::clip(title, usize::MAX)
+                .chars()
+                .filter(|ch| *ch != ' ')
+                .collect();
+            assert!(
+                kept == whole || rows.last().unwrap().ends_with('…'),
+                "{title}: {lines:?}"
+            );
+            // Its mesh draws every glyph of every row: none is lost past the sign's edge.
+            let station = Station {
+                id: "a".into(),
+                title: title.clone(),
+                state: State::Completed,
+                position: [0.0, 1.25, -2.8],
+                opacity: 1.0,
+            };
+            let sign = station_panel(&station, station.position, State::Completed);
+            assert_eq!(
+                glyph_quads(&sign),
+                glyphs_in(&sign.lines, SIGN_COLUMNS),
+                "{title}"
+            );
+            assert_eq!(
+                glyphs_in(&sign.lines, SIGN_COLUMNS),
+                sign.lines
+                    .iter()
+                    .map(|line| crate::ui_text::drawn(line)
+                        .filter(|ch| *ch != ' ' && *ch != crate::ui_text::WIDE)
+                        .count())
+                    .sum::<usize>(),
+                "{title}"
+            );
+            // A card: its title and source fit its width in cells, ending with "…" where cut, and it draws every glyph of them.
+            let mut result = card("a");
+            result.title = title.clone();
+            result.source_id = format!("ワーカー🤖{title}");
+            let workspace = Workspace {
+                presentations: vec![result],
+                ..Default::default()
+            };
+            let (panels, _) = test_layout(&workspace, &[], 0, 0);
+            let lines = &panels[0].lines;
+            for line in &lines[..2] {
+                assert!(width(line) <= COLUMNS, "{line}");
+            }
+            assert!(
+                width(title) <= COLUMNS || lines[0].ends_with('…'),
+                "{lines:?}"
+            );
+            assert_eq!(
+                glyph_quads(&panels[0]),
+                glyphs_in(lines, COLUMNS),
+                "{title}"
+            );
+        }
+        // The Japanese title fits its sign whole, fourteen characters a row.
+        let lines = label_lines(&titles[0], "COMPLETED");
+        assert_eq!(lines[..lines.len() - 1].concat(), titles[0]);
+        assert!(lines.iter().all(|line| !line.contains('…')));
+        // The longest Japanese title is cut at the sign's last row, with "…".
+        let lines = label_lines(&titles[3], "COMPLETED");
+        assert_eq!(lines.len(), SIGN_TITLE_ROWS + 1);
+        assert!(lines[SIGN_TITLE_ROWS - 1].ends_with('…'), "{lines:?}");
+        // A wide character that would cross the edge of a row goes to the next, whole.
+        assert_eq!(
+            label_lines(&titles[4], "IDLE"),
+            ["x".repeat(27), "日本".into(), "IDLE".into()]
+        );
+        // A sign with no title still has its row.
+        assert_eq!(label_lines("", "IDLE"), ["", "IDLE"]);
+    }
+
     #[test]
     fn sorted_pages_have_sources_and_clamp_requested_page() {
         let workspace = Workspace {
@@ -1193,7 +1324,7 @@ mod tests {
                     cache
                         .meshes
                         .iter()
-                        .map(|(_, mesh)| mesh.len())
+                        .map(|(_, mesh, _)| mesh.len())
                         .sum::<usize>()
                 );
                 assert_eq!(
@@ -2208,10 +2339,11 @@ mod tests {
                                 );
                                 let glyphs: Vec<_> = (0..512 * 512)
                                     .map(|p| p * 4)
+                                    // The title's colour at half coverage or more: at four metres its strokes are under half a pixel wide, and antialiased rather than aliased, so few pixels are wholly covered.
                                     .filter(|&i| {
-                                        sign_image[i] > 50
-                                            && sign_image[i + 1] > 180
-                                            && sign_image[i + 2] > 120
+                                        sign_image[i] > 30
+                                            && sign_image[i + 1] > 120
+                                            && sign_image[i + 2] > 80
                                             && rear_image[i + 1] < 100
                                     })
                                     .collect();
@@ -2429,7 +2561,7 @@ mod tests {
                         .cache
                         .meshes
                         .iter()
-                        .map(|(_, mesh)| mesh.len())
+                        .map(|(_, mesh, _)| mesh.len())
                         .sum::<usize>()
                 );
                 assert!(graphics.vertex_capacity >= graphics.cache.vertices.len());
@@ -2448,7 +2580,8 @@ mod tests {
                     let image = capture(&graphics, matrix, false);
                     let glyphs = (245..270)
                         .flat_map(|y| (180..330).map(move |x| (y * 512 + x) * 4))
-                        .filter(|&p| image[p] > 200 && image[p + 1] > 200 && image[p + 2] > 200)
+                        // White at about two thirds coverage or more: from two to five metres, strokes are under a pixel wide and antialiased rather than aliased, so few pixels are wholly covered.
+                        .filter(|&p| image[p] > 150 && image[p + 1] > 150 && image[p + 2] > 150)
                         .count();
                     assert!(glyphs > 4, "source {i} has no readable center glyphs");
                     {
@@ -2513,6 +2646,48 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(mesh(panel("\u{1f600}")), mesh(panel("?")));
+    }
+
+    #[test]
+    fn a_sign_built_while_glyphs_waited_is_built_again_until_it_has_them() {
+        let station = Station {
+            id: "a".into(),
+            title: crate::test_support::undrawn('\u{9f00}', 2),
+            state: State::Completed,
+            position: [0.0, 1.25, -2.8],
+            opacity: 1.0,
+        };
+        let sign = station_panel(&station, station.position, State::Completed);
+        let card = Panel {
+            origin: [0.0, 2.0, -3.0],
+            pixel: 0.005,
+            columns: COLUMNS,
+            // No text, so that it needs no glyph.
+            lines: vec![String::new()],
+            accent: WHITE,
+            opacity: 1.0,
+            sign: None,
+        };
+        let mut cache = PageCache::default();
+        let budget = crate::test_support::Budgeted::spent();
+        assert!(cache.update(vec![sign.clone(), card.clone()]));
+        assert!(!cache.complete);
+        let bare = cache.vertices.len();
+        // Only the sign lacked glyphs, so only it is built again, still without its kanji while the budget is spent, which no other test draws.
+        tomori_text::atlas::frame();
+        assert!(cache.update(vec![sign.clone(), card.clone()]));
+        assert_eq!(cache.builds, 3);
+        assert!(!cache.complete);
+        drop(budget);
+        assert!(cache.update(vec![sign.clone(), card.clone()]));
+        assert!(cache.complete);
+        let mut whole = Vec::new();
+        panel_mesh(&sign, &mut whole);
+        panel_mesh(&card, &mut whole);
+        assert!(whole.len() > bare);
+        assert_eq!((cache.builds, cache.vertices.len()), (4, whole.len()));
+        assert!(!cache.update(vec![sign, card]));
+        assert_eq!(cache.builds, 4);
     }
 
     #[test]

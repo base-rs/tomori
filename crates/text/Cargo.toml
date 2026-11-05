@@ -5,7 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Tomori's bundled fonts and the signed-distance-field glyph atlas its panels and labels are drawn from, free of GPU code"
 repository.workspace = true
-license.workspace = true
+# The code is MIT, as is the rest of Tomori; the bundled fonts in `assets/fonts` are under the SIL Open Font License 1.1, and both apply.
+license = "MIT AND OFL-1.1"
 readme = "readme.md"
 keywords = ["tomori", "font", "glyph-atlas", "sdf", "xr"]
 categories = ["text-processing", "rendering"]

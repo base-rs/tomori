@@ -5,6 +5,8 @@
 
 /// Farther than any distance in a tile, but finite, so that the transform's arithmetic stays finite.
 const FAR: f32 = 1e20;
+/// Coverage within this of none or all is taken as none or all. A rasteriser's sums leave such traces in pixels wholly outside or inside an outline, as `ab_glyph` does in many of Noto Sans JP's glyphs, and each would otherwise count as lying on an edge, raising the field across the glyph's box to nearly a half, which drew a faint box around the glyph where a pixel spans more than a texel.
+const TRACE: f32 = 1.0 / 256.0;
 
 /// The field for `coverage`, `width` pixels wide and row by row from the top, each from 0 to 1: 0.5 on the edge, rising inside and falling outside by 0.5 over `spread` pixels.
 pub(crate) fn field(coverage: &[f32], width: usize, spread: f32) -> Vec<u8> {
@@ -13,10 +15,10 @@ pub(crate) fn field(coverage: &[f32], width: usize, spread: f32) -> Vec<u8> {
     let mut outside = vec![FAR; coverage.len()];
     let mut inside = vec![0.0; coverage.len()];
     for (index, &alpha) in coverage.iter().enumerate() {
-        if alpha >= 1.0 {
+        if alpha >= 1.0 - TRACE {
             outside[index] = 0.0;
             inside[index] = FAR;
-        } else if alpha > 0.0 {
+        } else if alpha > TRACE {
             let edge = 0.5 - alpha;
             outside[index] = if edge > 0.0 { edge * edge } else { 0.0 };
             inside[index] = if edge < 0.0 { edge * edge } else { 0.0 };
@@ -142,6 +144,29 @@ mod tests {
         darker[3] = 0.75;
         let darker = super::field(&darker, width, 2.0);
         assert!(at(&darker, width, 3, 0) > 0.5);
+    }
+
+    #[test]
+    fn traces_of_coverage_are_none_or_all() {
+        // A square as a rasteriser may leave it: traces of coverage outside it and a little short of all inside.
+        let width = 16;
+        let mut coverage = vec![1e-5; width * width];
+        for y in 6..10 {
+            for x in 6..10 {
+                coverage[y * width + x] = 0.9999;
+            }
+        }
+        let traced = field(&coverage, width, 4.0);
+        let clean = field(
+            &coverage
+                .iter()
+                .map(|alpha| alpha.round())
+                .collect::<Vec<_>>(),
+            width,
+            4.0,
+        );
+        assert_eq!(traced, clean);
+        assert_eq!(at(&traced, width, 0, 0), 0.0);
     }
 
     #[test]

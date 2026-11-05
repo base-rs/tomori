@@ -27,6 +27,10 @@ assert_eq!(glyph.advance, 1.0);
 
 Its interfaces change with the environment framework ([#77](https://github.com/ioquatix/tomori/issues/77)).
 
+## Licence
+
+The code is under the [MIT License](license.md), and the bundled fonts under the [SIL Open Font License 1.1](assets/fonts/readme.md), so the package's licence is `MIT AND OFL-1.1`: a program that includes it follows both, which for the fonts means shipping their licences with them, as `fonts::LICENSES` makes easy.
+
 ## See Also
 
 - [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.

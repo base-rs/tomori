@@ -4,6 +4,8 @@
 //! The glyph atlas: one single-channel texture of signed distance fields, a tile per glyph, filled on demand as characters are first drawn and never moved or evicted, so that a mesh built from it stays valid. A fragment shader draws a glyph's edge where its field crosses one half, antialiased by the field's rate of change on screen, so that text stays crisp and smooth at any distance and tilt.
 //!
 //! Tiles are packed on shelves, left to right and top to bottom, each shelf as tall as its tallest tile; the atlas is [`WIDTH`] pixels wide and grows downwards, doubling, up to [`MAX_HEIGHT`]. The texture only needs the rows from the open shelf down uploaded after a change, as earlier shelves are closed. One atlas, behind [`with`], is shared by every panel and label in the process, so that each glyph is drawn into it once.
+//!
+//! Drawing a glyph costs tens of microseconds, so a thread that draws frames, such as the headset's, sets itself a [`Budget`] for each frame: once a frame has spent it, a glyph not yet drawn is not drawn, as if it had no outline, and [`waited`] counts it, so that whoever built a mesh with it builds it again next frame, when the glyph is drawn. [`frame`] starts the next frame's budget and says what this one spent. Other threads, such as tests' and the console's, have no budget, and draw every glyph when it is first asked for.
 
 use crate::{
     distance,
@@ -11,6 +13,7 @@ use crate::{
 };
 use ab_glyph::{Font, PxScale, point};
 use std::{
+    cell::Cell,
     collections::HashMap,
     sync::{Mutex, PoisonError},
     time::{Duration, Instant},
@@ -20,7 +23,7 @@ use std::{
 pub const WIDTH: u32 = 2048;
 /// Its height when it starts, in pixels.
 pub const START_HEIGHT: u32 = 256;
-/// The most it grows to: 16 MiB, room for about 4,000 CJK glyphs and many more Latin ones. It is the largest texture wgpu's default limits allow.
+/// The most it grows to: 16 MiB, room for about 9,000 glyphs, nearly every one the bundled fonts have, including JIS X 0208's 6,355 kanji. It is the largest texture wgpu's default limits allow.
 pub const MAX_HEIGHT: u32 = 8192;
 /// Pixels of distance either side of an edge that a field holds, which is also the margin around each glyph's outline in its tile, so that a glyph can be made bolder by up to this much.
 pub const SPREAD: f32 = 4.0;
@@ -59,6 +62,83 @@ pub struct Stats {
     pub rasterising: Duration,
 }
 
+/// What drawing new glyphs into the atlas may cost a thread in one frame: it draws while it has spent less than both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Budget {
+    pub time: Duration,
+    pub glyphs: usize,
+}
+
+impl Budget {
+    /// No limit, as for a thread that draws no frames.
+    pub const UNLIMITED: Self = Self {
+        time: Duration::MAX,
+        glyphs: usize::MAX,
+    };
+
+    /// About 1.5 ms a frame, a little over a tenth of a frame at 72 Hz, the headset's slowest rate: some 35 kanji a frame on a desktop, and perhaps a dozen on a Quest 3.
+    pub const FRAME: Self = Self {
+        time: Duration::from_micros(1500),
+        glyphs: usize::MAX,
+    };
+}
+
+/// What drawing glyphs cost a thread in one frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Frame {
+    /// Glyphs drawn into the atlas.
+    pub drawn: usize,
+    /// The time spent drawing them.
+    pub time: Duration,
+    /// Glyphs asked for once the budget was spent, which were left for a later frame.
+    pub waiting: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Allowance {
+    budget: Budget,
+    spent: Frame,
+    waited: u64,
+}
+
+thread_local! {
+    static ALLOWANCE: Cell<Allowance> = const {
+        Cell::new(Allowance {
+            budget: Budget::UNLIMITED,
+            spent: Frame {
+                drawn: 0,
+                time: Duration::ZERO,
+                waiting: 0,
+            },
+            waited: 0,
+        })
+    };
+}
+
+fn allowance<R>(f: impl FnOnce(&mut Allowance) -> R) -> R {
+    ALLOWANCE.with(|cell| {
+        let mut allowance = cell.get();
+        let result = f(&mut allowance);
+        cell.set(allowance);
+        result
+    })
+}
+
+/// Set what drawing glyphs may cost this thread in each frame, from now on.
+pub fn budget(budget: Budget) {
+    allowance(|allowance| allowance.budget = budget);
+}
+
+/// End this thread's frame: what drawing glyphs cost it, and a fresh budget for the next.
+pub fn frame() -> Frame {
+    allowance(|allowance| std::mem::take(&mut allowance.spent))
+}
+
+/// How many glyphs this thread has asked for and been refused since it started, because its frame's budget was spent. A mesh built while this changed lacks glyphs, and should be built again next frame.
+pub fn waited() -> u64 {
+    allowance(|allowance| allowance.waited)
+}
+
 /// The atlas's pixels and the tiles in it.
 pub struct Atlas {
     pixels: Vec<u8>,
@@ -94,33 +174,56 @@ impl Atlas {
         };
         let solid = vec![255; 16];
         atlas.place(4, 4, &solid);
-        atlas.replacement = atlas.glyph('?');
+        // Drawn whatever this thread's budget, as it stands in for every glyph once the atlas is full.
+        let (face, id) = fonts::find('?').expect("Noto Sans Mono has `?`");
+        atlas.replacement = atlas.add('?', face, id);
         atlas
     }
 
-    /// The glyph drawn for `ch`, drawing it into the atlas the first time: `None` for a character with no outline, such as a space, or that no bundled face has, and the replacement once the atlas is full.
+    /// The glyph drawn for `ch`, drawing it into the atlas the first time: `None` for a character with no outline, such as a space, or that no bundled face has; the replacement once the atlas is full; and `None`, counted by [`waited`], for one not yet drawn once this thread's frame has spent its [`Budget`].
     pub fn glyph(&mut self, ch: char) -> Option<Glyph> {
         if let Some(glyph) = self.glyphs.get(&ch) {
             return *glyph;
         }
+        // Not remembered, so that text full of characters no face has cannot grow the map.
+        let (face, id) = fonts::find(ch)?;
+        let allowed = allowance(|allowance| {
+            let allowed = allowance.spent.drawn < allowance.budget.glyphs
+                && allowance.spent.time < allowance.budget.time;
+            if !allowed {
+                allowance.spent.waiting += 1;
+                allowance.waited += 1;
+            }
+            allowed
+        });
+        if !allowed {
+            return None;
+        }
         let start = Instant::now();
-        let drawn = self.draw(ch);
+        let glyph = self.add(ch, face, id);
+        let time = start.elapsed();
+        allowance(|allowance| {
+            allowance.spent.drawn += 1;
+            allowance.spent.time += time;
+        });
+        glyph
+    }
+
+    /// Draw `ch`, which is `id` in `face`, into the atlas, whatever the budget.
+    fn add(&mut self, ch: char, face: &fonts::Face, id: ab_glyph::GlyphId) -> Option<Glyph> {
+        let start = Instant::now();
+        let drawn = self.draw(face, id);
         self.rasterising += start.elapsed();
         match drawn {
             Drawn::Glyph(glyph) => {
                 self.glyphs.insert(ch, glyph);
                 glyph
             }
-            Drawn::Missing => None,
             Drawn::Full => self.replacement,
         }
     }
 
-    fn draw(&mut self, ch: char) -> Drawn {
-        // Not remembered, so that text full of characters no face has cannot grow the map.
-        let Some((face, id)) = fonts::find(ch) else {
-            return Drawn::Missing;
-        };
+    fn draw(&mut self, face: &fonts::Face, id: ab_glyph::GlyphId) -> Drawn {
         let em = face.em();
         let font = &face.font;
         let scale = PxScale::from(face.scale * font.height_unscaled() / em);
@@ -135,14 +238,16 @@ impl Atlas {
             bounds.width() as u32 + 2 * pad,
             bounds.height() as u32 + 2 * pad,
         );
+        // Once the atlas is full, a glyph that does not fit is never rasterised, which would cost the same every time it is asked for.
+        if self.spot(width, height).is_none() {
+            return Drawn::Full;
+        }
         let mut coverage = vec![0.0; (width * height) as usize];
         outlined.draw(|x, y, alpha| {
             coverage[((y + pad) * width + x + pad) as usize] = alpha;
         });
         let field = distance::field(&coverage, width as usize, SPREAD);
-        let Some((x, y)) = self.place(width, height, &field) else {
-            return Drawn::Full;
-        };
+        let (x, y) = self.place(width, height, &field);
         let per_em = face.scale;
         Drawn::Glyph(Some(Glyph {
             tile: [x as f32, y as f32, width as f32, height as f32],
@@ -158,8 +263,8 @@ impl Atlas {
         }))
     }
 
-    /// Copy a tile of `width` × `height` pixels into the atlas, on the open shelf or a new one below it, growing the atlas if it must: where it went, or `None` if the atlas is full.
-    fn place(&mut self, width: u32, height: u32, tile: &[u8]) -> Option<(u32, u32)> {
+    /// Where a tile of `width` × `height` pixels would go, on the open shelf or a new one below it, and how tall the atlas must grow to hold it: `None` if it cannot.
+    fn spot(&self, width: u32, height: u32) -> Option<(u32, u32, u32)> {
         // A pixel between tiles, so that filtering never reads a neighbour.
         let (top, tallest, along) = self.shelf;
         let (x, y) = if along + width <= WIDTH {
@@ -167,13 +272,26 @@ impl Atlas {
         } else {
             (0, top + tallest + 1)
         };
-        while y + height > self.height {
-            if self.height * 2 > self.limit {
+        let mut grown = self.height;
+        while y + height > grown {
+            if grown * 2 > self.limit {
                 return None;
             }
-            self.height *= 2;
+            grown *= 2;
+        }
+        Some((x, y, grown))
+    }
+
+    /// Copy a tile of `width` × `height` pixels into the atlas, on the open shelf or a new one below it, growing the atlas if it must, where [`Atlas::spot`] found it fits: where it went.
+    fn place(&mut self, width: u32, height: u32, tile: &[u8]) -> (u32, u32) {
+        let (x, y, grown) = self
+            .spot(width, height)
+            .expect("a tile is placed only where it was found to fit");
+        if grown > self.height {
+            self.height = grown;
             self.pixels.resize((WIDTH * self.height) as usize, 0);
         }
+        let (top, tallest, along) = self.shelf;
         self.shelf = if y == top {
             (top, tallest.max(height), along + width + 1)
         } else {
@@ -185,7 +303,7 @@ impl Atlas {
                 .copy_from_slice(&tile[(row * width) as usize..((row + 1) * width) as usize]);
         }
         self.revision += 1;
-        Some((x, y))
+        (x, y)
     }
 
     /// The atlas's pixels, [`WIDTH`] to a row, top to bottom.
@@ -224,7 +342,6 @@ impl Atlas {
 
 enum Drawn {
     Glyph(Option<Glyph>),
-    Missing,
     Full,
 }
 
@@ -307,6 +424,28 @@ mod tests {
     }
 
     #[test]
+    fn a_glyphs_field_is_empty_away_from_its_outline() {
+        // These left traces of coverage across their boxes, which raised the field there to nearly a half.
+        let mut atlas = Atlas::default();
+        for ch in "の気東京天本".chars() {
+            let [x, y, width, height] = atlas.glyph(ch).unwrap().tile;
+            let rows = y as usize..(y + height) as usize;
+            let field: Vec<u8> = rows
+                .flat_map(|row| {
+                    atlas.pixels()[row * WIDTH as usize + x as usize..][..width as usize].to_vec()
+                })
+                .collect();
+            // Only pixels within about half a texel of an edge are near a half: under a sixteenth of these tiles, where the traces made from a sixth to two fifths of them so.
+            let near = field
+                .iter()
+                .filter(|value| (100..=120).contains(*value))
+                .count();
+            let all = field.len();
+            assert!(near * 8 < all, "{ch}: {near} of {all}");
+        }
+    }
+
+    #[test]
     fn tiles_never_overlap_and_the_atlas_grows_until_it_is_full() {
         let mut atlas = Atlas::new(512);
         let mut tiles: Vec<[f32; 4]> = Vec::new();
@@ -345,6 +484,95 @@ mod tests {
                 .all(|tile| tile[1] + tile[3] <= atlas.filled() as f32)
         );
         assert!(atlas.filled() > atlas.open());
+    }
+
+    /// Restores this thread's budget when dropped, even if a test fails, as a test may run on a thread another used.
+    struct Budgeted;
+
+    impl Budgeted {
+        fn new(limit: Budget) -> Self {
+            budget(limit);
+            frame();
+            Self
+        }
+    }
+
+    impl Drop for Budgeted {
+        fn drop(&mut self) {
+            budget(Budget::UNLIMITED);
+            frame();
+        }
+    }
+
+    #[test]
+    fn a_frame_draws_glyphs_within_its_budget_and_the_rest_wait_for_the_next() {
+        let mut atlas = Atlas::default();
+        let _budget = Budgeted::new(Budget {
+            time: Duration::MAX,
+            glyphs: 2,
+        });
+        let before = waited();
+        assert!(atlas.glyph('日').is_some());
+        assert!(atlas.glyph('本').is_some());
+        // The budget is spent: a glyph not yet drawn waits, and is not remembered as having no outline.
+        assert_eq!(atlas.glyph('語'), None);
+        assert!(!atlas.glyphs.contains_key(&'語'));
+        assert_eq!(waited(), before + 1);
+        // One drawn before, or a character no face has, costs nothing and does not wait.
+        assert!(atlas.glyph('日').is_some());
+        assert_eq!(atlas.glyph('🎤'), None);
+        assert_eq!(waited(), before + 1);
+        let spent = frame();
+        assert_eq!((spent.drawn, spent.waiting), (2, 1));
+        assert!(spent.time > Duration::ZERO);
+        // The next frame draws it.
+        assert!(atlas.glyph('語').is_some());
+        assert_eq!(frame().drawn, 1);
+        // With no time to spend, nothing new is drawn, but a new atlas still draws its replacement.
+        budget(Budget {
+            time: Duration::ZERO,
+            glyphs: usize::MAX,
+        });
+        let mut atlas = Atlas::default();
+        assert!(atlas.replacement.is_some());
+        assert_eq!(atlas.glyph('a'), None);
+        assert_eq!(frame().waiting, 1);
+    }
+
+    #[test]
+    fn the_frame_budget_is_a_little_of_a_frame() {
+        assert!(Budget::FRAME.time <= Duration::from_millis(2));
+        assert!(Budget::UNLIMITED.time > Duration::from_secs(1));
+        // A thread that never set one has none.
+        std::thread::spawn(|| {
+            let mut atlas = Atlas::default();
+            for ch in ('\u{4e00}'..'\u{4e40}').filter(|ch| fonts::covers(*ch)) {
+                assert!(atlas.glyph(ch).is_some());
+            }
+            assert_eq!(frame().waiting, 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_full_atlas_does_not_draw_a_glyph_it_cannot_place() {
+        // What drawing one kanji costs here.
+        let mut fresh = Atlas::default();
+        let rasterising = fresh.stats().rasterising;
+        fresh.glyph('語').unwrap();
+        let one = fresh.stats().rasterising - rasterising;
+        let mut atlas = Atlas::new(START_HEIGHT);
+        let full = ('\u{4e00}'..'\u{9fa0}')
+            .filter(|ch| fonts::covers(*ch))
+            .find(|ch| atlas.glyph(*ch) == atlas.replacement)
+            .expect("the atlas filled");
+        // Asked for again and again, it is found not to fit before it is rasterised, each time costing a small part of drawing it.
+        let rasterising = atlas.stats().rasterising;
+        for _ in 0..100 {
+            assert_eq!(atlas.glyph(full), atlas.replacement);
+        }
+        assert!(atlas.stats().rasterising - rasterising < one * 20);
     }
 
     #[test]

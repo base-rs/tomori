@@ -134,16 +134,12 @@ fn step(current: usize, count: usize, forward: bool) -> usize {
     }
 }
 
-/// Character-based truncation is safe for every UTF-8 boundary. Characters no
-/// bundled font has are drawn as '?', never a byte-indexing panic.
+/// `text` on one row of at most `columns` cells, ending with "…" where cut, by
+/// the one rule every panel uses, [`crate::ui_text::clip`]: counted in cells as
+/// drawn, so that a Japanese title, two cells a character, is cut where it
+/// reaches the card's edge rather than losing its end unmarked.
 pub fn clip(text: &str, columns: usize) -> String {
-    let mut chars = text.chars().filter(|c| !c.is_control());
-    let mut out: String = chars.by_ref().take(columns).collect();
-    if chars.next().is_some() && columns >= 3 {
-        out = out.chars().take(columns - 3).collect();
-        out.push_str("...");
-    }
-    out
+    crate::ui_text::clip(text, columns)
 }
 
 /// Cards lay out ASCII, a byte to a column. Show other Unicode scalars and
@@ -319,7 +315,10 @@ mod tests {
             .collect::<String>();
         assert_eq!(displayed, "\\u{1F980}".repeat(1024));
         assert_eq!(wrap(&"x\n".repeat(2048)).len(), 2048);
-        assert_eq!(clip("é中🦀xyz", 4), "é...");
+        // Titles are cut by display width, with "…": a CJK character takes two cells, and an emoji, drawn `?`, one.
+        assert_eq!(clip("é中🦀xyz", 4), "é中…");
+        assert_eq!(clip("é中🦀xyz", 7), "é中?xyz");
+        assert_eq!(clip("é中🦀xyz", 3), "é…");
         assert!(wrap("").is_empty());
     }
 

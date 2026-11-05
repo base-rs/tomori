@@ -246,7 +246,7 @@ fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
                     width,
                     Wrap {
                         indent,
-                        hanging: indent + marker.chars().count().max(2),
+                        hanging: indent + crate::ui_text::width(&marker).max(2),
                         continuation: None,
                     },
                 ));
@@ -350,7 +350,7 @@ fn shown_rows(group: &Group<'_>, columns: usize, expanded: bool) -> (Vec<Row>, b
         let mut cells = vec![(' ', style(TEXT))];
         cells.extend(std::iter::repeat_n(
             (' ', style(TEXT)),
-            columns.saturating_sub(1 + label.chars().count()),
+            columns.saturating_sub(1 + crate::ui_text::width(&label)),
         ));
         cells.extend(cut(&[Span::new(label, style(DIM))], columns));
         rows.push(Row::new(cells).with_bar(Some(group.speaker.colour)));
@@ -762,7 +762,7 @@ fn queue_rows(space: &SpaceState, input: &Input<'_>, state: &State, columns: usi
         return Vec::new();
     }
     let title = format!("── Queue ({}) ", entries.len());
-    let rule = "─".repeat(columns.saturating_sub(title.chars().count()));
+    let rule = "─".repeat(columns.saturating_sub(crate::ui_text::width(&title)));
     let mut rows = vec![Row::new(cut(
         &[Span::new(format!("{title}{rule}"), style(DIM))],
         columns,
@@ -785,10 +785,11 @@ fn queue_rows(space: &SpaceState, input: &Input<'_>, state: &State, columns: usi
             QueueState::Sending => '◐',
             _ => '○',
         };
-        let name: String = speaker.name.chars().take(6).collect();
+        // Six cells, as drawn, so that a Japanese name, two cells a character, keeps the column.
+        let name = crate::ui_text::pad(&speaker.name, 6);
         let mut left = vec![
             Span::new(" ", style(TEXT)),
-            Span::new(format!("{name:<6} "), Style::bold(speaker.colour)),
+            Span::new(format!("{name} "), Style::bold(speaker.colour)),
             Span::new(format!("{shape} "), style(TEXT)),
         ];
         let right = match removing {
@@ -988,7 +989,7 @@ fn body(
         });
     if newer > 0 {
         let label = format!("▾ {newer} new below");
-        let pad = columns.saturating_sub(label.chars().count()) / 2;
+        let pad = columns.saturating_sub(crate::ui_text::width(&label)) / 2;
         let mut cells: Vec<Cell> = std::iter::repeat_n((' ', style(TEXT)), pad).collect();
         cells.extend(cut(
             &[Span::new(label, Style::bold(speakers::AGENT))],
@@ -1377,6 +1378,69 @@ mod tests {
         space.queue[1].state = QueueState::Delivered;
         let _ = layout(&space, &input(), &mut state, WRIST_COLUMNS);
         assert_eq!(state.focus, None);
+    }
+
+    #[test]
+    fn japanese_names_and_messages_fit_the_wrist_counted_in_cells() {
+        let mut space = space();
+        space.title = "日本語の会話のスペース".repeat(4);
+        space.participants[0].name = "山田太郎".into();
+        space.participants[1].name = "Bob 佐藤 🎤".into();
+        space.messages = vec![
+            message(
+                "m1",
+                Role::User,
+                "山田太郎: テストを実行して、失敗したものを直してください。",
+            ),
+            message(
+                "m2",
+                Role::Assistant,
+                &"全部で**214**件のテストが通りました。原因は`span_end`の一つずれでした。"
+                    .repeat(3),
+            ),
+            message("m3", Role::User, "Bob 佐藤 🎤: and lint it 🎉 お願いします"),
+        ];
+        space.queue = ["山田太郎", "Bob 佐藤 🎤", "Ada"]
+            .iter()
+            .enumerate()
+            .map(|(index, speaker)| QueueEntry {
+                id: format!("q{index}"),
+                source: index as u32 + 1,
+                speaker: (*speaker).into(),
+                text: "次にデプロイして mixed text 🚀".repeat(3),
+                state: QueueState::Queued,
+            })
+            .collect();
+        for columns in [WRIST_COLUMNS, DETACHED_COLUMNS] {
+            let mut state = State {
+                expanded: space
+                    .messages
+                    .iter()
+                    .map(|message| message.id.clone())
+                    .collect(),
+                ..Default::default()
+            };
+            let rows = layout(&space, &input(), &mut state, columns);
+            for row in &rows {
+                let shown = row.plain();
+                assert!(row.cells.len() <= columns, "{columns}: {shown}");
+                assert!(crate::ui_text::whole(&row.cells), "{columns}: {shown}");
+            }
+            let text = plain(&rows);
+            assert!(text.iter().any(|row| row.contains("テスト")), "{text:#?}");
+            // The queue's names take six cells as drawn, so that its marks line up whatever the script, and a name cut ends with "…".
+            let marks: Vec<usize> = rows
+                .iter()
+                .filter(|row| row.plain().contains('○'))
+                .map(|row| row.cells.iter().position(|(ch, _)| *ch == '○').unwrap())
+                .collect();
+            assert_eq!(marks.len(), 3, "{text:#?}");
+            assert!(marks.iter().all(|mark| *mark == marks[0]), "{marks:?}");
+            assert!(
+                text.iter().any(|row| row.starts_with(" Bob …  ○")),
+                "{text:#?}"
+            );
+        }
     }
 
     #[test]

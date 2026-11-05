@@ -103,6 +103,8 @@ pub struct Panel {
     cameras: [wgpu::Buffer; 2],
     bindings: [wgpu::BindGroup; 2],
     canvas: Option<Canvas>,
+    /// Whether the mesh has every glyph, rather than lacking some that waited for a later frame's budget.
+    complete: bool,
 }
 
 impl Panel {
@@ -139,15 +141,18 @@ impl Panel {
             cameras,
             bindings,
             canvas: None,
+            complete: false,
         }
     }
 
-    /// Show `canvas`, rebuilding the mesh only if it changed.
+    /// Show `canvas`, rebuilding the mesh only if it changed, or if glyphs it needs were waiting for the atlas when it was last built.
     pub fn set(&mut self, queue: &wgpu::Queue, canvas: &Canvas) {
-        if self.canvas.as_ref() == Some(canvas) {
+        if self.complete && self.canvas.as_ref() == Some(canvas) {
             return;
         }
+        let waited = tomori_text::atlas::waited();
         let mut mesh = canvas.mesh();
+        self.complete = tomori_text::atlas::waited() == waited;
         if mesh.len() > self.capacity {
             log::debug!(
                 "A panel's mesh of {} vertices was cut to {}",
@@ -187,6 +192,38 @@ impl Panel {
 mod tests {
     use super::*;
     use crate::ui_text::{Row, Style};
+
+    #[test]
+    fn a_panel_built_while_glyphs_waited_is_built_again_until_it_has_them() {
+        crate::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+            let mut panel = Panel::new(&gpu.device, &pipeline, 1_000);
+            let mut canvas = Canvas::new(8, 0.001);
+            let kanji = crate::test_support::undrawn('\u{9f9f}', 2);
+            canvas
+                .rows
+                .push(Row::text(&kanji, Style::plain([1.0; 4]), 8));
+            // This frame's budget is spent: the panel is drawn without its glyphs, and drawn again next frame.
+            let budget = crate::test_support::Budgeted::spent();
+            panel.set(&gpu.queue, &canvas);
+            assert!(!panel.complete);
+            let bare = panel.count;
+            tomori_text::atlas::frame();
+            panel.set(&gpu.queue, &canvas);
+            assert!(!panel.complete);
+            assert_eq!(panel.count, bare);
+            // With the budget to draw them, it has them, and is not built again.
+            drop(budget);
+            panel.set(&gpu.queue, &canvas);
+            assert!(panel.complete);
+            assert_eq!(panel.count, bare + 12);
+            let waited = tomori_text::atlas::waited();
+            panel.set(&gpu.queue, &canvas);
+            assert_eq!(tomori_text::atlas::waited(), waited);
+        });
+    }
 
     #[test]
     fn a_panel_cuts_a_mesh_too_large_for_it_and_draws_nothing_when_empty() {

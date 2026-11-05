@@ -173,6 +173,8 @@ pub fn run(
     let mut event_buffer = xr::EventDataBuffer::new();
     let mut frames = 0_u64;
     let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
+    // Drawing new glyphs, such as a first paragraph of Japanese, costs this thread at most about 1.5 ms a frame; the rest are drawn over the frames after, and the log reports what each frame spent. See `design/text.md`.
+    tomori_render::glyphs::budget(tomori_render::glyphs::Budget::FRAME);
     log::info!(
         "Ready: {width}x{height} per eye, {} swapchain images. Right trigger: choose what the ray points at, or attract; A: choose.",
         images.len()

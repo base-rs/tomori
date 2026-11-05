@@ -522,7 +522,7 @@ pub fn label_mesh(scene: &Scene, hovered: Option<&Key>) -> Vec<Vertex> {
     mesh
 }
 
-/// The arrival labels on the GPU, rebuilt only when the scene or what is pointed at changes.
+/// The arrival labels on the GPU, rebuilt only when the scene or what is pointed at changes, or when glyphs they need were waiting for the atlas.
 pub struct ArrivalLabels {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
@@ -530,6 +530,7 @@ pub struct ArrivalLabels {
     count: u32,
     /// The vertices in the buffer, drawn unless hidden.
     length: u32,
+    /// What the mesh was built for, while it has every glyph, rather than lacking some that waited for a later frame's budget.
     cached: Option<(Scene, Option<Key>)>,
 }
 
@@ -631,6 +632,7 @@ impl ArrivalLabels {
             .as_ref()
             .is_some_and(|(cached, key)| cached == scene && key.as_ref() == hovered);
         if !unchanged {
+            let waited = tomori_text::atlas::waited();
             let mesh = label_mesh(scene, hovered);
             if mesh.len() > self.capacity {
                 self.capacity = mesh.len().next_power_of_two().min(MAX_VERTICES);
@@ -640,7 +642,8 @@ impl ArrivalLabels {
                 queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
             }
             self.length = mesh.len().min(self.capacity) as u32;
-            self.cached = Some((scene.clone(), hovered.cloned()));
+            self.cached =
+                (tomori_text::atlas::waited() == waited).then(|| (scene.clone(), hovered.cloned()));
         }
         // `hide` clears only the count; the buffer still holds the mesh.
         self.count = self.length;
@@ -1310,6 +1313,18 @@ mod tests {
                 })
                 .collect();
             assert!(gaps.is_empty(), "the glyph has gaps at font rows {gaps:?}");
+            // Left of it, on the background, where the glyph's quad reaches past its outline, nothing is lit: not even single pixels, as when a join's weight was interpolated to just under its mark and drawn as the boldest of glyphs.
+            let lit: Vec<(f32, f32)> = (0..16)
+                .flat_map(|x| {
+                    (0..64)
+                        .map(move |y| (-2.5 + 2.0 * x as f32 / 15.0, 0.25 + 10.5 * y as f32 / 63.0))
+                })
+                .filter(|(x, y)| {
+                    let (column, row) = at(on_label(&scene, *x, *y));
+                    image.get_pixel(column, row)[0] >= 180
+                })
+                .collect();
+            assert!(lit.is_empty(), "lit beside the glyph at {lit:?}");
             // Below the row, the background covers what is behind it.
             let y = 11.5;
             let (column, row) = at(on_label(&scene, 4.0, y));
@@ -1322,6 +1337,52 @@ mod tests {
             assert!(covered > 6, "{y}: no background");
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    #[test]
+    fn labels_built_while_glyphs_waited_are_built_again_until_they_have_them() {
+        let mut named = object(Kind::Choice);
+        named.label.lines = vec![crate::test_support::undrawn('\u{9e80}', 2)];
+        let scene = Scene {
+            objects: vec![named],
+            ..Default::default()
+        };
+        crate::test_gpu::with(|gpu| {
+            let camera_layout =
+                gpu.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: None,
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(64),
+                            },
+                            count: None,
+                        }],
+                    });
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let mut labels = ArrivalLabels::new(
+                &gpu.device,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                &camera_layout,
+                &glyphs,
+                1,
+            );
+            let budget = crate::test_support::Budgeted::spent();
+            labels.update(&gpu.device, &gpu.queue, &scene, None);
+            assert!(labels.cached.is_none());
+            let bare = labels.length;
+            drop(budget);
+            labels.update(&gpu.device, &gpu.queue, &scene, None);
+            assert!(labels.cached.is_some());
+            assert_eq!(labels.length, bare + 12);
+            let waited = tomori_text::atlas::waited();
+            labels.update(&gpu.device, &gpu.queue, &scene, None);
+            assert_eq!(tomori_text::atlas::waited(), waited);
         });
     }
 

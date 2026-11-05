@@ -2111,15 +2111,24 @@ mod tests {
         let space = japanese.space.as_mut().unwrap();
         space.title = "日本語の会話のスペース。".repeat(8);
         space.modes[1].2 = Some("説明文です。".repeat(30));
-        for model in [&model, &japanese] {
+        // And so does Latin mixed with Japanese, and emoji, which no font has, drawn `?` in one cell.
+        let mut mixed = model.clone();
+        mixed.name = "Bob 佐藤 🎤 José".repeat(4);
+        mixed.participants = vec!["Ada 🎧 山田".repeat(5); 3];
+        let space = mixed.space.as_mut().unwrap();
+        space.title = "Tomoriは日本語 🎉 mixed text".repeat(6);
+        space.modes[1].2 = Some("Fix the パーサー bug 🐛 ".repeat(20));
+        for model in [&model, &japanese, &mixed] {
             for section in sections {
                 let rows = items(section, model);
                 for row in &rows {
                     assert!(
-                        drawn(&row.text).count() <= WIDTH,
+                        crate::ui_text::width(&row.text) <= WIDTH,
                         "{section:?}: {}",
                         row.text
                     );
+                    let cells: Vec<_> = drawn(&row.text).map(|ch| (ch, ())).collect();
+                    assert!(crate::ui_text::whole(&cells), "{section:?}: {}", row.text);
                 }
             }
         }
@@ -2127,6 +2136,11 @@ mod tests {
             texts(&items(Some(Section::Space), &japanese))
                 .iter()
                 .any(|row| row.contains("日本語の会話"))
+        );
+        assert!(
+            texts(&items(Some(Section::Space), &mixed))
+                .iter()
+                .any(|row| row.contains("Tomoriは日本語 ? mixed"))
         );
         // The top level marks a title cut at two rows; the Space section goes on with the rest of it.
         let top = items(None, &model);

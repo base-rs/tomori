@@ -314,6 +314,20 @@ pub fn plain(cells: &[Cell]) -> String {
         .collect()
 }
 
+/// Whether every wide character in `cells` has its second cell after it, and every second cell a wide character before it: that no layout split one, or would draw one shrunk into a single cell. For tests of every surface's rows.
+#[cfg(test)]
+pub(crate) fn whole<T>(cells: &[(char, T)]) -> bool {
+    cells.iter().enumerate().all(|(index, (ch, _))| {
+        let next = cells.get(index + 1).map(|(next, _)| *next);
+        let before = index.checked_sub(1).map(|before| cells[before].0);
+        if *ch == WIDE {
+            before.is_some_and(|before| before != WIDE && columns(before) > 1)
+        } else {
+            (columns(*ch) > 1) == (next == Some(WIDE))
+        }
+    })
+}
+
 /// At most `most` of `rows`, the last ending with "…" where any are left out: after its text if it is shorter than `width`, or in place of its last cell.
 pub fn fit(rows: &mut Vec<Vec<Cell>>, most: usize, width: usize) {
     if rows.len() <= most {
@@ -349,6 +363,18 @@ pub fn clip(text: &str, width: usize) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     plain(&cut(&[Span::new(line, WHITE)], width))
+}
+
+/// The cells one line of `text` takes as drawn, its display width: two for each wide character, such as a CJK ideograph, kana or a full-width form, one for each other grapheme, and none for those that take no cell. Every row budget is counted in these.
+pub fn width(text: &str) -> usize {
+    drawn(text).count()
+}
+
+/// `text` on one row of exactly `width` cells: cut with "…", as [`clip`] does, and padded with spaces after it.
+pub fn pad(text: &str, width: usize) -> String {
+    let text = clip(text, width);
+    let fill = width - self::width(&text);
+    text + &" ".repeat(fill)
 }
 
 /// The cells drawn for one line of `text`: line breaks, each as one space whatever its kind, and tabs as spaces, each other grapheme as [`shown`] draws it, a wide one followed by [`WIDE`], leaving out those that take no cell.
@@ -433,7 +459,7 @@ pub fn cut(spans: &[Span], width: usize) -> Vec<Cell> {
     cells
 }
 
-/// The character drawn for `ch`: itself where a bundled font has it; a space for a space of any width; its base letter where a font has only that, such as for an accented letter outside the fonts; and `?` otherwise, such as for emoji, Hangul or kanji outside JIS X 0208.
+/// The character drawn for `ch`: itself where a bundled font has it; a space for a space of any width; its base letter, or the first letter of its compatibility decomposition, where a font has only that, such as for an accented letter outside the fonts or the ligature "ﬁ"; and `?` otherwise, such as for emoji, Hangul or kanji outside JIS X 0208.
 pub fn shown(ch: char) -> char {
     match ch {
         '\u{00a0}'
@@ -444,7 +470,7 @@ pub fn shown(ch: char) -> char {
         | '\u{3000}' => ' ',
         ch if tomori_text::fonts::covers(ch) => ch,
         ch => ch
-            .nfd()
+            .nfkd()
             .next()
             .filter(|base| tomori_text::fonts::covers(*base))
             .unwrap_or('?'),
@@ -466,21 +492,30 @@ pub struct Quad {
 
 /// Font pixels per em of a cell's glyph, which gives capitals about 8 of a row's 12, as the bitmap font had.
 const EM: f32 = 11.0;
-/// Of a wide character's, which fills more of its row.
-const WIDE_EM: f32 = 12.0;
+/// Of a wide character's, as a fraction of its row's height: an em is the whole of a CJK character's design, so this leaves about three quarters of a font pixel above and below it in a row of 12 or 11, and lines of Japanese never touch.
+const WIDE_EM: f32 = 0.875;
+/// How far above the baseline Noto Sans JP's em box reaches, in ems; the rest of it is below.
+const CJK_ASCENT: f32 = 0.88;
+/// Added to the weight of box drawing and blocks, which the shaders take as growing the glyph by half a screen pixel, so that where two meet each covers the pixels on their shared edge and no seam shows. A weight is otherwise at most a half, so the shaders tell the two apart at three quarters.
+pub const JOIN: f32 = 1.0;
+
+/// Whether `ch` is box drawing or a block, which fills its cells and joins its neighbours.
+fn joins(ch: char) -> bool {
+    ('\u{2500}'..='\u{259f}').contains(&ch)
+}
 /// How much bolder bold is on each side, in ems.
 const BOLD: f32 = 0.04;
 /// How far above and below the baseline Noto Sans Mono's box drawing and blocks reach, in ems, which a row is filled between.
 const BOX_TOP: f32 = 0.979;
 const BOX_BOTTOM: f32 = -0.246;
 
-/// The glyph drawn for `ch` in `cells` cells from `x`, on a row `row` font pixels tall whose top is at `top`: centred in its cells on a baseline three quarters of the way down, a wide one a little lower to centre it, and smaller where it is wider than its cells; box drawing and blocks stretched to fill their cells, so that lines join. `None` for one with no glyph, such as a space.
+/// The glyph drawn for `ch` in `cells` cells from `x`, on a row `row` font pixels tall whose top is at `top`: centred in its cells on a baseline three quarters of the way down, and smaller where it is wider than its cells; a wide one sized to its row and with its em box centred in it, so that lines of Japanese keep apart; box drawing and blocks stretched to fill their cells and grown by half a screen pixel, so that lines join. `None` for one with no glyph, such as a space, or one the atlas has not drawn yet.
 pub fn glyph(ch: char, cells: usize, x: f32, top: f32, row: f32, bold: bool) -> Option<Quad> {
     let glyph = atlas::glyph(ch)?;
     let room = (cells * CELL_WIDTH) as f32;
     let [left, up, width, height] = glyph.bounds;
     let weight = if bold { glyph.weight(BOLD) } else { 0.0 };
-    if ('\u{2500}'..='\u{259f}').contains(&ch) {
+    if joins(ch) {
         // From the glyph's advance and the line box drawing reaches onto the cells.
         let across = room / glyph.advance;
         let down = row / (BOX_TOP - BOX_BOTTOM);
@@ -490,12 +525,16 @@ pub fn glyph(ch: char, cells: usize, x: f32, top: f32, row: f32, bold: bool) -> 
             width: width * across,
             height: height * down,
             tile: glyph.tile,
-            weight,
+            weight: weight + JOIN,
         });
     }
     let wide = cells > 1;
-    let scale = (if wide { WIDE_EM } else { EM }).min(room / glyph.advance);
-    let baseline = top + row * 0.75 + if wide { 0.1 * scale } else { 0.0 };
+    let scale = (if wide { row * WIDE_EM } else { EM }).min(room / glyph.advance);
+    let baseline = if wide {
+        top + row / 2.0 + (CJK_ASCENT - 0.5) * scale
+    } else {
+        top + row * 0.75
+    };
     let pen = x + (room - glyph.advance * scale) / 2.0;
     Some(Quad {
         x: pen + left * scale,
@@ -521,16 +560,13 @@ pub fn quads<T: Copy>(
     })
 }
 
-/// The cells of a row that draw something, each with its column and how many cells it takes: every character but spaces and the second cells of wide ones.
+/// The cells of a row that draw something, each with its column and how many cells it takes: every character but spaces and the second cells of wide ones. A wide character always takes two, as its width says, so that it is never drawn shrunk into one; layout never leaves one without its second cell.
 pub fn placed<T: Copy>(cells: &[(char, T)]) -> impl Iterator<Item = (usize, char, usize, T)> + '_ {
     cells
         .iter()
         .enumerate()
         .filter(|(_, (ch, _))| *ch != ' ' && *ch != WIDE)
-        .map(|(column, &(ch, extra))| {
-            let wide = cells.get(column + 1).is_some_and(|(next, _)| *next == WIDE);
-            (column, ch, 1 + usize::from(wide), extra)
-        })
+        .map(|(column, &(ch, extra))| (column, ch, columns(ch), extra))
 }
 
 #[cfg(test)]
@@ -890,6 +926,122 @@ mod tests {
         );
         // A space has no glyph.
         assert_eq!(glyph(' ', 1, 0.0, 0.0, 12.0, false), None);
+    }
+
+    #[test]
+    fn text_is_measured_and_padded_by_the_cells_it_takes_as_drawn() {
+        assert_eq!(width(""), 0);
+        assert_eq!(width("abc"), 3);
+        // A CJK character takes two cells; an emoji, drawn `?`, and a composed accent, one; a zero-width joiner none.
+        assert_eq!(width("日本語"), 6);
+        assert_eq!(width("Tomoriは日本語"), 14);
+        assert_eq!(width("👍🏽 e\u{301}\u{200d}"), 3);
+        assert_eq!(pad("Ada", 6), "Ada   ");
+        assert_eq!(pad("山田", 6), "山田  ");
+        // Cut with "…" and padded where a wide character would cross the edge.
+        assert_eq!(pad("山田太郎", 6), "山田… ");
+        assert_eq!(pad("Alexander", 6), "Alexa…");
+        for text in ["", "Ada", "山田太郎", "Bob 佐藤 🎤", "Ｔｏｍｏｒｉ"] {
+            assert_eq!(width(&pad(text, 6)), 6, "{text}");
+        }
+    }
+
+    #[test]
+    fn compatibility_characters_are_drawn_as_their_letters() {
+        assert_eq!(drawn("\u{fb01}x"), "fx");
+        assert_eq!(shown('\u{2460}'), '1');
+    }
+
+    #[test]
+    fn a_wide_character_always_takes_two_cells_and_is_never_drawn_shrunk() {
+        // Even where its second cell was lost, as a cut by characters once did, it is drawn at its size across two cells.
+        let cells = [('a', ()), ('日', ()), ('本', ()), (WIDE, ())];
+        let placed: Vec<_> = placed(&cells).collect();
+        assert_eq!(
+            placed,
+            [(0, 'a', 1, ()), (1, '日', 2, ()), (2, '本', 2, ())]
+        );
+        assert!(!whole(&cells));
+        assert!(whole(&[('日', ()), (WIDE, ()), ('a', ())]));
+        assert!(!whole(&[(WIDE, ()), ('a', ())]));
+        assert!(!whole(&[('a', ()), (WIDE, ())]));
+        let quads: Vec<Quad> = quads(&cells, 0.0, 0.0, 11.0, |()| false)
+            .map(|(quad, ())| quad)
+            .collect();
+        // Both are drawn at a wide character's size, an em to seven eighths of the row.
+        for (quad, ch) in quads[1..].iter().zip(['日', '本']) {
+            let em = quad.width / atlas::glyph(ch).unwrap().bounds[2];
+            assert!((em - 11.0 * WIDE_EM).abs() < 0.01, "{ch}: {em}");
+        }
+        // Every rule that lays out a row leaves every wide character whole.
+        for text in [
+            "a日本",
+            "日本語のテキスト",
+            "Tomoriは日本語 🎉 mixed",
+            "x日y本z語",
+        ] {
+            for width in 1..12 {
+                assert!(
+                    whole(&cut(&[Span::new(text, WHITE)], width)),
+                    "{text} {width}"
+                );
+                for row in wrap(&[Span::new(text, WHITE)], width, Wrap::default()) {
+                    assert!(whole(&row), "{text} {width}");
+                }
+                for row in wrap(&[Span::new(text, WHITE)], width, CODE) {
+                    assert!(whole(&row), "{text} {width}");
+                }
+                let mut rows = wrap(&[Span::new(text, WHITE)], width, Wrap::default());
+                fit(&mut rows, 1, width);
+                assert!(
+                    rows.iter()
+                        .all(|row| whole(row) && row.len() <= width.max(2))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lines_of_japanese_keep_apart_in_rows_of_twelve_and_eleven() {
+        for row in [12.0, 11.0] {
+            for ch in "日本語のスペース。漢字龍鬱「」ぎゃ".chars() {
+                let quad = glyph(ch, 2, 0.0, 0.0, row, false).unwrap();
+                let glyph = atlas::glyph(ch).unwrap();
+                // The em box, inside the tile's margin, lies within the row with room above and below it.
+                let scale = quad.width / glyph.bounds[2];
+                let margin = atlas::SPREAD / glyph.scale * scale;
+                let (top, bottom) = (quad.y + margin, quad.y + quad.height - margin);
+                assert!(
+                    top >= -0.01 && bottom <= row + 0.01,
+                    "{ch} in {row}: {top} to {bottom}"
+                );
+                // And the em box, which the next row's characters reach to, is at least half a font pixel from the row's edges, so that neighbouring rows' ink stays a font pixel apart.
+                let baseline = quad.y + glyph.bounds[1] * scale;
+                let (em_top, em_bottom) = (
+                    baseline - CJK_ASCENT * scale,
+                    baseline + (1.0 - CJK_ASCENT) * scale,
+                );
+                assert!(
+                    em_top >= 0.5 && em_bottom <= row - 0.5,
+                    "{ch} in {row}: {em_top} to {em_bottom}"
+                );
+                assert!((scale - row * WIDE_EM).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn box_drawing_and_blocks_are_marked_to_join() {
+        for ch in ['─', '│', '┼', '█', '▌'] {
+            let quad = glyph(ch, 1, 0.0, 0.0, 12.0, false).unwrap();
+            assert!(quad.weight >= JOIN, "{ch}");
+            let bold = glyph(ch, 1, 0.0, 0.0, 12.0, true).unwrap();
+            assert!(
+                bold.weight > quad.weight && bold.weight < JOIN + 0.5,
+                "{ch}"
+            );
+        }
+        assert!(glyph('a', 1, 0.0, 0.0, 12.0, true).unwrap().weight < JOIN);
     }
 
     #[test]
