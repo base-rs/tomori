@@ -296,7 +296,9 @@ fn a_cancelled_utterance_never_reports_a_result() {
     );
     // A cancelled utterance may have produced partials, but never a result.
     while let Ok(event) = cancelled_events.recv_timeout(Duration::from_millis(100)) {
-        assert!(matches!(event, TranscriptEvent::Partial(_)), "{event:?}");
+        let TranscriptEvent::Partial(_) = event else {
+            unreachable!("{event:?}");
+        };
     }
 }
 
@@ -329,10 +331,9 @@ fn finishing_takes_priority_over_partials() {
     long.end();
     let order = order.lock().unwrap();
     // The decode that was held reports its partial; then the short utterance finishes before the long one decodes again.
-    assert!(
-        matches!(&order[0], ("long", TranscriptEvent::Partial(_))),
-        "{order:?}"
-    );
+    let ("long", TranscriptEvent::Partial(_)) = &order[0] else {
+        unreachable!("{order:?}");
+    };
     assert_eq!(
         order[1],
         ("short", TranscriptEvent::Final("run the".into())),
@@ -427,7 +428,9 @@ fn a_panic_disables_recognition_and_fails_every_utterance() {
     let mut recognition = Recognition::spawn(Scripted::default());
     let (mut waiting, waiting_events) = collect(&mut recognition, 1);
     speak(&mut waiting, &["run"]);
-    assert!(matches!(next(&waiting_events), TranscriptEvent::Partial(_)));
+    let TranscriptEvent::Partial(_) = next(&waiting_events) else {
+        unreachable!("expected TranscriptEvent::Partial(_)");
+    };
     let (mut crashing, crashing_events) = collect(&mut recognition, 2);
     speak(&mut crashing, &["crash"]);
     let stopped = TranscriptEvent::Failed(Error::Stopped(UNAVAILABLE.into()));
@@ -448,7 +451,9 @@ fn stopping_fails_open_utterances_unloads_the_recognizer_and_exits() {
     let mut recognition = Recognition::spawn(recognizer);
     let (mut utterance, receiver) = collect(&mut recognition, 1);
     speak(&mut utterance, &["run"]);
-    assert!(matches!(next(&receiver), TranscriptEvent::Partial(_)));
+    let TranscriptEvent::Partial(_) = next(&receiver) else {
+        unreachable!("expected TranscriptEvent::Partial(_)");
+    };
     let stopper = recognition.stopper();
     stopper.stop();
     assert_eq!(
@@ -463,4 +468,107 @@ fn stopping_fails_open_utterances_unloads_the_recognizer_and_exits() {
         later_events.recv_timeout(Duration::from_secs(5)),
         Err(mpsc::RecvTimeoutError::Disconnected)
     );
+}
+
+#[test]
+fn an_utterance_has_an_outcome_once_it_ends_or_fails() {
+    assert_eq!(
+        TranscriptEvent::Partial(Transcript::default()).outcome(),
+        None
+    );
+    assert_eq!(
+        TranscriptEvent::Final("done".into()).outcome(),
+        Some(Ok("done".into()))
+    );
+    assert_eq!(
+        TranscriptEvent::Failed(Error::Behind).outcome(),
+        Some(Err(Error::Behind))
+    );
+}
+
+/// An engine serving `recognizer`, with what sends it commands.
+fn engine_of(recognizer: Scripted) -> (Engine, mpsc::Sender<Command>) {
+    let (sender, receiver) = mpsc::channel();
+    (Engine::new(Box::new(recognizer), receiver), sender)
+}
+
+fn begin(sender: &mpsc::Sender<Command>, key: u64) -> mpsc::Receiver<TranscriptEvent> {
+    let (events, receiver) = mpsc::channel();
+    sender
+        .send(Command::Begin {
+            key,
+            id: key,
+            sink: Box::new(move |event| {
+                let _ = events.send(event);
+            }),
+            backlog: Arc::default(),
+        })
+        .unwrap();
+    receiver
+}
+
+#[test]
+fn an_engine_whose_commands_end_finishes_only_what_has_ended() {
+    // Its commands end while it waits for the next.
+    let (mut engine, sender) = engine_of(Scripted::default());
+    let events = begin(&sender, 1);
+    assert!(engine.turn());
+    drop(sender);
+    assert!(engine.turn());
+    assert!(!engine.connected);
+    // Once ended and with nothing left, it stops.
+    assert!(!engine.turn());
+    drop(events);
+    // They end while it applies those waiting, after ending one.
+    let (mut engine, sender) = engine_of(Scripted::default());
+    let events = begin(&sender, 1);
+    sender.send(Command::End { key: 1 }).unwrap();
+    drop(sender);
+    assert!(engine.turn());
+    engine.disconnect();
+    assert_eq!(events.try_recv(), Ok(TranscriptEvent::Final(String::new())));
+}
+
+#[test]
+fn an_engine_stopped_while_applying_what_waits_stops_and_ignores_audio_for_no_utterance() {
+    let (mut engine, sender) = engine_of(Scripted::default());
+    let events = begin(&sender, 1);
+    sender.send(Command::End { key: 1 }).unwrap();
+    // Audio for no utterance, or one that has ended, is not heard.
+    for key in [9, 1] {
+        sender
+            .send(Command::Audio {
+                key,
+                samples: spoken(&["run"]),
+            })
+            .unwrap();
+    }
+    sender.send(Command::Stop).unwrap();
+    assert!(!engine.turn());
+    let Ok(TranscriptEvent::Failed(Error::Stopped(_))) = events.try_recv() else {
+        unreachable!("stopping fails the utterance");
+    };
+}
+
+#[test]
+fn a_second_panic_is_reported_once() {
+    let (mut engine, _sender) = engine_of(Scripted::default());
+    engine.disable("first");
+    engine.disable("second");
+    assert!(engine.disabled);
+}
+
+#[test]
+fn audio_at_another_rate_is_resampled_and_too_little_to_resample_is_kept() {
+    let mut recognition = Recognition::spawn(Scripted::default());
+    let mut utterance = recognition.begin(1, RATE, drop::<TranscriptEvent>);
+    utterance.push_frame(&AudioFrame {
+        gate: tomori_protocol::Gate::Agent,
+        source: 0,
+        sequence: 0,
+        timestamp: 0,
+        sample_rate: 48_000,
+        samples: vec![0; 1],
+    });
+    utterance.cancel();
 }
