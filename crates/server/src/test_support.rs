@@ -321,6 +321,8 @@ pub struct TestClient {
     /// The role named in the welcome.
     pub role: tomori_protocol::ConnectionRole,
     sequence: u32,
+    /// Every control message received, as JSON, in order, whether or not a test has read it.
+    received: Arc<Mutex<Vec<String>>>,
 }
 
 impl TestClient {
@@ -347,6 +349,8 @@ impl TestClient {
         let (message_sender, messages) = channel();
         let (audio_sender, audio) = channel();
         let reader = stream.try_clone().unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let record = received.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -366,9 +370,14 @@ impl TestClient {
                 decoder.push(&chunk);
                 while let Some(frame) = decoder.next_frame().unwrap() {
                     let delivered = match frame.kind {
-                        FrameKind::Control => message_sender
-                            .send(frame.to_server_message().unwrap())
-                            .is_ok(),
+                        FrameKind::Control => {
+                            let message = frame.to_server_message().unwrap();
+                            record
+                                .lock()
+                                .unwrap()
+                                .push(serde_json::to_string(&message).unwrap());
+                            message_sender.send(message).is_ok()
+                        }
                         FrameKind::Audio => audio_sender.send(frame.to_audio().unwrap()).is_ok(),
                     };
                     if !delivered {
@@ -384,7 +393,13 @@ impl TestClient {
             source: 0,
             role: tomori_protocol::ConnectionRole::Unknown,
             sequence: 0,
+            received,
         }
+    }
+
+    /// Every control message received so far, as JSON, whether or not the test has read it.
+    pub fn received(&self) -> Vec<String> {
+        self.received.lock().unwrap().clone()
     }
 
     pub fn hello(&mut self, participant: &str, name: &str) {

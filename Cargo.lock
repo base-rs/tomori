@@ -3716,6 +3716,7 @@ dependencies = [
  "async-channel",
  "base-endpoint",
  "base-http",
+ "base-http-client",
  "base-http-server",
  "base-scheduler",
  "base-scheduler-native",
@@ -3736,6 +3737,7 @@ dependencies = [
  "tomori-protocol",
  "tomori-security",
  "tomori-speech",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]

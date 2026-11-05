@@ -173,6 +173,11 @@ pub struct SpaceState {
     /// client offers the change only when this is set. See `design/environments.md`.
     #[serde(default)]
     pub environment_changes: bool,
+    /// Whether the space's environment shows cards, the GitHub environment's issues and pull requests, which the server
+    /// sends a participant who asks with [`crate::ClientMessage::WatchCards`], and lets them place with
+    /// [`crate::ClientMessage::PlaceCard`]. False from older servers and in other environments. See `design/github.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cards: bool,
 }
 
 /// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and

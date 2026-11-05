@@ -65,6 +65,8 @@ pub struct Server {
     restoring: std::sync::Mutex<Vec<Restore>>,
     /// Whether the counts include how many spaces need attention; see [`Self::with_attention_advertised`].
     advertise_attention: bool,
+    /// Where the cards come from, for the spaces that show them; see [`Self::with_github`].
+    cards: Option<Arc<dyn crate::cards::CardSource>>,
 }
 
 /// Confirms or declines the pairing waiting, from outside the server, such as its console. See `design/security.md`.
@@ -147,6 +149,28 @@ where
     Ok(socket)
 }
 
+/// Read the cards from `source` on a thread of its own, or `None` once `cancellation` is cancelled first. A thread that cannot start, or ends without an answer, is a failed read.
+async fn read_cards(
+    source: Arc<dyn crate::cards::CardSource>,
+    cancellation: &Cancellation,
+) -> Option<Result<crate::cards::Fetched, crate::cards::Failure>> {
+    use crate::cards::Failure;
+    let (sender, receiver) = async_channel::bounded(1);
+    let started = crate::system::spawn("tomori-cards", move || {
+        let _ = sender.send_blocking(source.fetch());
+    });
+    if let Err(error) = started {
+        return Some(Err(Failure::new(format!(
+            "could not start reading: {error}"
+        ))));
+    }
+    match select(pin!(receiver.recv()), pin!(cancellation.cancelled())).await {
+        Either::Left((Ok(result), _)) => Some(result),
+        Either::Left((Err(_), _)) => Some(Err(Failure::new("reading ended without an answer"))),
+        Either::Right(_) => None,
+    }
+}
+
 impl Server {
     pub fn new(backends: Backends, transcriber: Arc<dyn Transcriber>) -> Self {
         let (sender, jobs) = async_channel::unbounded();
@@ -171,6 +195,7 @@ impl Server {
             tls: None,
             restoring: std::sync::Mutex::new(Vec::new()),
             advertise_attention: true,
+            cards: None,
         }
     }
 
@@ -229,6 +254,36 @@ impl Server {
     pub fn with_environments(self, environments: impl IntoIterator<Item = Environment>) -> Self {
         self.hub.set_environments(Environments::new(environments));
         self
+    }
+
+    /// Offer the GitHub environment, a prototype, whose spaces show `github`'s open issues and pull requests as cards
+    /// that participants lay out. The server reads them, read-only, with the token it holds, about once a minute while
+    /// someone watches them, and never sends the token to clients, the agent or the logs. Call it after
+    /// [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
+    pub fn with_github(self, github: crate::github::GitHub) -> Self {
+        self.with_cards(crate::github::ENVIRONMENT, "GitHub", Arc::new(github))
+    }
+
+    /// Offer the environment `id`, labelled `label`, whose spaces show the cards `source` reads.
+    pub(crate) fn with_cards(
+        mut self,
+        id: &str,
+        label: &str,
+        source: Arc<dyn crate::cards::CardSource>,
+    ) -> Self {
+        let name = source.source();
+        self.hub.offer_environment(
+            Environment::new(id, label).with_instructions(crate::github::instructions(&name)),
+        );
+        self.hub.set_board(crate::cards::Board::new(id, name));
+        self.cards = Some(source);
+        self
+    }
+
+    /// The environments offered.
+    #[cfg(test)]
+    pub(crate) fn environments(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
+        self.hub.environment_info()
     }
 
     /// Use `roots` unless roots were already given.
@@ -370,7 +425,7 @@ impl Server {
             services.cancel();
             served
         };
-        let (served, ((), ((), ((), ())))) = zip(
+        let (served, ((), ((), ((), ((), ()))))) = zip(
             serving,
             zip(
                 self.supervise(scheduler, &services),
@@ -378,7 +433,10 @@ impl Server {
                     self.sweep(scheduler, &services),
                     zip(
                         self.pace(scheduler, &services),
-                        self.publish(scheduler, counts, &services),
+                        zip(
+                            self.publish(scheduler, counts, &services),
+                            self.refresh_cards(scheduler, &services),
+                        ),
                     ),
                 ),
             ),
@@ -423,6 +481,37 @@ impl Server {
                 publish(counts);
                 published = counts;
                 due = scheduler.now() + self.counts_interval;
+            }
+        }
+    }
+
+    /// Read the cards whenever they are due while someone watches them, until cancelled; see [`crate::cards::Refresh`]. Each read runs on a thread of its own, as reading blocks; one still running when serving ends finishes within its own timeout, and is ignored.
+    async fn refresh_cards<S: Timers>(&self, scheduler: &S, cancellation: &Cancellation) {
+        let Some(source) = &self.cards else {
+            return;
+        };
+        let mut timer = scheduler.timer();
+        while !cancellation.is_cancelled() {
+            let listener = self.hub.listen_cards();
+            match self.hub.cards_next(scheduler.now()) {
+                crate::cards::Next::Now => {
+                    if let Some(result) = read_cards(source.clone(), cancellation).await {
+                        self.hub.cards_fetched(result, scheduler.now());
+                    }
+                }
+                crate::cards::Next::At(due) => {
+                    if let Err(error) = scheduler
+                        .timer_wait_until(&mut timer, due, cancellation)
+                        .await
+                        && !cancellation.is_cancelled()
+                    {
+                        log::error!("The cards timer failed: {error}");
+                        return;
+                    }
+                }
+                crate::cards::Next::Idle => {
+                    select(pin!(listener), pin!(cancellation.cancelled())).await;
+                }
             }
         }
     }
@@ -1733,6 +1822,102 @@ mod tests {
         block_on(scheduler.inner.shutdown());
     }
 
+    /// Cards read from a script, last first, after `delay`, panicking once it is empty.
+    struct Scripted {
+        delay: Duration,
+        results: Mutex<Vec<Result<crate::cards::Fetched, crate::cards::Failure>>>,
+    }
+
+    impl crate::cards::CardSource for Scripted {
+        fn source(&self) -> String {
+            "o/r".to_owned()
+        }
+
+        fn fetch(&self) -> Result<crate::cards::Fetched, crate::cards::Failure> {
+            std::thread::sleep(self.delay);
+            self.results
+                .lock()
+                .unwrap()
+                .pop()
+                .expect("the script has another read")
+        }
+    }
+
+    fn scripted(
+        delay: Duration,
+        results: Vec<Result<crate::cards::Fetched, crate::cards::Failure>>,
+    ) -> Arc<dyn crate::cards::CardSource> {
+        Arc::new(Scripted {
+            delay,
+            results: Mutex::new(results),
+        })
+    }
+
+    #[test]
+    fn cards_are_read_on_a_thread_of_their_own_and_a_lost_read_is_a_failure() {
+        use crate::cards::{Failure, Fetched};
+        let live = Cancellation::new();
+        let read = |source, cancellation: &Cancellation| block_on(read_cards(source, cancellation));
+        assert_eq!(
+            read(
+                scripted(Duration::ZERO, vec![Ok(Fetched::default())]),
+                &live
+            ),
+            Some(Ok(Fetched::default()))
+        );
+        // A read that panics answers nothing.
+        assert_eq!(
+            read(scripted(Duration::ZERO, Vec::new()), &live),
+            Some(Err(Failure::new("reading ended without an answer")))
+        );
+        crate::system::refuse("tomori-cards");
+        let refused = read(scripted(Duration::ZERO, Vec::new()), &live)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            refused.message.starts_with("could not start reading: "),
+            "{refused:?}"
+        );
+        // Serving ends while it reads: its answer is ignored.
+        let cancelled = Cancellation::new();
+        cancelled.cancel();
+        let slow = scripted(Duration::from_millis(200), vec![Ok(Fetched::default())]);
+        assert_eq!(read(slow, &cancelled), None);
+    }
+
+    #[test]
+    fn cards_wait_until_due_or_watched_and_a_failing_timer_ends_their_reading() {
+        let scheduler = Faulty {
+            failing_timers: true,
+            ..Faulty::new()
+        };
+        let live = Cancellation::new();
+        // A server without cards reads none.
+        block_on(server().refresh_cards(&scheduler, &live));
+        let server = server().with_cards("github", "GitHub", scripted(Duration::ZERO, Vec::new()));
+        assert!(
+            server
+                .environments()
+                .iter()
+                .any(|environment| environment.id == "github" && environment.label == "GitHub")
+        );
+        // Nobody watches, so it waits, until serving ends.
+        let later = Cancellation::new();
+        block_on(zip(server.refresh_cards(&scheduler, &later), async {
+            later.cancel()
+        }));
+        // Read just now, it waits until they are due, ending as the timer fails.
+        server
+            .hub
+            .cards_fetched(Ok(crate::cards::Fetched::default()), Instant::now());
+        block_on(server.refresh_cards(&scheduler, &live));
+        // A timer cancelled as serving ends is no failure.
+        let later = Cancellation::new();
+        block_on(zip(server.refresh_cards(&Faulty::new(), &later), async {
+            later.cancel()
+        }));
+    }
+
     #[test]
     fn timers_that_fail_end_the_sweep_the_pacing_the_counts_and_the_drain() {
         log::set_max_level(log::LevelFilter::Trace);
@@ -2054,6 +2239,7 @@ mod tests {
                         instructions: String::new(),
                         closed: None,
                         closed_order: None,
+                        placements: Default::default(),
                     }])
                 })
                 .unwrap();

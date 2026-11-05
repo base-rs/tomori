@@ -111,7 +111,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::SetSpeech { .. }
         | ClientMessage::Replay { .. }
         | ClientMessage::StopReplay
-        | ClientMessage::DecideKnock { .. } => participant,
+        | ClientMessage::DecideKnock { .. }
+        // Visitors see no cards in this prototype, as a repository may be private. See `design/github.md`.
+        | ClientMessage::WatchCards
+        | ClientMessage::PlaceCard { .. } => participant,
     };
     if permitted {
         None

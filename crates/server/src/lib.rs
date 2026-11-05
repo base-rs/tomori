@@ -13,12 +13,14 @@ mod application;
 pub mod auth_command;
 mod backends;
 mod builder;
+mod cards;
 mod command;
 mod connection;
 mod door;
 mod environments;
 #[cfg(unix)]
 mod exit;
+pub mod github;
 mod hub;
 mod instructions;
 pub mod kept;

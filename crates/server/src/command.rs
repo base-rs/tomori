@@ -24,6 +24,7 @@ pub(crate) fn usage(backends: &str) -> String {
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
                                           [--auth MODE] [--no-visitors]
                      [--max-visitors COUNT] [--state-directory PATH]
+                     [--github-repository OWNER/NAME]
        tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
 
 Options:
@@ -79,6 +80,11 @@ Options:
                                                                      Where the token store, the certificate and the spaces kept across restarts
                        are (default $XDG_STATE_HOME/tomori, or ~/.local/state/tomori). One server
                        at a time uses a state directory, so give each server its own.
+  --github-repository OWNER/NAME
+                       Offer the GitHub environment, a prototype, whose spaces show this repository's
+                       open issues and pull requests as cards to lay out. The server reads them,
+                       read-only, with the token in GITHUB_TOKEN, or else from `gh auth token`, and
+                       never sends the token to clients or the agent.
   --help               Show this help."
     )
 }
@@ -111,6 +117,8 @@ pub(crate) struct Arguments {
     visitors: bool,
     max_visitors: usize,
     state_directory: Option<PathBuf>,
+    /// The repository whose cards the GitHub environment shows, if it is offered.
+    github_repository: Option<crate::github::Repository>,
 }
 
 /// The state directory from the environment; see [`crate::auth_command::default_state_directory`].
@@ -158,6 +166,7 @@ pub(crate) fn parse(
         visitors: true,
         max_visitors: crate::DEFAULT_MAX_VISITORS,
         state_directory: None,
+        github_repository: None,
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -285,6 +294,14 @@ pub(crate) fn parse(
                         .next()
                         .ok_or("--state-directory needs a directory")?
                         .into(),
+                )
+            }
+            "--github-repository" => {
+                parsed.github_repository = Some(
+                    arguments
+                        .next()
+                        .ok_or("--github-repository needs OWNER/NAME")?
+                        .parse()?,
                 )
             }
             "--help" | "-h" => return Err(usage.to_owned()),
@@ -894,10 +911,32 @@ pub(crate) fn configure(
         server = server.with_request_timeout(timeout);
     }
     let server = synthesis(server, root, &arguments.speech_segmentation, engines);
+    let server = github(
+        server,
+        arguments,
+        std::env::var_os("GITHUB_TOKEN"),
+        std::process::Command::new("gh").args(["auth", "token"]),
+    )?;
     Ok((
         hooks.into_iter().fold(server, |server, hook| hook(server)),
         fingerprint,
     ))
+}
+
+/// `server` offering the GitHub environment, if `arguments` name a repository, with the token in `variable`, the value of `GITHUB_TOKEN`, or else from `command`, `gh auth token`.
+fn github(
+    server: Server,
+    arguments: &Arguments,
+    variable: Option<std::ffi::OsString>,
+    command: &mut std::process::Command,
+) -> Result<Server, String> {
+    let Some(repository) = &arguments.github_repository else {
+        return Ok(server);
+    };
+    crate::github::Token::find(variable, command).map(|token| {
+        eprintln!("GitHub environment: showing {repository}, read-only.");
+        server.with_github(crate::github::GitHub::new(repository.clone(), token))
+    })
 }
 
 /// Listen where `arguments` say, advertise with `start` unless turned off, and serve until `cancellation`, withdrawing the advertisement as soon as serving ends.
@@ -1043,6 +1082,14 @@ mod tests {
                 "--speech-segmentation needs block or sentence, not \"word\"",
             ),
             (&["--name"], "--name needs a name"),
+            (
+                &["--github-repository"],
+                "--github-repository needs OWNER/NAME",
+            ),
+            (
+                &["--github-repository", "tomori"],
+                "--github-repository needs OWNER/NAME, such as ioquatix/tomori, not \"tomori\"",
+            ),
             (
                 &["--max-visitors", "many"],
                 "--max-visitors needs a count, not \"many\"",
@@ -1908,5 +1955,26 @@ mod tests {
             roots.roots(),
             [std::env::temp_dir().canonicalize().unwrap()]
         );
+    }
+
+    #[test]
+    fn the_github_environment_is_offered_only_with_a_repository_and_a_token() {
+        let server = || Server::new(Backends::new(), Arc::new(NullTranscriber::new()));
+        let offered = |server: &Server| {
+            server
+                .environments()
+                .iter()
+                .any(|environment| environment.id == crate::github::ENVIRONMENT)
+        };
+        let mut never = std::process::Command::new("/nonexistent/gh");
+        // Without the flag, no token is looked for.
+        let plain = github(server(), &arguments(&[]).unwrap(), None, &mut never).unwrap();
+        assert!(!offered(&plain));
+        // With it, the token is looked for; finding it with `gh` is tested in `tests/github_token.rs`.
+        let flagged = arguments(&["--github-repository", "ioquatix/tomori"]).unwrap();
+        let token = Some("not-a-real-token".into());
+        assert!(offered(
+            &github(server(), &flagged, token, &mut never).unwrap()
+        ));
     }
 }
