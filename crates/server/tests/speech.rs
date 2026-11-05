@@ -1113,6 +1113,103 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
     );
 }
 
+/// The message a participant is told for words with no speech in them.
+const NO_SPEECH: &str = "no speech heard";
+
+/// Record `seconds` of silence as utterance `id`, as when the participant pressed to talk by accident.
+fn record_silence(client: &mut TestClient, id: &str, seconds: usize) {
+    begin(client, id, false);
+    for _ in 0..seconds * 50 {
+        client.send_audio(Gate::Agent, vec![0; FRAME_SAMPLES]);
+    }
+    end(client, id);
+}
+
+/// That nothing has been queued in `client`'s space, or sent to the agent.
+fn assert_nothing_sent(server: &TestServer, client: &mut TestClient) {
+    client.send(&ClientMessage::Ping { nonce: 7 });
+    client.wait_for(|message| matches!(message, ServerMessage::Pong { nonce: 7 }).then_some(()));
+    assert!(
+        server
+            .backend
+            .started()
+            .iter()
+            .all(|session| session.log().prompts.is_empty())
+    );
+}
+
+#[test]
+fn a_streaming_recording_with_no_speech_in_it_is_not_sent() {
+    let server = recognizing_server(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Silence");
+    record_silence(&mut ada, "u1", 1);
+    assert_eq!(failure(&mut ada, "u1"), NO_SPEECH);
+    assert_nothing_sent(&server, &mut ada);
+}
+
+/// An offline recognizer that hears every clip as its text.
+struct Hearing(&'static str);
+
+impl tomori_speech::stt::OfflineRecognizer for Hearing {
+    fn transcribe(&mut self, _: &[i16]) -> Result<String, Error> {
+        Ok(self.0.to_owned())
+    }
+}
+
+#[test]
+fn an_offline_recording_heard_only_as_noise_is_not_sent() {
+    for heard in ["[BLANK_AUDIO]", "(static)"] {
+        let server = TestServer::with_server(FakeBackend::manual(), move |backends| {
+            Server::new(
+                backends,
+                Arc::new(tomori_server::OfflineTranscriber::new(Hearing(heard), None)),
+            )
+        });
+        let mut ada = server.connect("ada", "Ada");
+        ada.create_space("Noise");
+        record_silence(&mut ada, "u1", 1);
+        assert_eq!(failure(&mut ada, "u1"), NO_SPEECH, "{heard}");
+        assert_nothing_sent(&server, &mut ada);
+    }
+}
+
+/// With Whisper and the Silero detector, as the server runs the offline backend, a recording of silence is not sent. Skipped without both models; see [`tomori_speech::test_models`].
+#[test]
+fn an_offline_recording_of_silence_is_not_sent_with_whisper_and_silero() {
+    use tomori_speech::stt::{SileroVad, SileroVadConfig, WhisperConfig};
+    use tomori_speech::test_models::{self, WHISPER_MODEL};
+
+    let root = test_models::root();
+    let whisper = WhisperConfig::named(&root, WHISPER_MODEL);
+    let vad = SileroVadConfig::from_root(&root);
+    test_models::with(
+        "the Whisper and Silero voice activity models",
+        "bash scripts/fetch-asr-model.sh whisper tiny.en",
+        &[&whisper.model, &vad.model],
+        || {
+            let (whisper, vad) = (whisper.clone(), vad.clone());
+            let server = TestServer::with_server(FakeBackend::manual(), move |backends| {
+                let recognizer = tomori_server::offline::Whisper::new(&whisper).unwrap();
+                let voice: Box<dyn tomori_speech::stt::VoiceActivity> =
+                    Box::new(SileroVad::new(&vad).unwrap());
+                Server::new(
+                    backends,
+                    Arc::new(tomori_server::OfflineTranscriber::new(
+                        recognizer,
+                        Some(voice),
+                    )),
+                )
+            });
+            let mut ada = server.connect("ada", "Ada");
+            ada.create_space("Silence");
+            record_silence(&mut ada, "u1", 2);
+            assert_eq!(failure(&mut ada, "u1"), NO_SPEECH);
+            assert_nothing_sent(&server, &mut ada);
+        },
+    );
+}
+
 /// A stage of an utterance's transcription, and the part being transcribed.
 type Progress = (TranscriptStage, Option<TranscriptPart>);
 

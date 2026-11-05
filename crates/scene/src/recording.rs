@@ -591,6 +591,16 @@ mod tests {
         assert!(text(&failed).ends_with("B dismisses"));
         assert_eq!(failed.rows.len(), 4);
         assert_eq!(failed.border, Some(RED));
+        // The server's reason for a recording with no speech in it reads on from "Not sent:".
+        let silent = canvas(
+            &Phase::Failed {
+                reason: "no speech heard".into(),
+            },
+            None,
+            0.0,
+        );
+        assert_eq!(silent.rows.len(), 2);
+        assert!(text(&silent).starts_with("Not sent: no speech heard"));
     }
 
     #[test]

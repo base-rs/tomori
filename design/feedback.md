@@ -13,7 +13,7 @@ This describes how a client tells the participant, by sound and by controller vi
 | Recording starts | X opens the microphone for push-to-talk | a short rising tick, only when the live microphone is off | 25 ms at 0.6 | left |
 | Recording stops | X is released and the words are on their way | none | 15 ms at 0.35 | left |
 | Sent | the server finishes transcribing this participant's words, queued or answered | two rising notes | none | — |
-| Not sent | the microphone fails, or fails to turn live; this participant's words fail to record, end or transcribe, or are lost as the connection drops while they are recorded; or a request cannot be sent | two falling low notes | two taps of 30 ms at 0.7, 80 ms apart | left for the microphone and words, right otherwise |
+| Not sent | the microphone fails, or fails to turn live; this participant's words fail to record, end or transcribe, have no speech in them, or are lost as the connection drops while they are recorded; or a request cannot be sent | two falling low notes | two taps of 30 ms at 0.7, 80 ms apart | left for the microphone and words, right otherwise |
 | Request waiting | an approval or question appears in the space, once for those arriving together, including on joining | a three-note chime | three taps of 25 ms at 0.6 | right |
 | Request reminder | a request still waits after 60 seconds and the participant has not looked at it, by opening the right wrist's transcript or focusing the request there; once | the chime, quieter | one tap | right |
 | Catching up | speech played again starts that the participant did not ask for, on joining or returning (see `speech.md`) | a soft falling swell | none | — |

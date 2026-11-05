@@ -1208,10 +1208,7 @@ fn a_transcript_comes_to_nothing_for_an_utterance_unknown_unheard_or_left_behind
     };
     let (utterance, text) = spoken("  ");
     hub.transcript_finished(utterance, &text);
-    assert_eq!(
-        failure(&client).as_deref(),
-        Some("Nothing was heard, so nothing was sent.")
-    );
+    assert_eq!(failure(&client).as_deref(), Some("no speech heard"));
     let (utterance, text) = spoken("Deploy it.");
     client.send(ClientMessage::Leave);
     client.read();
