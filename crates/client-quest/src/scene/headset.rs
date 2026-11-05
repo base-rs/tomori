@@ -592,7 +592,7 @@ impl Headset {
                 .map(|joint| Vec3::from_array(joint.position)),
             view: scene_head.map(crate::controller_ui::view_spot),
         };
-        // The hand menu shows above the left wrist while the left palm faces the head, from hand tracking or else the left controller. Pinned with Y, it stands above the left controller facing the head, whatever its angle.
+        // The hand menu shows above the left wrist while the left palm is turned up, from hand tracking or else the left controller. Pinned with Y, it stands above the left controller facing the head, whatever its angle.
         let left_palm = if self.step.pinned() {
             trackers
                 .target(Vec3::new(0.0, 0.03, 0.0))
@@ -606,20 +606,20 @@ impl Headset {
         } else {
             tracked[controller::LEFT]
                 .as_ref()
-                .and_then(Palm::from_left_hand)
+                .and_then(|hand| Palm::from_hand(Side::Left, hand))
                 .or_else(|| {
                     controllers[controller::LEFT]
                         .as_ref()
-                        .and_then(Palm::from_left_controller)
+                        .and_then(|pose| Palm::from_controller(Side::Left, pose))
                 })
         };
         // The right palm shows the transcript, from the right controller, or else hand tracking, which only reads.
         let right_controller = controllers[controller::RIGHT]
             .as_ref()
-            .and_then(Palm::from_right_controller);
+            .and_then(|pose| Palm::from_controller(Side::Right, pose));
         let right_hand = tracked[controller::RIGHT]
             .as_ref()
-            .and_then(Palm::from_right_hand);
+            .and_then(|hand| Palm::from_hand(Side::Right, hand));
         let senses = Senses {
             focused: self.focused,
             head: scene_head,
@@ -1300,6 +1300,57 @@ mod tests {
     }
 
     #[test]
+    fn the_left_controller_rolled_palm_up_shows_the_menu_as_the_right_shows_the_transcript() {
+        let mut rig = Rig::new(joined());
+        // The left hand rolls outwards the other way, so its grip mirrors the right's, low in front and to the left.
+        let left_grip = |degrees: f32| {
+            let turn = Quat::from_rotation_z(-degrees.to_radians())
+                * Quat::from_rotation_z(90f32.to_radians());
+            Controls {
+                controller_poses: [
+                    Some(Pose {
+                        position: [-0.2, 1.1, -0.35],
+                        orientation: turn.to_array(),
+                    }),
+                    None,
+                ],
+                ..Controls::default()
+            }
+        };
+        let neutral = Controls {
+            controller_poses: [
+                Some(Pose {
+                    position: [-0.2, 1.1, -0.35],
+                    orientation: Quat::IDENTITY.to_array(),
+                }),
+                None,
+            ],
+            ..Controls::default()
+        };
+        for (controls, shown, at) in [
+            (&neutral, false, 0),
+            (&neutral, false, 300),
+            (&left_grip(40.0), false, 400),
+            (&left_grip(40.0), false, 500),
+            (&left_grip(40.0), true, 600),
+            (&left_grip(-50.0), true, 700),
+            (&left_grip(60.0), false, 800),
+            (&left_grip(50.0), false, 900),
+            (&left_grip(50.0), false, 1200),
+        ] {
+            let drawn = rig.frame(controls, [None, None], Duration::from_millis(at));
+            assert_eq!(
+                drawn
+                    .frame
+                    .arrival
+                    .is_some_and(|arrival| !arrival.scene.objects.is_empty()),
+                shown,
+                "at {at} ms"
+            );
+        }
+    }
+
+    #[test]
     fn the_transcript_faces_the_middle_of_the_head() {
         let mut rig = Rig::new(joined());
         rig.frame(&right_grip(palm_up_by(0.0)), [None, None], Duration::ZERO);
@@ -1385,9 +1436,9 @@ mod tests {
     }
 
     #[test]
-    fn a_tracked_left_hand_faces_its_palm_at_the_head_to_show_the_menu() {
+    fn a_tracked_left_hand_turned_palm_up_shows_the_menu() {
         let mut rig = Rig::new(joined());
-        // A left hand held up in front, its palm towards the head: the little finger crossed with the index points out of the palm.
+        // A left hand held up in front, its palm up: the little finger crossed with the index points out of the palm.
         let wrist = Vec3::new(0.0, 1.55, -0.35);
         let mut joints = [Joint::default(); hands::JOINT_COUNT];
         for (index, joint) in joints.iter_mut().enumerate() {
@@ -1398,8 +1449,8 @@ mod tests {
             };
         }
         joints[1].position = wrist;
-        joints[7].position = wrist + Vec3::new(0.0, 0.08, 0.0);
-        joints[22].position = wrist + Vec3::new(0.07, 0.07, 0.0);
+        joints[7].position = wrist + Vec3::new(0.0, 0.0, -0.08);
+        joints[22].position = wrist + Vec3::new(0.07, 0.0, 0.0);
         let hands = [Some(joints), None];
         rig.frame(&Controls::default(), hands, Duration::ZERO);
         let drawn = rig.frame(&Controls::default(), hands, HOLD);

@@ -86,7 +86,7 @@
 
 - A visitor can knock to take part in the space they watch, and its participants let them in or turn them away; someone let in becomes a collaborator in that space.
 
-- Turn your left palm, or left controller, towards your face to show the hand menu above your wrist: its People & security section shows who is here, how many visitors are watching, knocks waiting, pairing and notices, and flashes when someone knocks.
+- Turn your left palm up, or roll the left controller palm up, within about 45° of straight up, to show the hand menu above your wrist, as the right palm shows the transcript: its People & security section shows who is here, how many visitors are watching, knocks waiting, pairing and notices, and flashes when someone knocks.
 
 - Pair the headset with a server to make it an owner, without copying a token: choose the gold key beside the connected server, and confirm the 6-digit code it shows by typing it on the server's console, or on the owners' status page. Pairing also restores trust in a server whose certificate changed. In `--console`, `p` pairs.
 

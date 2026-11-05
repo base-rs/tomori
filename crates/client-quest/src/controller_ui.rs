@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Vec2, Vec3};
 
 use crate::conversation::Conversation;
-use crate::hand_menu::{Palm, Visibility};
+use crate::hand_menu::{Palm, PalmUp};
 use crate::panel_anchor::PanelAnchor;
 use crate::recording::{self, Anchor, Trackers};
 use crate::transcript::{DETACHED_COLUMNS, WRIST_COLUMNS};
@@ -112,11 +112,6 @@ pub fn pill(conversation: &mut Conversation, now: Instant, hidden: bool, pose: M
         model: Some(pose * Mat4::from_translation(PILL_OFFSET - Vec3::Y * (height / 2.0))),
     }
 }
-
-/// The transcript shows once the right palm has faced within this angle of straight up for [`HOLD`](crate::hand_menu::HOLD), whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up.
-pub const WRIST_SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
-/// It hides once the palm has turned further than this from straight up, so that it does not flicker at the edge.
-pub const WRIST_HIDE_ANGLE: f32 = 55.0 * std::f32::consts::PI / 180.0;
 
 /// The size of the transcript's font pixel on the wrist, and once detached, further away.
 pub const WRIST_PIXEL: f32 = 0.001;
@@ -232,7 +227,7 @@ pub struct WristFrame {
 /// Whether the right wrist's transcript is shown, on the wrist or detached into the world.
 #[derive(Clone, Debug, Default)]
 pub struct WristState {
-    visibility: Visibility,
+    palm_up: PalmUp,
     on_hand: bool,
     detached: Option<PanelAnchorState>,
 }
@@ -262,20 +257,13 @@ impl WristState {
             return false;
         }
         if frame.menu_pinned {
-            self.visibility = Visibility::default();
+            self.palm_up = PalmUp::default();
             self.on_hand = false;
             return false;
         }
-        // While the left menu shows, or the right hand points, it does not show, but it stays if it already shows.
+        // The right palm turned up shows it, as the left shows the hand menu. While the left menu shows, or the right hand points, it does not show, but it stays if it already shows.
         let blocked = !self.on_hand && (frame.menu_shown || frame.pointing);
-        // Only how far the palm is from facing up counts, not where the head is.
-        let angle = frame
-            .palm
-            .filter(|_| !blocked)
-            .map(|palm| palm.angle_to_up());
-        let shown = self
-            .visibility
-            .update_within(angle, WRIST_SHOW_ANGLE, WRIST_HIDE_ANGLE, now);
+        let shown = self.palm_up.update(frame.palm.filter(|_| !blocked), now);
         let was = self.on_hand;
         // Detached, turning the wrist shows no second copy.
         self.on_hand = shown && self.detached.is_none();
@@ -433,6 +421,7 @@ mod tests {
     use super::*;
 
     use crate::controller;
+    use crate::feedback::Hand as Side;
     use crate::hand_menu::{HOLD, head_centre, head_turned};
     use glam::Quat;
 
@@ -456,7 +445,7 @@ mod tests {
     fn controller_frame(pose: controller::Pose, yaw: f32) -> WristFrame {
         let head = head_turned(NECK, yaw, -20.0);
         WristFrame {
-            palm: Palm::from_right_controller(&pose),
+            palm: Palm::from_controller(Side::Right, &pose),
             head: Some(head),
             viewer: Some(head_centre(head)),
             in_space: true,
@@ -482,10 +471,10 @@ mod tests {
     #[test]
     fn the_right_palm_faces_inwards_in_a_neutral_grip_and_up_when_rolled_out() {
         // OpenXR's grip +X points into the right palm, so the palm faces along -X: in a neutral grip, to the left, towards the body.
-        let neutral = Palm::from_right_controller(&grip(Quat::IDENTITY)).unwrap();
+        let neutral = Palm::from_controller(Side::Right, &grip(Quat::IDENTITY)).unwrap();
         assert!(neutral.normal.dot(-Vec3::X) > 0.999, "{:?}", neutral.normal);
         assert!((neutral.angle_to_up().to_degrees() - 90.0).abs() < 0.01);
-        let up = Palm::from_right_controller(&grip(palm_up())).unwrap();
+        let up = Palm::from_controller(Side::Right, &grip(palm_up())).unwrap();
         assert!(up.normal.dot(Vec3::Y) > 0.999, "{:?}", up.normal);
     }
 

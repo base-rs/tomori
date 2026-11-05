@@ -186,12 +186,12 @@ impl Head {
         }
     }
 
-    /// A left palm held up in front of the participant, facing them, where the hand menu shows while it is open.
+    /// A left palm turned up in front of the participant, as the gesture that shows the hand menu turns it, where the menu shows while it is open.
     fn palm(&self) -> Palm {
-        let wrist = arrival::HOME + self.rotation() * Vec3::new(-0.06, -0.14, -0.45);
+        let wrist = arrival::HOME + self.rotation() * Vec3::new(-0.06, -0.2, -0.45);
         Palm {
             wrist,
-            normal: (arrival::HOME - wrist).normalize(),
+            normal: Vec3::Y,
         }
     }
 }
@@ -472,14 +472,13 @@ mod tests {
     }
 
     #[test]
-    fn the_palms_are_in_view_the_left_facing_the_eye_and_the_right_turned_up() {
+    fn the_palms_are_in_view_and_both_turned_up() {
         let head = Head {
             yaw: -1.2,
             pitch: 0.3,
         };
         let palm = head.palm();
-        let to_eye = (arrival::HOME - palm.wrist).normalize();
-        assert!(palm.normal.dot(to_eye) > 0.999);
+        assert_eq!(palm.normal, Vec3::Y);
         let right = head.right_palm();
         assert_eq!(right.normal, Vec3::Y);
         // Within the 60° vertical field of view, so the menu shows in the window.
