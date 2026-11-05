@@ -2727,24 +2727,7 @@ fn start_resyncs<'a, S: Timers>(
                     };
                     (result, rest, missing)
                 },
-                async {
-                    // Optional, like the listing at attach: a failure keeps
-                    // the modes already known.
-                    let modes_cancel = listing.child();
-                    futures_lite::future::race(
-                        async {
-                            let info = api::session_info(client, resolved, &id, &modes_cancel)
-                                .await
-                                .ok()?;
-                            Some(modes(client, resolved, &directory, &info, &modes_cancel).await)
-                        },
-                        async {
-                            let _ = timers.sleep(SNAPSHOT_TIMEOUT, &modes_cancel).await;
-                            None
-                        },
-                    )
-                    .await
-                },
+                bounded_modes(client, resolved, &id, &directory, &listing, timers),
             )
             .await;
             local.cancel();
@@ -2759,6 +2742,30 @@ fn start_resyncs<'a, S: Timers>(
             }
         }));
     }
+}
+
+/// The modes of session `id` in `directory`, read again within [`SNAPSHOT_TIMEOUT`]: the agent its record names, among those listed again. Optional, like the listing at attach: `None` if its record cannot be read in time, or the read is cancelled, which keeps the modes already known.
+async fn bounded_modes<S: Timers>(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    id: &str,
+    directory: &str,
+    cancellation: &Cancellation,
+    timers: &S,
+) -> Option<Modes> {
+    futures_lite::future::race(
+        async {
+            let info = api::session_info(client, resolved, id, cancellation)
+                .await
+                .ok()?;
+            Some(modes(client, resolved, directory, &info, cancellation).await)
+        },
+        async {
+            let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
+            None
+        },
+    )
+    .await
 }
 
 /// The workers among `omitted` that OpenCode answers do not exist, looked up
@@ -11642,6 +11649,44 @@ mod tests {
             );
             assert_eq!(restores.len(), MAX_RESYNCS);
         });
+    }
+
+    #[test]
+    fn modes_read_again_are_listed_or_none_when_the_record_cannot_be_read_in_time() {
+        let listed = crate::api::tests::service(agents);
+        let modes = crate::api::tests::with_client(
+            listed,
+            async |client, resolved, cancellation, scheduler| {
+                bounded_modes(client, resolved, "s", "/tmp", cancellation, scheduler).await
+            },
+        );
+        let offered: Vec<_> = modes
+            .unwrap()
+            .offered
+            .into_iter()
+            .map(|mode| mode.id)
+            .collect();
+        assert_eq!(offered, ["plan"]);
+        // A record that cannot be read.
+        let refused = crate::api::tests::unreachable_port();
+        let modes = crate::api::tests::with_client(
+            refused,
+            async |client, resolved, cancellation, scheduler| {
+                bounded_modes(client, resolved, "s", "/tmp", cancellation, scheduler).await
+            },
+        );
+        assert!(modes.is_none());
+        // A service that never answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let modes = crate::api::tests::with_client(
+            port,
+            async |client, resolved, cancellation, scheduler| {
+                let timers = Hurried::new(scheduler, 0, false);
+                bounded_modes(client, resolved, "s", "/tmp", cancellation, &timers).await
+            },
+        );
+        assert!(modes.is_none());
     }
 
     fn messages(_method: &str, _path: &str) -> (&'static str, String) {
