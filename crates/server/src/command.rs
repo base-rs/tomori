@@ -1661,6 +1661,19 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn a_server_whose_scheduler_cannot_start_says_so_and_fails() {
+        let directory = directory("no-scheduler");
+        let arguments = local(&directory, &["--auth", "open"]);
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        crate::system::refuse("scheduler");
+        assert_eq!(
+            crate::process::serve_until_signalled(server, &arguments, fingerprint),
+            Err("Could not start the scheduler: the system refused scheduler".to_owned())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     /// Begin pairing as a device does, and reveal, returning the code it derives.
     fn pair(
         client: &mut crate::test_support::TestClient,

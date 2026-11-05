@@ -103,5 +103,5 @@ tomori-security = { version = "0.1.0", path = "../security", features = ["issue"
 tomori-client = { version = "0.1.0", path = "../client" }
 
 [[package.metadata.bake.test.coverage.exclude]]
-path = "src/process.rs"
-reason = "The server process's calls to the operating system: creating its scheduler and console thread, which fail only when the system refuses them, handling signals, and ending at once with _exit, after which the process writes no coverage."
+path = "src/exit.rs"
+reason = "Ends the process at once with _exit, after which it writes no coverage."

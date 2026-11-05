@@ -17,6 +17,8 @@ mod command;
 mod connection;
 mod door;
 mod environments;
+#[cfg(unix)]
+mod exit;
 mod hub;
 mod instructions;
 pub mod kept;
@@ -34,6 +36,7 @@ mod recognition;
 mod retention;
 mod server;
 mod space;
+mod system;
 mod transcriber;
 mod voice;
 mod workspace;
