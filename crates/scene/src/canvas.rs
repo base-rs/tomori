@@ -70,7 +70,7 @@ impl Canvas {
     }
 
     /// The text, a row per line.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn plain(&self) -> String {
         self.rows
             .iter()

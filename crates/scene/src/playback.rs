@@ -4,6 +4,10 @@
 //! The platform speaker, which plays other participants and the agent's speech through the client's [`tomori_client::playback::Player`]. See `design/live-audio.md`.
 //!
 //! The output stream stays open while connected. It opens and closes on its own thread, so that the frame does not wait for the device. Its callback renders the player at the device rate; [`crate::connection::Connection`] controls the player and silences it while push-to-talk records.
+//!
+//! # Device adapters
+//!
+//! Each client's speaker is a [`Playback`], which its own crate implements over the platform's audio interface. Its output callback calls [`render_channels`] with the device's rate and channel count, which never waits for the player, so that the callback cannot stall the device.
 
 use std::sync::{
     Arc, Mutex,
@@ -115,7 +119,7 @@ pub fn start(
 }
 
 /// Render the player at `sample_rate` into `output`, mono or interleaved stereo, or silence if another stream holds it.
-pub fn render(player: &Shared, sample_rate: u32, layout: Layout, output: &mut [i16]) {
+fn render(player: &Shared, sample_rate: u32, layout: Layout, output: &mut [i16]) {
     match player.try_lock() {
         Ok(mut player) => player.render(sample_rate, layout, output),
         // A stream that is being replaced, or a poisoned player, plays nothing rather than waiting.
@@ -123,7 +127,7 @@ pub fn render(player: &Shared, sample_rate: u32, layout: Layout, output: &mut [i
     }
 }
 
-/// Render into `output`, `channels` interleaved samples per frame: mono for one channel, and otherwise stereo in the first two with the rest silent. `stereo` is scratch space, kept between calls.
+/// Render the player at `sample_rate` into `output`, from a device adapter's output callback: `channels` interleaved samples per frame, mono for one channel, and otherwise stereo in the first two with the rest silent. It plays silence, rather than waiting, while another stream holds the player. `stereo` is scratch space, kept between calls.
 pub fn render_channels(
     player: &Shared,
     sample_rate: u32,

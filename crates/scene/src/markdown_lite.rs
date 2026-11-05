@@ -53,7 +53,7 @@ pub struct Block {
 
 impl Block {
     /// The block's text without its marks.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn plain(&self) -> String {
         self.text.iter().map(|(text, _)| text.as_str()).collect()
     }

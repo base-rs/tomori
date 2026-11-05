@@ -445,7 +445,7 @@ impl Conversation {
     }
 
     /// Queue `action` as though the conversation had asked for it.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn push_action(&mut self, action: Action) {
         self.actions.push(action);
     }
@@ -1418,7 +1418,7 @@ impl Conversation {
         self.pairing = Some(Pairing::Waiting(code, began));
     }
 
-    /// Give up on a pairing that has waited longer than [`PAIRING_PATIENCE`] at `now`, cancelling it on the server. Called every frame.
+    /// Give up on a pairing that has waited longer than the device waits for one, the server's timeout and a margin, at `now`, cancelling it on the server. Called every frame.
     pub fn expire_pairing(&mut self, now: Instant) {
         let began = match &self.pairing {
             Some(Pairing::Committed(_, began) | Pairing::Waiting(_, began)) => *began,
@@ -1764,7 +1764,7 @@ impl Conversation {
     }
 
     /// Whether the right stick up and down selects queued entries now, rather than doing anything else.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn selects_queue(&self) -> bool {
         self.mode == Mode::Space
             && self.role.participates()
@@ -3274,7 +3274,7 @@ impl Conversation {
     }
 
     /// The problem to show: this participant's newest error, else the space's ongoing problem unless dismissed here.
-    pub fn problem(&self) -> Option<String> {
+    pub(crate) fn problem(&self) -> Option<String> {
         self.error.clone().or_else(|| {
             self.space
                 .as_ref()

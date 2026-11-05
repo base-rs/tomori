@@ -26,8 +26,8 @@ pub mod haptics;
 pub mod identity;
 pub mod interaction;
 pub mod log_cadence;
-pub mod markdown_lite;
-pub mod panel_anchor;
+mod markdown_lite;
+mod panel_anchor;
 pub mod pill;
 pub mod playback;
 pub mod pointing;
@@ -35,9 +35,9 @@ pub mod recording;
 pub mod scene;
 pub mod server_choice;
 pub mod spatial_audio;
-pub mod speakers;
+mod speakers;
 pub mod swarm;
-pub mod system;
+mod system;
 /// Devices and connections for tests, shared with the other client crates' tests through the `testing` feature.
 #[cfg(all(any(test, feature = "testing"), not(target_os = "android")))]
 pub mod test_support;

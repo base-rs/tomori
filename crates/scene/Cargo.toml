@@ -10,7 +10,7 @@ license.workspace = true
 publish = false
 
 [features]
-# `test_support`: a microphone and a speaker without hardware, and a TLS test server with scripted agent sessions, shared with the other client crates' tests. Enabled only by tests.
+# `test_support`: a microphone and a speaker without hardware, and a TLS test server with scripted agent sessions, with `scene::fixtures` and `Conversation::take_actions`, shared with the other client crates' tests. Enabled only by tests; every other test hook is `cfg(test)`.
 testing = ["dep:tomori-server", "dep:tomori-backend"]
 
 [dependencies]

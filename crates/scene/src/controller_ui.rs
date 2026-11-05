@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! What the panels held by the controllers show and where, shared by the headset's and the desktop window's frame steps: the recording indicator and the `LIVE` badge on the left controller (see `design/hand-menu.md`), the status pill, and the transcript on the right wrist (see `design/wrist-transcript.md`). The panels that draw them are renderer's panels.
+//! What the panels held by the controllers show and where, shared by the headset's and the desktop window's frame steps: the recording indicator and the `LIVE` badge on the left controller (see `design/hand-menu.md`), the status pill, and the transcript on the right wrist (see `design/wrist-transcript.md`). The panels that draw them are the renderer's `scene_graphics::Panels`.
 
 use std::time::{Duration, Instant};
 

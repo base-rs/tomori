@@ -4,6 +4,13 @@
 //! The platform microphone, opened for live audio or push-to-talk. See `design/live-audio.md`.
 //!
 //! Capture hands mono samples to a callback on its own thread; [`crate::connection::Connection`] passes them to the client's [`tomori_client::Microphone`], which frames and sends them.
+//!
+//! # Device adapters
+//!
+//! Each client's microphone is a [`Capture`], which its own crate implements over the platform's audio interface. Two helpers keep those adapters thin, so that their logic is tested here:
+//!
+//! - a device that pushes interleaved frames to a callback, such as cpal's, passes them through [`downmix`];
+//! - a device that is read from, such as AAudio's, implements [`InputStream`] and runs [`run_capture`] on its capture thread, which decides what is delivered at the push-to-talk boundary and when a lost connection stops live capture.
 
 /// Receives captured mono samples in the range -1 to 1, on the capture thread.
 pub type Samples = Box<dyn FnMut(&[f32]) + Send>;
@@ -64,7 +71,7 @@ pub trait Capture {
     }
 }
 
-/// Average interleaved channels into mono.
+/// Average interleaved channels into mono, for a device adapter whose device delivers `channels` samples per frame. `output` is cleared first, and receives one sample per whole frame; a trailing partial frame is dropped.
 pub fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
     output.clear();
     if channels <= 1 {
@@ -78,17 +85,24 @@ pub fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
     );
 }
 
-/// A pull-based input stream, such as AAudio's. Separated from the device so
+/// A pull-based input stream, such as AAudio's, which a device adapter implements for [`run_capture`]. Separated from the device so
 /// that the capture boundary can be tested deterministically.
+///
+/// [`run_capture`] calls [`Self::start`] once, then reads until capture ends, then [`Self::stop`] once, whatever the result. An error from any of them ends capture with that error.
 pub trait InputStream {
+    /// Start the device capturing. Nothing is read before this succeeds.
     fn start(&mut self) -> Result<(), String>;
-    /// Read up to `buffer.len()` samples, waiting at most `timeout_ns`; zero
-    /// returns only what the device has already captured.
+    /// Read up to `buffer.len()` mono samples, in the range -1 to 1 at the
+    /// [`Recording`]'s rate, into the start of `buffer`, and return how many,
+    /// waiting at most `timeout_ns`; zero returns only what the device has
+    /// already captured, without waiting, and returns 0 once that is all read.
     fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String>;
+    /// Stop the device. Called once, after the last read.
     fn stop(&mut self);
     /// How many times the device has discarded audio because it was not read
-    /// in time. A device that cannot tell reports a constant, such as zero or
-    /// an error code, which is never taken as a loss.
+    /// in time, a count that only grows while started: any increase between
+    /// reads is taken as lost audio. A device that cannot tell reports a
+    /// constant, such as zero or an error code, which is never taken as a loss.
     fn overruns(&self) -> i32;
 }
 
@@ -105,8 +119,10 @@ const MAX_DRAIN_READS: usize = 64;
 /// The shortest interval between warnings that the live microphone lost audio.
 const OVERRUN_LOG: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Capture until `stop` is set or, for live audio, `active` reports that the
-/// connection ended.
+/// Capture from the stream `open` makes until `stop` is set or, for live
+/// audio, `active` reports that the connection ended, delivering what is read
+/// to `samples`, through `buffer`. A device adapter runs this on its capture
+/// thread; `active` is `None` for push-to-talk.
 ///
 /// The capture boundary is the moment `stop` is observed. Every sample the
 /// device captured before it is delivered: a read in flight when stop is set,

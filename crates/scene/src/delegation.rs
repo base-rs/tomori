@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use crate::pointing::Target;
 use crate::pointing::{Ray, Shape};
 use crate::swarm::CENTER;
@@ -419,7 +419,7 @@ impl Scene {
 
     /// The workers that can be pointed at, keyed by identifier, where they stand now: each live worker's anchor, as a
     /// sphere a little larger than its flock. Workers leaving cannot be pointed at. [`Self::point`] tests the same.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn targets(&self) -> Vec<Target<String>> {
         self.workers
             .iter()
@@ -473,7 +473,7 @@ impl Scene {
         &self.cubes
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn snapshot(&self) -> Vec<Cube> {
         self.cubes.clone()
     }

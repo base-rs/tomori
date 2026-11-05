@@ -240,7 +240,7 @@ impl<K: Clone + PartialEq> Pointer<K> {
     }
 
     /// The highlighted target, as of the last update.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn hovered(&self) -> Option<&K> {
         self.hovered.as_ref()
     }
