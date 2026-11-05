@@ -18,13 +18,14 @@ From the repository root, build the client and discover the target space:
 
 ```sh
 cargo build -p tomori-client-quest --bin tomori
+cargo build -p tomori-client-spectator --bin tomori-spectator
 ./target/debug/tomori discover --server 127.0.0.1:8765
 ```
 
 Use the actual server address and space ID from the output. Run this in a terminal and leave it running:
 
 ```sh
-./target/debug/tomori --spectator-pipewire \
+./target/debug/tomori-spectator --pipewire \
   --server 127.0.0.1:8765 --space SPACE_ID
 ```
 
@@ -94,13 +95,13 @@ Record the module IDs printed by these commands if you want to unload these exac
 The simplest way to route the spectator's audio is to start it with the sink, once the sink exists, and skip the mapping below:
 
 ```sh
-./target/debug/tomori --spectator-pipewire \
+./target/debug/tomori-spectator --pipewire \
   --server 127.0.0.1:8765 --space SPACE_ID --audio-output tomori_spectator_audio
 ```
 
 `--audio-output` chooses the output for that process only and changes no remembered route. To move a spectator that is already running instead, map it as follows.
 
-Identify the spectator's process ID from the terminal that started it, or use `ps -eo pid,args` and select the `tomori --spectator-pipewire` process for the intended space. Multiple Tomori processes can have the same audio application name, so that name alone is not enough. Set `SPECTATOR_PID` to the chosen PID and map it to its PipeWire sink input and current sink:
+Identify the spectator's process ID from the terminal that started it, or use `ps -eo pid,args` and select the `tomori-spectator --pipewire` process for the intended space. Multiple Tomori processes can have the same audio application name, so that name alone is not enough. Set `SPECTATOR_PID` to the chosen PID and map it to its PipeWire sink input and current sink:
 
 ```sh
 export SPECTATOR_PID=1234  # replace with the spectator process ID

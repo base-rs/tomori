@@ -3529,6 +3529,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomori-client-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "glam",
+ "log",
+ "pollster",
+ "tomori-client",
+ "tomori-protocol",
+ "tomori-render",
+ "tomori-scene",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "tomori-client-quest"
 version = "0.1.0"
 dependencies = [
@@ -3536,11 +3553,9 @@ dependencies = [
  "android_logger",
  "anyhow",
  "ash",
- "cpal",
  "env_logger",
  "glam",
  "jni 0.21.1",
- "libc",
  "log",
  "ndk",
  "openxr",
@@ -3548,12 +3563,34 @@ dependencies = [
  "serde",
  "serde_json",
  "tomori-client",
+ "tomori-client-desktop",
+ "tomori-client-spectator",
  "tomori-protocol",
  "tomori-render",
  "tomori-scene",
  "tomori-server",
  "wgpu",
  "wgpu-hal",
+]
+
+[[package]]
+name = "tomori-client-spectator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "glam",
+ "libc",
+ "log",
+ "pollster",
+ "serde",
+ "serde_json",
+ "tomori-client",
+ "tomori-client-desktop",
+ "tomori-protocol",
+ "tomori-render",
+ "tomori-scene",
+ "wgpu",
  "winit",
 ]
 

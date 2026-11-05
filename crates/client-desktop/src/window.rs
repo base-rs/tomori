@@ -3,7 +3,7 @@
 
 //! What a desktop window gives the contents it shows, and what they ask of it, so that the contents are tested without a display.
 //!
-//! The window itself, its winit event loop and its Vulkan surface, is `desktop_window.rs`, which holds only those calls: it turns each window event into an [`Input`], and draws through a [`Surface`]. Everything the window does with them is decided here and in the contents: the server-less window and the spectator's ([`crate::desktop`]), and the participant's ([`crate::desktop_participant`]). See `design/desktop.md`.
+//! The window itself, its winit event loop and its Vulkan surface, is `desktop_window.rs`, which holds only those calls: it turns each window event into an [`Input`], and draws through a [`Surface`]. Everything the window does with them is decided here and in the contents: the server-less window ([`crate::desktop`]), the participant's ([`crate::desktop_participant`]), and the spectator's, in `tomori-client-spectator`. See `design/desktop.md`.
 
 use anyhow::Result;
 use glam::Vec2;
@@ -129,8 +129,9 @@ mod tests {
 }
 
 /// A window to test contents with: it draws into an offscreen texture and records what was asked of it.
-#[cfg(test)]
-pub(crate) mod test {
+/// A surface and a device for testing contents without a display, shared with the spectator's tests through the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
+pub mod test {
     use super::*;
 
     pub struct TestSurface {
@@ -204,7 +205,7 @@ pub(crate) mod test {
     /// Run `test` with the shared test device, as a window would give it, at the test surface's size; skipped where there is no GPU.
     pub fn with_gpu(format: wgpu::TextureFormat, test: impl FnOnce(Gpu)) {
         // The contents log what they set up, such as the adapter, which tests exercise.
-        crate::test_support::log_everything();
+        tomori_scene::test_support::log_everything();
         tomori_render::test_gpu::with(|gpu| {
             test(Gpu {
                 adapter: gpu.adapter,

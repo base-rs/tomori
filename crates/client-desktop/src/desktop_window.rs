@@ -3,15 +3,13 @@
 
 //! The desktop window's calls into the window system: winit's event loop and window, and the window's Vulkan or Metal surface. It needs a display, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
 //!
-//! Only those calls belong here. Each window event becomes a [`window::Input`] and each frame is drawn through a [`window::Surface`]; what the window does with them is decided by its [`window::Contents`], in covered modules. See `design/desktop.md`.
+//! Only those calls belong here. Each window event becomes a [`window::Input`] and each frame is drawn through a [`window::Surface`]; what the window does with them is decided by its [`window::Contents`], in covered modules: the server-less window, the participant's, or what [`show`] is given, such as the spectator's. See `design/desktop.md`.
 
 use crate::{
     connection::Connection,
     conversation::Conversation,
     desktop::Demo,
     desktop_participant::Participant,
-    pipewire_video::Producer,
-    spectator_feed::Feed,
     window::{self, Contents, Flow, Gpu, Input, Settings, Wake},
 };
 use anyhow::{Context, Result};
@@ -25,12 +23,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// The server-less window, or with a `feed` the spectator's, publishing it to PipeWire too if `pipewire`, until it is closed; see [`Demo`].
-pub fn run_demo(feed: Option<Feed>, pipewire: bool) -> Result<()> {
-    run(Demo::settings(feed.is_some()), |gpu| {
-        let producer = pipewire.then(Producer::start).transpose()?;
-        Ok(Demo::new(gpu, feed, producer))
-    })
+/// The server-less window, until it is closed; see [`Demo`].
+pub fn run_demo() -> Result<()> {
+    run(Demo::settings(), |gpu| Ok(Demo::new(gpu)))
 }
 
 /// The participant's window, connected as `conversation` and `connection` describe, until it is closed; see [`Participant`].
@@ -38,6 +33,15 @@ pub fn run_participant(conversation: Conversation, connection: Connection) -> Re
     run(Participant::settings(), |gpu| {
         Ok(Participant::new(gpu, conversation, connection))
     })
+}
+
+/// Open a window as `settings` describe and show what `open` makes of the window's device and `with`, until it is closed or fails, as the spectator's window does.
+pub fn show<C: Contents, A>(
+    settings: Settings,
+    open: fn(Gpu, A) -> Result<C>,
+    with: A,
+) -> Result<()> {
+    run(settings, move |gpu| open(gpu, with))
 }
 
 /// Open a window as `settings` describe and show what `start` makes once the window and its device exist, until it is closed or fails.

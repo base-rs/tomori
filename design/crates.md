@@ -31,6 +31,8 @@ These stay unpublished, with `publish = false`:
 | `tomori-client-quest` | The headset and desktop application, released as an APK. Downstream headset builds need it as a library first. |
 | `tomori-scene` | The platform-neutral client that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
 | `tomori-render` | The renderers that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
+| `tomori-client-desktop` | The desktop modes that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
+| `tomori-client-spectator` | The spectator, with its `tomori-spectator` executable, split out of `tomori-client-quest`; published with it once the headset has a builder. |
 | `tomori-example-server` | An example for downstream servers to follow; see `builders.md`. |
 | `tomori-bake` | Development tasks only. |
 

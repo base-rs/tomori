@@ -1,0 +1,45 @@
+[package]
+name = "tomori-client-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tomori on the desktop: the server-less window, taking part from a window or a terminal, and finding servers"
+repository.workspace = true
+license.workspace = true
+# Published once the headset's builder has proved its interfaces; see design/crates.md.
+publish = false
+
+[features]
+# `window::test`: a surface and the shared test device for testing a window's contents without a display, for the spectator's tests. Enabled only by tests.
+testing = ["tomori-scene/testing", "tomori-render/test-gpu"]
+
+[dependencies]
+anyhow = "1"
+cpal = "0.18"
+glam = "0.30"
+log = "0.4"
+pollster = "0.4"
+tomori-client = { version = "0.1.0", path = "../client" }
+tomori-protocol = { version = "0.1.0", path = "../protocol" }
+tomori-render = { version = "0.1.0", path = "../render" }
+tomori-scene = { version = "0.1.0", path = "../scene" }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+winit = "0.30"
+
+# Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
+
+[dev-dependencies]
+# The device for offscreen rendering tests.
+tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
+tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
+
+# The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See design/testing.md.
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/desktop_window.rs"
+reason = "winit's event loop and window, and the window's Vulkan or Metal surface; needs a display."
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/desktop_audio.rs"
+reason = "Opens the default microphone and speaker through cpal; needs audio devices."

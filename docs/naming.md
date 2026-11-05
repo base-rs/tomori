@@ -33,6 +33,8 @@ The public repository uses `ioquatix/tomori`. Technical names now match:
 - Rust packages: `tomori-` followed by the crate's role, such as `tomori-protocol` and `tomori-server`, in folders under `crates/` without the prefix, such as `crates/protocol`. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
 - Headset and desktop application: package `tomori-client-quest` (in `crates/client-quest`); its library and executable are `tomori`.
 - Server executable: `tomori-server`, from the package of the same name.
+- Spectator executable: `tomori-spectator`, from the package `tomori-client-spectator` (in `crates/client-spectator`); `tomori --spectator…` runs it too.
+- Desktop crate: `tomori-client-desktop` (in `crates/client-desktop`), which the `tomori` executable's desktop modes run.
 - Android application ID: `io.github.ioquatix.tomori`; label: **Tomori**;
   APK: `tomori.apk`.
 - Node bridge package: `tomori-opencode-bridge`.

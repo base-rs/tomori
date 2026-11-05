@@ -16,9 +16,9 @@ The only other exception is a file of raw device or platform calls that cannot r
 | --- | --- |
 | `crates/client-quest/src/xr.rs` | The OpenXR instance, session, swapchain and actions, and the frame loop that drives them, which need an OpenXR runtime and a headset. |
 | `crates/client-quest/src/vulkan.rs` | The Vulkan instance and device created through OpenXR, and the runtime's swapchain images imported into wgpu. |
-| `crates/client-quest/src/desktop_window.rs` | winit's event loop and window, and the window's Vulkan or Metal surface, which need a display. |
-| `crates/client-quest/src/desktop_audio.rs` | The default microphone and speaker, opened through cpal. |
-| `crates/client-quest/src/child_process.rs` | What a forked child runs before it executes its program, whose coverage counters the child discards. |
+| `crates/client-desktop/src/desktop_window.rs` | winit's event loop and window, and the window's Vulkan or Metal surface, which need a display. |
+| `crates/client-desktop/src/desktop_audio.rs` | The default microphone and speaker, opened through cpal. |
+| `crates/client-spectator/src/child_process.rs` | What a forked child runs before it executes its program, whose coverage counters the child discards. |
 | `crates/server/src/exit.rs` | Ending the server process at once with `_exit`, after which it writes no coverage. |
 | `crates/discovery/src/daemon.rs` | Starting the multicast DNS responder and querier, whose failures come only from the system. |
 
