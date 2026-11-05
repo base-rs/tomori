@@ -5,15 +5,12 @@
 mod android;
 #[cfg(target_os = "android")]
 mod android_audio;
-mod arrival_graphics;
 #[cfg(not(target_os = "android"))]
 mod child_process;
 #[cfg(not(target_os = "android"))]
 mod cli;
 #[cfg(not(target_os = "android"))]
 mod console;
-mod controller;
-mod controller_graphics;
 #[cfg(not(target_os = "android"))]
 mod cpal_audio;
 #[cfg(not(target_os = "android"))]
@@ -26,37 +23,39 @@ mod desktop_participant;
 mod desktop_window;
 #[cfg(not(target_os = "android"))]
 mod discover;
-mod graphics;
 
 #[cfg(not(target_os = "android"))]
 mod headless_spectator;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
-mod scene_graphics;
 #[cfg(not(target_os = "android"))]
 mod spectator;
 #[cfg(not(target_os = "android"))]
 mod spectator_feed;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
-#[cfg(all(test, not(target_os = "android")))]
-mod test_support;
-mod ui_panel;
 mod vulkan;
 #[cfg(not(target_os = "android"))]
 mod window;
-mod workspace_graphics;
 mod xr;
 mod xr_types;
 
+// The renderers, from `tomori-render`, under the paths this crate's own modules use.
+use tomori_render::{controller, graphics, scene_graphics};
+#[cfg(all(test, not(target_os = "android")))]
+use tomori_scene::test_support;
+
 // The platform-neutral modules, from `tomori-scene`, under the paths this crate's own modules use.
-use tomori_scene::{
-    arrival, arrival_motion, connection, controller_ui, conversation, delegation, environment,
-    feedback, hand_menu, hands, haptics, identity, interaction, log_cadence, scene, server_choice,
-    swarm,
-};
+#[cfg(all(test, not(target_os = "android")))]
+use tomori_scene::server_choice;
 #[cfg(not(target_os = "android"))]
-use tomori_scene::{caption, capture, playback, pointing, spatial_audio, transcript, ui_text};
+use tomori_scene::{
+    caption, capture, delegation, environment, hand_menu, interaction, playback, pointing,
+    spatial_audio, swarm, transcript, ui_text,
+};
+use tomori_scene::{
+    connection, conversation, feedback, hands, haptics, identity, log_cadence, scene,
+};
 
 #[cfg(not(target_os = "android"))]
 pub use cli::{Command, Mode};

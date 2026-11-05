@@ -3536,14 +3536,9 @@ dependencies = [
  "android_logger",
  "anyhow",
  "ash",
- "basisu",
- "bytemuck",
  "cpal",
  "env_logger",
- "font8x8",
  "glam",
- "gltf",
- "image",
  "jni 0.21.1",
  "libc",
  "log",
@@ -3555,6 +3550,7 @@ dependencies = [
  "tomori-client",
  "tomori-environment-sky",
  "tomori-protocol",
+ "tomori-render",
  "tomori-scene",
  "tomori-server",
  "wgpu",
@@ -3600,6 +3596,26 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tomori-render"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "basisu",
+ "bytemuck",
+ "font8x8",
+ "glam",
+ "gltf",
+ "image",
+ "log",
+ "pollster",
+ "serde_json",
+ "tomori-environment-sky",
+ "tomori-protocol",
+ "tomori-scene",
+ "wgpu",
 ]
 
 [[package]]

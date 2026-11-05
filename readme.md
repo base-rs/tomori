@@ -21,7 +21,7 @@ Switching does not reset agents, conversations or worker positions. Sky uses the
 The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the on-device frame-time budget still needs measurement. The stereo/switch/recenter regression runs with the other tests (see [Tests](#tests--desktop-openxr)); to save a preview sheet:
 
 ```sh
-TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p tomori-client-quest \
+TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p tomori-render \
   sky_environment_renders_stereo_switches_and_preserves_recenter
 ```
 
@@ -132,7 +132,7 @@ Speech runs on the CPU, including on macOS; see [crates/speech/readme.md](crates
 
 The spectator joins the same server and space as the headset and renders a read-only view from a participant's relayed head, controller and hand presence. It renders the shared worker state and simulates its own swarm from the space's activity; it is not a pixel-perfect Quest cast. The headset's HUD is not shown. No OBS or YouTube stream starts automatically.
 
-Both tracked controller grip poses are rendered using the bundled, MIT-licensed WebXR Quest Touch Plus models (see `crates/client-quest/assets/controllers/`). If the Quest runtime exposes `XR_FB_render_model`, the headset attempts to load its models on a background thread and falls back to the bundled meshes if loading fails. The PC spectator currently uses the bundled meshes rather than copying runtime assets. Controller textures are supported for embedded PNG/JPEG and Basis Universal KTX2; button animation is not yet implemented. When `XR_EXT_hand_tracking` is available and hand tracking is enabled on the Quest, tracked hands are shown as a simple joint-and-bone skeleton rather than a skinned hand mesh. Hand gestures do not replace the existing controller bindings. The server relays controller poses and tracked joint positions to the other space participants.
+Both tracked controller grip poses are rendered using the bundled, MIT-licensed WebXR Quest Touch Plus models (see `crates/render/assets/controllers/`). If the Quest runtime exposes `XR_FB_render_model`, the headset attempts to load its models on a background thread and falls back to the bundled meshes if loading fails. The PC spectator currently uses the bundled meshes rather than copying runtime assets. Controller textures are supported for embedded PNG/JPEG and Basis Universal KTX2; button animation is not yet implemented. When `XR_EXT_hand_tracking` is available and hand tracking is enabled on the Quest, tracked hands are shown as a simple joint-and-bone skeleton rather than a skinned hand mesh. Hand gestures do not replace the existing controller bindings. The server relays controller poses and tracked joint positions to the other space participants.
 
 ```sh
 cargo run -p tomori-client-quest -- discover --server 127.0.0.1:8765
@@ -291,12 +291,12 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 
 - `crates/client-quest/src/desktop.rs`: the server-less and spectator windows, orbit camera, mouse attraction; `desktop_participant.rs`: the `--desktop` window. `window.rs` is what a window gives its contents, and `desktop_window.rs` the winit and surface calls alone.
 - `crates/client-quest/src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions: the device calls only, with the values read and the choices made in `xr_types.rs`.
-- `crates/scene/src/scene.rs`: the frame step the headset and the desktop window share, from plain input; `scene/headset.rs` and `scene/desktop.rs` hold each platform's own logic, and `crates/client-quest/src/scene_graphics.rs` draws a frame.
+- `crates/scene/src/scene.rs`: the frame step the headset and the desktop window share, from plain input; `scene/headset.rs` and `scene/desktop.rs` hold each platform's own logic, and `crates/render/src/scene_graphics.rs` draws a frame.
 - `crates/client-quest/src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed two-layer XR swapchain images, one layer per eye.
-- `crates/client-quest/src/graphics.rs`, `crates/client-quest/src/swarm.wgsl`: instanced cube rendering with per-eye depth.
+- `crates/render/src/graphics.rs`, `crates/render/src/swarm.wgsl`: instanced cube rendering with per-eye depth.
 - `crates/scene/src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
 - `bridge/asr.mjs`, `bridge/asr_worker.py`: GPU/CPU Whisper rolling transcription.
-- `crates/scene/src/caption.rs`, `crates/client-quest/src/caption.wgsl`: head-relative, stereo text panel.
+- `crates/scene/src/caption.rs`, `crates/render/src/caption.wgsl`: head-relative, stereo text panel.
 - `crates/scene/src/conversation.rs`: server list, space list and space panel, driven by server events.
 - `crates/scene/src/connection.rs`: the server connection and Bonjour browsing.
 - `bridge/`: official OpenCode V2 client adapter, no longer used by the headset.
@@ -315,14 +315,14 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
 
-`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. The application is being split into crates of its own, unpublished until the headset has a builder: `tomori-scene`, in `crates/scene`, is the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
+`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. The application is being split into crates of its own, unpublished until the headset has a builder: `tomori-scene`, in `crates/scene`, is the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code; and `tomori-render`, in `crates/render`, holds the wgpu renderers and shaders that the headset, the desktop window and the spectator share. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
 ## Third-Party Components
 
 Original project code is released under the MIT License; see [license.md](license.md). Third-party components retain their own licenses:
 
-- Bundled controller assets: [MIT](crates/client-quest/assets/controllers/LICENSE.md).
-- Basis Universal notices and test fixtures: [Apache-2.0](crates/client-quest/assets/licenses/basisu-LICENSE.txt), with fixture provenance in [crates/client-quest/tests/fixtures/README.md](crates/client-quest/tests/fixtures/README.md).
+- Bundled controller assets: [MIT](crates/render/assets/controllers/LICENSE.md).
+- Basis Universal notices and test fixtures: [Apache-2.0](crates/render/assets/licenses/basisu-LICENSE.txt), with fixture provenance in [crates/render/tests/fixtures/README.md](crates/render/tests/fixtures/README.md).
 - The optional OBS plugin compatibility patch follows the upstream plugin's GPL-2.0-or-later licensing; its packaging metadata is under `packaging/`.
 - Speech models and native dependencies are downloaded separately, not bundled in this repository. Their licensing requirements are noted in the relevant setup sections above.
 

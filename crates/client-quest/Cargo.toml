@@ -18,18 +18,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-tomori-environment-sky = { version = "0.1.0", path = "../environment-sky" }
 ash = "0.38"
-bytemuck = { version = "1", features = ["derive"] }
-basisu = "0.1"
 tomori-client = { version = "0.1.0", path = "../client" }
 glam = "0.30"
-gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-font8x8 = "0.3"
 log = "0.4"
 openxr = "0.22"
 tomori-protocol = { version = "0.1.0", path = "../protocol" }
+tomori-render = { version = "0.1.0", path = "../render" }
 tomori-scene = { version = "0.1.0", path = "../scene" }
 serde = { version = "1", features = ["derive"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
@@ -89,7 +84,8 @@ package = "io.github.ioquatix.tomori"
 apk_name = "tomori"
 build_targets = ["aarch64-linux-android"]
 runtime_libs = "../../android/libs"
-assets = "assets"
+# The licence notices of the controller models and the Basis Universal transcoder, which `tomori-render` compiles in.
+assets = "../render/assets"
 strip = "strip"
 
 [package.metadata.android.sdk]
