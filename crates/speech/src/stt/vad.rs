@@ -78,14 +78,14 @@ impl SileroVad {
     pub fn new(config: &SileroVadConfig) -> Result<Self, Error> {
         // The detector buffers the speech it has heard until it is taken, which is at most what it is given at once.
         let buffer = LONGEST as f32 / RATE as f32 + 1.0;
-        let detector =
-            VoiceActivityDetector::create(&config.sherpa()?, buffer).ok_or_else(|| {
-                Error::Unavailable(format!(
-                    "sherpa-onnx could not load the Silero voice activity model at {}",
-                    config.model.display()
-                ))
-            })?;
-        Ok(Self { detector })
+        Error::loaded(
+            VoiceActivityDetector::create(&config.sherpa()?, buffer),
+            format!(
+                "the Silero voice activity model at {}",
+                config.model.display()
+            ),
+        )
+        .map(|detector| Self { detector })
     }
 
     /// Take the stretches of speech the detector has finished, relative to where it was reset.
@@ -166,47 +166,71 @@ mod tests {
         let clips = WhisperConfig::named(&root, test_models::WHISPER_MODEL)
             .model
             .join("test_wavs");
-        if !test_models::installed(
+        test_models::with(
             "the Silero voice activity model and the clips that come with the Whisper model",
             &format!(
                 "bash scripts/fetch-asr-model.sh whisper {}",
                 test_models::WHISPER_MODEL
             ),
             &[&config.model, &clips],
-        ) {
-            return;
-        }
-        let mut vad = SileroVad::new(&config).unwrap();
-        let first = clip(&clips, "0.wav");
-        let second = clip(&clips, "1.wav");
-        let gap = RATE as usize;
-        let mut samples = first.clone();
-        samples.extend(std::iter::repeat_n(0, gap));
-        samples.extend(&second);
-        let speech = vad.speech(&samples).unwrap();
-        assert!(!speech.is_empty());
-        // No speech is heard in the middle of the gap, and some is heard on either side.
-        let middle = first.len() + gap / 2;
-        assert!(
-            speech.iter().all(|range| !range.contains(&middle)),
-            "{speech:?}"
+            || {
+                let mut vad = SileroVad::new(&config).unwrap();
+                let first = clip(&clips, "0.wav");
+                let second = clip(&clips, "1.wav");
+                let gap = RATE as usize;
+                let mut samples = first.clone();
+                samples.extend(std::iter::repeat_n(0, gap));
+                samples.extend(&second);
+                let speech = vad.speech(&samples).unwrap();
+                assert!(!speech.is_empty());
+                // No speech is heard in the middle of the gap, and some is heard on either side.
+                let middle = first.len() + gap / 2;
+                assert!(
+                    speech.iter().all(|range| !range.contains(&middle)),
+                    "{speech:?}"
+                );
+                assert!(speech.iter().any(|range| range.start < first.len()));
+                assert!(speech.iter().any(|range| range.end > first.len() + gap));
+                // Hearing the same audio again gives the same answer.
+                assert_eq!(vad.speech(&samples).unwrap(), speech);
+                // A whole segment of silence or faint noise holds no speech.
+                assert!(vad.speech(&vec![0; MAX_SEGMENT]).unwrap().is_empty());
+                let noise: Vec<i16> = (0..MAX_SEGMENT)
+                    .map(|index| ((index * 7919 % 401) as i16 - 200) / 4)
+                    .collect();
+                assert!(vad.speech(&noise).unwrap().is_empty());
+                let started = std::time::Instant::now();
+                vad.speech(&samples).unwrap();
+                eprintln!(
+                    "Heard {:.1} seconds in {:.3} seconds.",
+                    samples.len() as f64 / f64::from(RATE),
+                    started.elapsed().as_secs_f64()
+                );
+            },
         );
-        assert!(speech.iter().any(|range| range.start < first.len()));
-        assert!(speech.iter().any(|range| range.end > first.len() + gap));
-        // Hearing the same audio again gives the same answer.
-        assert_eq!(vad.speech(&samples).unwrap(), speech);
-        // A whole segment of silence or faint noise holds no speech.
-        assert!(vad.speech(&vec![0; MAX_SEGMENT]).unwrap().is_empty());
-        let noise: Vec<i16> = (0..MAX_SEGMENT)
-            .map(|index| ((index * 7919 % 401) as i16 - 200) / 4)
-            .collect();
-        assert!(vad.speech(&noise).unwrap().is_empty());
-        let started = std::time::Instant::now();
-        vad.speech(&samples).unwrap();
-        eprintln!(
-            "Heard {:.1} seconds in {:.3} seconds.",
-            samples.len() as f64 / f64::from(RATE),
-            started.elapsed().as_secs_f64()
+    }
+
+    #[test]
+    fn a_model_sherpa_onnx_refuses_or_too_much_audio_is_said() {
+        let config = SileroVadConfig::from_root(&crate::test_models::root());
+        crate::test_models::with(
+            "the Silero voice activity model",
+            "bash scripts/fetch-asr-model.sh whisper tiny.en",
+            &[&config.model],
+            || {
+                // sherpa-onnx refuses so high a threshold.
+                let refused = SileroVadConfig {
+                    threshold: 5.0,
+                    ..config.clone()
+                };
+                let Err(Error::Unavailable(_)) = SileroVad::new(&refused) else {
+                    unreachable!("the threshold is refused");
+                };
+                let mut vad = SileroVad::new(&config).unwrap();
+                let Err(Error::Engine(_)) = vad.speech(&vec![0; LONGEST + 1]) else {
+                    unreachable!("too much audio is refused");
+                };
+            },
         );
     }
 }
