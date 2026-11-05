@@ -71,8 +71,9 @@ reason = "OpenXR runtime calls: the instance, session, swapchain, actions and th
 path = "src/vulkan.rs"
 reason = "Creates the Vulkan instance and device through OpenXR and imports the runtime's swapchain images into wgpu; needs an OpenXR runtime."
 
+# Tomori's own APK, which `bash scripts/android.sh build` packages. `cargo-apk` reads this table only from the package it builds, so a headset build of another project's has a copy of its own, with its own application ID, label, icon and assets; see context/android.md.
 [package.metadata.android]
-package = "io.github.ioquatix.tomori"
+package = "com.codeotaku.tomori"
 apk_name = "tomori"
 build_targets = ["aarch64-linux-android"]
 runtime_libs = "../../android/libs"

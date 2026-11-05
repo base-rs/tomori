@@ -34,4 +34,10 @@ The `tomori` library has an `android_main` of its own, which runs Tomori's build
 tomori-client-quest = { version = "0.1.0", default-features = false }
 ```
 
-Packaging such a build as its own APK is planned in [#132](https://github.com/ioquatix/tomori/pull/132); until then this example is built for the host only.
+It is packaged as an APK of its own, `com.example.tomori.headset`, labelled **Tomori Example**, with an icon and an asset of its own. Its manifest is a copy of `tomori-client-quest`'s in its `Cargo.toml`, as [Packaging a Headset Build for the Quest](../../crates/client-quest/context/android.md) describes, and it installs beside Tomori's own app:
+
+```sh
+bash scripts/android.sh --package tomori-example-headset run
+```
+
+The APK is `target/debug/apk/tomori-example-headset.apk`. Its `assets` hold its own `tomori-example-headset.txt` and links to the licence notices in `crates/render/assets`, and its `res` its launcher icon. CI builds it on every pull request.
