@@ -399,12 +399,12 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// A punctuator that records the thread it is dropped on.
+    /// A punctuator that changes nothing and records the thread it is dropped on.
     struct Unloaded(Arc<Mutex<Option<std::thread::ThreadId>>>);
 
     impl Punctuator for Unloaded {
         fn punctuate(&mut self, text: &str) -> Result<String, Error> {
-            unreachable!("nothing is punctuated, not {text:?}")
+            Ok(text.to_owned())
         }
     }
 
@@ -417,10 +417,11 @@ mod tests {
     #[test]
     fn stopping_unloads_the_punctuator_on_the_recognition_thread() {
         let unloaded = Arc::new(Mutex::new(None));
-        let recognition = Recognition::spawn(Punctuated::new(
+        let mut recognition = Recognition::spawn(Punctuated::new(
             Fixed("run the tests"),
             Unloaded(Arc::clone(&unloaded)),
         ));
+        assert_eq!(transcribe(&mut recognition), "run the tests.");
         let stopper = recognition.stopper();
         stopper.stop();
         assert!(stopper.wait(std::time::Instant::now() + Duration::from_secs(5)));
@@ -571,9 +572,8 @@ mod tests {
     #[test]
     fn the_probe_is_taken_off_or_left_out_if_the_model_drops_it() {
         assert_eq!(
-            probed("run the tests", |text| Ok(
-                capitalize(text)?.replace(" i", ". I")
-            )),
+            probed("run the tests", |text| capitalize(text)
+                .map(|text| text.replace(" i", ". I"))),
             Ok("Run the tests.".into())
         );
         // A model that drops the probe punctuates the text alone.

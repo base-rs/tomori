@@ -5729,7 +5729,7 @@ mod tests {
         assert_eq!(stale.workers[0].state, WorkerState::Unknown);
         // A slow but valid active response must win over the stale busy
         // timestamp rather than falsely making this idle session busy.
-        while stale_events.try_recv().is_ok() {}
+        std::iter::from_fn(|| stale_events.try_recv().ok()).for_each(drop);
         delay_active.store(true, Ordering::Release);
         delayed_rx
             .recv_timeout(Duration::from_secs(3))
