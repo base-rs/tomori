@@ -126,9 +126,11 @@ impl Microphone {
         self.sender
             .send(ClientMessage::Gate { gate: Gate::Agent })
             .and_then(|()| {
+                // This crate's clients read the server's progress with an utterance; see `design/speech.md`.
                 self.sender.send(ClientMessage::UtteranceBegin {
                     utterance: utterance.clone(),
                     answer,
+                    progress: true,
                 })
             })?;
         self.utterance = Some(utterance);
@@ -375,6 +377,7 @@ mod tests {
                 ClientMessage::UtteranceBegin {
                     utterance: "u1".into(),
                     answer: None,
+                    progress: true,
                 },
                 ClientMessage::UtteranceEnd {
                     utterance: "u1".into(),
@@ -453,6 +456,7 @@ mod tests {
                 ClientMessage::UtteranceBegin {
                     utterance: "u1".into(),
                     answer: None,
+                    progress: true,
                 },
                 ClientMessage::UtteranceCancel {
                     utterance: "u1".into()
@@ -479,6 +483,7 @@ mod tests {
                 ClientMessage::UtteranceBegin {
                     utterance: "u1".into(),
                     answer: None,
+                    progress: true,
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]
@@ -507,6 +512,7 @@ mod tests {
             Some(&ClientMessage::UtteranceBegin {
                 utterance: "u2".into(),
                 answer: None,
+                progress: true,
             })
         );
     }

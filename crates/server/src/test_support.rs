@@ -437,6 +437,7 @@ impl TestClient {
         self.send(&ClientMessage::UtteranceBegin {
             utterance: utterance.to_owned(),
             answer: None,
+            progress: false,
         });
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {

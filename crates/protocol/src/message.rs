@@ -46,6 +46,27 @@ pub enum Pointed {
     Unknown,
 }
 
+/// What recognition is doing with an utterance that has ended, in [`ServerMessage::TranscriptProgress`]. See
+/// `design/speech.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptStage {
+    /// Its end and audio have arrived, and it is being transcribed.
+    Transcribing,
+    /// It waits for the recognizer, which is transcribing another utterance first.
+    Waiting,
+    /// A stage a newer server sends that this build does not know, shown as transcribing.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Which part of an utterance transcribed in several is being transcribed: `number`, counted from 1, of `of`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPart {
+    pub number: u32,
+    pub of: u32,
+}
+
 /// Control messages sent by a client.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -94,6 +115,11 @@ pub enum ClientMessage {
         /// The presented question and field this utterance answers, so that its transcript is sent as the answer rather than queued as input. Absent from older clients, and sent only to a server whose [`crate::SpaceState::speech`] is known. See `design/spaces.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answer: Option<AnswerTarget>,
+        /// Whether this client reads [`ServerMessage::TranscriptProgress`], which the server then sends for this
+        /// utterance once its end has arrived. Absent from older clients, which would refuse the message, and ignored
+        /// by older servers, which send none. See `design/speech.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        progress: bool,
     },
     /// Finalize the utterance; the server finishes recognition and queues the transcript.
     UtteranceEnd {
@@ -245,6 +271,16 @@ pub enum ServerMessage {
         /// True once the utterance is finalized and queued.
         #[serde(rename = "final")]
         finished: bool,
+    },
+    /// What recognition is doing with an utterance whose end, and so all of its audio, has arrived, until its final
+    /// [`ServerMessage::Transcript`] or [`ServerMessage::TranscriptFailed`]. Sent first as the end arrives, and again
+    /// as the stage or part changes, only for an utterance whose [`ClientMessage::UtteranceBegin`] set `progress`.
+    TranscriptProgress {
+        utterance: String,
+        stage: TranscriptStage,
+        /// The part being transcribed, when the utterance is transcribed in more than one. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<TranscriptPart>,
     },
     /// Recognition could not produce a transcript; nothing was queued.
     TranscriptFailed {
@@ -504,6 +540,70 @@ mod tests {
                 pointed: Some(Pointed::Unknown)
             }
         );
+    }
+
+    #[test]
+    fn transcript_progress_is_asked_for_and_tolerates_new_stages() {
+        // An older client does not ask for progress, and a begin without it says nothing of it.
+        let bare: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "utterance_begin", "utterance": "u"}),
+        )
+        .unwrap();
+        assert_eq!(
+            bare,
+            ClientMessage::UtteranceBegin {
+                utterance: "u".into(),
+                answer: None,
+                progress: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"type": "utterance_begin", "utterance": "u"})
+        );
+        let asking = ClientMessage::UtteranceBegin {
+            utterance: "u".into(),
+            answer: None,
+            progress: true,
+        };
+        assert_eq!(serde_json::to_value(&asking).unwrap()["progress"], true);
+
+        // One part needs no count; a part of several says which.
+        let received = ServerMessage::TranscriptProgress {
+            utterance: "u".into(),
+            stage: TranscriptStage::Transcribing,
+            part: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&received).unwrap(),
+            serde_json::json!({"type": "transcript_progress", "utterance": "u", "stage": "transcribing"})
+        );
+        let second = ServerMessage::TranscriptProgress {
+            utterance: "u".into(),
+            stage: TranscriptStage::Transcribing,
+            part: Some(TranscriptPart { number: 2, of: 3 }),
+        };
+        let json = serde_json::json!({
+            "type": "transcript_progress", "utterance": "u", "stage": "transcribing", "part": {"number": 2, "of": 3}
+        });
+        assert_eq!(serde_json::to_value(&second).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            second
+        );
+        assert_eq!(
+            serde_json::to_value(TranscriptStage::Waiting).unwrap(),
+            "waiting"
+        );
+        // A stage from a newer server is read as unknown rather than refusing the message.
+        let newer: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "transcript_progress", "utterance": "u", "stage": "punctuating"
+        }))
+        .unwrap();
+        let ServerMessage::TranscriptProgress { stage, .. } = newer else {
+            unreachable!("read as progress");
+        };
+        assert_eq!(stage, TranscriptStage::Unknown);
     }
 
     #[test]

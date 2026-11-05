@@ -150,6 +150,7 @@ mod tests {
             ClientMessage::UtteranceBegin {
                 utterance: "u".into(),
                 answer: None,
+                progress: false,
             },
             ClientMessage::UtteranceEnd {
                 utterance: "u".into(),

@@ -503,6 +503,33 @@ struct UtteranceRecord {
     /// The worker the participant pointed at while speaking, as the space knew it when the utterance ended. Their
     /// client names only its identity. See `design/interaction.md`.
     pointed: Option<crate::space::PointedWorker>,
+    /// The connection whose client asked for [`ServerMessage::TranscriptProgress`] as it began the utterance, if it did. Progress is sent only there, as the participant may reconnect with an older client, which would refuse it.
+    progress: Option<ConnectionId>,
+    /// When its end arrived, and with it the last of its audio, from which the time it takes to transcribe is logged.
+    ended: Option<Instant>,
+    /// Since when it has waited behind another utterance, if it waits now, and how long it waited before.
+    waiting: Option<Instant>,
+    waited: Duration,
+}
+
+impl UtteranceRecord {
+    /// Log how long the utterance took to transcribe after its end arrived, and how much of that it waited, once it has `outcome`, so that the time can be seen per utterance. Nothing is logged for one that failed while it was spoken.
+    fn log_outcome(&self, id: UtteranceId, outcome: &str) {
+        if let Some(ended) = self.ended {
+            let now = Instant::now();
+            let waited = self.waited
+                + self
+                    .waiting
+                    .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+            log::info!(
+                "Utterance {} from participant {} {outcome} {:.2} s after its end arrived, having waited {:.2} s for the recognizer.",
+                id.0,
+                self.source,
+                now.saturating_duration_since(ended).as_secs_f64(),
+                waited.as_secs_f64()
+            );
+        }
+    }
 }
 
 /// A transcriber call to make once the lock is released.
@@ -2026,7 +2053,11 @@ impl Hub {
             ClientMessage::Gate { .. } => {
                 // Each audio frame carries its own gate; the announcement needs no state yet.
             }
-            ClientMessage::UtteranceBegin { utterance, answer } => {
+            ClientMessage::UtteranceBegin {
+                utterance,
+                answer,
+                progress,
+            } => {
                 let checked =
                     limits::check(&utterance, limits::UTTERANCE_BYTES, "utterance identifier")
                         .and_then(|()| match &answer {
@@ -2070,6 +2101,10 @@ impl Hub {
                         space,
                         answer,
                         pointed: None,
+                        progress: progress.then_some(connection),
+                        ended: None,
+                        waiting: None,
+                        waited: Duration::ZERO,
                     },
                 );
                 let record = state
@@ -2125,8 +2160,18 @@ impl Hub {
                     }
                     _ => None,
                 };
+                // Its frames and its end share one ordered stream, so all of its audio has arrived: the participant is told that it is being transcribed, before anything recognition reports.
                 if let Some(record) = state.utterances.get_mut(&open.id) {
                     record.pointed = resolved;
+                    record.ended = Some(Instant::now());
+                    // The end arrives on the connection that began the utterance, as a reconnect closes it.
+                    if record.progress.is_some() {
+                        outbox.message(ServerMessage::TranscriptProgress {
+                            utterance: open.client,
+                            stage: tomori_protocol::TranscriptStage::Transcribing,
+                            part: None,
+                        });
+                    }
                 }
                 deferred.push(Deferred::End(open.id));
             }
@@ -2701,11 +2746,46 @@ impl Hub {
         }
     }
 
+    /// What recognition is doing with an utterance that has ended, told to its participant if their client reads it.
+    pub(crate) fn transcript_progress(
+        &self,
+        utterance: UtteranceId,
+        stage: tomori_protocol::TranscriptStage,
+        part: Option<tomori_protocol::TranscriptPart>,
+    ) {
+        let mut state = self.lock();
+        let state = &mut *state;
+        let Some(record) = state.utterances.get_mut(&utterance) else {
+            return;
+        };
+        let now = Instant::now();
+        if stage == tomori_protocol::TranscriptStage::Waiting {
+            record.waiting.get_or_insert(now);
+        } else if let Some(since) = record.waiting.take() {
+            record.waited += now.saturating_duration_since(since);
+        }
+        // Only the connection that asked is told: a later one of the participant's may be an older client's. One superseded by a reconnect is closed, and so ignores it, and one that has gone is no longer listed.
+        let Some(connection) = record
+            .progress
+            .and_then(|connection| state.connections.get(&connection))
+        else {
+            return;
+        };
+        connection
+            .outbox
+            .message(ServerMessage::TranscriptProgress {
+                utterance: record.client.clone(),
+                stage,
+                part,
+            });
+    }
+
     pub(crate) fn transcript_finished(&self, utterance: UtteranceId, text: &str) {
         let mut state = self.lock();
         let Some(record) = state.utterances.remove(&utterance) else {
             return;
         };
+        record.log_outcome(utterance, "was transcribed");
         let text = text.trim();
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
@@ -2838,6 +2918,7 @@ impl Hub {
             let Some(record) = state.utterances.remove(&utterance) else {
                 return;
             };
+            record.log_outcome(utterance, "failed to transcribe");
             // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again. The transcriber is still told, as every utterance it began ends with an end or a cancel.
             for connection in state.connections.values_mut() {
                 if let Some(open) = connection.utterance.take_if(|open| open.id == utterance) {

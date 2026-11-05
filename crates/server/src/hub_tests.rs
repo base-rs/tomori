@@ -7,6 +7,7 @@ use super::*;
 use crate::fake::FakeBackend;
 use crate::outbox::Popped;
 use crate::transcriber::NullTranscriber;
+use tomori_protocol::TranscriptStage;
 
 /// A hub with the fake backend, and the jobs it gives the supervisor.
 fn hub_with(backend: FakeBackend) -> (Arc<Hub>, async_channel::Receiver<Job>) {
@@ -285,6 +286,7 @@ fn a_new_utterance_fails_the_one_still_open() {
     let begin = |utterance: &str| ClientMessage::UtteranceBegin {
         utterance: utterance.to_owned(),
         answer: None,
+        progress: false,
     };
     client.send(begin("one"));
     client.send(begin("two"));
@@ -919,6 +921,7 @@ fn utterances_are_ended_or_cancelled_only_while_open() {
     let begin = ClientMessage::UtteranceBegin {
         utterance: "one".to_owned(),
         answer: None,
+        progress: false,
     };
     client.send(begin.clone());
     assert_eq!(client.errors(), ["Join a space first."]);
@@ -943,6 +946,140 @@ fn utterances_are_ended_or_cancelled_only_while_open() {
 }
 
 #[test]
+fn progress_is_told_only_to_a_client_that_asks_from_the_end_until_the_outcome() {
+    let (hub, _jobs) = hub_waiting();
+    let id = stopped(&hub, Snapshot::default());
+    let newer = Client::greeted(&hub, Access::open(), "ada");
+    newer.join(&id);
+    let older = Client::greeted(&hub, Access::open(), "bea");
+    older.join(&id);
+    let progress_read = |client: &Client| -> Vec<ServerMessage> {
+        client
+            .read()
+            .into_iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    ServerMessage::TranscriptProgress { .. } | ServerMessage::Transcript { .. }
+                )
+            })
+            .collect()
+    };
+    let utterance_of = |client: &Client| {
+        hub.lock().connections[&client.connection]
+            .utterance
+            .as_ref()
+            .unwrap()
+            .id
+    };
+    let progress = |utterance: &str, stage, part| ServerMessage::TranscriptProgress {
+        utterance: utterance.to_owned(),
+        stage,
+        part,
+    };
+    for (client, utterance, asks) in [(&newer, "new", true), (&older, "old", false)] {
+        client.send(ClientMessage::UtteranceBegin {
+            utterance: utterance.to_owned(),
+            answer: None,
+            progress: asks,
+        });
+    }
+    let (new, old) = (utterance_of(&newer), utterance_of(&older));
+    // Nothing is said while the words are spoken.
+    assert_eq!(progress_read(&newer), []);
+    for (client, utterance) in [(&newer, "new"), (&older, "old")] {
+        client.send(ClientMessage::UtteranceEnd {
+            utterance: utterance.to_owned(),
+            pointed: None,
+        });
+    }
+    // As the end arrives, a client that asks is told that its words are being transcribed; an older one is not.
+    assert_eq!(
+        progress_read(&newer),
+        [progress("new", TranscriptStage::Transcribing, None)]
+    );
+    assert_eq!(progress_read(&older), []);
+    let second = Some(tomori_protocol::TranscriptPart { number: 2, of: 3 });
+    for utterance in [new, old] {
+        hub.transcript_progress(utterance, TranscriptStage::Waiting, None);
+        hub.transcript_progress(utterance, TranscriptStage::Waiting, None);
+    }
+    hub.transcript_progress(new, TranscriptStage::Transcribing, second);
+    assert_eq!(
+        progress_read(&newer),
+        [
+            progress("new", TranscriptStage::Waiting, None),
+            progress("new", TranscriptStage::Waiting, None),
+            progress("new", TranscriptStage::Transcribing, second),
+        ]
+    );
+    assert_eq!(progress_read(&older), []);
+    // What it waited is counted once, from when it first waited.
+    {
+        let state = hub.lock();
+        assert!(state.utterances[&new].waiting.is_none());
+        assert!(state.utterances[&old].waiting.is_some());
+    }
+    hub.transcript_finished(new, "Deploy it.");
+    // The older one fails while it still waits.
+    hub.transcript_failed(old, "Transcription failed.");
+    assert!(matches!(
+        &progress_read(&newer)[..],
+        [ServerMessage::Transcript { finished: true, .. }]
+    ));
+    // Progress reported after the outcome is not told.
+    hub.transcript_progress(new, TranscriptStage::Transcribing, None);
+    assert_eq!(progress_read(&newer), []);
+}
+
+#[test]
+fn progress_is_told_only_on_the_connection_that_asked_while_it_is_the_participants() {
+    let (hub, _jobs) = hub_waiting();
+    let first = stopped(&hub, Snapshot::default());
+    let second = stopped(&hub, Snapshot::default());
+    let newer = Client::greeted(&hub, Access::open(), "ada");
+    newer.join(&first);
+    newer.send(ClientMessage::UtteranceBegin {
+        utterance: "u1".to_owned(),
+        answer: None,
+        progress: true,
+    });
+    newer.send(ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    let progress_read = |client: &Client| -> Vec<ServerMessage> {
+        client
+            .read()
+            .into_iter()
+            .filter(|message| matches!(message, ServerMessage::TranscriptProgress { .. }))
+            .collect()
+    };
+    let waiting = ServerMessage::TranscriptProgress {
+        utterance: "u1".to_owned(),
+        stage: TranscriptStage::Waiting,
+        part: None,
+    };
+    assert_eq!(progress_read(&newer).len(), 1, "the acknowledgement");
+    // Moving to another space keeps the connection, whose client still reads progress.
+    newer.join(&second);
+    hub.transcript_progress(utterance, TranscriptStage::Waiting, None);
+    assert_eq!(progress_read(&newer), [waiting]);
+    // Ada reconnects, perhaps with an older client, which would refuse progress, while the superseded connection is still listed: neither is told.
+    let older = Client::greeted(&hub, Access::open(), "ada");
+    hub.transcript_progress(utterance, TranscriptStage::Transcribing, None);
+    assert_eq!(progress_read(&older), []);
+    assert_eq!(progress_read(&newer), []);
+    // Nor, once the connection that asked has gone, is a later one, even of a client that reads progress, as it did not ask for these words.
+    hub.disconnect(newer.connection);
+    let again = Client::greeted(&hub, Access::open(), "ada");
+    hub.transcript_progress(utterance, TranscriptStage::Transcribing, None);
+    assert_eq!(progress_read(&again), []);
+    assert_eq!(progress_read(&older), []);
+}
+
+#[test]
 fn an_utterance_transcribed_before_it_ended_is_still_ended() {
     let (hub, _jobs) = hub();
     let id = stopped(&hub, Snapshot::default());
@@ -951,6 +1088,7 @@ fn an_utterance_transcribed_before_it_ended_is_still_ended() {
     client.send(ClientMessage::UtteranceBegin {
         utterance: "one".to_owned(),
         answer: None,
+        progress: false,
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_finished(utterance, "Deploy it.");
@@ -1052,6 +1190,7 @@ fn a_transcript_comes_to_nothing_for_an_utterance_unknown_unheard_or_left_behind
         client.send(ClientMessage::UtteranceBegin {
             utterance: "one".to_owned(),
             answer: None,
+            progress: false,
         });
         client.send(ClientMessage::UtteranceEnd {
             utterance: "one".to_owned(),
@@ -1109,6 +1248,7 @@ fn only_the_latest_spoken_answers_are_remembered() {
             question: "question-1".to_owned(),
             field: "field-1".to_owned(),
         }),
+        progress: false,
     });
     client.send(ClientMessage::UtteranceEnd {
         utterance: "one".to_owned(),
@@ -1177,6 +1317,7 @@ fn words_for_a_driver_that_has_stopped_are_marked_unsent() {
     client.send(ClientMessage::UtteranceBegin {
         utterance: "one".to_owned(),
         answer: None,
+        progress: false,
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_partial(UtteranceId(99), "nobody");

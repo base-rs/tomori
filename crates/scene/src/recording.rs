@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use glam::{Mat4, Quat, Vec3};
 
+use tomori_protocol::{TranscriptPart, TranscriptStage};
+
 use crate::canvas::{Canvas, Rect};
 use crate::controller::Pose;
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, cut, wrap};
@@ -40,6 +42,13 @@ const TEXT: [f32; 4] = [0.93, 0.96, 1.0, 1.0];
 const DIM: [f32; 4] = [0.6, 0.68, 0.78, 1.0];
 const TRACK: [f32; 4] = [0.12, 0.16, 0.2, 1.0];
 
+/// What the server said it is doing with words it has all of, until their outcome: its stage, and the part being transcribed when there are several. See `design/speech.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Received {
+    pub stage: TranscriptStage,
+    pub part: Option<TranscriptPart>,
+}
+
 /// What the indicator says.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -51,8 +60,12 @@ pub enum Phase {
         /// The worker pointed at, which the words will be sent about. See `design/interaction.md`.
         about: Option<String>,
     },
-    /// X was released; the server is transcribing.
-    Sending { heard: String, answering: bool },
+    /// X was released: the words are on their way, until the server says it has them, and then it is transcribing them, or waiting to, as `received` says.
+    Sending {
+        heard: String,
+        answering: bool,
+        received: Option<Received>,
+    },
     /// The words were queued, at `position` in the queue when known, or answered the question.
     Sent {
         answered: bool,
@@ -204,17 +217,26 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
                 None => cut(&[Span::new(release, Style::plain(TEXT))], COLUMNS),
             }));
         }
-        Phase::Sending { heard, answering } => {
+        Phase::Sending {
+            heard,
+            answering,
+            received,
+        } => {
             let rows = &mut canvas.rows;
-            rows.push(Row::text(
-                if *answering {
-                    "Answering…"
-                } else {
-                    "Sending…"
-                },
-                Style::bold(TEXT),
-                COLUMNS,
-            ));
+            let said = match received {
+                None if *answering => "Answering…".to_owned(),
+                None => "Sending…".to_owned(),
+                Some(Received {
+                    stage: TranscriptStage::Waiting,
+                    ..
+                }) => "Waiting to transcribe".to_owned(),
+                Some(Received {
+                    part: Some(part), ..
+                }) => format!("Transcribing, part {} of {}", part.number, part.of),
+                // Including a stage from a newer server.
+                Some(_) => "Transcribing…".to_owned(),
+            };
+            rows.push(Row::text(&said, Style::bold(TEXT), COLUMNS));
             if !heard.trim().is_empty() {
                 rows.extend(tail(heard, 2, Style::plain(DIM)));
             }
@@ -391,6 +413,7 @@ mod tests {
             &Phase::Sending {
                 heard: "yes".into(),
                 answering: true,
+                received: None,
             },
             None,
             0.0,
@@ -460,6 +483,44 @@ mod tests {
     }
 
     #[test]
+    fn words_the_server_has_say_whether_they_are_transcribed_or_wait() {
+        let received = |stage, part| Phase::Sending {
+            heard: "check the build".into(),
+            answering: true,
+            received: Some(Received { stage, part }),
+        };
+        let part = |number, of| Some(TranscriptPart { number, of });
+        for (phase, said) in [
+            (
+                received(TranscriptStage::Transcribing, None),
+                "Transcribing…",
+            ),
+            (
+                received(TranscriptStage::Transcribing, part(2, 3)),
+                "Transcribing, part 2 of 3",
+            ),
+            (
+                received(TranscriptStage::Waiting, None),
+                "Waiting to transcribe",
+            ),
+            // A stage from a newer server reads as transcribing.
+            (received(TranscriptStage::Unknown, None), "Transcribing…"),
+        ] {
+            let canvas = canvas(&phase, None, 0.0);
+            assert_eq!(text(&canvas), format!("{said}\n\"check the build\""));
+            assert_eq!(canvas.border, None);
+        }
+        // The most parts a 5 minute message is cut into fits the card.
+        let longest = canvas(
+            &received(TranscriptStage::Transcribing, part(17, 17)),
+            None,
+            0.0,
+        );
+        assert_eq!(longest.rows[0].plain(), "Transcribing, part 17 of 17");
+        assert!(longest.rows.iter().all(|row| row.cells.len() <= COLUMNS));
+    }
+
+    #[test]
     fn answering_releasing_sending_and_failing_each_say_so() {
         let answering = Phase::Recording {
             elapsed: Duration::from_secs(3),
@@ -481,7 +542,8 @@ mod tests {
             text(&canvas(
                 &Phase::Sending {
                     heard: "hi".into(),
-                    answering: false
+                    answering: false,
+                    received: None,
                 },
                 None,
                 0.0

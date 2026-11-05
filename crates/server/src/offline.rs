@@ -10,11 +10,11 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use tomori_protocol::AudioFrame;
+use tomori_protocol::{AudioFrame, TranscriptPart, TranscriptStage};
 use tomori_speech::stt::{
     OfflineRecognition, OfflineRecognizer, OfflineUtterance, RATE, VoiceActivity,
 };
-use tomori_speech::{Error, Stopper};
+use tomori_speech::{Error, Progress, Stopper};
 
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 
@@ -107,6 +107,17 @@ fn report(sink: &TranscriptSink, event: tomori_speech::TranscriptEvent) {
         tomori_speech::TranscriptEvent::Partial(_) => {
             unreachable!("the offline recognizer reports no partials")
         }
+        tomori_speech::TranscriptEvent::Progress(Progress::Waiting) => {
+            sink.progress(TranscriptStage::Waiting, None);
+        }
+        tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part, parts }) => {
+            // A part is worth saying only of several; the counts are bounded by the 5 minute limit.
+            let part = (parts > 1).then(|| TranscriptPart {
+                number: u32::try_from(part).unwrap_or(u32::MAX),
+                of: u32::try_from(parts).unwrap_or(u32::MAX),
+            });
+            sink.progress(TranscriptStage::Transcribing, part);
+        }
         tomori_speech::TranscriptEvent::Final(text) => sink.finish(&text),
         tomori_speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
         tomori_speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(&format!(
@@ -155,6 +166,9 @@ mod tests {
     fn each_outcome_is_told_to_the_utterance() {
         let sink = TranscriptSink::nowhere(UtteranceId(1));
         for event in [
+            tomori_speech::TranscriptEvent::Progress(Progress::Waiting),
+            tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part: 1, parts: 1 }),
+            tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part: 2, parts: 3 }),
             tomori_speech::TranscriptEvent::Final("Deploy it.".into()),
             tomori_speech::TranscriptEvent::Failed(Error::Stopped("gone".into())),
             tomori_speech::TranscriptEvent::Failed(Error::TooLong(600)),

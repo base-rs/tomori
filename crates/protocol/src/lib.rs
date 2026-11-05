@@ -18,7 +18,10 @@ mod space;
 pub use audio::{AGENT_SOURCE, AUDIO_HEADER_BYTES, AudioError, AudioFrame, Gate, REPLAY_SOURCE};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
-pub use message::{AnswerTarget, ClientMessage, Decision, Pointed, Pose, ServerMessage};
+pub use message::{
+    AnswerTarget, ClientMessage, Decision, Pointed, Pose, ServerMessage, TranscriptPart,
+    TranscriptStage,
+};
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,

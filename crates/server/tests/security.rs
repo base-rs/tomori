@@ -198,6 +198,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
     vic.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");
     assert!(ada.next_audio(Duration::from_millis(300)).is_none());

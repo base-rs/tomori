@@ -1386,6 +1386,7 @@ fn say_answer(
             question: question.id.clone(),
             field: question.field.clone(),
         }),
+        progress: false,
     });
     client.send_audio(
         tomori_protocol::Gate::Agent,
@@ -1634,6 +1635,7 @@ fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".to_owned(),
         answer: None,
+        progress: false,
     });
     ada.send_audio(Gate::Agent, speech("he"));
     // The gate switches to live and back; some live frames were not sent.
@@ -1666,6 +1668,7 @@ fn a_lost_frame_fails_the_utterance() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".to_owned(),
         answer: None,
+        progress: false,
     });
     ada.send_audio(Gate::Agent, speech("ab"));
     ada.skip_sequence(2);
