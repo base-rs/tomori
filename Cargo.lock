@@ -3655,7 +3655,6 @@ dependencies = [
  "anyhow",
  "basisu",
  "bytemuck",
- "font8x8",
  "glam",
  "gltf",
  "image",

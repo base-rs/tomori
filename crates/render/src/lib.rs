@@ -19,11 +19,9 @@ pub mod ui_panel;
 pub mod workspace_graphics;
 
 // The platform-neutral modules, from `tomori-scene`, under the paths this crate's own modules use.
-#[cfg(test)]
-use tomori_scene::ui_text;
 use tomori_scene::{
     arrival, arrival_motion, controller_ui, delegation, environment, hand_menu, hands, interaction,
-    scene, server_choice, swarm,
+    scene, server_choice, swarm, ui_text,
 };
 
 /// The licence of the bundled controller models, which [`controller_graphics`] draws.

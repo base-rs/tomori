@@ -14,6 +14,7 @@ use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
 use crate::feedback::Hand as Side;
 use crate::hands::Hand;
+use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines};
 
 /// A palm shows what its hand holds once it has faced within this angle of straight up for [`HOLD`], whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up. See `design/hand-menu.md`.
 pub const SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
@@ -31,11 +32,17 @@ const LITTLE_KNUCKLE: usize = 22;
 pub const ROW: f32 = 0.024;
 pub const ROW_LENGTH: f32 = 0.2;
 const MARKER: f32 = 0.009;
-const PIXEL: f32 = 0.0011;
-/// The most rows a layer of the agent's instructions takes when opened; a longer one ends with "...".
+/// The size of a font pixel of the menu's labels, in metres.
+pub const PIXEL: f32 = 0.0011;
+/// How far the menu reaches to the right of the middle of its rows' markers, in metres. A row's label starts two markers' widths along, and its background, sized to its text, ends two font pixels past its last cell.
+pub const PANEL: f32 = 0.42;
+/// How many characters every row of the menu holds, at most: as many cells of the font as fit in [`PANEL`]. Rows are wrapped or cut to it by [`crate::ui_text`], and a row's names, titles and labels are cut to leave room for the rest of it.
+pub const WIDTH: usize = ((PANEL - 2.0 * MARKER) / PIXEL - 2.0) as usize / CELL_WIDTH;
+/// The most rows a layer of the agent's instructions takes when opened; a longer one ends with "…".
 pub const LAYER_ROWS: usize = 14;
-/// How much of a layer its button in the Agent section shows.
-const PREVIEW: usize = 24;
+/// The most rows a notice takes, and the description of the mode pointed at.
+const NOTICE_ROWS: usize = 3;
+const DESCRIPTION_ROWS: usize = 4;
 
 /// The sign that turns the geometry of the hand on `side` into the way its palm faces. OpenXR's grip +X axis is normal to the palm, pointing away from the left palm and into the right one; and the little finger's knuckle crossed with the index finger's, from the wrist, points out of the left palm and into the right one.
 fn palm_sign(side: Side) -> f32 {
@@ -344,6 +351,31 @@ fn role_label(role: ConnectionRole) -> &'static str {
     }
 }
 
+/// A part of a row of the menu: text kept whole, such as "Turn ", " away" or a role, or the one part cut to fit, such as a name, mode or title.
+enum Part<'a> {
+    Kept(&'a str),
+    Cut(&'a str),
+}
+
+/// `parts` as one row of at most [`WIDTH`] characters: the kept parts whole, and the part that may be cut taking the room they leave, ending with "…" where it needs more. A run of spaces or line breaks in it is one space.
+fn row(parts: &[Part]) -> String {
+    let kept: usize = parts
+        .iter()
+        .map(|part| match part {
+            Part::Kept(text) => drawn(text).count(),
+            Part::Cut(_) => 0,
+        })
+        .sum();
+    let room = WIDTH.saturating_sub(kept);
+    parts
+        .iter()
+        .map(|part| match part {
+            Part::Kept(text) => (*text).to_owned(),
+            Part::Cut(text) => clip(text, room),
+        })
+        .collect()
+}
+
 /// The rows of `section`, or of the top level, for `model`.
 pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
     // The Space and Agent sections apply only inside a space, so leaving one returns to the top level; this device's Sound section applies everywhere.
@@ -365,16 +397,21 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
     };
     // Inside a space, the header says where the participant is and what the agent is doing, whenever the menu opens on the top level or the Space section.
     if let Some(space) = space.filter(|_| matches!(section, None | Some(Section::Space))) {
-        for line in wrap(&space.title, WIDTH).into_iter().take(2) {
+        // The Space section goes on with the rest of the title, so only the top level marks it cut.
+        let rows = if section.is_none() { 2 } else { usize::MAX };
+        for line in lines(&space.title, WIDTH, rows).into_iter().take(2) {
             text(&mut items, MenuKind::Heading, line);
         }
-        let mut status = vec![space.activity.clone()];
-        status.extend(space.mode.clone());
-        if space.speech == tomori_protocol::SpeechSetting::Brief {
-            status.push("brief".into());
+        // The activity, a word, is kept, and the mode, a name, cut to leave room for the rest.
+        let mut status = vec![Part::Kept(&space.activity)];
+        if let Some(mode) = &space.mode {
+            status.extend([Part::Kept(" | "), Part::Cut(mode)]);
         }
-        status.push(space.here.clone());
-        text(&mut items, MenuKind::Text, status.join(" | "));
+        if space.speech == tomori_protocol::SpeechSetting::Brief {
+            status.push(Part::Kept(" | brief"));
+        }
+        status.extend([Part::Kept(" | "), Part::Kept(&space.here)]);
+        text(&mut items, MenuKind::Text, row(&status));
     }
     let section_item = |items: &mut Vec<Item>, section: Section, flashing: bool, label: &str| {
         items.push(Item {
@@ -427,20 +464,28 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
         Some(Section::Space) => {
             button(&mut items, MenuKey::Back, "< Back".into());
             if let Some(space) = space {
-                for line in wrap(&space.title, WIDTH).into_iter().skip(2) {
+                for line in lines(&space.title, WIDTH, usize::MAX).into_iter().skip(2) {
                     text(&mut items, MenuKind::Text, line);
                 }
-                text(&mut items, MenuKind::Text, space.running.clone());
+                text(
+                    &mut items,
+                    MenuKind::Text,
+                    row(&[Part::Cut(&space.running)]),
+                );
                 text(&mut items, MenuKind::Heading, "Mode".into());
                 if space.modes.is_empty() {
                     let mode = space.mode.as_deref().unwrap_or("none offered");
-                    text(&mut items, MenuKind::Text, format!("Mode: {mode}"));
+                    text(
+                        &mut items,
+                        MenuKind::Text,
+                        row(&[Part::Kept("Mode: "), Part::Cut(mode)]),
+                    );
                 }
                 for (id, name, description, current) in &space.modes {
                     let label = if *current {
-                        format!("* {name} (now)")
+                        row(&[Part::Kept("* "), Part::Cut(name), Part::Kept(" (now)")])
                     } else {
-                        format!("  {name}")
+                        row(&[Part::Kept("  "), Part::Cut(name)])
                     };
                     let key = MenuKey::Mode(id.clone());
                     // Only a participant switches it; a visitor reads it.
@@ -452,7 +497,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     if model.pointed.as_ref() == Some(&key)
                         && let Some(description) = description
                     {
-                        for line in wrap(description, WIDTH).into_iter().take(4) {
+                        for line in lines(description, WIDTH - 2, DESCRIPTION_ROWS) {
                             text(&mut items, MenuKind::Text, format!("  {line}"));
                         }
                     }
@@ -481,16 +526,20 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     );
                     // Only an owner changes it, to one of those the server offers; anyone else reads it.
                     if space.environments.is_empty() {
-                        text(&mut items, MenuKind::Text, environment.clone());
+                        text(&mut items, MenuKind::Text, row(&[Part::Cut(environment)]));
                     }
                     for (id, name, current) in &space.environments {
                         if *current {
-                            text(&mut items, MenuKind::Text, format!("* {name} (now)"));
+                            text(
+                                &mut items,
+                                MenuKind::Text,
+                                row(&[Part::Kept("* "), Part::Cut(name), Part::Kept(" (now)")]),
+                            );
                         } else {
                             button(
                                 &mut items,
                                 MenuKey::Environment(id.clone()),
-                                format!("  {name}"),
+                                row(&[Part::Kept("  "), Part::Cut(name)]),
                             );
                         }
                     }
@@ -520,7 +569,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
         Some(Section::Leave) => {
             text(&mut items, MenuKind::Heading, "Leave this space?".into());
             let title = space.map_or("", |space| space.title.as_str());
-            for line in wrap(title, WIDTH).into_iter().take(2) {
+            for line in lines(title, WIDTH, 2) {
                 text(&mut items, MenuKind::Text, line);
             }
             button(&mut items, MenuKey::ConfirmLeave, "Leave".into());
@@ -545,10 +594,13 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                                 format!("{}: none", layer.label()),
                             );
                         } else {
+                            // The start of every line of it, as one, cut at a word.
+                            let room = WIDTH - layer.label().len() - 2;
+                            let start = lines(&clip(said, usize::MAX), room, 1).concat();
                             button(
                                 &mut items,
                                 MenuKey::Layer(layer),
-                                format!("{}: {}", layer.label(), preview(said)),
+                                format!("{}: {start}", layer.label()),
                             );
                         }
                     }
@@ -561,10 +613,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         );
                     }
                     if let Some(error) = &instructions.error {
-                        for line in crate::caption::wrapped_lines(error)
-                            .into_iter()
-                            .take(LAYER_ROWS)
-                        {
+                        for line in lines(error, WIDTH, LAYER_ROWS) {
                             text(&mut items, MenuKind::Text, line);
                         }
                     }
@@ -579,14 +628,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 .as_ref()
                 .map(|instructions| layer.text(instructions))
                 .unwrap_or_default();
-            let mut lines = crate::caption::wrapped_lines(said);
-            if lines.len() > LAYER_ROWS {
-                lines.truncate(LAYER_ROWS);
-                let last = lines.last_mut().expect("truncated to at least one");
-                last.truncate(crate::caption::COLUMNS - 3);
-                last.push_str("...");
-            }
-            for line in lines {
+            for line in lines(said, WIDTH, LAYER_ROWS) {
                 text(&mut items, MenuKind::Text, line);
             }
         }
@@ -599,12 +641,20 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     button(
                         &mut items,
                         MenuKey::Admit(knock.id.clone()),
-                        format!("Let {} in", knock.name),
+                        row(&[
+                            Part::Kept("Let "),
+                            Part::Cut(&knock.name),
+                            Part::Kept(" in"),
+                        ]),
                     );
                     button(
                         &mut items,
                         MenuKey::Decline(knock.id.clone()),
-                        format!("Turn {} away", knock.name),
+                        row(&[
+                            Part::Kept("Turn "),
+                            Part::Cut(&knock.name),
+                            Part::Kept(" away"),
+                        ]),
                     );
                     requests = true;
                 }
@@ -624,7 +674,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 requests = true;
             }
             if let Some(pairing) = &model.pairing {
-                button(&mut items, MenuKey::Pair, pairing.clone());
+                button(&mut items, MenuKey::Pair, row(&[Part::Cut(pairing)]));
                 requests = true;
             }
             if !requests {
@@ -634,7 +684,13 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
             text(
                 &mut items,
                 MenuKind::Text,
-                format!("You: {} ({})", model.name, role_label(model.role)),
+                row(&[
+                    Part::Kept("You: "),
+                    Part::Cut(&model.name),
+                    Part::Kept(" ("),
+                    Part::Kept(role_label(model.role)),
+                    Part::Kept(")"),
+                ]),
             );
             if model.in_space {
                 if model.people.is_empty() {
@@ -643,18 +699,22 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     } else {
                         model.participants.join(", ")
                     };
-                    text(&mut items, MenuKind::Text, format!("Here: {here}"));
+                    // Wrapped, so that everyone here is shown.
+                    for line in lines(&format!("Here: {here}"), WIDTH, usize::MAX) {
+                        text(&mut items, MenuKind::Text, line);
+                    }
                 } else {
                     // Each with a swatch of their colour, the key to the transcript's colours.
                     text(&mut items, MenuKind::Text, "Here:".into());
                     for person in &model.people {
-                        let mut label = person.name.clone();
-                        if person.you {
-                            label = format!("You ({label})");
-                        }
-                        if person.away {
-                            label.push_str(", away");
-                        }
+                        let (before, after) = if person.you { ("You (", ")") } else { ("", "") };
+                        let away = if person.away { ", away" } else { "" };
+                        let label = row(&[
+                            Part::Kept(before),
+                            Part::Cut(&person.name),
+                            Part::Kept(after),
+                            Part::Kept(away),
+                        ]);
                         let key = MenuKey::Text(items.len());
                         items.push(Item {
                             key,
@@ -670,9 +730,21 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                 );
             }
             if let Some(notice) = &model.notice {
-                text(&mut items, MenuKind::Text, notice.clone());
+                for line in lines(notice, WIDTH, NOTICE_ROWS) {
+                    text(&mut items, MenuKind::Text, line);
+                }
             }
         }
+    }
+    // Every row is drawn as the transcript draws it, and fits the menu's width, which the rows above leave room for.
+    for item in &mut items {
+        item.text = cut(
+            &[Span::new(item.text.as_str(), Style::plain([1.0; 4]))],
+            WIDTH,
+        )
+        .into_iter()
+        .map(|(ch, _)| ch)
+        .collect();
     }
     items
 }
@@ -690,37 +762,6 @@ pub fn text(section: Option<Section>, model: &Model) -> Vec<String> {
             _ => item.text,
         })
         .collect()
-}
-
-/// How wide the menu's wrapped rows are, in characters.
-const WIDTH: usize = 32;
-
-/// `text` wrapped to `width` characters, at words.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => lines.push(word.chars().take(width).collect()),
-        }
-    }
-    lines
-}
-
-/// The start of `text`, on one line, cut at a word with "..." when longer than [`PREVIEW`].
-fn preview(text: &str) -> String {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if line.chars().count() <= PREVIEW {
-        return line;
-    }
-    let cut: String = line.chars().take(PREVIEW).collect();
-    let cut = cut
-        .rsplit_once(' ')
-        .map_or(cut.as_str(), |(start, _)| start);
-    format!("{cut}...")
 }
 
 /// The hand menu's state: whether it shows, and which section is open.
@@ -1289,7 +1330,7 @@ mod tests {
         model.instructions = Some(AgentInstructions {
             tomori: tomori.clone(),
             environment: String::new(),
-            space: "Mind the docs.".into(),
+            space: "Mind the docs.\nAnd more".into(),
             error: Some("The agent did not take Tomori's instructions: gone".into()),
         });
         let rows = items(Some(Section::Agent), &model);
@@ -1298,9 +1339,9 @@ mod tests {
             [
                 "< Back",
                 "Instructions",
-                "Tomori's: You are Tomori, the...",
+                "Tomori's: You are Tomori, the…",
                 "The environment's: none",
-                "This space's: Mind the docs.",
+                "This space's: Mind the docs. And more",
                 "Clear this space's",
                 "The agent did not take Tomori's",
                 "instructions: gone",
@@ -1327,11 +1368,8 @@ mod tests {
         let rows = items(menu.section, &model);
         assert_eq!(rows[1].text, "Tomori's");
         assert_eq!(rows.len(), 2 + LAYER_ROWS);
-        assert!(rows.last().unwrap().text.ends_with("..."));
-        assert!(
-            rows.iter()
-                .all(|row| row.text.chars().count() <= crate::caption::COLUMNS)
-        );
+        assert!(rows.last().unwrap().text.ends_with('…'));
+        assert!(rows.iter().all(|row| row.text.chars().count() <= WIDTH));
         assert_eq!(menu.choose(&MenuKey::Back), None);
         assert_eq!(menu.section, Some(Section::Agent));
         assert_eq!(
@@ -1397,8 +1435,8 @@ mod tests {
         assert_eq!(
             texts(&rows),
             [
-                "Fix the parser in the lexer",
-                "before the release goes out",
+                "Fix the parser in the lexer before the",
+                "release goes out",
                 "running | build | brief | 2 here",
                 "Space",
                 "Agent",
@@ -1543,8 +1581,8 @@ mod tests {
             texts(&rows),
             [
                 "Leave this space?",
-                "Fix the parser in the lexer",
-                "before the release goes out",
+                "Fix the parser in the lexer before the",
+                "release goes out",
                 "Leave",
                 "Stay",
             ]
@@ -1740,5 +1778,265 @@ mod tests {
         ] {
             assert!(!role_label(role).is_empty());
         }
+    }
+    #[test]
+    fn every_row_fits_the_menu_and_draws_what_the_transcript_draws() {
+        let long = "Bartholomew-Fitzgerald-Montgomery-Smythe";
+        let mut model = in_space(ConnectionRole::Owner);
+        model.name = format!("José {long}");
+        model.participants = vec![long.into(); 4];
+        model.people.clear();
+        model.pairing = Some(format!("Pairing code {}", "9".repeat(60)));
+        model.knocks = vec![KnockRequest {
+            id: "knock-1".into(),
+            name: long.repeat(2),
+        }];
+        model.notice = Some("A security notice long enough to be cut. ".repeat(4));
+        let space = model.space.as_mut().unwrap();
+        space.title = format!("{} {}", "word".repeat(15), "Łódź ".repeat(20));
+        space.activity = "running a very long tool call".into();
+        space.here = "12 here, 3 away".into();
+        space.modes[1].1 = long.repeat(3);
+        space.modes[1].2 = Some("A description ".repeat(30));
+        space.environments = vec![
+            ("sky".into(), "Sky".into(), true),
+            ("long".into(), long.repeat(2), false),
+        ];
+        model.pointed = Some(MenuKey::Mode("plan".into()));
+        model.instructions = Some(AgentInstructions {
+            tomori: "x".repeat(400),
+            environment: "Short.".into(),
+            space: "word ".repeat(400),
+            error: Some("why ".repeat(200)),
+        });
+        let sections = [
+            None,
+            Some(Section::Space),
+            Some(Section::Leave),
+            Some(Section::Agent),
+            Some(Section::Layer(Layer::Tomori)),
+            Some(Section::Layer(Layer::Space)),
+            Some(Section::PeopleAndSecurity),
+            Some(Section::Sound),
+        ];
+        for section in sections {
+            let rows = items(section, &model);
+            for row in &rows {
+                assert!(
+                    row.text.chars().count() <= WIDTH,
+                    "{section:?}: {}",
+                    row.text
+                );
+            }
+        }
+        // The top level marks a title cut at two rows; the Space section goes on with the rest of it.
+        let top = items(None, &model);
+        assert_eq!(top[1].text.chars().last(), Some('…'));
+        assert!(!top[0].text.contains('?'));
+        let space = texts(&items(Some(Section::Space), &model))
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>();
+        assert!(!space[1].ends_with('…'));
+        assert!(space.iter().any(|row| row.contains("Lódz")), "{space:?}");
+        // A word longer than a row is broken across rows rather than dropped.
+        let layer = texts(&items(Some(Section::Layer(Layer::Tomori)), &model))
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(layer[2], "x".repeat(WIDTH));
+        assert_eq!(layer.len(), 2 + 10);
+        // The description of the mode pointed at, the error and the notice are bounded in rows too, and marked where cut.
+        let people = texts(&items(Some(Section::PeopleAndSecurity), &model))
+            .iter()
+            .map(|text| text.to_string())
+            .collect::<Vec<_>>();
+        assert!(people.last().unwrap().ends_with('…'));
+        let pointed = items(Some(Section::Space), &model);
+        assert!(pointed.iter().any(|row| row.text.ends_with('…')));
+        model.pointed = None;
+        assert_eq!(
+            pointed.len() - items(Some(Section::Space), &model).len(),
+            DESCRIPTION_ROWS
+        );
+    }
+
+    /// The rows of `section` for `model`, as text.
+    fn rows(section: Option<Section>, model: &Model) -> Vec<String> {
+        texts(&items(section, model))
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Whether `rows` has one that starts with `start`, cuts what follows with "…" and ends with `end`, filling the menu's width.
+    fn cut_between(rows: &[String], start: &str, end: &str) -> bool {
+        rows.iter().any(|row| {
+            row.starts_with(start)
+                && row.ends_with(&format!("…{end}"))
+                && row.chars().count() == WIDTH
+        })
+    }
+
+    /// The text of the row of `section` chosen by `key`.
+    fn text_of(section: Option<Section>, model: &Model, key: &MenuKey) -> String {
+        items(section, model)
+            .into_iter()
+            .find(|item| &item.key == key)
+            .expect("a row with the key")
+            .text
+    }
+
+    #[test]
+    fn a_long_name_title_or_label_is_cut_and_the_rest_of_its_row_kept() {
+        // Names, modes and environments of up to 64 bytes are allowed, and spoken.
+        let long = "Bartholomew Fitzgerald-Montgomery of the Very Long Name";
+        let mut model = in_space(ConnectionRole::Owner);
+        model.name = long.into();
+        model.knocks = vec![KnockRequest {
+            id: "knock-1".into(),
+            name: long.into(),
+        }];
+        model.people[0].name = long.into();
+        model.people[1].name = long.into();
+        model.people.push(Person {
+            name: long.into(),
+            colour: [1.0; 3],
+            you: false,
+            away: false,
+        });
+        model.pairing = Some(long.into());
+        // The role, "away", "in" and the action words survive.
+        let people = rows(Some(Section::PeopleAndSecurity), &model);
+        assert!(cut_between(&people, "Let Bartholomew", " in"), "{people:?}");
+        assert!(
+            cut_between(&people, "Turn Bartholomew", " away"),
+            "{people:?}"
+        );
+        assert!(
+            cut_between(&people, "You: Bartholomew", " (owner)"),
+            "{people:?}"
+        );
+        assert!(cut_between(&people, "You (Bartholomew", ")"), "{people:?}");
+        assert!(cut_between(&people, "Bartholomew", ", away"), "{people:?}");
+        // A row that is only a name, such as a pairing label or someone here, is cut to the width.
+        let whole = clip(long, WIDTH);
+        assert_eq!(whole.chars().count(), WIDTH);
+        assert_eq!(
+            text_of(Some(Section::PeopleAndSecurity), &model, &MenuKey::Pair),
+            whole
+        );
+        assert_eq!(people.iter().filter(|row| **row == whole).count(), 2);
+        // A visitor's own row keeps its role too.
+        model.role = ConnectionRole::Visitor;
+        let visitor = rows(Some(Section::PeopleAndSecurity), &model);
+        assert!(
+            cut_between(&visitor, "You: Bartholomew", " (visitor)"),
+            "{visitor:?}"
+        );
+
+        // In the Space section, a long mode keeps "(now)", and the title, environment and status are cut or wrapped to fit, keeping the rest.
+        let mut model = in_space(ConnectionRole::Owner);
+        let space = model.space.as_mut().unwrap();
+        space.title = format!("{long} {long}");
+        space.running = format!("opencode in {long}");
+        space.mode = Some(long.into());
+        space.modes[0].1 = long.into();
+        space.modes[1].1 = long.into();
+        space.here = "12 here, 3 away".into();
+        space.environment = Some(long.into());
+        space.environments = vec![
+            ("current".into(), long.into(), true),
+            ("other".into(), long.into(), false),
+        ];
+        let rows_of_space = rows(Some(Section::Space), &model);
+        let now = format!("* {} (now)", clip(long, WIDTH - 8));
+        let other = format!("  {}", clip(long, WIDTH - 2));
+        assert!(
+            cut_between(std::slice::from_ref(&now), "* Bartholomew", " (now)"),
+            "{now}"
+        );
+        assert!(
+            cut_between(std::slice::from_ref(&other), "  Bartholomew", ""),
+            "{other}"
+        );
+        let space_row = |key: MenuKey| text_of(Some(Section::Space), &model, &key);
+        assert_eq!(space_row(MenuKey::Mode("build".into())), now);
+        assert_eq!(space_row(MenuKey::Mode("plan".into())), other);
+        assert_eq!(space_row(MenuKey::Environment("other".into())), other);
+        // The current environment is read, not chosen, after the mode's rows.
+        assert_eq!(rows_of_space.iter().filter(|row| **row == now).count(), 2);
+        assert!(
+            rows_of_space
+                .iter()
+                .any(|row| row.starts_with("opencode in Bartholomew") && row.ends_with('…')),
+            "{rows_of_space:?}"
+        );
+        // The status keeps the activity, "brief" and how many are here, and cuts the mode.
+        assert_eq!(rows_of_space[2], "running | Bar… | brief | 12 here, 3 away");
+        model.space.as_mut().unwrap().speech = tomori_protocol::SpeechSetting::Full;
+        assert!(cut_between(
+            &rows(Some(Section::Space), &model),
+            "running | Bartholomew",
+            " | 12 here, 3 away"
+        ));
+        // The title wraps at words, on the top level's two rows and the Space section's after them, before the space's running agent.
+        let heading = items(Some(Section::Space), &model);
+        assert_eq!(heading[0].kind, MenuKind::Heading);
+        assert_eq!(heading[3].key, MenuKey::Back);
+        let running = rows_of_space
+            .iter()
+            .position(|row| row.starts_with("opencode"))
+            .unwrap();
+        let title = [&rows_of_space[..2], &rows_of_space[4..running]].concat();
+        assert!(title.iter().all(|row| !row.contains('…')), "{title:?}");
+        assert_eq!(title.join(" "), format!("{long} {long}"));
+        assert_eq!(rows_of_space[running].chars().count(), WIDTH);
+        // A long mode no one can switch to keeps its label.
+        model.space.as_mut().unwrap().modes.clear();
+        let modeless = rows(Some(Section::Space), &model);
+        assert!(
+            cut_between(&modeless, "Mode: Bartholomew", ""),
+            "{modeless:?}"
+        );
+        // Without environments to change to, the environment's name is cut.
+        model.space.as_mut().unwrap().environments.clear();
+        let fixed = rows(Some(Section::Space), &model);
+        assert!(cut_between(&fixed, "Bartholomew", ""), "{fixed:?}");
+    }
+
+    #[test]
+    fn everyone_here_is_shown_when_the_server_gives_only_names() {
+        let mut model = in_space(ConnectionRole::Owner);
+        model.people.clear();
+        model.participants = [
+            "Ada Lovelace",
+            "Bob",
+            "Charles Babbage",
+            "Dorothy",
+            "Edsger",
+        ]
+        .map(String::from)
+        .to_vec();
+        let people = rows(Some(Section::PeopleAndSecurity), &model);
+        let start = people
+            .iter()
+            .position(|row| row.starts_with("Here: "))
+            .unwrap();
+        let here = people[start..start + 2].join(" ");
+        assert_eq!(
+            here,
+            "Here: Ada Lovelace, Bob, Charles Babbage, Dorothy, Edsger"
+        );
+        assert!(people.iter().all(|row| !row.contains('…')), "{people:?}");
+    }
+
+    #[test]
+    fn the_rows_fill_the_panel_at_the_menus_font() {
+        // A row of `WIDTH` cells fits in the panel, with its background's margin after it, and one more would not.
+        let reach = |cells: usize| 2.0 * MARKER + ((cells * CELL_WIDTH) as f32 + 2.0) * PIXEL;
+        assert!(reach(WIDTH) <= PANEL);
+        assert!(reach(WIDTH + 1) > PANEL);
+        assert_eq!(WIDTH, 40);
     }
 }

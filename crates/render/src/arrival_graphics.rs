@@ -11,7 +11,6 @@ use crate::{
     server_choice::Source,
 };
 use bytemuck::{Pod, Zeroable};
-use font8x8::{BASIC_FONTS, UnicodeFonts};
 use glam::{Quat, Vec3};
 use std::f32::consts::{FRAC_PI_4, TAU};
 use tomori_protocol::{Activity, Attention};
@@ -366,14 +365,14 @@ struct Styled<'a> {
     alpha: f32,
 }
 
-/// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is.
+/// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is. Every quad lies in the label's plane, so that a label tilted to face the viewer draws its glyphs' rows touching and its background behind all of them.
 fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
     let label = styled.label;
     let p = label.pixel;
     let columns = label
         .lines
         .iter()
-        .map(|line| line.chars().count())
+        .map(|line| crate::ui_text::drawn(line).count())
         .max()
         .unwrap_or(0);
     if columns == 0 {
@@ -409,7 +408,7 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
             [0.0, 1.0],
         ] {
             mesh.push(Vertex {
-                position: (corner + right * (u * w) - Vec3::Y * (v * h)).to_array(),
+                position: (corner + right * (u * w) - up * (v * h)).to_array(),
                 color,
             });
         }
@@ -436,12 +435,8 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
             },
             1.0,
         );
-        for (column, ch) in line.chars().enumerate() {
-            let glyph = BASIC_FONTS
-                .get(ch)
-                .or_else(|| BASIC_FONTS.get('?'))
-                .unwrap_or([0; 8]);
-            for (gy, bits) in glyph.iter().enumerate() {
+        for (column, ch) in crate::ui_text::drawn(line).enumerate() {
+            for (gy, bits) in crate::ui_text::glyph(ch).iter().enumerate() {
                 let mut gx = 0;
                 while gx < 8 {
                     if bits & (1 << gx) == 0 {
@@ -1011,6 +1006,221 @@ mod tests {
             time: 0.0,
         };
         assert!(cubes(&frame).is_empty());
+    }
+
+    /// Where the viewer is, and a label below and in front of them, tilted 45° back to face them, as the hand menu's are: a row of solid block glyphs, which the basic table lacks.
+    fn tilted() -> (Vec3, Scene) {
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let anchor = eye + Vec3::new(0.0, -1.0, -1.0).normalize() * 0.6;
+        let mut label = object(Kind::Menu(MenuKind::Text));
+        label.position = anchor;
+        label.choosable = false;
+        label.label = Label {
+            anchor,
+            lines: vec!["████".into()],
+            align: Align::Left,
+            pixel: 0.004,
+            alpha: 1.0,
+            tilt: true,
+        };
+        let scene = Scene {
+            objects: vec![label],
+            viewer: Some(eye),
+            ..Default::default()
+        };
+        (eye, scene)
+    }
+
+    /// A point of the label's first glyph, `x` and `y` font pixels right and down from its anchor, in the label's plane.
+    fn on_label(scene: &Scene, x: f32, y: f32) -> Vec3 {
+        let label = &scene.objects[0].label;
+        let normal = facing_from(label.anchor, scene.viewer, true);
+        let right = Vec3::Y.cross(normal).normalize();
+        let up = normal.cross(right);
+        label.anchor + (right * x - up * y) * label.pixel
+    }
+
+    #[test]
+    fn a_tilted_label_lies_in_its_plane_and_draws_every_character_the_transcript_does() {
+        let (_, scene) = tilted();
+        let label = &scene.objects[0].label;
+        let normal = facing_from(label.anchor, scene.viewer, true);
+        assert!(normal.y > 0.7, "tilted back to face the viewer: {normal}");
+        let mesh = label_mesh(&scene, None);
+        for vertex in &mesh {
+            let depth = (Vec3::from_array(vertex.position) - label.anchor).dot(normal);
+            assert!(depth.abs() < 0.003, "{depth}");
+        }
+        // A block is one run per pixel row, eight to a glyph, with the background's quad.
+        assert_eq!(mesh.len(), 6 * (1 + 4 * 8));
+        // Accented letters come from the wider tables, and a ligature they lack draws as `?`.
+        let drawn = |text: &str| {
+            let mut scene = scene.clone();
+            scene.objects[0].label.lines = vec![text.into()];
+            label_mesh(&scene, None)
+        };
+        assert_ne!(drawn("José"), drawn("Jos?"));
+        assert_eq!(drawn("Ł"), drawn("L"));
+        assert_eq!(drawn("\u{153}"), drawn("?"));
+        // A combining mark takes no cell.
+        assert_eq!(drawn("e\u{301}"), drawn("e"));
+    }
+
+    /// The hand menu's widest rows, of as many characters as it holds, fill its panel as they are drawn, their backgrounds ending within it and less than a cell short of its edge.
+    #[test]
+    fn the_hand_menus_widest_rows_fill_its_panel_without_overflowing() {
+        use crate::hand_menu::{HandMenu, MenuKey, Model, PANEL, PIXEL, Palm, Section, WIDTH};
+        let mut menu = HandMenu::default();
+        menu.choose(&MenuKey::Section(Section::PeopleAndSecurity));
+        let model = Model {
+            notice: Some("x".repeat(3 * WIDTH)),
+            ..Default::default()
+        };
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.1, -0.35),
+            normal: Vec3::new(0.3, 0.8, 0.4).normalize(),
+        };
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let objects = menu.objects(&palm, &model, head);
+        let widest: Vec<_> = objects
+            .iter()
+            .filter(|object| object.label.lines[0].chars().count() == WIDTH)
+            .collect();
+        assert_eq!(widest.len(), 3);
+        for object in widest {
+            let scene = Scene {
+                objects: vec![object.clone()],
+                viewer: Some(head),
+                ..Default::default()
+            };
+            let right = Vec3::Y
+                .cross(facing_from(object.label.anchor, Some(head), true))
+                .normalize();
+            let reach = label_mesh(&scene, None)
+                .iter()
+                .map(|vertex| (Vec3::from_array(vertex.position) - object.position).dot(right))
+                .fold(f32::MIN, f32::max);
+            assert!(reach <= PANEL, "{reach}");
+            assert!(reach > PANEL - 9.0 * PIXEL, "{reach}");
+        }
+    }
+
+    /// The label's text is solid when seen from where it faces: before its quads were built along the label's up, a label tilted by 45° drew each pixel row about 70% as tall as the rows' spacing, leaving stripes, and its background short of its last row.
+    #[test]
+    fn a_tilted_label_draws_solid_glyphs_over_its_whole_background() {
+        const SIZE: u32 = 256;
+        let (eye, scene) = tilted();
+        let centre = on_label(&scene, 4.0, 4.0);
+        let matrix = glam::Mat4::perspective_rh(0.25, 1.0, 0.05, 50.0)
+            * glam::Mat4::look_at_rh(eye, centre, Vec3::Y);
+        crate::test_gpu::with(|gpu| {
+            let device = &gpu.device;
+            let queue = &gpu.queue;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tilted label test eye"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = crate::graphics::Renderer::new(device, queue, format, SIZE, SIZE);
+            let mut capture = |scene: &Scene| {
+                renderer.update_arrival(
+                    device,
+                    queue,
+                    &Frame {
+                        scene,
+                        hovered: None,
+                        ray: None,
+                        time: 0.0,
+                    },
+                );
+                renderer.render(
+                    device,
+                    queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    glam::Mat4::IDENTITY,
+                    &[],
+                );
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("tilted label test readback"),
+                    size: u64::from(SIZE * SIZE * 4),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(SIZE * 4),
+                            rows_per_image: Some(SIZE),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = tx.send(result);
+                    });
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                buffer.unmap();
+                image::RgbaImage::from_raw(SIZE, SIZE, data).unwrap()
+            };
+            let image = capture(&scene);
+            let bare = capture(&Scene {
+                viewer: scene.viewer,
+                ..Default::default()
+            });
+            crate::test_support::preview("TOMORI_TILTED_LABEL_PREVIEW", &image);
+            let at = |point: Vec3| {
+                let clip = matrix * point.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                let column = ((x * 0.5 + 0.5) * SIZE as f32) as u32;
+                let row = ((0.5 - y * 0.5) * SIZE as f32) as u32;
+                (column, row)
+            };
+            // Down the middle of the first glyph, every screen pixel is lit.
+            let gaps: Vec<f32> = (0..64)
+                .map(|step| 0.25 + 7.5 * step as f32 / 63.0)
+                .filter(|y| {
+                    let (column, row) = at(on_label(&scene, 4.0, *y));
+                    image.get_pixel(column, row)[0] < 180
+                })
+                .collect();
+            assert!(gaps.is_empty(), "the glyph has gaps at font rows {gaps:?}");
+            // Below the glyph, to the bottom of its row, the background covers what is behind it.
+            for y in [9.5, 11.5] {
+                let (column, row) = at(on_label(&scene, 4.0, y));
+                let covered = image.get_pixel(column, row).0[..3]
+                    .iter()
+                    .zip(&bare.get_pixel(column, row).0[..3])
+                    .map(|(a, b)| u32::from(a.abs_diff(*b)))
+                    .sum::<u32>();
+                assert!(image.get_pixel(column, row)[0] < 180, "{y}: lit");
+                assert!(covered > 6, "{y}: no background");
+            }
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
     }
 
     #[test]

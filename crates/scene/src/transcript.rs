@@ -11,7 +11,7 @@ use tomori_protocol::{Activity, QueueState, Role, SpaceState};
 
 use crate::markdown_lite::{self, Inline, Kind};
 use crate::speakers::{self, Known, Speaker};
-use crate::ui_text::{Cell, Rgba, Row, Span, Style, Wrap, cut, wrap};
+use crate::ui_text::{Cell, Rgba, Row, Span, Style, Wrap, cut, fit, wrap};
 
 /// The width on the wrist, in cells.
 pub const WRIST_COLUMNS: usize = 28;
@@ -693,12 +693,7 @@ fn card(
             columns,
             Wrap::default(),
         );
-        if lines.len() > 3 {
-            lines.truncate(3);
-            let last = &mut lines[2];
-            last.truncate(columns - 1);
-            last.push(('…', style(TEXT)));
-        }
+        fit(&mut lines, 3, columns);
         rows.extend(lines.into_iter().map(Row::new));
     };
     let note = |text: &str, color: Rgba| -> Vec<Row> {
@@ -885,12 +880,7 @@ pub fn layout(
             columns,
             Wrap::default(),
         );
-        if lines.len() > 2 {
-            lines.truncate(2);
-            let last = &mut lines[1];
-            last.truncate(columns - 1);
-            last.push(('…', style(RED)));
-        }
+        fit(&mut lines, 2, columns);
         budget -= lines.len();
         rows.extend(lines.into_iter().map(Row::new));
     }

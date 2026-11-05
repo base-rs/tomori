@@ -3243,15 +3243,10 @@ impl Conversation {
             None => String::new(),
         };
         // The description gets the rows the entries leave, but at most half, and the entries at least one.
-        let mut description = wrapped_lines(&description);
         let room = rows.saturating_sub(items.len().min(rows) + 1);
         let room = room.max(rows.saturating_sub(1) / 2);
-        if description.len() > room {
-            description.truncate(room);
-            // The body has at least four rows, so the description at least one.
-            let last = description.last_mut().expect("the description keeps a row");
-            *last = short(&format!("{last}..."));
-        }
+        // The body has at least four rows, so the description at least one.
+        let description = crate::ui_text::lines(&description, COLUMNS, room);
         let shown = rows
             .saturating_sub(description.len() + usize::from(!description.is_empty()))
             .max(1);
@@ -3327,17 +3322,15 @@ impl Conversation {
         let Some(problem) = self.problem() else {
             return Vec::new();
         };
-        let mut lines = wrapped_lines(&format!(
-            "! {} {}",
-            age(self.problem_age(&problem, now)),
-            problem.replace('\n', " ")
-        ));
-        if lines.len() > PROBLEM_ROWS {
-            lines.truncate(PROBLEM_ROWS);
-            let last = &mut lines[PROBLEM_ROWS - 1];
-            *last = format!("{}...", &last[..last.len().min(COLUMNS - 3)]);
-        }
-        lines
+        crate::ui_text::lines(
+            &format!(
+                "! {} {}",
+                age(self.problem_age(&problem, now)),
+                problem.replace('\n', " ")
+            ),
+            COLUMNS,
+            PROBLEM_ROWS,
+        )
     }
 
     /// The queue strip: entries waiting or being sent, oldest first, on up to [`QUEUE_ROWS`] rows, keeping the selected entry in view.
@@ -3765,21 +3758,19 @@ fn window(selected: usize, count: usize, rows: usize) -> usize {
 /// The end of `text` within `width` columns, so that words still being heard stay in view.
 #[cfg(any(not(target_os = "android"), test))]
 fn tail(text: &str, width: usize) -> String {
-    let ascii = wrapped_lines(&text.replace('\n', " ")).join(" ");
-    if ascii.len() <= width {
-        ascii
+    let line: Vec<char> = crate::ui_text::clip(text, usize::MAX).chars().collect();
+    if line.len() <= width {
+        line.into_iter().collect()
     } else {
-        format!("...{}", &ascii[ascii.len() - (width - 3)..])
+        std::iter::once('…')
+            .chain(line[line.len() - (width - 1)..].iter().copied())
+            .collect()
     }
 }
 
+/// `text` on one row of the panel, as [`crate::ui_text::clip`] cuts it.
 fn short(text: &str) -> String {
-    let ascii = wrapped_lines(&text.replace('\n', " ")).join(" ");
-    if ascii.len() <= COLUMNS {
-        ascii
-    } else {
-        format!("{}...", &ascii[..COLUMNS - 3])
-    }
+    crate::ui_text::clip(text, COLUMNS)
 }
 
 fn shift(index: usize, delta: i32, count: usize) -> usize {
@@ -3979,7 +3970,10 @@ mod tests {
     fn assert_fits(conversation: &mut Conversation) {
         let text = conversation.text();
         assert!(text.lines().count() <= ROWS, "{text}");
-        assert!(text.lines().all(|line| line.len() <= COLUMNS), "{text}");
+        assert!(
+            text.lines().all(|line| line.chars().count() <= COLUMNS),
+            "{text}"
+        );
     }
 
     #[test]
@@ -6226,7 +6220,7 @@ mod tests {
 
         let paged = pages(&(0..200).map(|i| format!("line {i}\n")).collect::<String>());
         assert!(paged.last().unwrap().last().unwrap().contains("199"));
-        assert!(short(&"🦀".repeat(200)).len() <= COLUMNS);
+        assert!(short(&"🦀".repeat(200)).chars().count() <= COLUMNS);
     }
 
     fn modes(current: &str) -> impl FnOnce(&mut SpaceState) {
@@ -7560,7 +7554,7 @@ mod tests {
         let utterance = press(&mut conversation);
         let heard = format!("{} the newest words", "older words ".repeat(10));
         conversation.apply(transcript(&utterance, &heard, false));
-        assert!(conversation.text().contains("MIC AGENT: ..."));
+        assert!(conversation.text().contains("MIC AGENT: …"));
         assert!(conversation.text().contains("the newest words"));
         conversation.talk(false);
         assert!(conversation.text().contains("the newest words..."));
