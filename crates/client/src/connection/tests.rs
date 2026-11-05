@@ -167,9 +167,7 @@ fn an_utterance_is_for_the_agent_unless_it_answers_or_names() {
     let naming = Utterance::new("u-1", 3).naming();
     assert!(naming.naming && naming.answer.is_none() && naming.generation == 3);
     // What it attends to, as it begins, goes with it.
-    let worker = tomori_protocol::Resource::Worker {
-        worker: "ses_1".into(),
-    };
+    let worker = tomori_protocol::Resource::worker("ses_1");
     let attending = Utterance::new("u-1", 3).attending(vec![worker.clone()]);
     assert_eq!(attending.attention, [worker]);
 }

@@ -597,9 +597,7 @@ fn prompts(session: &tomori_server::fake::FakeSession) -> Vec<String> {
 
 /// A worker by identity, as a client names it.
 fn worker(id: &str) -> tomori_protocol::Resource {
-    tomori_protocol::Resource::Worker {
-        worker: id.to_owned(),
-    }
+    tomori_protocol::Resource::worker(id)
 }
 
 #[test]
@@ -733,6 +731,62 @@ fn attention_is_captured_as_the_utterance_begins_and_never_from_a_description_a_
         pointed: None,
     });
     // The agent has the first words, and the second wait for it.
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.text == "is this one done" && entry.state == QueueState::Delivered)
+            && state.queue.iter().any(|entry| entry.text == "and that one")
+    });
+    session.reply("done");
+    ada.space(|state| {
+        state
+            .queue
+            .iter()
+            .all(|entry| entry.state == QueueState::Delivered)
+    });
+    assert_eq!(
+        prompts(&session),
+        [
+            "Ada: [Pointing at worker \"Tests\" (fake session ses_a, running)] is this one done",
+            "Ada: and that one",
+        ]
+    );
+}
+
+#[test]
+fn a_malformed_attention_entry_is_skipped_and_the_words_still_reach_the_agent() {
+    let server = TestServer::with_backend(FakeBackend::manual());
+    let (mut ada, _bob, _) = pair(&server);
+    let session = server.backend.started()[0].clone();
+    session.emit(Event::WorkersChanged {
+        workers: vec![Worker {
+            id: "ses_a".into(),
+            parent: Some(session.id()),
+            title: "Tests".into(),
+            state: WorkerState::Running,
+        }],
+    });
+    ada.space(|state| state.workers.len() == 1);
+    // A known kind without its identity, an entry that is not an object and one without a kind cost only themselves:
+    // the utterance begins, attending to what could be read.
+    ada.send_json(&serde_json::json!({
+        "type": "utterance_begin", "utterance": "u1", "attention": [
+            {"kind": "worker"}, "ses_a", {"uri": "github://o/r/issues/1"}, {"kind": "worker", "worker": "ses_a"}
+        ]
+    }));
+    ada.send_audio(Gate::Agent, speech("is this one done"));
+    // An older client's pointing that cannot be read costs nothing either.
+    ada.send_json(&serde_json::json!({"type": "utterance_end", "utterance": "u1", "pointed": {"kind": "worker"}}));
+    // Attention that names nothing readable keeps the words too.
+    ada.send_json(&serde_json::json!({
+        "type": "utterance_begin", "utterance": "u2", "attention": [{"kind": "worker", "worker": ["ses_a"]}]
+    }));
+    ada.send_audio(Gate::Agent, speech("and that one"));
+    ada.send(&ClientMessage::UtteranceEnd {
+        utterance: "u2".into(),
+        pointed: None,
+    });
     ada.space(|state| {
         state
             .queue

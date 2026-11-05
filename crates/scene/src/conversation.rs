@@ -2507,9 +2507,7 @@ impl Conversation {
         let attention = pointed
             .iter()
             .filter(|_| !answering)
-            .map(|worker| tomori_protocol::Resource::Worker {
-                worker: worker.clone(),
-            })
+            .map(tomori_protocol::Resource::worker)
             .collect();
         self.actions.push(Action::BeginUtterance(if naming {
             Utterance::new(utterance.clone(), self.capture_generation).naming()
@@ -5758,19 +5756,19 @@ mod tests {
         let text = conversation.text();
         assert!(!text.contains("on the PC"), "{text}");
         assert!(text.ends_with("Hold X to answer | hold B leave"), "{text}");
+        // An answer is about the question, so a worker pointed at as X is pressed is not sent with it.
+        conversation.point_at(Some("worker-1"));
         conversation.talk(true);
         let actions = conversation.take_actions();
         assert!(
             matches!(
                 &actions[..],
-                [Action::BeginUtterance(Utterance { answer: Some(target), naming: false, .. })]
-                    if target.question == "question-1" && target.field == "test"
+                [Action::BeginUtterance(Utterance { answer: Some(target), naming: false, attention, .. })]
+                    if target.question == "question-1" && target.field == "test" && attention.is_empty()
             ),
             "{actions:?}"
         );
         assert!(conversation.text().contains("MIC ANSWER"));
-        // An answer is about the question, so a worker pointed at meanwhile is not sent with it.
-        conversation.point_at(Some("worker-1"));
         conversation.talk(false);
         assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
 
@@ -5862,12 +5860,14 @@ mod tests {
                 id: utterance,
                 answer: None,
                 naming: true,
+                attention,
                 ..
             }),
         ] = &actions[..]
         else {
             unreachable!("{actions:?}")
         };
+        assert!(attention.is_empty(), "{attention:?}");
         let utterance = utterance.clone();
         assert!(!conversation.menu_model().naming, "once only");
         assert!(conversation.text().contains("MIC NAME: listening..."));
@@ -6914,7 +6914,7 @@ mod tests {
             };
             utterance.attention.clone()
         };
-        let resource = |id: &str| tomori_protocol::Resource::Worker { worker: id.into() };
+        let resource = tomori_protocol::Resource::worker;
 
         // Pointed at as X is pressed, then elsewhere and away before letting go: the worker it began with is kept,
         // and the words end naming nothing.

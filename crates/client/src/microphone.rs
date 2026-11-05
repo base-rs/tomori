@@ -366,9 +366,7 @@ mod tests {
     #[test]
     fn an_utterance_begins_with_what_is_attended_to_and_ends_naming_nothing() {
         let (mut microphone, sender) = microphone();
-        let worker = tomori_protocol::Resource::Worker {
-            worker: "ses_1".into(),
-        };
+        let worker = tomori_protocol::Resource::worker("ses_1");
         microphone
             .begin_attending("u1", vec![worker.clone()])
             .unwrap();

@@ -3654,6 +3654,7 @@ dependencies = [
 name = "tomori-protocol"
 version = "0.1.0"
 dependencies = [
+ "log",
  "serde",
  "serde_json",
  "unicode-normalization",
