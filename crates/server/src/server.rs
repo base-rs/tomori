@@ -1885,6 +1885,49 @@ mod tests {
         assert_eq!(read(slow, &cancelled), None);
     }
 
+    /// A server showing `source`'s cards, with an owner watching them in a space that shows them.
+    fn server_with_watcher(source: Arc<dyn crate::cards::CardSource>) -> Server {
+        let server = server().with_cards("github", "GitHub", source);
+        let (commands, _receiver) = async_channel::unbounded();
+        let request = crate::hub::CreateRequest {
+            title: "Cards".to_owned(),
+            backend: "fake".to_owned(),
+            directory: "/tmp".to_owned(),
+            session: None,
+            creator: "nobody".to_owned(),
+            creator_space: None,
+            environment: "github".to_owned(),
+            instructions: String::new(),
+        };
+        let id = server
+            .hub
+            .register_space(&request, "session".to_owned(), Default::default(), commands)
+            .unwrap();
+        let (connection, ..) = server
+            .hub
+            .connect(Cancellation::new(), crate::Access::open())
+            .unwrap();
+        for message in [
+            tomori_protocol::ClientMessage::Hello {
+                protocol: tomori_protocol::PROTOCOL_VERSION,
+                participant: "ada".to_owned(),
+                name: "Ada".to_owned(),
+                names: false,
+            },
+            tomori_protocol::ClientMessage::Join { space: id },
+            tomori_protocol::ClientMessage::WatchCards,
+        ] {
+            server
+                .hub
+                .receive(connection, tomori_protocol::Frame::client(&message));
+        }
+        assert_eq!(
+            server.hub.cards_next(Instant::now()),
+            crate::cards::Next::Now
+        );
+        server
+    }
+
     #[test]
     fn cards_wait_until_due_or_watched_and_a_failing_timer_ends_their_reading() {
         let scheduler = Faulty {
@@ -1911,6 +1954,15 @@ mod tests {
             .hub
             .cards_fetched(Ok(crate::cards::Fetched::default()), Instant::now());
         block_on(server.refresh_cards(&scheduler, &live));
+        // Serving ends while a read is under way: its answer is not waited for.
+        let watched = server_with_watcher(scripted(
+            Duration::from_millis(500),
+            vec![Ok(crate::cards::Fetched::default())],
+        ));
+        let later = Cancellation::new();
+        block_on(zip(watched.refresh_cards(&Faulty::new(), &later), async {
+            later.cancel()
+        }));
         // A timer cancelled as serving ends is no failure.
         let later = Cancellation::new();
         block_on(zip(server.refresh_cards(&Faulty::new(), &later), async {

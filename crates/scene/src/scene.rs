@@ -170,6 +170,8 @@ pub struct Frame<'a> {
     pub agent: [f32; 3],
     /// What to tell the others in the space; visitors send nothing.
     pub presence: Option<Presence>,
+    /// The GitHub environment's inbox and cards, in the scene, while the space shows them.
+    pub cards: Vec<controller_ui::Sheet>,
 }
 
 /// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
@@ -207,6 +209,8 @@ pub struct Step {
     presentation_navigation: CardNavigation,
     /// In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
     panel: PanelAnchor,
+    /// The GitHub environment's cards: the one carried and the one put down; see `design/github.md`.
+    board: crate::board::Board,
 }
 
 impl Default for Step {
@@ -232,6 +236,7 @@ impl Default for Step {
             coordinator_samples: Vec::with_capacity(crate::swarm::AGENT_COUNT),
             presentation_navigation: CardNavigation::default(),
             panel: PanelAnchor::default(),
+            board: crate::board::Board::default(),
         }
     }
 }
@@ -551,17 +556,60 @@ impl Step {
             && !menu_shown
             && !wrist_active
             && conversation.joined_space().is_some();
-        let worker = self.delegation_scene.point(senses.ray.filter(|_| in_space));
-        // Entering a new target, an arrival object, a hand menu row or a worker, ticks very lightly, but not while the trigger pulls the swarm.
+        // The space's cards stand wherever it shows them; the ray and the right grip act on them only while nothing else takes them. See `design/github.md`.
+        let board = self.board.update(crate::board::Input {
+            cards: conversation.cards().filter(|_| !in_arrival),
+            ray: senses.ray,
+            grip: senses.grip,
+            viewer: senses.viewer,
+            active: in_space,
+            now,
+        });
+        if board.picked {
+            feedback.emit(feedback::Event::Choose, now);
+        }
+        if let Some((card, placement)) = board.placed {
+            feedback.emit(feedback::Event::Hover, now);
+            conversation.place_card(card, placement);
+        }
+        let worker = self
+            .delegation_scene
+            .point(senses.ray.filter(|_| in_space))
+            .map(str::to_owned);
+        // The nearer of the card and the worker the ray meets is pointed at; a card carried is pointed at all along.
+        let reach = |point: Vec3| {
+            senses
+                .ray
+                .map_or(f32::INFINITY, |ray| point.distance(ray.origin))
+        };
+        let card = self.board.held().map(str::to_owned).or_else(|| {
+            board
+                .pointed
+                .as_ref()
+                .filter(|(_, distance, _)| {
+                    self.delegation_scene
+                        .hit_point()
+                        .is_none_or(|point| *distance < reach(point))
+                })
+                .map(|(card, _, _)| card.clone())
+        });
+        let worker = worker.filter(|_| card.is_none());
+        // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
         let target = self
             .highlighted
             .as_ref()
             .map(feedback::key)
-            .or_else(|| worker.map(feedback::key));
+            .or_else(|| card.as_ref().map(feedback::key))
+            .or_else(|| worker.as_ref().map(feedback::key));
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
         }
-        conversation.point_at(worker);
+        let card_end = card.as_ref().and(board.end);
+        conversation.point(match (card, worker) {
+            (Some(card), _) => Some(tomori_protocol::Resource::card(card)),
+            (None, Some(worker)) => Some(tomori_protocol::Resource::worker(worker)),
+            (None, None) => None,
+        });
         let (root, workspace) = self.workers.update(conversation.joined_space());
         self.coordinator_samples.clear();
         self.coordinator_samples.extend(
@@ -583,7 +631,7 @@ impl Step {
                     hit: pointing.hit.is_some(),
                 })
         } else {
-            let hit = self.delegation_scene.hit_point();
+            let hit = card_end.or_else(|| self.delegation_scene.hit_point());
             ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
                 origin: ray.origin,
                 end: hit.unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
@@ -645,6 +693,7 @@ impl Step {
             listener: senses.head_pose,
             agent,
             presence,
+            cards: board.sheets,
         }
     }
 }
@@ -714,6 +763,20 @@ pub mod fixtures {
         conversation.apply(space(|_| {}));
         conversation.take_actions();
         conversation
+    }
+
+    /// Show `cards` in [`SPACE`], which shows cards, as the server sends them.
+    pub fn show_cards(conversation: &mut Conversation, cards: Vec<tomori_protocol::Card>) {
+        conversation.apply(space(|state| state.cards = true));
+        conversation.apply(Event::Message(ServerMessage::Cards {
+            cards: Box::new(tomori_protocol::Cards {
+                space: SPACE.into(),
+                source: "o/r".into(),
+                cards,
+                status: None,
+            }),
+        }));
+        conversation.take_actions();
     }
 
     /// Joined to [`SPACE`] with an approval waiting.
@@ -851,6 +914,131 @@ mod tests {
         let mut buttons = Buttons::default();
         change(&mut buttons);
         buttons
+    }
+
+    #[test]
+    fn the_ray_points_at_the_nearer_of_a_card_and_a_worker_and_the_grip_carries_a_card() {
+        use tomori_protocol::{Card, CardKind, Cards, Checks, Resource, ServerMessage};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| {
+            state.cards = true;
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ..senses()
+        };
+        let mut frame = |step: &mut Step, conversation: &mut Conversation, senses: &Senses| {
+            step.update(senses, conversation, &mut feedback, now, FRAME)
+                .stations
+                .iter()
+                .map(|station| Vec3::from_array(station.position))
+                .collect::<Vec<_>>()
+        };
+        let worker = frame(&mut step, &mut conversation, &senses)[0];
+        // Before the cards arrive, there are none to draw.
+        assert!(
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                .cards
+                .is_empty()
+        );
+        // One card stands halfway to the worker, facing the eye, and another beyond it.
+        let between = arrival::HOME.lerp(worker, 0.5);
+        let beyond = arrival::HOME.lerp(worker, 1.5);
+        let placed = |at: Vec3| {
+            let model = crate::recording::facing(at, arrival::HOME, 1.0);
+            let (_, rotation, _) = model.to_scale_rotation_translation();
+            tomori_protocol::Pose {
+                position: at.to_array(),
+                orientation: rotation.to_array(),
+            }
+        };
+        let card = |number: u64, at: Vec3| Card {
+            id: format!("github://o/r/issues/{number}"),
+            number,
+            kind: CardKind::Issue,
+            title: "A card".into(),
+            author: "ada".into(),
+            labels: Vec::new(),
+            checks: Checks::None,
+            age: 0,
+            placement: Some(placed(at)),
+        };
+        let show = |conversation: &mut Conversation, at: Vec3| {
+            conversation.apply(tomori_client::Event::Message(ServerMessage::Cards {
+                cards: Box::new(Cards {
+                    space: SPACE.into(),
+                    source: "o/r".into(),
+                    cards: vec![card(1, at)],
+                    status: None,
+                }),
+            }));
+        };
+        show(&mut conversation, between);
+        conversation.take_actions();
+        senses.ray = Ray::new(arrival::HOME, worker - arrival::HOME);
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(output.cards.len(), 2, "the inbox and the card");
+        let beam = output
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(beam.hit && beam.end.distance(between) < 1e-3);
+        // What X begins attending to as it is pressed.
+        let attending = |conversation: &mut Conversation| {
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            utterance.attention.clone()
+        };
+        let card_pointed = Resource::card("github://o/r/issues/1");
+        assert_eq!(attending(&mut conversation), [card_pointed.clone()]);
+        // Beyond the worker, the worker is pointed at.
+        show(&mut conversation, beyond);
+        frame(&mut step, &mut conversation, &senses);
+        assert_eq!(attending(&mut conversation), [Resource::worker("ses_a")]);
+        // Back between, the grip picks it up and, carried, it is what is pointed at, wherever the ray goes.
+        show(&mut conversation, between);
+        frame(&mut step, &mut conversation, &senses);
+        senses.grip = Some(1.0);
+        frame(&mut step, &mut conversation, &senses);
+        assert_eq!(step.board.held(), Some("github://o/r/issues/1"));
+        senses.ray = Ray::new(arrival::HOME, Vec3::new(0.5, 0.0, -1.0));
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let beam = output
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(
+            beam.end
+                .distance(senses.ray.unwrap().at(between.distance(arrival::HOME)))
+                < 1e-3
+        );
+        assert_eq!(attending(&mut conversation), [card_pointed]);
+        // Letting go puts it down there, for everyone in the space.
+        senses.grip = Some(0.0);
+        frame(&mut step, &mut conversation, &senses);
+        let actions = conversation.take_actions();
+        let [Action::Send(tomori_protocol::ClientMessage::PlaceCard { card, placement })] =
+            actions.as_slice()
+        else {
+            unreachable!("one card put down, not {actions:?}");
+        };
+        assert_eq!(card, "github://o/r/issues/1");
+        assert!(placement.is_some());
     }
 
     #[test]

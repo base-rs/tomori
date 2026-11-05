@@ -83,9 +83,9 @@ enum Talk {
         answering: bool,
         /// Whether the words say the participant's new display name rather than being queued.
         naming: bool,
-        /// The worker pointed at as X was pressed, which the utterance began attending to, unless it answers the
-        /// presented question. See `design/interaction.md`.
-        pointed: Option<String>,
+        /// The worker or card pointed at as X was pressed, which the utterance began attending to, unless it answers
+        /// the presented question. See `design/interaction.md`.
+        pointed: Option<tomori_protocol::Resource>,
     },
     /// X was released; waiting for the server's final transcript.
     Sending {
@@ -268,8 +268,12 @@ pub struct Conversation {
     #[cfg(any(not(target_os = "android"), test))]
     paged: Option<Paged>,
     talk: Option<Talk>,
-    /// The worker the participant points at now, by identifier, as the frame loop or console last reported.
-    pointing_at: Option<String>,
+    /// What the participant points at now, a worker or a card, as the frame loop or console last reported.
+    pointing_at: Option<tomori_protocol::Resource>,
+    /// The cards of the space, in a space whose environment shows them. See `design/github.md`.
+    cards: Option<tomori_protocol::Cards>,
+    /// The space whose cards this connection asked to watch, so that it asks once for each space and connection.
+    watching: Option<String>,
     live: bool,
     /// Whether the participant is wearing the device and attending. See `design/spaces.md`.
     engagement: Engagement,
@@ -385,6 +389,8 @@ impl Conversation {
             paged: None,
             talk: None,
             pointing_at: None,
+            cards: None,
+            watching: None,
             live: false,
             engagement: Engagement::Engaged,
             reported: None,
@@ -644,8 +650,9 @@ impl Conversation {
             if self.mode != Mode::Space {
                 self.error = None;
             }
-            // A new connection starts with nothing reported.
+            // A new connection starts with nothing reported, and watching nothing.
             self.reported = None;
+            self.watching = None;
             self.backends = backends.clone();
             self.roots = roots.clone();
             self.environments = environments.clone();
@@ -720,8 +727,9 @@ impl Conversation {
                     // The server ignores a visitor's engagement, so it is reported again on taking part.
                     self.reported = None;
                 }
-                // Admitted to act here, the participant's engagement now counts.
+                // Admitted to act here, the participant's engagement now counts, and the space's cards can be watched.
                 self.report();
+                self.watch_cards();
             }
             ServerMessage::Spaces { spaces } => {
                 let selected = self.spaces.get(self.selected).map(|space| &space.id);
@@ -747,6 +755,16 @@ impl Conversation {
             ServerMessage::Name { name } => {
                 log::info!("Now called {name:?}");
                 self.server_name = Some(name);
+            }
+            // Only the joined space's cards are kept; a late update from a space left is ignored.
+            ServerMessage::Cards { cards } => {
+                if self
+                    .space
+                    .as_ref()
+                    .is_some_and(|space| space.id == cards.space)
+                {
+                    self.cards = Some(*cards);
+                }
             }
             // The answer to a session list, shown on the session ring after "New session".
             ServerMessage::Sessions { sessions } => {
@@ -930,6 +948,7 @@ impl Conversation {
             self.message = self.message.min(items(&state).saturating_sub(1));
         }
         self.space = Some(state);
+        self.watch_cards();
         if arrived {
             self.request_at = Some(Instant::now());
             // The transcript's focus moves to the request's title, so that an A meant for something else there decides nothing.
@@ -1123,6 +1142,8 @@ impl Conversation {
         self.knocks.clear();
         self.knock = None;
         self.space = None;
+        self.cards = None;
+        self.watching = None;
         self.joining = None;
         self.message = 0;
         self.page = 0;
@@ -2518,12 +2539,8 @@ impl Conversation {
         let pointed = self
             .pointing_at
             .clone()
-            .filter(|id| !naming && self.has_worker(id));
-        let attention = pointed
-            .iter()
-            .filter(|_| !answering)
-            .map(tomori_protocol::Resource::worker)
-            .collect();
+            .filter(|target| !naming && self.knows(target));
+        let attention = pointed.iter().filter(|_| !answering).cloned().collect();
         self.actions.push(Action::BeginUtterance(if naming {
             Utterance::new(utterance.clone(), self.capture_generation).naming()
         } else {
@@ -2545,21 +2562,79 @@ impl Conversation {
     /// console command. The worker pointed at as X is pressed is sent as the words begin, and pointing elsewhere
     /// while X is held does not change it. See `design/interaction.md`.
     pub fn point_at(&mut self, worker: Option<&str>) {
-        if self.pointing_at.as_deref() != worker {
-            self.pointing_at = worker.map(str::to_owned);
+        self.point(worker.map(tomori_protocol::Resource::worker));
+    }
+
+    /// What the participant points at now, a worker or a card, as [`Self::point_at`] says of workers.
+    pub fn point(&mut self, target: Option<tomori_protocol::Resource>) {
+        if self.pointing_at != target {
+            self.pointing_at = target;
         }
     }
 
     /// The worker the participant points at now, as the console shows it.
     #[cfg(not(target_os = "android"))]
     pub fn pointing_at(&self) -> Option<&str> {
-        self.pointing_at.as_deref()
+        match &self.pointing_at {
+            Some(tomori_protocol::Resource::Worker { worker, .. }) => Some(worker),
+            _ => None,
+        }
     }
 
-    /// Whether the joined space has the worker identified by `id`.
-    fn has_worker(&self, id: &str) -> bool {
-        self.joined_space()
-            .is_some_and(|(space, _)| space.workers.iter().any(|worker| worker.id == id))
+    /// Whether the joined space has `target`, a worker or a card.
+    fn knows(&self, target: &tomori_protocol::Resource) -> bool {
+        self.about(target).is_some()
+    }
+
+    /// What `target` is called, as the recording indicator and status line name it: a worker's title, or a card's
+    /// number and title. `None` when the joined space does not have it, or for a kind this client does not show.
+    fn about(&self, target: &tomori_protocol::Resource) -> Option<String> {
+        use tomori_protocol::Resource;
+        match target {
+            Resource::Worker { worker, .. } => self
+                .joined_space()
+                .and_then(|(space, _)| space.workers.iter().find(|known| &known.id == worker))
+                .map(|worker| worker.title.clone()),
+            Resource::Card { card, .. } => self
+                .cards()
+                .and_then(|cards| cards.cards.iter().find(|known| &known.id == card))
+                .map(|card| format!("#{} {}", card.number, card.title)),
+            _ => None,
+        }
+    }
+
+    /// The cards of the joined space, while its environment shows them. See `design/github.md`.
+    pub fn cards(&self) -> Option<&tomori_protocol::Cards> {
+        self.cards.as_ref().filter(|cards| {
+            self.joined_space()
+                .is_some_and(|(space, _)| space.id == cards.space)
+        })
+    }
+
+    /// Put the card `card` at `placement`, or back in the inbox, for everyone in the space. Only a participant can.
+    pub fn place_card(&mut self, card: String, placement: Option<tomori_protocol::Pose>) {
+        if !self.role.participates() || self.cards().is_none() {
+            return;
+        }
+        self.actions
+            .push(Action::Send(ClientMessage::PlaceCard { card, placement }));
+    }
+
+    /// Ask to watch the joined space's cards, once for each space and connection, if it shows them and this
+    /// participant takes part; forget them if it does not show them.
+    fn watch_cards(&mut self) {
+        let Some(space) = self.space.as_ref().filter(|_| self.mode == Mode::Space) else {
+            return;
+        };
+        if !space.cards {
+            self.cards = None;
+            self.watching = None;
+            return;
+        }
+        if self.role.participates() && self.watching.as_ref() != Some(&space.id) {
+            self.watching = Some(space.id.clone());
+            self.actions.push(Action::Send(ClientMessage::WatchCards));
+        }
     }
 
     /// The presented question, when this participant can answer it by voice: Tomori supports it, and the server says it routes spoken answers. See `design/spaces.md`.
@@ -2721,17 +2796,11 @@ impl Conversation {
                 pointed,
                 ..
             }) => {
-                // The worker the words will be about, which an answer never is.
+                // The worker or card the words will be about, which an answer never is.
                 let about = pointed
                     .as_ref()
                     .filter(|_| !answering)
-                    .and_then(|pointed| {
-                        self.space
-                            .iter()
-                            .flat_map(|space| &space.workers)
-                            .find(|worker| &worker.id == pointed)
-                    })
-                    .map(|worker| worker.title.clone());
+                    .and_then(|pointed| self.about(pointed));
                 return Some(Phase::Recording {
                     about,
                     elapsed: now.saturating_duration_since(*started),
@@ -3512,20 +3581,17 @@ impl Conversation {
     #[cfg(any(not(target_os = "android"), test))]
     fn space_status(&self, space: &SpaceState) -> String {
         let talking = match &self.talk {
-            // Until words are heard, the line says which worker they will be about.
+            // Until words are heard, the line says which worker or card they will be about.
             Some(Talk::Recording {
                 heard,
                 answering: false,
                 naming: false,
                 pointed: Some(pointed),
                 ..
-            }) if heard.is_empty() && space.workers.iter().any(|worker| &worker.id == pointed) => {
-                let worker = space.workers.iter().find(|worker| &worker.id == pointed);
-                Some(short(&format!(
-                    "MIC AGENT about {}",
-                    worker.map_or("", |worker| worker.title.as_str())
-                )))
-            }
+            }) if heard.is_empty() && self.knows(pointed) => Some(short(&format!(
+                "MIC AGENT about {}",
+                self.about(pointed).unwrap_or_default()
+            ))),
             Some(
                 talk @ Talk::Recording {
                     heard, answering, ..
@@ -7013,6 +7079,140 @@ mod tests {
         conversation.take_actions();
         conversation.point_at(Some("ses_gone"));
         assert!(attending(&mut conversation).is_empty());
+    }
+
+    /// The cards of [`SPACE`]: issue 97, and pull request 164.
+    fn cards(space: &str) -> Event {
+        let card = |number: u64, title: &str| tomori_protocol::Card {
+            id: format!("github://o/r/issues/{number}"),
+            number,
+            kind: tomori_protocol::CardKind::Issue,
+            title: title.into(),
+            author: "ada".into(),
+            labels: Vec::new(),
+            checks: tomori_protocol::Checks::None,
+            age: 0,
+            placement: None,
+        };
+        Event::Message(ServerMessage::Cards {
+            cards: Box::new(tomori_protocol::Cards {
+                space: space.into(),
+                source: "o/r".into(),
+                cards: vec![card(97, "Physics for cards"), card(164, "Publish")],
+                status: None,
+            }),
+        })
+    }
+
+    #[test]
+    fn a_space_that_shows_cards_is_watched_once_for_each_space_and_connection() {
+        let mut conversation = joined(|_| {});
+        assert_eq!(conversation.cards(), None);
+        // The space starts showing cards: they are asked for once.
+        conversation.apply(space(|space| space.cards = true));
+        assert_eq!(sent(&mut conversation), [ClientMessage::WatchCards]);
+        conversation.apply(space(|space| space.cards = true));
+        assert!(sent(&mut conversation).is_empty());
+        // Another space's cards, as from a space just left, are not kept.
+        conversation.apply(cards("space-2"));
+        assert_eq!(conversation.cards(), None);
+        conversation.apply(cards(SPACE));
+        assert_eq!(conversation.cards().unwrap().cards.len(), 2);
+        // A new connection watches again.
+        conversation.apply(Event::State(ConnectionState::Closed));
+        conversation.apply(connected());
+        conversation.take_actions();
+        conversation.apply(space(|space| space.cards = true));
+        assert_eq!(sent(&mut conversation), [ClientMessage::WatchCards]);
+        // The space stops showing cards, as when an owner changes its environment: they are forgotten, and watched
+        // again when it shows them again.
+        conversation.apply(space(|_| {}));
+        assert_eq!(conversation.cards(), None);
+        conversation.apply(space(|space| space.cards = true));
+        assert_eq!(sent(&mut conversation), [ClientMessage::WatchCards]);
+        conversation.apply(cards(SPACE));
+        // Leaving forgets them.
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert_eq!(conversation.cards(), None);
+    }
+
+    #[test]
+    fn a_visitor_watches_no_cards_until_let_in() {
+        let mut conversation = joined(|_| {});
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        conversation.take_actions();
+        conversation.apply(space(|space| space.cards = true));
+        assert!(sent(&mut conversation).is_empty());
+        // Nor can it place one, should it have any.
+        conversation.place_card("github://o/r/issues/97".into(), None);
+        assert!(sent(&mut conversation).is_empty());
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Collaborator,
+        }));
+        assert!(sent(&mut conversation).contains(&ClientMessage::WatchCards));
+    }
+
+    #[test]
+    fn cards_are_placed_and_the_card_pointed_at_as_x_is_pressed_is_sent_as_the_words_begin() {
+        let mut conversation = joined(|space| space.cards = true);
+        // Without cards there is nothing to place.
+        conversation.place_card("github://o/r/issues/97".into(), None);
+        assert!(sent(&mut conversation).is_empty());
+        conversation.apply(cards(SPACE));
+        let pose = tomori_protocol::Pose {
+            position: [0.0, 1.0, -0.5],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        conversation.place_card("github://o/r/issues/97".into(), Some(pose));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::PlaceCard {
+                card: "github://o/r/issues/97".into(),
+                placement: Some(pose),
+            }]
+        );
+        let card = |number: u64| tomori_protocol::Resource::card(format!("github://o/r/issues/{number}"));
+        let attending = |conversation: &mut Conversation| {
+            conversation.talk(true);
+            let actions = conversation.take_actions();
+            let [Action::BeginUtterance(utterance)] = actions.as_slice() else {
+                unreachable!("recording begins")
+            };
+            utterance.attention.clone()
+        };
+        // The card pointed at as X is pressed is what the words begin attending to.
+        conversation.point(Some(card(97)));
+        assert_eq!(attending(&mut conversation), [card(97)]);
+        assert!(
+            conversation
+                .text()
+                .contains("MIC AGENT about #97 Physics for cards")
+        );
+        assert!(matches!(
+            conversation.recording_phase(Instant::now()),
+            Some(crate::recording::Phase::Recording { about: Some(about), .. }) if about == "#97 Physics for cards"
+        ));
+        // Pointing elsewhere while talking changes nothing, and the words end naming nothing.
+        conversation.point(Some(card(164)));
+        conversation.point(None);
+        assert_eq!(conversation.pointing_at(), None);
+        assert!(
+            conversation
+                .text()
+                .contains("MIC AGENT about #97 Physics for cards")
+        );
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+        // A card the space lacks, or a kind this client does not show, is not attended to.
+        for target in [card(1), tomori_protocol::Resource::Unknown] {
+            conversation.point(Some(target));
+            assert!(attending(&mut conversation).is_empty());
+            assert_eq!(conversation.pointing_at(), None);
+            conversation.talk(false);
+            conversation.take_actions();
+        }
     }
 
     #[test]

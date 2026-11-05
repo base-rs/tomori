@@ -387,7 +387,7 @@ mod tests {
         for _ in 0..8 {
             refresh.failed(start, None);
             let Next::At(due) = refresh.next(start, true) else {
-                panic!("a failure waits");
+                unreachable!("a failure waits");
             };
             waits.push((due - start).as_secs());
         }

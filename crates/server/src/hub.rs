@@ -3658,9 +3658,6 @@ impl Hub {
     /// When the cards are next due to be read at `now`: only while someone watches them in a space that shows them.
     pub(crate) fn cards_next(&self, now: Instant) -> crate::cards::Next {
         let state = self.lock();
-        let Some(board) = &state.board else {
-            return crate::cards::Next::Idle;
-        };
         let watched = state.connections.values().any(|connection| {
             connection.cards
                 && connection
@@ -3670,7 +3667,12 @@ impl Hub {
                     .and_then(|participant| participant.space.as_deref())
                     .is_some_and(|space| state.shows_cards(space))
         });
-        board.refresh.next(now, watched)
+        state
+            .board
+            .as_ref()
+            .map_or(crate::cards::Next::Idle, |board| {
+                board.refresh.next(now, watched)
+            })
     }
 
     /// Take what reading the cards at `now` found, telling everyone watching if it changed what they see.
@@ -4005,18 +4007,15 @@ impl Hub {
             Outgoing::Cards => {
                 let state = self.lock();
                 // Nothing for a connection that does not watch them, has left their space, or is in a space that no longer shows them.
-                let space = state
+                let watching = state
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|record| record.cards);
+                let (space, board) = state
                     .member(connection)
                     .and_then(|(_, space)| space)
-                    .filter(|space| state.shows_cards(space))
-                    .filter(|_| {
-                        state
-                            .connections
-                            .get(&connection)
-                            .is_some_and(|record| record.cards)
-                    })
-                    .and_then(|space| state.space(&space))?;
-                let board = state.board.as_ref()?;
+                    .filter(|space| watching && state.shows_cards(space))
+                    .and_then(|space| state.space(&space).zip(state.board.as_ref()))?;
                 let cards = board.cards(
                     &space.model.id,
                     &space.placements,

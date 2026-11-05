@@ -174,6 +174,7 @@ fn times_are_read_as_github_writes_them() {
         "2026-11-05T09:00:00+00:00",
         "2026-11-05 09:00:00Z",
         "20x6-11-05T09:00:00Z",
+        "2026-11-05T09:0x:00Z",
         "2026-13-05T09:00:00Z",
         "2026-00-05T09:00:00Z",
         "2026-11-32T09:00:00Z",
@@ -293,13 +294,18 @@ fn at_most_the_card_limit_is_kept_and_a_missing_list_is_empty() {
             reset: Duration::ZERO,
         })
     );
-    let unlimited = serde_json::json!({"data": {"repository": {}}});
-    assert_eq!(
-        interpret(&repository(), answer(200, &unlimited.to_string()), NOW)
-            .unwrap()
-            .rate,
-        None
-    );
+    // Without a rate limit, or one without what remains of it, there is none.
+    for unlimited in [
+        serde_json::json!({"data": {"repository": {}}}),
+        serde_json::json!({"data": {"rateLimit": {"resetAt": "2026-11-05T10:00:00Z"}, "repository": {}}}),
+    ] {
+        assert_eq!(
+            interpret(&repository(), answer(200, &unlimited.to_string()), NOW)
+                .unwrap()
+                .rate,
+            None
+        );
+    }
 }
 
 #[test]
@@ -341,15 +347,17 @@ fn refusals_and_errors_say_why_and_how_long_to_wait() {
 
 #[test]
 fn the_query_reaches_github_with_the_token_only_in_its_authorization() {
+    // Answered in chunks with a trailer, as a proxy might.
     let (port, requests) = service(|_, _| {
-        respond(
-            "200 OK",
-            "",
-            &data(
-                serde_json::json!([{"number": 1, "title": "One"}]),
-                serde_json::json!([]),
-            ),
+        let body = data(
+            serde_json::json!([{"number": 1, "title": "One"}]),
+            serde_json::json!([]),
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nTrailer: x-done\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\nx-done: 1\r\n\r\n",
+            body.len()
         )
+        .into_bytes()
     });
     let fetched = github(port).fetch().unwrap();
     assert_eq!(fetched.cards.len(), 1);

@@ -449,7 +449,7 @@ fn interpret(repository: &Repository, answer: Answer, now: u64) -> Result<Fetche
         .and_then(|data| data.get("rateLimit"))
         .and_then(|rate| {
             Some(Rate {
-                remaining: rate.get("remaining")?.as_u64()?,
+                remaining: rate.get("remaining").and_then(Value::as_u64)?,
                 reset: rate
                     .get("resetAt")
                     .and_then(Value::as_str)
@@ -484,8 +484,8 @@ fn interpret(repository: &Repository, answer: Answer, now: u64) -> Result<Fetche
 /// The card for one issue or pull request `node`, with when it was last updated, in seconds since the epoch. `None`
 /// for a node without a number or title.
 fn card(repository: &Repository, node: &Value, pull: bool, now: u64) -> Option<(u64, FetchedCard)> {
-    let number = node.get("number")?.as_u64()?;
-    let title = node.get("title")?.as_str()?;
+    let number = node.get("number").and_then(Value::as_u64)?;
+    let title = node.get("title").and_then(Value::as_str)?;
     let time = |key: &str| node.get(key).and_then(Value::as_str).and_then(timestamp);
     let opened = time("createdAt").unwrap_or(now);
     let updated = time("updatedAt").unwrap_or(opened);
@@ -511,7 +511,7 @@ fn card(repository: &Repository, node: &Value, pull: bool, now: u64) -> Option<(
         .flatten()
         .filter_map(|label| {
             Some(Label {
-                name: crate::space::one_line(label.get("name")?.as_str()?, 50),
+                name: crate::space::one_line(label.get("name").and_then(Value::as_str)?, 50),
                 color: label
                     .get("color")
                     .and_then(Value::as_str)
@@ -559,12 +559,24 @@ fn timestamp(text: &str) -> Option<u64> {
         (16, b':'),
         (19, b'Z'),
     ];
-    if bytes.len() != 20 || separators.iter().any(|&(at, byte)| bytes[at] != byte) {
+    // Digits everywhere but the separators.
+    let shaped = bytes.len() == 20
+        && bytes.iter().enumerate().all(|(at, byte)| {
+            match separators.iter().find(|(position, _)| *position == at) {
+                Some((_, separator)) => byte == separator,
+                None => byte.is_ascii_digit(),
+            }
+        });
+    if !shaped {
         return None;
     }
-    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<u64>().ok();
-    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
-    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let number = |range: std::ops::Range<usize>| {
+        bytes[range]
+            .iter()
+            .fold(0, |value, digit| value * 10 + u64::from(digit - b'0'))
+    };
+    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+    let (hour, minute, second) = (number(11..13), number(14..16), number(17..19));
     if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }

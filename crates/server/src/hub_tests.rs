@@ -2057,3 +2057,49 @@ fn a_name_someone_else_has_is_taken() {
     });
     assert!(second.errors().is_empty());
 }
+
+#[test]
+fn cards_are_rendered_only_for_a_watcher_in_a_space_that_shows_them() {
+    let (hub, _jobs) = hub();
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    // Without a board, nothing is due and no space shows cards.
+    assert_eq!(hub.cards_next(Instant::now()), crate::cards::Next::Idle);
+    hub.offer_environment(crate::Environment::new("github", "GitHub"));
+    hub.set_board(crate::cards::Board::new("github", "o/r"));
+    let (commands, _receiver) = async_channel::unbounded();
+    let id = hub
+        .register_space(
+            &CreateRequest {
+                environment: "github".to_owned(),
+                ..request("nobody")
+            },
+            "session".to_owned(),
+            Snapshot::default(),
+            commands,
+        )
+        .unwrap();
+    // In the lobby, and in the space before watching, cards render as nothing.
+    assert_eq!(hub.render(ada.connection, Outgoing::Cards), None);
+    ada.join(&id);
+    assert_eq!(hub.render(ada.connection, Outgoing::Cards), None);
+    assert_eq!(hub.cards_next(Instant::now()), crate::cards::Next::Idle);
+    ada.send(ClientMessage::WatchCards);
+    let Some(ServerMessage::Cards { cards }) = hub.render(ada.connection, Outgoing::Cards) else {
+        unreachable!("a watcher is sent the cards");
+    };
+    assert_eq!(cards.space, id);
+    // Watched, they are due at once.
+    let now = Instant::now();
+    assert_eq!(hub.cards_next(now), crate::cards::Next::Now);
+    // A read that finds what was there already tells nobody.
+    hub.cards_fetched(Ok(crate::cards::Fetched::default()), now);
+    ada.read();
+    hub.cards_fetched(Ok(crate::cards::Fetched::default()), now);
+    assert!(ada.read().is_empty());
+    // An identity too long to be one is refused before anything else.
+    ada.send(ClientMessage::PlaceCard {
+        card: "x".repeat(limits::IDENTIFIER_BYTES + 1),
+        placement: None,
+    });
+    assert_eq!(ada.errors().len(), 1);
+}

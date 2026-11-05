@@ -34,7 +34,7 @@ pub const MAX_CARDS: usize = 200;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Card {
     /// Its identity, such as `github://ioquatix/tomori/issues/97`, which [`crate::ClientMessage::PlaceCard`] and
-    /// [`crate::Pointed::Card`] name.
+    /// [`crate::Resource::Card`] name.
     pub id: String,
     pub number: u64,
     pub kind: CardKind,
