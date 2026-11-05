@@ -3522,6 +3522,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomori-client-quest"
+version = "0.1.0"
+dependencies = [
+ "android-activity",
+ "android_logger",
+ "anyhow",
+ "ash",
+ "base-markdown",
+ "basisu",
+ "bytemuck",
+ "cpal",
+ "env_logger",
+ "font8x8",
+ "glam",
+ "gltf",
+ "image",
+ "jni 0.21.1",
+ "libc",
+ "log",
+ "ndk",
+ "openxr",
+ "pollster",
+ "serde",
+ "serde_json",
+ "tomori-backend",
+ "tomori-client",
+ "tomori-discovery",
+ "tomori-environment-sky",
+ "tomori-protocol",
+ "tomori-security",
+ "tomori-server",
+ "wgpu",
+ "wgpu-hal",
+ "winit",
+]
+
+[[package]]
 name = "tomori-discovery"
 version = "0.1.0"
 dependencies = [
@@ -3559,43 +3596,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "tomori-quest"
-version = "0.1.0"
-dependencies = [
- "android-activity",
- "android_logger",
- "anyhow",
- "ash",
- "base-markdown",
- "basisu",
- "bytemuck",
- "cpal",
- "env_logger",
- "font8x8",
- "glam",
- "gltf",
- "image",
- "jni 0.21.1",
- "libc",
- "log",
- "ndk",
- "openxr",
- "pollster",
- "serde",
- "serde_json",
- "tomori-backend",
- "tomori-client",
- "tomori-discovery",
- "tomori-environment-sky",
- "tomori-protocol",
- "tomori-security",
- "tomori-server",
- "wgpu",
- "wgpu-hal",
- "winit",
 ]
 
 [[package]]

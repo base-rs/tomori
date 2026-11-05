@@ -19,7 +19,7 @@ The crates share one version and are released together, so depend on the same ve
 
 ## Unpublished crates
 
-- `tomori-quest`, the headset and desktop application, whose library is `tomori`, is released as an Android APK rather than to crates.io.
+- `tomori-client-quest`, the headset and desktop application, whose library is `tomori`, is released as an Android APK rather than to crates.io.
 - `tomori-environment-sky`, the renderer of the Sky environment, waits for the environment interface that will let other projects register environments.
 
 ## Choosing crates

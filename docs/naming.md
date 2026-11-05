@@ -20,9 +20,9 @@ future design options, not implemented features.
 Read-only checks of the crates.io API on 2026-11-03, each a `GET` of `https://crates.io/api/v1/crates/NAME` with a `User-Agent`, returned HTTP 404 for every name Tomori uses or plans to use: no registered crate was found at the time of checking. A check of `serde` returned 200, confirming the API answered. A search for `tomori` found only `kotomori`, which is unrelated.
 
 - To be published: `tomori-protocol`, `tomori-client`, `tomori-discovery`, `tomori-security`, `tomori-backend`, `tomori-backend-opencode`, `tomori-speech` and `tomori-server`.
-- Kept unpublished for now: `tomori-quest` and `tomori-environment-sky`.
+- Kept unpublished for now: `tomori-client-quest` and `tomori-environment-sky`.
 - Planned in [#97](https://github.com/ioquatix/tomori/issues/97): `tomori-environment`, `tomori-scene`, `tomori-render` and `tomori-physics`.
-- The bare name `tomori`, which no package uses: the headset's library and executable are named `tomori`, but its package is `tomori-quest`.
+- The bare name `tomori`, which no package uses: the headset's library and executable are named `tomori`, but its package is `tomori-client-quest`.
 
 None of these names has been reserved or published. Recheck them before the first publication; this is not a trademark or wider availability check. An earlier check, on 2026-10-28, found `tomori` free too.
 
@@ -31,7 +31,7 @@ None of these names has been reserved or published. Recheck them before the firs
 The public repository uses `ioquatix/tomori`. Technical names now match:
 
 - Rust packages: `tomori-` followed by the crate's role, such as `tomori-protocol` and `tomori-server`, in folders under `crates/` without the prefix, such as `crates/protocol`. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
-- Headset and desktop application: package `tomori-quest` (in `crates/client-quest`); its library and executable are `tomori`.
+- Headset and desktop application: package `tomori-client-quest` (in `crates/client-quest`); its library and executable are `tomori`.
 - Server executable: `tomori-server`, from the package of the same name.
 - Android application ID: `io.github.ioquatix.tomori`; label: **Tomori**;
   APK: `tomori.apk`.

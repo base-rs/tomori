@@ -1,5 +1,5 @@
 [package]
-name = "tomori-quest"
+name = "tomori-client-quest"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

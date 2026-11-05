@@ -14,7 +14,7 @@ case "$command" in
         # cargo-apk resolves the SHERPA_ONNX_ARCHIVE_DIR set in .cargo/config.toml and panics if it is missing, although the headset does not link the speech libraries: the directory is needed, not scripts/fetch-sherpa-onnx.sh.
         mkdir -p .tools/sherpa-onnx
         cargo metadata --locked --format-version 1 --no-deps > /dev/null
-        cargo apk build -p tomori-quest --lib
+        cargo apk build -p tomori-client-quest --lib
         if [[ "$command" == run ]]; then
             adb install -r target/debug/apk/tomori.apk
             # The headset reaches the server at 127.0.0.1:8765; TOMORI_SERVER_PORT is where the server listens on the PC.
