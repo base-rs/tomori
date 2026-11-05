@@ -218,18 +218,25 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             }));
         }
         Phase::Sending {
-            heard, answering, ..
+            heard,
+            answering,
+            received,
         } => {
             let rows = &mut canvas.rows;
-            rows.push(Row::text(
-                if *answering {
-                    "Answering…"
-                } else {
-                    "Sending…"
-                },
-                Style::bold(TEXT),
-                COLUMNS,
-            ));
+            let said = match received {
+                None if *answering => "Answering…".to_owned(),
+                None => "Sending…".to_owned(),
+                Some(Received {
+                    stage: TranscriptStage::Waiting,
+                    ..
+                }) => "Waiting to transcribe".to_owned(),
+                Some(Received {
+                    part: Some(part), ..
+                }) => format!("Transcribing, part {} of {}", part.number, part.of),
+                // Including a stage from a newer server.
+                Some(_) => "Transcribing…".to_owned(),
+            };
+            rows.push(Row::text(&said, Style::bold(TEXT), COLUMNS));
             if !heard.trim().is_empty() {
                 rows.extend(tail(heard, 2, Style::plain(DIM)));
             }
@@ -473,6 +480,44 @@ mod tests {
         assert!(canvas.rows[1].plain().starts_with('…'));
         assert!(canvas.rows[2].plain().contains("thirteen"));
         assert!(canvas.rows.iter().all(|row| row.cells.len() <= COLUMNS));
+    }
+
+    #[test]
+    fn words_the_server_has_say_whether_they_are_transcribed_or_wait() {
+        let received = |stage, part| Phase::Sending {
+            heard: "check the build".into(),
+            answering: true,
+            received: Some(Received { stage, part }),
+        };
+        let part = |number, of| Some(TranscriptPart { number, of });
+        for (phase, said) in [
+            (
+                received(TranscriptStage::Transcribing, None),
+                "Transcribing…",
+            ),
+            (
+                received(TranscriptStage::Transcribing, part(2, 3)),
+                "Transcribing, part 2 of 3",
+            ),
+            (
+                received(TranscriptStage::Waiting, None),
+                "Waiting to transcribe",
+            ),
+            // A stage from a newer server reads as transcribing.
+            (received(TranscriptStage::Unknown, None), "Transcribing…"),
+        ] {
+            let canvas = canvas(&phase, None, 0.0);
+            assert_eq!(text(&canvas), format!("{said}\n\"check the build\""));
+            assert_eq!(canvas.border, None);
+        }
+        // The most parts a 5 minute message is cut into fits the card.
+        let longest = canvas(
+            &received(TranscriptStage::Transcribing, part(17, 17)),
+            None,
+            0.0,
+        );
+        assert_eq!(longest.rows[0].plain(), "Transcribing, part 17 of 17");
+        assert!(longest.rows.iter().all(|row| row.cells.len() <= COLUMNS));
     }
 
     #[test]
