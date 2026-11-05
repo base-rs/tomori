@@ -16,6 +16,16 @@ Each space is bound to one environment, chosen when it is created and the same f
 - **Desktop window:** it has no server, so press **E** to switch between Sky and the grid (and any scenery a headset build of its own registers; see [examples/headset](examples/headset/readme.md)) (with `--desktop` and a server, **E** does nothing: the space chooses); or launch with `TOMORI_ENVIRONMENT=minimal cargo run -p tomori-client-quest` to start on the grid.
 - **Spectator:** shows the environment of the space it watches, as everyone in it does, and follows an owner's change to it.
 
+### GitHub (prototype)
+
+A first experiment of the GitHub environment proposed in [docs/proposals/github-and-code-environments.md](docs/proposals/github-and-code-environments.md): start the server with `--github-repository OWNER/NAME`, and an owner can change a space to **GitHub** from the hand menu's **Space** section. Its cards, the repository's open issues and pull requests, start in an inbox front left of you. Point at one with the right ray to highlight it, squeeze the right grip to pick it up and carry it along the ray, and let go to put it down, or over the inbox to put it back. Everyone in the space sees where cards are put, and the server keeps that with the space. Point at a card as you press **X** to ask the agent about it. The server reads GitHub, read-only, with the token in `GITHUB_TOKEN` or else from `gh auth token`, and never sends it to the headset or the agent:
+
+```sh
+cargo run -p tomori-server --bin tomori-server -- --backend opencode --github-repository ioquatix/tomori
+```
+
+Nothing is changed on GitHub, and only participants see the cards; see [design/github.md](design/github.md).
+
 Switching does not reset agents, conversations or worker positions. Sky uses the same scene/recenter transform as the workspace; it does not move the camera. Clouds use a bounded low-resolution volumetric density pass with translucent edges and approximate moonlighting; lanterns have brighter emissive faces and cast warm, occluded illumination onto the nearby static scenery through a build-time lightmap, not runtime point-light shadow maps. The same lightmap adds local ambient occlusion at contacts. The shrine and platform cast/receive softly filtered moon shadows from a cached static shadow map. Agent/status visuals and labels are not shadowed. There is no day/night cycle, scenery collision or new locomotion system.
 
 The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the on-device frame-time budget still needs measurement. The stereo/switch/recenter regression runs with the other tests (see [Tests](#tests--desktop-openxr)); to save a preview sheet:

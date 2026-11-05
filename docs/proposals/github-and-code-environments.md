@@ -219,6 +219,7 @@ Each is small, answers one question on the headset, and can be abandoned. They a
 
 - **Hypothesis:** sorting a real backlog by hand, as cards in piles, is quicker and clearer than a list in a browser, and the piles are remembered between sessions.
 - **Build:** `environment-github`'s server half syncing one repository's open issues and pull requests through a token on the server; cards with the faces above; pick up and put down with the ray; snapping piles; layout kept with the space. No physics, no write-back. It can be the "small test environment with real state and intents" #75 and #76 call for.
+- **Prototype:** built in November 2026, ahead of the framework, behind `--github-repository`; `design/github.md` says what it does and leaves out (no piles, snapping or done tray yet). Its protocol is narrow and shaped for #76: the cards are one collection sent whole when they change, placing a card is an intent, and watching is interest.
 - **Evaluate:** triage Tomori's own open issues on the headset, then a comparable set on a laptop. Compare time, decisions made, and how it felt. A day later, find "the pile with the physics issue" without labels.
 - **Depends on:** #75, #76, #77 (cards as panels), #78 (grab), #79 (where the inbox stands), #83 (the token as a data source), and #146 for legible titles at card size.
 - **Effort:** medium, mostly the framework it exercises.

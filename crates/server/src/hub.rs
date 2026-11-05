@@ -241,6 +241,8 @@ pub struct Hub {
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
     counts_changed: Notify,
+    /// Notified when someone starts watching the cards, so that the server reads them if they are due. See `design/github.md`.
+    cards_watched: Notify,
     /// The most visitors connected at once; see `design/security.md`.
     max_visitors: AtomicUsize,
     /// Issues collaborator tokens to admitted visitors; see [`Hub::set_tokens`].
@@ -292,6 +294,8 @@ struct HubState {
     knock_cooldowns: HashMap<(String, String), Instant>,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
+    /// The cards the server shows in their environment's spaces, if it shows any. See `design/github.md`.
+    board: Option<crate::cards::Board>,
 }
 
 struct ConnectionRecord {
@@ -311,6 +315,8 @@ struct ConnectionRecord {
     /// Whether the last push-to-talk frame was stray, so that each run of them is logged once.
     straying: bool,
     liveness: Liveness,
+    /// Whether the client watches the cards of the space it is in, until it leaves it. See `design/github.md`.
+    cards: bool,
 }
 
 impl ConnectionRecord {
@@ -417,6 +423,8 @@ struct SpaceRecord {
     instructing: Cell<Option<bool>>,
     /// The keys and texts of the latest spoken answers applied, so that a repeated finalization of one is acknowledged rather than answered again; see [`ANSWERED`].
     answered: std::collections::VecDeque<(String, String)>,
+    /// Where the space's participants put its cards, by card. See `design/github.md`.
+    placements: std::collections::BTreeMap<String, tomori_protocol::Pose>,
 }
 
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
@@ -674,6 +682,37 @@ impl HubState {
         self.spaces.iter_mut().find(|space| space.model.id == id)
     }
 
+    /// Whether the space `id` shows the board's cards.
+    fn shows_cards(&self, id: &str) -> bool {
+        self.space(id)
+            .zip(self.board.as_ref())
+            .is_some_and(|(space, board)| space.model.environment == board.environment())
+    }
+
+    /// The board, if the space `id` shows its cards.
+    fn cards_of(&self, id: &str) -> Option<&crate::cards::Board> {
+        self.board.as_ref().filter(|_| self.shows_cards(id))
+    }
+
+    /// Send the cards again to everyone watching them in `space`, or in every space that shows them.
+    fn touch_cards(&self, space: Option<&str>) {
+        for record in self.spaces.iter().filter(|record| {
+            space.is_none_or(|space| record.model.id == space) && self.shows_cards(&record.model.id)
+        }) {
+            for member in record.model.members() {
+                if let Some(connection) = self
+                    .participants
+                    .get(member)
+                    .and_then(|participant| participant.connection)
+                    .and_then(|connection| self.connections.get(&connection))
+                    .filter(|connection| connection.cards)
+                {
+                    connection.outbox.cards();
+                }
+            }
+        }
+    }
+
     /// Tell everyone in the space, and the lobby, that the space changed.
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
@@ -739,6 +778,7 @@ impl HubState {
                         .filter(|_| !space.kept_open)
                         .map(str::to_owned),
                     closed_order: space.closed.filter(|_| !space.kept_open),
+                    placements: space.placements.clone(),
                 }
             })
             .collect()
@@ -848,6 +888,14 @@ impl HubState {
         record.model.participants.retain(|id| id != participant);
         record.model.visitors.retain(|id| id != participant);
         record.speech.left(participant);
+        // Watching the cards ends with leaving their space.
+        if let Some(connection) = participants
+            .get(participant)
+            .and_then(|record| record.connection)
+            .and_then(|connection| self.connections.get_mut(&connection))
+        {
+            connection.cards = false;
+        }
         self.withdraw_knock(participant, &space);
         self.touch_space(&space);
     }
@@ -1257,6 +1305,7 @@ impl Hub {
             environments: RwLock::new(Environments::default()),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
+            cards_watched: Notify::new(),
             max_visitors: AtomicUsize::new(usize::MAX),
             tokens: RwLock::new(None),
             kept: RwLock::new(None),
@@ -1742,6 +1791,7 @@ impl Hub {
                     stalled: None,
                     cancellation,
                 },
+                cards: false,
             },
         );
         Some((id, outbox, received, output))
@@ -2353,10 +2403,13 @@ impl Hub {
                     });
                 }
                 // What the participant attends to is captured now, as they begin: only identities are taken from the
-                // client, which the space resolves, ignoring those it does not have. An answer goes to the question
-                // presented, and a name to the participant, so either is about nothing attended to.
+                // client, which the space resolves, ignoring those it does not have, cards only on the board of a
+                // space that shows them. An answer goes to the question presented, and a name to the participant, so
+                // either is about nothing attended to.
                 let attention = match state.space(&space) {
-                    Some(record) if answer.is_none() && !naming => record.model.resolve(&attention),
+                    Some(record) if answer.is_none() && !naming => {
+                        record.model.resolve(&attention, state.cards_of(&space))
+                    }
                     _ => Vec::new(),
                 };
                 state.next_utterance += 1;
@@ -2427,8 +2480,13 @@ impl Hub {
                         .filter(|record| {
                             record.attention.is_empty() && record.answer.is_none() && !record.naming
                         })
-                        .and_then(|record| state.space(&record.space))
-                        .map(|space| space.model.resolve(&[resource]))
+                        .and_then(|record| {
+                            state.space(&record.space).map(|space| {
+                                space
+                                    .model
+                                    .resolve(&[resource], state.cards_of(&record.space))
+                            })
+                        })
                 });
                 // Its frames and its end share one ordered stream, so all of its audio has arrived: the participant is told that it is being transcribed, before anything recognition reports.
                 if let Some(record) = state.utterances.get_mut(&open.id) {
@@ -2902,6 +2960,50 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+            ClientMessage::WatchCards => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                if !state.shows_cards(&space) {
+                    state.error(participant, "This space shows no cards.");
+                    return;
+                }
+                let record = state
+                    .connections
+                    .get_mut(&connection)
+                    .expect("the connection acting is listed");
+                record.cards = true;
+                record.outbox.cards();
+                self.cards_watched.notify(usize::MAX);
+            }
+            ClientMessage::PlaceCard { card, placement } => {
+                if let Err(error) = limits::check(&card, limits::IDENTIFIER_BYTES, "card") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                if !state.shows_cards(&space) {
+                    state.error(participant, "This space shows no cards.");
+                    return;
+                }
+                let HubState { spaces, board, .. } = &mut *state;
+                let board = board.as_ref().expect("checked above");
+                let record = spaces
+                    .iter_mut()
+                    .find(|record| record.model.id == space)
+                    .expect("checked above");
+                match crate::cards::place(&mut record.placements, board, &card, placement) {
+                    Ok(true) => {
+                        // Everyone watching sees it move, and the layout is kept with the space.
+                        state.touch_cards(Some(&space));
+                        deferred.push(Deferred::Keep);
+                    }
+                    Ok(false) => {}
+                    Err(error) => state.error(participant, error),
+                }
+            }
             ClientMessage::SetSpeech { speech } => {
                 let Some(space) = in_space(state) else {
                     return;
@@ -3289,6 +3391,7 @@ impl Hub {
             waker: None,
             answered: std::collections::VecDeque::new(),
             instructing: Cell::new(None),
+            placements: std::collections::BTreeMap::new(),
         });
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
@@ -3400,6 +3503,7 @@ impl Hub {
                     waker: None,
                     answered: std::collections::VecDeque::new(),
                     instructing: Cell::new(None),
+                    placements: kept.placements,
                 });
             }
             // Listed in the order they were created, as before the restart.
@@ -3537,6 +3641,67 @@ impl Hub {
     /// Wait for a space to defer a snapshot. Check [`snapshot_deadline`](Self::snapshot_deadline) after creating the listener to avoid a lost wakeup.
     pub fn listen_snapshots(&self) -> EventListener {
         self.deferred_snapshot.listen()
+    }
+
+    /// Show `board`'s cards in the spaces of its environment. See `design/github.md`.
+    pub(crate) fn set_board(&self, board: crate::cards::Board) {
+        self.lock().board = Some(board);
+    }
+
+    /// Offer `environment` too, in place of one with the same identifier, or else after those offered.
+    pub(crate) fn offer_environment(&self, environment: crate::Environment) {
+        let mut environments = self
+            .environments
+            .write()
+            .expect("environments are never left poisoned");
+        *environments = environments.clone().with(environment);
+    }
+
+    /// The environments offered, as clients are told them.
+    #[cfg(test)]
+    pub(crate) fn environment_info(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
+        self.environments().info()
+    }
+
+    /// Notified when someone starts watching the cards.
+    pub(crate) fn listen_cards(&self) -> EventListener {
+        self.cards_watched.listen()
+    }
+
+    /// When the cards are next due to be read at `now`: only while someone watches them in a space that shows them.
+    pub(crate) fn cards_next(&self, now: Instant) -> crate::cards::Next {
+        let state = self.lock();
+        let watched = state.connections.values().any(|connection| {
+            connection.cards
+                && connection
+                    .participant
+                    .as_ref()
+                    .and_then(|participant| state.participants.get(participant))
+                    .and_then(|participant| participant.space.as_deref())
+                    .is_some_and(|space| state.shows_cards(space))
+        });
+        state
+            .board
+            .as_ref()
+            .map_or(crate::cards::Next::Idle, |board| {
+                board.refresh.next(now, watched)
+            })
+    }
+
+    /// Take what reading the cards at `now` found, telling everyone watching if it changed what they see.
+    pub(crate) fn cards_fetched(
+        &self,
+        result: Result<crate::cards::Fetched, crate::cards::Failure>,
+        now: Instant,
+    ) {
+        let mut state = self.lock();
+        if state
+            .board
+            .as_mut()
+            .is_some_and(|board| board.fetched(result, now))
+        {
+            state.touch_cards(None);
+        }
     }
 
     /// Send the deferred snapshots that are due at `now`.
@@ -3841,13 +4006,40 @@ impl Hub {
                     .and_then(|(_, space)| space)
                     .and_then(|space| state.space(&space))?;
                 let participants = state.participants(&space.model);
+                let cards = state.shows_cards(&space.model.id);
                 let mut state = space.model.state(
                     participants,
                     self.environments().instructions(&space.model.environment),
                 );
                 limits::fit_state(&mut state);
+                state.cards = cards;
                 Some(ServerMessage::Space {
                     state: Box::new(state),
+                })
+            }
+            Outgoing::Cards => {
+                let state = self.lock();
+                // Nothing for a connection that does not watch them, has left their space, is in a space that no longer shows them, or only visits it: leaving a space stops watching, and a visitor cannot start, so the role is checked again in case either is ever missed.
+                let watching = state
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|record| record.cards);
+                let (space, board) = state
+                    .member(connection)
+                    .and_then(|(_, space)| space)
+                    .filter(|space| {
+                        watching
+                            && state.role(connection, Some(space)).participates()
+                            && state.shows_cards(space)
+                    })
+                    .and_then(|space| state.space(&space).zip(state.board.as_ref()))?;
+                let cards = board.cards(
+                    &space.model.id,
+                    &space.placements,
+                    crate::github::unix_now(),
+                );
+                Some(ServerMessage::Cards {
+                    cards: Box::new(cards),
                 })
             }
             Outgoing::Spaces => {

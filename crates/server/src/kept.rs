@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub const SPACES_FILE: &str = "spaces.json";
 
 /// What is kept of one space: enough to list it again and bind it to its session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KeptSpace {
     pub id: String,
     pub title: String,
@@ -37,6 +37,9 @@ pub struct KeptSpace {
     /// When the space closed relative to the others, so that the least recently closed are still forgotten first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_order: Option<u64>,
+    /// Where its participants put its cards, by card, in a space whose environment shows cards. See `design/github.md`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub placements: std::collections::BTreeMap<String, tomori_protocol::Pose>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -181,6 +184,7 @@ mod tests {
             instructions: String::new(),
             closed: None,
             closed_order: None,
+            placements: Default::default(),
         }
     }
 

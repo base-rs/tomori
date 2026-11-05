@@ -29,6 +29,9 @@ pub enum Outgoing {
     Space,
     /// The current lobby listing, rendered when sent.
     Spaces,
+    /// The cards of the participant's space, rendered when sent, so that a burst of changes, such as several cards
+    /// placed, sends one. See `design/github.md`.
+    Cards,
 }
 
 #[derive(Debug)]
@@ -66,6 +69,7 @@ struct Inner {
     audio: VecDeque<Vec<u8>>,
     space_pending: bool,
     spaces_pending: bool,
+    cards_pending: bool,
     /// Queued [`ServerMessage::Error`] replies.
     errors: usize,
     closed: bool,
@@ -195,6 +199,18 @@ impl Outbox {
         });
     }
 
+    /// Send the cards of the participant's space soon. Repeated changes before they are sent produce one message.
+    pub fn cards(&self) {
+        self.update(|inner| {
+            if inner.cards_pending {
+                return false;
+            }
+            inner.cards_pending = true;
+            inner.control.push_back(Outgoing::Cards);
+            true
+        });
+    }
+
     /// A participant's audio frame.
     pub fn audio(&self, frame: Vec<u8>) {
         self.update(|inner| {
@@ -256,6 +272,7 @@ impl Outbox {
             match item {
                 Outgoing::Space => inner.space_pending = false,
                 Outgoing::Spaces => inner.spaces_pending = false,
+                Outgoing::Cards => inner.cards_pending = false,
                 Outgoing::Message(ServerMessage::Error { .. }) => inner.errors -= 1,
                 Outgoing::Message(_) => {}
             }
@@ -330,6 +347,19 @@ mod tests {
         outbox.space();
         let Popped::Control(Outgoing::Space) = outbox.pop() else {
             unreachable!("expected Popped::Control(Outgoing::Space)");
+        };
+        // Cards coalesce the same way.
+        outbox.cards();
+        outbox.cards();
+        let Popped::Control(Outgoing::Cards) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Cards)");
+        };
+        let Popped::Empty = outbox.pop() else {
+            unreachable!("expected Popped::Empty");
+        };
+        outbox.cards();
+        let Popped::Control(Outgoing::Cards) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Cards)");
         };
         outbox.close();
         let Popped::Closed = outbox.pop() else {

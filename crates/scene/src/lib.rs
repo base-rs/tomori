@@ -11,6 +11,7 @@
 
 pub mod arrival;
 pub mod arrival_motion;
+pub mod board;
 pub mod canvas;
 pub mod caption;
 pub mod capture;

@@ -47,6 +47,10 @@ The server says in `Welcome` the name it knows the participant by. A client offe
 
 **Protocol version.** These changes raise the protocol version. A participant's handle replaces their identity in shared state, and Hello and `Welcome` change; an older client could not recognize its own queue entries.
 
+**Data source credentials.** A token a server is given for a data source, such as the GitHub environment's (see `github.md`), stays on the server: it is used only in the server's own requests to that source, and never sent to a client, put in a space's state or kept spaces, told to the agent or logged.
+
+**Repository text is untrusted.** Anyone can open an issue or pull request on a public repository, so the titles, authors and labels the GitHub environment tells the agent are marked as untrusted repository content, quoted so that they cannot end their quotation or the context block or forge another, and the environment's layer of the agent's instructions says they are data, never instructions (see `github.md`).
+
 ## Rationale
 
 `server.md` deferred authentication until Tomori is used on untrusted networks, because space participants can approve agent tool use. The user wants people without credentials to be able to watch a space, hearing the speech and seeing the geometry, while collaborating requires admission, and only owners create spaces. Authentication should be unobtrusive: a device authenticates once and then connects silently, and admitting someone happens in the scene rather than through login forms, in keeping with `arrival.md`. It should also be pluggable, so that identity providers can be added without changing what each role may do.
