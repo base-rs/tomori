@@ -142,8 +142,13 @@ fn append_json_bytes(bytes: &mut Vec<u8>, data: &[u8], status: u16) -> Result<()
 }
 
 fn post(path: &str, payload: &Value) -> Request<BufferedBody> {
+    with_json(Method::POST, path, payload)
+}
+
+/// A `method` request for `path` whose body is `payload`.
+fn with_json(method: Method, path: &str, payload: &Value) -> Request<BufferedBody> {
     let mut request = Request::new(
-        Method::POST,
+        method,
         Path::from(path.to_owned()),
         BufferedBody::from(payload.to_string().into_bytes()),
     );
@@ -718,14 +723,7 @@ pub async fn put_instruction<'scope>(
     cancellation: &Cancellation,
 ) -> Result<(), Failure> {
     let payload = serde_json::json!({ "value": value });
-    let mut request = Request::new(
-        Method::PUT,
-        Path::from(instruction_path(session_id, key)),
-        BufferedBody::from(payload.to_string().into_bytes()),
-    );
-    if let Ok(field) = Field::new("content-type", "application/json") {
-        let _ = request.fields.append(field);
-    }
+    let request = with_json(Method::PUT, &instruction_path(session_id, key), &payload);
     let response = exchange(
         client,
         request,
@@ -1224,7 +1222,7 @@ fn urlencoding(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base_scheduler::{
         AddressHints, AddressInfoCollection, AddressInfoView, AddressResolution, AddressService,
@@ -1236,7 +1234,7 @@ mod tests {
 
     /// A service on its own port that answers each request with what `route` returns for its method and path, as a
     /// status line and a JSON body, until the test ends.
-    fn service(route: fn(&str, &str) -> (&'static str, String)) -> u16 {
+    pub(crate) fn service(route: fn(&str, &str) -> (&'static str, String)) -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -1273,7 +1271,7 @@ mod tests {
     }
 
     /// A port nothing listens on.
-    fn unreachable_port() -> u16 {
+    pub(crate) fn unreachable_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -1282,10 +1280,10 @@ mod tests {
     }
 
     /// Run `calls` with a client of the service on `port`, then stop the client.
-    fn with_client(
+    pub(crate) fn with_client<T>(
         port: u16,
-        calls: impl AsyncFnOnce(&Client<'_>, &Resolved, &Cancellation, &NativeScheduler),
-    ) {
+        calls: impl AsyncFnOnce(&Client<'_>, &Resolved, &Cancellation, &NativeScheduler) -> T,
+    ) -> T {
         block_on(async {
             let scheduler = NativeScheduler::with_options(NativeOptions {
                 workers: 1,
@@ -1319,14 +1317,16 @@ mod tests {
                 port,
                 auth: Some(("opencode".into(), "secret".into())),
             };
-            let (_driven, ()) = futures_lite::future::zip(driver.run(&cancellation), async {
-                calls(&client, &resolved, &cancellation, &scheduler).await;
+            let (_driven, value) = futures_lite::future::zip(driver.run(&cancellation), async {
+                let value = calls(&client, &resolved, &cancellation, &scheduler).await;
                 cancellation.cancel();
+                value
             })
             .await;
             drop(client);
             scheduler.shutdown().await;
-        });
+            value
+        })
     }
 
     /// The status and message of a failed call.
@@ -1440,10 +1440,6 @@ mod tests {
     fn an_unparseable_or_malformed_answer_is_a_failure() {
         let port = service(|_, path| match path {
             "/api/session/active" => ("200 OK", r#"{"data":[]}"#.to_owned()),
-            _ if path.contains("/message?") => ("200 OK", r#"{"data":[],"cursor":7}"#.to_owned()),
-            _ if path.starts_with("/api/session/s2/message") => {
-                ("200 OK", r#"{"cursor":{}}"#.to_owned())
-            }
             _ if path.ends_with("/permission") || path.ends_with("/form") => {
                 ("200 OK", r#"{"data":{}}"#.to_owned())
             }
@@ -2053,6 +2049,95 @@ mod tests {
             None
         );
         assert_eq!(running_from_record(&json!({})), None);
+        assert_eq!(running_from_record(&json!({"time": 1})), None);
+        assert_eq!(
+            running_from_record(&json!({"time":{"busy":1,"idle":"invalid"}})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_child_may_have_ended_any_way_and_a_message_part_must_be_known() {
+        for outcome in ["succeeded", "failed", "interrupted"] {
+            let mut record = child("c", "p");
+            record["outcome"] = json!(outcome);
+            assert!(valid_session_record(&record));
+        }
+        assert!(!valid_snapshot_message(
+            &json!({"type":"assistant","content":[{"type":"image"}]})
+        ));
+    }
+
+    /// The service's sessions, each a valid record, with no messages, forms
+    /// or permissions except one permission request of `s1` that names a
+    /// resource that is not text.
+    fn invalid_permission(_method: &str, path: &str) -> (&'static str, String) {
+        let path = path.split('?').next().unwrap_or_default();
+        match path {
+            "/api/session/s1/permission" => (
+                "200 OK",
+                json!({"data":[{"id":"p","sessionID":"s1","action":"bash","resources":[1]}]})
+                    .to_string(),
+            ),
+            "/api/session/s1/message" => page(Vec::new(), Value::Null),
+            "/api/session/s1/form" => ("200 OK", r#"{"data":[]}"#.to_owned()),
+            _ => ("200 OK", json!({"data": child("s1", "p")}).to_string()),
+        }
+    }
+
+    #[test]
+    fn a_session_is_not_read_with_a_permission_naming_something_other_than_text() {
+        with_client(
+            service(invalid_permission),
+            async |client, resolved, cancellation, _| {
+                let parts = SnapshotParts::fetch(client, resolved, "s1", cancellation, || {}).await;
+                let Err(failure) = parts else {
+                    unreachable!("expected the read to fail");
+                };
+                assert_eq!(
+                    failure.message,
+                    "the server returned an invalid permission request"
+                );
+            },
+        );
+    }
+
+    /// A first page of as many messages as are read, and another.
+    fn many_messages(_method: &str, _path: &str) -> (&'static str, String) {
+        let messages = (0..100)
+            .map(|index| json!({"id": format!("m{index}"), "type": "user", "text": ""}))
+            .collect();
+        page(messages, json!("more"))
+    }
+
+    #[test]
+    fn messages_are_read_no_further_than_the_limit() {
+        with_client(
+            service(many_messages),
+            async |client, resolved, cancellation, _| {
+                let messages = session_messages(client, resolved, "s1", cancellation)
+                    .await
+                    .unwrap();
+                assert_eq!(messages["data"].as_array().unwrap().len(), 100);
+            },
+        );
+    }
+
+    #[test]
+    fn a_prompt_keeps_a_key_already_shaped_as_a_message_id_and_an_invalid_record_has_no_running_state()
+     {
+        let port = service(|_, path| match path {
+            "/api/session/active" => ("200 OK", r#"{"data":{}}"#.to_owned()),
+            "/api/session/s1" => ("200 OK", r#"{"data":{"id":"s1"}}"#.to_owned()),
+            _ => ("200 OK", "{}".to_owned()),
+        });
+        with_client(port, async |client, resolved, cancellation, scheduler| {
+            send_prompt(client, resolved, "s1", "msg_k", "Hi", cancellation)
+                .await
+                .unwrap();
+            let running = session_running(client, resolved, "s1", cancellation, scheduler).await;
+            assert_eq!(running.unwrap(), None);
+        });
     }
 
     #[test]

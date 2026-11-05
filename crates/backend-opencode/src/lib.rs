@@ -49,7 +49,7 @@ struct Connection {
 pub struct OpenCode {
     config: Config,
     /// `None` until the first use; `Some(Ok(_))` once the thread is running;
-    /// `Some(Err(_))` if starting the thread failed.
+    /// `Some(Err(_))` once the backend has been shut down.
     connection: Mutex<Option<std::result::Result<Connection, Error>>>,
 }
 
@@ -86,12 +86,7 @@ impl OpenCode {
                     .spawn(move || {
                         connection::run_thread(resolve, receiver);
                     })
-                    .map_err(|error| {
-                        Error::new(
-                            ErrorKind::Unavailable,
-                            format!("could not start the connection thread: {error}"),
-                        )
-                    })?;
+                    .expect("spawn the opencode connection thread");
                 let value = Connection {
                     commands: commands.clone(),
                     thread: Some(thread),
