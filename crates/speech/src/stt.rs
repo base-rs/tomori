@@ -97,6 +97,18 @@ pub enum TranscriptEvent {
     Failed(Error),
 }
 
+impl TranscriptEvent {
+    /// The utterance's outcome, once it has one: its final transcript, or why it failed; `None` for a partial result.
+    #[cfg(test)]
+    pub(crate) fn outcome(self) -> Option<Result<String, Error>> {
+        match self {
+            Self::Partial(_) => None,
+            Self::Final(text) => Some(Ok(text)),
+            Self::Failed(error) => Some(Err(error)),
+        }
+    }
+}
+
 type Sink = Box<dyn FnMut(TranscriptEvent) + Send>;
 
 enum Command {
@@ -198,9 +210,8 @@ impl Drop for Recognition {
     /// Waits for utterances that have already ended to finish; utterances still open are discarded without events.
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let thread = self.thread.take().expect("joined only here");
+        let _ = thread.join();
     }
 }
 

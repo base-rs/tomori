@@ -131,7 +131,11 @@ impl Speech {
         }
         self.next += 1;
         let segment = self.next;
-        let _ = self.jobs.as_ref()?.send(Job {
+        let jobs = self
+            .jobs
+            .as_ref()
+            .expect("open until closed, which takes the speech");
+        let _ = jobs.send(Job {
             segment,
             text: text.to_owned(),
         });
@@ -141,9 +145,8 @@ impl Speech {
     /// Stop accepting segments and wait until every queued segment has been synthesized.
     pub fn close(mut self) {
         self.jobs = None;
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let thread = self.thread.take().expect("joined only here");
+        let _ = thread.join();
     }
 }
 
@@ -177,6 +180,13 @@ mod tests {
             self.log.lock().unwrap().push(text.to_owned());
             if text.contains("crash") {
                 panic!("the synthesizer crashed");
+            }
+            if text.contains("silent") {
+                output(AudioChunk {
+                    sample_rate: 24_000,
+                    samples: Vec::new(),
+                });
+                return Ok(());
             }
             for (index, _) in text.split_whitespace().enumerate() {
                 thread::sleep(self.delay);
@@ -254,9 +264,13 @@ mod tests {
         speech.speak("first sentence");
         // The first audio arrives while the reply is still streaming.
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(matches!(event, SpeechEvent::Started { segment: 1, .. }));
+        let SpeechEvent::Started { segment: 1, .. } = event else {
+            unreachable!("expected SpeechEvent::Started {{ segment: 1, .. }}");
+        };
         let event = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(matches!(event, SpeechEvent::Audio { segment: 1, .. }));
+        let SpeechEvent::Audio { segment: 1, .. } = event else {
+            unreachable!("expected SpeechEvent::Audio {{ segment: 1, .. }}");
+        };
         speech.speak("second sentence");
         speech.close();
         assert!(
@@ -282,6 +296,7 @@ mod tests {
 
     #[test]
     fn a_panic_disables_synthesis_for_later_segments() {
+        log::set_max_level(log::LevelFilter::Trace);
         let (mut speech, receiver, log) = spawn(Duration::ZERO);
         speech.speak("please crash now");
         speech.speak("recovered");
@@ -335,13 +350,16 @@ mod tests {
                 text: "Hello there.".into()
             }
         );
-        assert!(matches!(
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
-            SpeechEvent::Audio { segment: 1, .. }
-        ));
-        for sentence in crate::speakable::sentences(speakable.push(" arriving.")) {
-            speech.speak(&sentence);
-        }
+        let SpeechEvent::Audio { segment: 1, .. } =
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            unreachable!("expected SpeechEvent::Audio {{ segment: 1, .. }}");
+        };
+        // Its second paragraph is not closed yet, so it has no sentence to speak.
+        assert_eq!(
+            crate::speakable::sentences(speakable.push(" arriving.")).count(),
+            0
+        );
         for sentence in crate::speakable::sentences(speakable.finish()) {
             speech.speak(&sentence);
         }
@@ -354,5 +372,23 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["This is a reply that is still arriving."]);
+    }
+
+    #[test]
+    fn a_segment_whose_audio_is_empty_sends_none() {
+        let (mut speech, receiver, _) = spawn(Duration::ZERO);
+        speech.speak("silent please");
+        speech.close();
+        let events: Vec<_> = receiver.iter().collect();
+        assert_eq!(
+            events,
+            [
+                SpeechEvent::Started {
+                    segment: 1,
+                    text: "silent please".into()
+                },
+                SpeechEvent::Finished { segment: 1 }
+            ]
+        );
     }
 }
