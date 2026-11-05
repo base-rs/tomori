@@ -4,7 +4,6 @@
 //! The result cards' pages and their navigation with the right stick: a card's content is wrapped and paged here, once, so that navigation and the renderer use the same pages.
 
 use crate::delegation::{Kind, Presentation, Workspace};
-use font8x8::{BASIC_FONTS, UnicodeFonts};
 
 /// The most result cards shown.
 pub const MAX_RESULTS: usize = 64;
@@ -135,19 +134,15 @@ fn step(current: usize, count: usize, forward: bool) -> usize {
     }
 }
 
-/// Character-based truncation is safe for every UTF-8 boundary. Unsupported
-/// glyphs become '?' in the bitmap mesh, never a byte-indexing panic.
+/// `text` on one row of at most `columns` cells, ending with "…" where cut, by
+/// the one rule every panel uses, [`crate::ui_text::clip`]: counted in cells as
+/// drawn, so that a Japanese title, two cells a character, is cut where it
+/// reaches the card's edge rather than losing its end unmarked.
 pub fn clip(text: &str, columns: usize) -> String {
-    let mut chars = text.chars().filter(|c| !c.is_control());
-    let mut out: String = chars.by_ref().take(columns).collect();
-    if chars.next().is_some() && columns >= 3 {
-        out = out.chars().take(columns - 3).collect();
-        out.push_str("...");
-    }
-    out
+    crate::ui_text::clip(text, columns)
 }
 
-/// The bitmap font only supports basic glyphs. Show other Unicode scalars and
+/// Cards lay out ASCII, a byte to a column. Show other Unicode scalars and
 /// control characters as explicit code-point escapes rather than losing them.
 pub fn wrap(text: &str) -> Vec<String> {
     let mut lines = Vec::new();
@@ -161,7 +156,7 @@ pub fn wrap(text: &str) -> Vec<String> {
             just_wrapped = false;
             continue;
         }
-        let token = if ch.is_control() || BASIC_FONTS.get(ch).is_none() {
+        let token = if ch.is_control() || !ch.is_ascii() {
             format!("\\u{{{:X}}}", ch as u32)
         } else {
             ch.to_string()
@@ -320,7 +315,10 @@ mod tests {
             .collect::<String>();
         assert_eq!(displayed, "\\u{1F980}".repeat(1024));
         assert_eq!(wrap(&"x\n".repeat(2048)).len(), 2048);
-        assert_eq!(clip("é中🦀xyz", 4), "é...");
+        // Titles are cut by display width, with "…": a CJK character takes two cells, and an emoji, drawn `?`, one.
+        assert_eq!(clip("é中🦀xyz", 4), "é中…");
+        assert_eq!(clip("é中🦀xyz", 7), "é中?xyz");
+        assert_eq!(clip("é中🦀xyz", 3), "é…");
         assert!(wrap("").is_empty());
     }
 

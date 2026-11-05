@@ -65,6 +65,7 @@ fn licenses_name_the_bundled_assets() {
     let output = tomori(&["--licenses"], None);
     assert!(output.status.success());
     assert!(stdout(&output).contains("Basis Universal transcoder:"));
+    assert!(stdout(&output).contains("SIL OPEN FONT LICENSE Version 1.1"));
 }
 
 #[test]

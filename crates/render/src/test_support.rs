@@ -23,3 +23,54 @@ fn a_preview_is_saved_where_its_variable_says() {
     assert_eq!(image::open(&path).unwrap().width(), 2);
     std::fs::remove_file(path).unwrap();
 }
+
+/// Sets this thread's glyph budget, and restores it to none when dropped, even if a test fails, as a test may run on a thread another used.
+pub struct Budgeted;
+
+impl Budgeted {
+    pub fn new(budget: tomori_text::atlas::Budget) -> Self {
+        tomori_text::atlas::budget(budget);
+        tomori_text::atlas::frame();
+        Self
+    }
+
+    /// A budget that draws no new glyph this frame.
+    pub fn spent() -> Self {
+        Self::new(tomori_text::atlas::Budget {
+            time: std::time::Duration::MAX,
+            glyphs: 0,
+        })
+    }
+}
+
+impl Drop for Budgeted {
+    fn drop(&mut self) {
+        tomori_text::atlas::budget(tomori_text::atlas::Budget::UNLIMITED);
+        tomori_text::atlas::frame();
+    }
+}
+
+/// `count` kanji that the shared atlas has not drawn yet, looking down from `from`, which each test gives differently so that tests running at once do not draw each other's: each is asked for with no budget, and waits if it is not drawn.
+pub fn undrawn(from: char, count: usize) -> String {
+    let _budget = Budgeted::spent();
+    ('\u{4e00}'..=from)
+        .rev()
+        .filter(|ch| tomori_text::fonts::covers(*ch))
+        .filter(|ch| {
+            let waited = tomori_text::atlas::waited();
+            tomori_text::atlas::glyph(*ch);
+            tomori_text::atlas::waited() > waited
+        })
+        .take(count)
+        .collect()
+}
+
+#[test]
+fn undrawn_kanji_are_not_in_the_atlas_until_drawn() {
+    let kanji = undrawn('\u{9e40}', 2);
+    assert_eq!(kanji.chars().count(), 2);
+    for ch in kanji.chars() {
+        assert!(tomori_text::atlas::glyph(ch).is_some());
+    }
+    assert!(!undrawn('\u{9e40}', 2).contains(kanji.chars().next().unwrap()));
+}

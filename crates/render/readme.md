@@ -16,7 +16,7 @@ Its interfaces change with the environment framework ([#75](https://github.com/i
 
 ## Licences
 
-The Meta Quest Touch Plus controller models in `assets/controllers` are under the [MIT License](assets/controllers/LICENSE.md), and the Basis Universal transcoder's notice is in [assets/licenses](assets/licenses/basisu-LICENSE.txt). They are compiled in; an APK that includes this crate carries these notices in its assets.
+The Meta Quest Touch Plus controller models in `assets/controllers` are under the [MIT License](assets/controllers/LICENSE.md), the Basis Universal transcoder's notice is in [assets/licenses](assets/licenses/basisu-LICENSE.txt), and the licences of the fonts it draws text with, from [`tomori-text`](https://crates.io/crates/tomori-text), are in [assets/licenses](assets/licenses/fonts-LICENSE.txt) too. They are compiled in; an APK that includes this crate carries these notices in its assets.
 
 ## See Also
 

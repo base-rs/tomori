@@ -37,7 +37,7 @@ apk_name = "tomori-example-headset"
 build_targets = ["aarch64-linux-android"]
 # The Khronos OpenXR loader, which `scripts/android.sh` fetches into this folder's arm64-v8a when it is missing. This example shares Tomori's; a project of its own names a folder of its own.
 runtime_libs = "../../android/libs"
-# This build's own assets, which a build reads through `AndroidApp::asset_manager`, with the licence notices of what `tomori-render` compiles in: the controller models and the Basis Universal transcoder. Here they are links to `crates/render/assets`; a project of its own copies them from the `tomori-render` package it depends on.
+# This build's own assets, which a build reads through `AndroidApp::asset_manager`, with the licence notices of what `tomori-render` compiles in: the controller models, the Basis Universal transcoder and the fonts. Here they are links to `crates/render/assets`; a project of its own copies them from the `tomori-render` package it depends on.
 assets = "assets"
 # This build's own Android resources: its launcher icon.
 resources = "res"

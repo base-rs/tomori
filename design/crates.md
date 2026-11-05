@@ -22,6 +22,7 @@ These crates are published to crates.io, and every one of them can be packaged a
 | `tomori-backend-opencode` | The default backend, needed by the server's `opencode` feature. |
 | `tomori-speech` | Needed by the server's default `speech` feature. |
 | `tomori-server` | `cargo install tomori-server`, and the library that downstream servers build on through its builder; see `builders.md`. |
+| `tomori-text` | The bundled fonts and the glyph atlas, which `tomori-scene` lays text out with and `tomori-render` draws. |
 | `tomori-environment-sky` | The Sky environment's renderer, which `tomori-render` draws as Tomori's own scenery, so that the renderers and the clients can be published. Its interface changes when environments get a shared interface. |
 | `tomori-scene` | The platform-neutral client, which every client crate and downstream headset builds on. |
 | `tomori-render` | The renderers and the `Scenery` that a downstream headset implements to draw an environment of its own. |

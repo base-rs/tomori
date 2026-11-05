@@ -3872,14 +3872,21 @@ fn window(selected: usize, count: usize, rows: usize) -> usize {
 /// The end of `text` within `width` columns, so that words still being heard stay in view.
 #[cfg(any(not(target_os = "android"), test))]
 fn tail(text: &str, width: usize) -> String {
-    let line: Vec<char> = crate::ui_text::clip(text, usize::MAX).chars().collect();
-    if line.len() <= width {
-        line.into_iter().collect()
-    } else {
-        std::iter::once('…')
-            .chain(line[line.len() - (width - 1)..].iter().copied())
-            .collect()
+    let line = crate::ui_text::clip(text, usize::MAX);
+    if crate::ui_text::width(&line) <= width {
+        return line;
     }
+    // As many characters from the end as fit beside the "…", counted in cells as drawn.
+    let mut kept = Vec::new();
+    let mut used = 1;
+    for ch in line.chars().rev() {
+        used += crate::ui_text::width(ch.encode_utf8(&mut [0; 4]));
+        if used > width {
+            break;
+        }
+        kept.push(ch);
+    }
+    std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
 /// `text` on one row of the panel, as [`crate::ui_text::clip`] cuts it.

@@ -1063,7 +1063,8 @@ mod tests {
         assert_eq!(clip("a much longer label", 10), "a much lo…");
         assert_eq!(clip("two\nlines", 20), "two lines");
         assert_eq!(clip(&"🦀".repeat(40), 10).chars().count(), 10);
-        assert_eq!(clip("José’s space", 20), "José's space");
+        assert_eq!(clip("José’s space", 20), "José’s space");
+        assert_eq!(clip("日本語のスペース", 9), "日本語の…");
     }
 
     fn summary(id: &str, attention: Option<Attention>, age: Option<u32>) -> SpaceSummary {
