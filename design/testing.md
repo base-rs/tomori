@@ -1,0 +1,37 @@
+# Testing
+
+This describes the test coverage Tomori's workspace must keep.
+
+## Requirement
+
+Every measured source region in the workspace runs under its tests: `cargo bake test:coverage --all-targets true` passes on current stable Rust, on CI's Linux runner with lavapipe and the speech models. The Test workflow's `test-result` job requires it, and the main branch requires `test-result`. The target is 100%, never a lower floor.
+
+Uncovered code gets a test, or is removed if nothing needs it. A branch that only an impossible error could take becomes an `expect` with its reason, or an `unreachable!` where the state rules it out. A branch that only a race could take is restructured, so that whether it runs does not depend on timing. Bake does not count regions inside `unreachable!`.
+
+The only other exception is a file of raw device or platform calls that cannot run in CI, listed with its reason under `[[package.metadata.bake.test.coverage.exclude]]` in its crate's `Cargo.toml`. Such a file is thin. It makes the calls and passes their results on, and the decisions around them are in covered modules. The exclusions are:
+
+| File | What cannot run in CI |
+| --- | --- |
+| `crates/client-quest/src/xr.rs` | The OpenXR instance, session, swapchain and actions, and the frame loop that drives them, which need an OpenXR runtime and a headset. |
+| `crates/client-quest/src/vulkan.rs` | The Vulkan instance and device created through OpenXR, and the runtime's swapchain images imported into wgpu. |
+| `crates/client-quest/src/desktop_window.rs` | winit's event loop and window, and the window's Vulkan or Metal surface, which need a display. |
+| `crates/client-quest/src/desktop_audio.rs` | The default microphone and speaker, opened through cpal. |
+| `crates/client-quest/src/child_process.rs` | What a forked child runs before it executes its program, whose coverage counters the child discards. |
+| `crates/server/src/process.rs` | The server process's scheduler, signal handling and console thread, and `_exit`, after which a process writes no coverage. |
+| `crates/discovery/src/daemon.rs` | Starting the multicast DNS responder and querier, whose failures come only from the system. |
+
+Coverage is not achieved through `#[coverage(off)]` or `cfg(coverage)`, nor by measuring less of the workspace.
+
+## Rationale
+
+The last regions find as many bugs as the first ones, and they expose dead code. A lower floor makes people test code they don't care about whenever someone else's change lowers the total. With 100%, each change brings its own tests. Some code can't run in GitHub CI, such as the headset's OpenXR calls. An exclusion that names its file and reason, in the crate it belongs to, keeps that visible and reviewable, where scattered markers would not. Agreed with the maintainer in November 2026 in [#55](https://github.com/ioquatix/tomori/issues/55); see the proposal in [#111](https://github.com/ioquatix/tomori/pull/111).
+
+## Scope
+
+Every workspace member's code, including its inline tests and the `bake/` package, as `cargo llvm-cov --workspace --all-targets` measures it on Linux. The examples, and files in `tests/` directories, are not measured. Code compiled only for Android is not measured either. It belongs in the headset's thin platform files.
+
+## Validation
+
+- `cargo bake test:coverage --all-targets true` passes in CI. Its report lists each excluded file with its reason and its size, in regions and lines.
+- A change that adds or widens an exclusion is reviewed as lowering the target would be. Its file must hold only device or platform calls, its reason must say what cannot run, and no logic may have moved into it.
+- Search the source for `coverage(off)` and `cfg(coverage)`: there is neither.
