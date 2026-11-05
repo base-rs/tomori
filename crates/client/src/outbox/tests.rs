@@ -124,6 +124,7 @@ fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() 
             answer: None,
             progress: false,
             naming: false,
+            attention: Vec::new(),
         })
         .unwrap();
     let mut agent = audio(5);
@@ -486,6 +487,7 @@ fn begin(utterance: &str) -> ClientMessage {
         answer: None,
         progress: false,
         naming: false,
+        attention: Vec::new(),
     }
 }
 

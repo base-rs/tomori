@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Rules for text that people choose and others read: display names, and text quoted on one line, such as in a context line told to the agent. See `design/security.md`.
+//! Rules for text that people choose and others read: display names, and text quoted on one line, such as in a context block told to the agent. See `design/security.md`.
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -19,7 +19,7 @@ pub enum NameError {
     Empty,
     /// The name starts with `/`, which could read as a command to the agent, since the name begins each prompt it attributes.
     Command,
-    /// The name contains `:`, which ends the name before a speaker's words, or a square bracket, which delimits a context line.
+    /// The name contains `:`, which ends the name before a speaker's words, or a square bracket, which delimits a context block.
     Delimiter,
     /// The name is longer than [`NAME_CHARS`] characters or [`NAME_BYTES`] bytes.
     TooLong,

@@ -160,6 +160,7 @@ mod tests {
                 answer: None,
                 progress: false,
                 naming: false,
+                attention: Vec::new(),
             },
             ClientMessage::UtteranceEnd {
                 utterance: "u".into(),

@@ -223,6 +223,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         answer: None,
         progress: false,
         naming: false,
+        attention: Vec::new(),
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");
     assert!(ada.next_audio(Duration::from_millis(300)).is_none());
