@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The hand menu: shown above the left wrist while the left palm faces the head, as a top-level menu of sections chosen by pointing, with a cue on the wrist when something waits. See `design/hand-menu.md`.
+//! The hand menu: shown above the left wrist while the left palm is turned up, as a top-level menu of sections chosen by pointing, with a cue on the wrist when something waits. See `design/hand-menu.md`.
 //!
 //! Its items are arrival objects, so that they are drawn, labelled, pointed at and chosen as arrival's are.
 
@@ -12,13 +12,14 @@ use tomori_protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockStat
 
 use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
+use crate::feedback::Hand as Side;
 use crate::hands::Hand;
 
-/// The menu appears once the palm has faced the head within this angle for [`HOLD`].
-pub const SHOW_ANGLE: f32 = 35.0 * std::f32::consts::PI / 180.0;
-/// The menu hides once the palm turns further than this from the head.
+/// A palm shows what its hand holds once it has faced within this angle of straight up for [`HOLD`], whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up. See `design/hand-menu.md`.
+pub const SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
+/// It hides once the palm has turned further than this from straight up, so that it does not flicker at the edge.
 pub const HIDE_ANGLE: f32 = 55.0 * std::f32::consts::PI / 180.0;
-/// How long the palm faces the head before the menu appears, so that a hand passing through the pose does not show it.
+/// How long the palm faces up before it shows, so that a hand passing through the pose does not show it.
 pub const HOLD: Duration = Duration::from_millis(200);
 
 /// The OpenXR hand joints the palm is found from: the wrist and the knuckles of the index and little fingers, which are far enough apart to give a steady direction.
@@ -36,6 +37,14 @@ pub const LAYER_ROWS: usize = 14;
 /// How much of a layer its button in the Agent section shows.
 const PREVIEW: usize = 24;
 
+/// The sign that turns the geometry of the hand on `side` into the way its palm faces. OpenXR's grip +X axis is normal to the palm, pointing away from the left palm and into the right one; and the little finger's knuckle crossed with the index finger's, from the wrist, points out of the left palm and into the right one.
+fn palm_sign(side: Side) -> f32 {
+    match side {
+        Side::Left => 1.0,
+        Side::Right => -1.0,
+    }
+}
+
 /// Where a palm is and which way it faces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palm {
@@ -45,20 +54,19 @@ pub struct Palm {
 }
 
 impl Palm {
-    /// The left palm of a tracked hand, from its wrist and the bases of its index and little fingers.
-    pub fn from_left_hand(hand: &Hand) -> Option<Self> {
+    /// The palm of a tracked hand on `side`, from its wrist and the bases of its index and little fingers.
+    pub fn from_hand(side: Side, hand: &Hand) -> Option<Self> {
         let position =
             |index: usize| hand.joints[index].map(|joint| Vec3::from_array(joint.position));
         let wrist = position(WRIST)?;
         let index = position(INDEX_KNUCKLE)? - wrist;
         let little = position(LITTLE_KNUCKLE)? - wrist;
-        // For a left hand, the little finger crossed with the index finger points out of the palm.
-        let normal = little.cross(index).try_normalize()?;
+        let normal = (little.cross(index) * palm_sign(side)).try_normalize()?;
         Some(Self { wrist, normal })
     }
 
-    /// The left palm of a controller held in the left hand: its grip pose's +X axis points away from the palm.
-    pub fn from_left_controller(pose: &controller::Pose) -> Option<Self> {
+    /// The palm of a controller held in the hand on `side`, along its grip pose's X axis.
+    pub fn from_controller(side: Side, pose: &controller::Pose) -> Option<Self> {
         let orientation = Quat::from_array(pose.orientation);
         if orientation.length_squared().is_nan() || orientation.length_squared() <= 1e-6 {
             return None;
@@ -66,33 +74,8 @@ impl Palm {
         let orientation = orientation.normalize();
         Some(Self {
             wrist: Vec3::from_array(pose.position),
-            normal: orientation * Vec3::X,
+            normal: orientation * Vec3::X * palm_sign(side),
         })
-    }
-
-    /// The right palm of a tracked hand: for a right hand the index finger crossed with the little finger points out of the palm. See `design/wrist-transcript.md`.
-    pub fn from_right_hand(hand: &Hand) -> Option<Self> {
-        let position =
-            |index: usize| hand.joints[index].map(|joint| Vec3::from_array(joint.position));
-        let wrist = position(WRIST)?;
-        let index = position(INDEX_KNUCKLE)? - wrist;
-        let little = position(LITTLE_KNUCKLE)? - wrist;
-        let normal = index.cross(little).try_normalize()?;
-        Some(Self { wrist, normal })
-    }
-
-    /// The right palm of a controller held in the right hand: OpenXR's grip +X points into the right palm, so the palm faces along -X.
-    pub fn from_right_controller(pose: &controller::Pose) -> Option<Self> {
-        Self::from_left_controller(pose).map(|palm| Self {
-            normal: -palm.normal,
-            ..palm
-        })
-    }
-
-    /// The angle, in radians, between the way the palm faces and the way to `head`.
-    pub fn angle_to(&self, head: Vec3) -> Option<f32> {
-        let towards = (head - self.wrist).try_normalize()?;
-        Some(self.normal.dot(towards).clamp(-1.0, 1.0).acos())
     }
 
     /// The angle, in radians, between the way the palm faces and straight up in the scene, whose +Y is the world's up.
@@ -119,43 +102,32 @@ pub fn head_turned(neck: Vec3, yaw: f32, pitch: f32) -> Mat4 {
     Mat4::from_rotation_translation(rotation, neck - rotation * EYES_TO_NECK)
 }
 
-/// Whether the menu is shown, with hysteresis in angle and time.
+/// The gesture both hands share, turning the palm up: whether what the hand holds is shown, with hysteresis in angle and time. It shows once the palm has faced within [`SHOW_ANGLE`] of straight up for [`HOLD`], and hides once it is beyond [`HIDE_ANGLE`] or the hand is no longer tracked. Only the palm counts, not where the head is. Each hand's own reasons not to show are its caller's. See `design/hand-menu.md` and `design/wrist-transcript.md`.
 #[derive(Clone, Debug, Default)]
-pub struct Visibility {
+pub struct PalmUp {
     shown: bool,
-    facing_since: Option<Instant>,
+    up_since: Option<Instant>,
 }
 
-impl Visibility {
-    /// Update with the palm's angle to the head at `now`, or `None` when the hand is not tracked. Returns whether the menu is shown.
-    pub fn update(&mut self, angle: Option<f32>, now: Instant) -> bool {
-        self.update_within(angle, SHOW_ANGLE, HIDE_ANGLE, now)
-    }
-
-    /// Update with the palm's `angle` to whatever it turns towards at `now`, or `None` when the hand is not tracked: it shows once the angle has been within `show` for [`HOLD`], and hides once it is beyond `hide`. Returns whether it is shown.
-    pub fn update_within(
-        &mut self,
-        angle: Option<f32>,
-        show: f32,
-        hide: f32,
-        now: Instant,
-    ) -> bool {
-        match angle {
+impl PalmUp {
+    /// Update with `palm` at `now`, or `None` when the hand is not tracked or must not show. Returns whether it is shown.
+    pub fn update(&mut self, palm: Option<Palm>, now: Instant) -> bool {
+        match palm.map(|palm| palm.angle_to_up()) {
             None => {
                 self.shown = false;
-                self.facing_since = None;
+                self.up_since = None;
             }
             Some(angle) if self.shown => {
-                if angle > hide {
+                if angle > HIDE_ANGLE {
                     self.shown = false;
-                    self.facing_since = None;
+                    self.up_since = None;
                 }
             }
-            Some(angle) if angle <= show => {
-                let since = *self.facing_since.get_or_insert(now);
+            Some(angle) if angle <= SHOW_ANGLE => {
+                let since = *self.up_since.get_or_insert(now);
                 self.shown = now.saturating_duration_since(since) >= HOLD;
             }
-            Some(_) => self.facing_since = None,
+            Some(_) => self.up_since = None,
         }
         self.shown
     }
@@ -754,17 +726,16 @@ fn preview(text: &str) -> String {
 /// The hand menu's state: whether it shows, and which section is open.
 #[derive(Clone, Debug, Default)]
 pub struct HandMenu {
-    visibility: Visibility,
+    palm_up: PalmUp,
     section: Option<Section>,
     /// Pinned open by Y, whatever the hand's pose, until Y or B.
     pinned: bool,
 }
 
 impl HandMenu {
-    /// Update with the left palm and the head at `now`. Returns whether the menu is shown.
-    pub fn update(&mut self, palm: Option<Palm>, head: Option<Vec3>, now: Instant) -> bool {
-        let angle = palm.zip(head).and_then(|(palm, head)| palm.angle_to(head));
-        let shown = self.visibility.update(angle, now);
+    /// Update with the left palm at `now`, which shows the menu as the right palm shows the transcript, by [`PalmUp`]. Returns whether the menu is shown.
+    pub fn update(&mut self, palm: Option<Palm>, now: Instant) -> bool {
+        let shown = self.palm_up.update(palm, now);
         shown || self.pinned
     }
 
@@ -930,80 +901,157 @@ mod tests {
         Hand { joints }
     }
 
-    #[test]
-    fn a_left_palm_turned_up_faces_up() {
-        // Fingers forward, palm up: for a left hand the index finger is on the left.
-        let up = hand(
+    /// A tracked hand on `side` with its palm up and its fingers forward: the index finger is on the thumb's side, left for a left hand and right for a right one.
+    fn hand_palm_up(side: Side) -> Hand {
+        let thumb = -palm_sign(side) * 0.03;
+        hand(
             Vec3::ZERO,
-            Vec3::new(-0.03, 0.0, -0.09),
-            Vec3::new(0.03, 0.0, -0.08),
-        );
-        let palm = Palm::from_left_hand(&up).unwrap();
-        assert!(palm.normal.dot(Vec3::Y) > 0.99, "{:?}", palm.normal);
-        assert!(palm.angle_to(Vec3::new(0.0, 0.5, 0.0)).unwrap() < 0.01);
-        // A hand missing a joint has no palm.
-        let mut missing = up;
-        missing.joints[WRIST] = None;
-        assert_eq!(Palm::from_left_hand(&missing), None);
+            Vec3::new(thumb, 0.0, -0.09),
+            Vec3::new(-thumb, 0.0, -0.08),
+        )
     }
 
+    /// A controller held in the hand on `side`, low in front, its -Z forward and its +Y up in a neutral grip, turned by `turn`.
+    fn grip(side: Side, turn: Quat) -> controller::Pose {
+        controller::Pose {
+            position: [palm_sign(side) * -0.2, 1.1, -0.35],
+            orientation: turn.to_array(),
+        }
+    }
+
+    /// Rolling either hand outwards about the forward axis by 90° turns its palm up.
+    fn rolled_up(side: Side) -> Quat {
+        Quat::from_rotation_z(palm_sign(side) * std::f32::consts::FRAC_PI_2)
+    }
+
+    /// The palm of the controller on `side` turned up, then tilted by `tilt`.
+    fn up_tilted(side: Side, tilt: Quat) -> Option<Palm> {
+        Palm::from_controller(side, &grip(side, tilt * rolled_up(side)))
+    }
+
+    /// Whether `palm`, held for the dwell from hidden, shows.
+    fn shows(palm: Option<Palm>) -> bool {
+        let start = Instant::now();
+        let mut palm_up = PalmUp::default();
+        palm_up.update(palm, start);
+        palm_up.update(palm, start + HOLD)
+    }
+
+    const SIDES: [Side; 2] = [Side::Left, Side::Right];
+
     #[test]
-    fn a_right_palm_mirrors_the_left() {
-        // Fingers forward, palm up: for a right hand the index finger is on the right.
-        let up = hand(
-            Vec3::ZERO,
-            Vec3::new(0.03, 0.0, -0.09),
-            Vec3::new(-0.03, 0.0, -0.08),
-        );
-        let palm = Palm::from_right_hand(&up).unwrap();
-        assert!(palm.normal.dot(Vec3::Y) > 0.99, "{:?}", palm.normal);
-        // A right controller rolled the other way faces up along its grip's -X axis.
-        let pose = controller::Pose {
-            position: [0.2, 1.0, -0.3],
-            orientation: Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2).to_array(),
-        };
-        let palm = Palm::from_right_controller(&pose).unwrap();
-        assert!(palm.normal.dot(Vec3::Y) > 0.99, "{:?}", palm.normal);
-        let cue = wrist_cue(&palm, true);
+    fn either_palm_turned_up_faces_up_from_joints_or_the_grip() {
+        for side in SIDES {
+            let palm = Palm::from_hand(side, &hand_palm_up(side)).unwrap();
+            assert!(
+                palm.normal.dot(Vec3::Y) > 0.99,
+                "{side:?} {:?}",
+                palm.normal
+            );
+            let palm = up_tilted(side, Quat::IDENTITY).unwrap();
+            assert!(
+                palm.normal.dot(Vec3::Y) > 0.999,
+                "{side:?} {:?}",
+                palm.normal
+            );
+            // A hand missing a joint has no palm.
+            let mut missing = hand_palm_up(side);
+            missing.joints[WRIST] = None;
+            assert_eq!(Palm::from_hand(side, &missing), None);
+        }
+        let cue = wrist_cue(&up_tilted(Side::Right, Quat::IDENTITY).unwrap(), true);
         assert_eq!(cue.kind, Kind::Menu(MenuKind::ProblemCue));
         assert_eq!(cue.key, Key::Menu(MenuKey::WristCue));
         assert!(!cue.choosable);
     }
 
     #[test]
-    fn a_left_controller_palm_faces_along_its_grip_x_axis() {
-        let pose = controller::Pose {
-            position: [0.0, 1.0, -0.3],
-            orientation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array(),
-        };
-        let palm = Palm::from_left_controller(&pose).unwrap();
-        assert!(palm.normal.dot(Vec3::Y) > 0.99, "{:?}", palm.normal);
+    fn in_a_neutral_grip_either_palm_faces_inwards_along_opposite_signs_of_the_grip_x_axis() {
+        // OpenXR's grip +X points away from the left palm and into the right one, so both palms face inwards, towards the body's middle, and 90° from up.
+        let left = Palm::from_controller(Side::Left, &grip(Side::Left, Quat::IDENTITY)).unwrap();
+        assert!(left.normal.dot(Vec3::X) > 0.999, "{:?}", left.normal);
+        let right = Palm::from_controller(Side::Right, &grip(Side::Right, Quat::IDENTITY)).unwrap();
+        assert!(right.normal.dot(-Vec3::X) > 0.999, "{:?}", right.normal);
+        for palm in [left, right] {
+            assert!((palm.angle_to_up().to_degrees() - 90.0).abs() < 0.01);
+        }
         let degenerate = controller::Pose {
             position: [0.0; 3],
             orientation: [0.0; 4],
         };
-        assert_eq!(Palm::from_left_controller(&degenerate), None);
+        assert_eq!(Palm::from_controller(Side::Left, &degenerate), None);
     }
 
     #[test]
-    fn the_menu_shows_after_a_hold_and_hides_past_the_outer_angle() {
+    fn either_palm_up_shows_after_the_dwell() {
+        for side in SIDES {
+            // A neutral grip, palm inwards, does not show, however long it is held.
+            let neutral = Palm::from_controller(side, &grip(side, Quat::IDENTITY));
+            assert!(!shows(neutral), "{side:?}");
+            // Straight up shows, from joints or the grip.
+            assert!(shows(up_tilted(side, Quat::IDENTITY)), "{side:?}");
+            assert!(
+                shows(Palm::from_hand(side, &hand_palm_up(side))),
+                "{side:?}"
+            );
+            // So do 40° towards the body, away from it, forwards and back.
+            for tilt in [
+                Quat::from_rotation_z(40f32.to_radians()),
+                Quat::from_rotation_z(-40f32.to_radians()),
+                Quat::from_rotation_x(40f32.to_radians()),
+                Quat::from_rotation_x(-40f32.to_radians()),
+            ] {
+                let palm = up_tilted(side, tilt);
+                let angle = palm.unwrap().angle_to_up().to_degrees();
+                assert!((angle - 40.0).abs() < 0.01, "{side:?} {angle}");
+                assert!(shows(palm), "{side:?} {tilt:?}");
+            }
+            // Palm down does not.
+            assert!(!shows(Palm::from_controller(
+                side,
+                &grip(side, rolled_up(side).inverse())
+            )));
+        }
+    }
+
+    #[test]
+    fn either_palm_between_the_angles_neither_shows_nor_hides_and_past_them_hides() {
         let start = Instant::now();
-        let mut visibility = Visibility::default();
-        let degrees = |value: f32| Some(value.to_radians());
-        assert!(!visibility.update(degrees(20.0), start));
-        assert!(!visibility.update(degrees(20.0), start + HOLD / 2));
-        assert!(visibility.update(degrees(20.0), start + HOLD));
-        // Shown until past the outer angle, not the inner one.
-        assert!(visibility.update(degrees(45.0), start + HOLD * 2));
-        assert!(!visibility.update(degrees(60.0), start + HOLD * 3));
-        // A hand passing through the pose does not show it.
-        assert!(!visibility.update(degrees(20.0), start + HOLD * 4));
-        assert!(!visibility.update(degrees(50.0), start + HOLD * 5));
-        assert!(!visibility.update(degrees(20.0), start + HOLD * 6));
-        assert!(!visibility.update(degrees(20.0), start + HOLD * 6 + HOLD / 2));
-        // Losing the hand hides it.
-        assert!(visibility.update(degrees(20.0), start + HOLD * 7));
-        assert!(!visibility.update(None, start + HOLD * 8));
+        let tilt = |degrees: f32| Quat::from_rotation_z(degrees.to_radians());
+        for side in SIDES {
+            // 50° from up does not show from hidden.
+            assert!(!shows(up_tilted(side, tilt(50.0))), "{side:?}");
+            // But keeps it shown once it shows.
+            let mut palm_up = PalmUp::default();
+            palm_up.update(up_tilted(side, Quat::IDENTITY), start);
+            assert!(palm_up.update(up_tilted(side, Quat::IDENTITY), start + HOLD));
+            assert!(palm_up.update(up_tilted(side, tilt(50.0)), start + HOLD * 2));
+            assert!(palm_up.update(up_tilted(side, tilt(-50.0)), start + HOLD * 3));
+            // 70° hides it.
+            assert!(!palm_up.update(up_tilted(side, tilt(70.0)), start + HOLD * 4));
+        }
+    }
+
+    #[test]
+    fn either_palm_respects_the_dwell_so_a_hand_passing_through_does_not_show() {
+        let start = Instant::now();
+        let up = |side| up_tilted(side, Quat::IDENTITY);
+        let away = |side| up_tilted(side, Quat::from_rotation_z(60f32.to_radians()));
+        for side in SIDES {
+            let mut palm_up = PalmUp::default();
+            assert!(!palm_up.update(up(side), start));
+            assert!(!palm_up.update(up(side), start + HOLD / 2));
+            assert!(palm_up.update(up(side), start + HOLD));
+            assert!(!palm_up.update(away(side), start + HOLD * 2));
+            // Passing through the pose, turning away before the dwell, restarts it.
+            assert!(!palm_up.update(up(side), start + HOLD * 3));
+            assert!(!palm_up.update(away(side), start + HOLD * 3 + HOLD / 2));
+            assert!(!palm_up.update(up(side), start + HOLD * 4));
+            assert!(!palm_up.update(up(side), start + HOLD * 4 + HOLD / 2));
+            assert!(palm_up.update(up(side), start + HOLD * 5));
+            // Losing the hand hides it.
+            assert!(!palm_up.update(None, start + HOLD * 6));
+        }
     }
 
     fn texts(items: &[Item]) -> Vec<&str> {
@@ -1013,23 +1061,19 @@ mod tests {
     #[test]
     fn a_hand_or_controller_that_gives_no_direction_has_no_palm() {
         let flat = hand(Vec3::ZERO, Vec3::X, Vec3::X * 2.0);
-        assert_eq!(Palm::from_left_hand(&flat), None);
-        assert_eq!(Palm::from_right_hand(&flat), None);
-        for missing in [WRIST, INDEX_KNUCKLE, LITTLE_KNUCKLE] {
-            let mut partial = hand(Vec3::ZERO, Vec3::X, Vec3::Z);
-            partial.joints[missing] = None;
-            assert_eq!(Palm::from_left_hand(&partial), None);
-            assert_eq!(Palm::from_right_hand(&partial), None);
-        }
-        // Nor is there a way to the head from the wrist itself.
-        let palm = Palm::from_left_hand(&hand(Vec3::ZERO, Vec3::X, -Vec3::Z)).unwrap();
-        assert_eq!(palm.angle_to(palm.wrist), None);
         let lost = controller::Pose {
             position: [0.0; 3],
             orientation: [f32::NAN; 4],
         };
-        assert_eq!(Palm::from_left_controller(&lost), None);
-        assert_eq!(Palm::from_right_controller(&lost), None);
+        for side in SIDES {
+            assert_eq!(Palm::from_hand(side, &flat), None);
+            for missing in [WRIST, INDEX_KNUCKLE, LITTLE_KNUCKLE] {
+                let mut partial = hand(Vec3::ZERO, Vec3::X, Vec3::Z);
+                partial.joints[missing] = None;
+                assert_eq!(Palm::from_hand(side, &partial), None);
+            }
+            assert_eq!(Palm::from_controller(side, &lost), None);
+        }
     }
 
     #[test]
@@ -1517,18 +1561,18 @@ mod tests {
     fn y_pins_the_menu_open_at_the_space_section_until_y_or_b() {
         let start = Instant::now();
         let mut menu = HandMenu::default();
-        assert!(!menu.update(None, None, start));
+        assert!(!menu.update(None, start));
         menu.toggle_pin();
         assert!(menu.pinned());
         assert_eq!(menu.section, Some(Section::Space));
         // Shown whatever the hand's pose, or with no hand at all.
-        assert!(menu.update(None, None, start));
+        assert!(menu.update(None, start));
         menu.toggle_pin();
-        assert!(!menu.update(None, None, start));
+        assert!(!menu.update(None, start));
         menu.toggle_pin();
         assert!(menu.unpin());
         assert!(!menu.unpin());
-        assert!(!menu.update(None, None, start));
+        assert!(!menu.update(None, start));
     }
 
     #[test]
@@ -1679,17 +1723,16 @@ mod tests {
     }
 
     #[test]
-    fn showing_follows_the_palm_and_the_head() {
+    fn showing_follows_the_palm() {
         let start = Instant::now();
         let mut menu = HandMenu::default();
         let palm = Palm {
             wrist: Vec3::new(0.0, 1.0, -0.3),
             normal: Vec3::new(0.0, 0.6, 0.3).normalize(),
         };
-        let head = Vec3::new(0.0, 1.6, 0.0);
-        assert!(!menu.update(Some(palm), Some(head), start));
-        assert!(menu.update(Some(palm), Some(head), start + HOLD));
-        assert!(!menu.update(None, Some(head), start + HOLD * 2));
+        assert!(!menu.update(Some(palm), start));
+        assert!(menu.update(Some(palm), start + HOLD));
+        assert!(!menu.update(None, start + HOLD * 2));
         for role in [
             ConnectionRole::Collaborator,
             ConnectionRole::Pairing,

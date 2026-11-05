@@ -85,7 +85,7 @@ pub struct Senses {
     pub trigger: Option<f32>,
     /// The right hand points, which keeps the transcript from showing.
     pub pointing: bool,
-    /// The left palm, which shows the hand menu while it faces the viewer.
+    /// The left palm, which shows the hand menu while it faces up.
     pub left_palm: Option<Palm>,
     /// The right palm, which shows the transcript while it faces up.
     pub right_palm: Option<Palm>,
@@ -436,11 +436,10 @@ impl Step {
         let indicator = self
             .indicator
             .update(conversation, senses.trackers, senses.viewer, moment);
-        // The hand menu shows above the left wrist while the left palm faces the head. Whichever of it and the right transcript shows first wins; while it shows, the trigger chooses only in it. See `design/hand-menu.md`.
+        // The hand menu shows above the left wrist while the left palm is turned up, as the right palm shows the transcript. Whichever of it and the right transcript shows first wins; while it shows, the trigger chooses only in it. See `design/hand-menu.md`.
         let menu_shown = focused
             && self.hand_menu.update(
                 senses.left_palm.filter(|_| !self.wrist.state().on_hand()),
-                senses.viewer,
                 now,
             );
         self.menu_was_shown = menu_shown;
@@ -791,7 +790,7 @@ mod tests {
         }
     }
 
-    /// A palm `degrees` from facing straight up, held in front of the head.
+    /// A right palm `degrees` from facing straight up, held in front of the head.
     fn palm_up(degrees: f32) -> Palm {
         let normal = glam::Quat::from_rotation_z(degrees.to_radians()) * Vec3::Y;
         Palm {
@@ -800,12 +799,11 @@ mod tests {
         }
     }
 
-    /// A left palm in front of the head, facing it.
-    fn palm_facing_head() -> Palm {
-        let wrist = arrival::HOME + Vec3::new(-0.06, -0.14, -0.45);
+    /// A left palm `degrees` from facing straight up, held up in front of the head, as the right one in [`palm_up`] is.
+    fn left_palm_up(degrees: f32) -> Palm {
         Palm {
-            wrist,
-            normal: (arrival::HOME - wrist).normalize(),
+            wrist: arrival::HOME + Vec3::new(-0.06, -0.2, -0.45),
+            ..palm_up(degrees)
         }
     }
 
@@ -850,7 +848,7 @@ mod tests {
         let mut step = Step::default();
         let start = Instant::now();
         let swaying = Senses {
-            left_palm: Some(palm_facing_head()),
+            left_palm: Some(left_palm_up(0.0)),
             viewer: Some(arrival::HOME + Vec3::new(0.012, -0.013, 0.031)),
             ..senses()
         };
@@ -1170,19 +1168,27 @@ mod tests {
     }
 
     #[test]
-    fn the_left_palm_facing_the_viewer_shows_the_menu_after_the_hold_with_focus() {
+    fn the_left_palm_within_45_degrees_of_up_shows_the_menu_after_the_dwell_until_past_55() {
         let mut conversation = joined();
         let mut feedback = felt();
         let start = Instant::now();
-        let senses = Senses {
-            left_palm: Some(palm_facing_head()),
+        let at = |degrees| Senses {
+            left_palm: Some(left_palm_up(degrees)),
             ..senses()
         };
         let mut step = Step::default();
-        let frame = step.update(&senses, &mut conversation, &mut feedback, start, FRAME);
-        assert!(frame.arrival.is_none(), "not yet");
+        let frame = step.update(&at(40.0), &mut conversation, &mut feedback, start, FRAME);
+        assert!(frame.arrival.is_none(), "not before the dwell");
         let frame = step.update(
-            &senses,
+            &at(40.0),
+            &mut conversation,
+            &mut feedback,
+            start + HOLD / 2,
+            FRAME,
+        );
+        assert!(frame.arrival.is_none(), "not halfway through it");
+        let frame = step.update(
+            &at(40.0),
             &mut conversation,
             &mut feedback,
             start + HOLD,
@@ -1193,10 +1199,38 @@ mod tests {
         assert_eq!(arrival.scene.viewer, Some(arrival::HOME));
         // The pill hides while a hand's panel shows.
         assert_eq!(frame.panels.pill, Sheet::default());
+        // Between the angles it stays, and past 55° it hides.
+        let frame = step.update(
+            &at(50.0),
+            &mut conversation,
+            &mut feedback,
+            start + HOLD * 2,
+            FRAME,
+        );
+        assert!(frame.arrival.is_some());
+        let frame = step.update(
+            &at(60.0),
+            &mut conversation,
+            &mut feedback,
+            start + HOLD * 3,
+            FRAME,
+        );
+        assert!(frame.arrival.is_none());
+        // 50° from hidden never shows it.
+        let mut step = Step::default();
+        step.update(&at(50.0), &mut conversation, &mut feedback, start, FRAME);
+        let frame = step.update(
+            &at(50.0),
+            &mut conversation,
+            &mut feedback,
+            start + HOLD,
+            FRAME,
+        );
+        assert!(frame.arrival.is_none());
         // Without focus it never shows.
         let unfocused = Senses {
             focused: false,
-            ..senses
+            ..at(0.0)
         };
         let mut step = Step::default();
         step.update(&unfocused, &mut conversation, &mut feedback, start, FRAME);
@@ -1208,6 +1242,39 @@ mod tests {
             FRAME,
         );
         assert!(frame.arrival.is_none());
+    }
+
+    #[test]
+    fn turning_the_head_does_not_change_whether_either_palm_shows_its_panel() {
+        let mut conversation = joined();
+        let start = Instant::now();
+        let neck = arrival::HOME - Vec3::new(0.0, 0.075, -0.08);
+        for yaw in [-90.0, -45.0, 0.0, 45.0, 90.0, 180.0] {
+            let head = crate::hand_menu::head_turned(neck, yaw, -20.0);
+            let turned = Senses {
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(crate::hand_menu::head_centre(head)),
+                ..senses()
+            };
+            for (degrees, shown) in [(0.0, true), (40.0, true), (-40.0, true), (90.0, false)] {
+                let mut step = Step::default();
+                let left = Senses {
+                    left_palm: Some(left_palm_up(degrees)),
+                    ..turned
+                };
+                step.update(&left, &mut conversation, &mut felt(), start, FRAME);
+                let frame = step.update(&left, &mut conversation, &mut felt(), start + HOLD, FRAME);
+                assert_eq!(frame.arrival.is_some(), shown, "left {yaw} {degrees}");
+                let mut step = Step::default();
+                let right = Senses {
+                    right_palm: Some(palm_up(degrees)),
+                    ..turned
+                };
+                let wrist = wrist_after(&mut step, &mut conversation, &right, start);
+                assert_eq!(wrist.model.is_some(), shown, "right {yaw} {degrees}");
+            }
+        }
     }
 
     /// The transcript's sheet after holding the right palm `degrees` from up, from hidden.
@@ -1315,7 +1382,7 @@ mod tests {
         let mut conversation = joined();
         let start = Instant::now();
         let both = Senses {
-            left_palm: Some(palm_facing_head()),
+            left_palm: Some(left_palm_up(0.0)),
             right_palm: Some(palm_up(0.0)),
             ..senses()
         };
@@ -1691,7 +1758,7 @@ mod tests {
         use crate::hand_menu::MenuKey;
         let start = Instant::now();
         let menu = Senses {
-            left_palm: Some(palm_facing_head()),
+            left_palm: Some(left_palm_up(0.0)),
             ..senses()
         };
         // Y pins the menu open at its Space section, whose rows choose at once.
@@ -1794,7 +1861,7 @@ mod tests {
             &arrival::Key::Server("10.0.0.1:8765".into()),
         );
         let menu = Senses {
-            left_palm: Some(palm_facing_head()),
+            left_palm: Some(left_palm_up(0.0)),
             ray: aim_at(server.shape),
             ..senses()
         };
