@@ -32,7 +32,7 @@ fn root_from(root: Option<std::ffi::OsString>) -> PathBuf {
     }
 }
 
-/// Run `test` if every one of `paths`, the files or directories of `model`, exists; see [`installed`].
+/// Run `test` if every one of `paths`, the files or directories of `model`, exists. If not, says that the test is skipped and that `fetch` fetches the models, or fails it if [`REQUIRE_MODELS`] is set.
 ///
 /// # Panics
 ///
@@ -60,21 +60,7 @@ fn with_required(
     }
 }
 
-/// Whether every one of `paths`, the files or directories of `model`, which names the models the calling test needs, exists. If not, says that the test is skipped and that `fetch` fetches the models, or fails it if [`REQUIRE_MODELS`] is set.
-///
-/// # Panics
-///
-/// If a path is missing while [`REQUIRE_MODELS`] is set.
-pub fn installed(model: &str, fetch: &str, paths: &[&Path]) -> bool {
-    installed_with(
-        model,
-        fetch,
-        paths,
-        std::env::var(REQUIRE_MODELS).ok().as_deref(),
-    )
-}
-
-/// [`installed`], with the value of [`REQUIRE_MODELS`] given as `required`.
+/// Whether every one of `paths`, the files or directories of `model`, which names the models the calling test needs, exists, with the value of [`REQUIRE_MODELS`] given as `required`. If not, says that the test is skipped and that `fetch` fetches the models, or fails it if `required` is set.
 fn installed_with(model: &str, fetch: &str, paths: &[&Path], required: Option<&str>) -> bool {
     let Some(path) = paths.iter().find(|path| !path.exists()) else {
         return true;
