@@ -67,6 +67,8 @@ pub enum Shape {
         center: Vec3,
         half_extents: Vec3,
     },
+    /// A rectangle of a flat panel, such as a row of the hand menu, met in the panel's own plane and orientation.
+    Panel(crate::panel::Area),
 }
 
 impl Shape {
@@ -112,6 +114,15 @@ impl Shape {
                 }
                 Some(near)
             }
+            Shape::Panel(area) => area.intersect(ray),
+        }
+    }
+
+    /// The middle of the shape, in scene coordinates.
+    pub fn centre(&self) -> Vec3 {
+        match *self {
+            Shape::Sphere { center, .. } | Shape::Box { center, .. } => center,
+            Shape::Panel(area) => area.centre(),
         }
     }
 }
@@ -329,6 +340,38 @@ mod tests {
         assert_eq!(shape.intersect(&inside), Some(0.0));
         let skew = Ray::new(Vec3::new(0.0, 1.5, 0.0), Vec3::new(1.0, 0.0, -1.0)).unwrap();
         assert_eq!(shape.intersect(&skew), None);
+        assert_eq!(shape.centre(), Vec3::new(0.0, 1.0, -2.0));
+        assert_eq!(
+            sphere("a", 0.5, -2.0).shape.centre(),
+            Vec3::new(0.5, 1.0, -2.0)
+        );
+    }
+
+    #[test]
+    fn a_panel_s_rectangle_is_met_in_its_plane_and_missed_beside_or_behind_it() {
+        use crate::panel::{Area, Plane, Rect};
+        use glam::Vec2;
+        // A rectangle 40 cm wide and 2.4 cm tall, tilted 60° back, below and ahead of the eye.
+        let (sin, cos) = 60f32.to_radians().sin_cos();
+        let shape = Shape::Panel(Area {
+            plane: Plane::facing(Vec3::new(-0.2, 1.0, -0.4), Vec3::new(0.0, sin, cos)),
+            rect: Rect {
+                min: Vec2::new(0.0, -0.012),
+                max: Vec2::new(0.4, 0.012),
+            },
+        });
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let centre = shape.centre();
+        assert!(centre.distance(Vec3::new(0.0, 1.0, -0.4)) < 1e-6);
+        let ray = Ray::new(eye, centre - eye).unwrap();
+        assert!((shape.intersect(&ray).unwrap() - eye.distance(centre)).abs() < 1e-5);
+        // Beside it in its plane, along it, and turned away from it, it is missed.
+        let beside = Ray::new(eye, centre + Vec3::X * 0.25 - eye).unwrap();
+        assert_eq!(shape.intersect(&beside), None);
+        let along = Ray::new(centre + Vec3::Y, Vec3::X).unwrap();
+        assert_eq!(shape.intersect(&along), None);
+        let away = Ray::new(eye, eye - centre).unwrap();
+        assert_eq!(shape.intersect(&away), None);
     }
 
     #[test]

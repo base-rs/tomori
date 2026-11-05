@@ -809,9 +809,7 @@ mod tests {
 
     /// A ray from the eye through the middle of `shape`.
     fn aim_at(shape: crate::pointing::Shape) -> Option<Ray> {
-        let (crate::pointing::Shape::Sphere { center, .. }
-        | crate::pointing::Shape::Box { center, .. }) = shape;
-        Ray::new(arrival::HOME, center - arrival::HOME)
+        Ray::new(arrival::HOME, shape.centre() - arrival::HOME)
     }
 
     /// The target with `key` in `scene`.

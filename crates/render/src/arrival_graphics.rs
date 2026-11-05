@@ -8,10 +8,11 @@ use crate::{
     arrival::{Align, Key, Kind, Label, Object, Scene, attention_colour, clip, facing_from},
     delegation::Cube,
     hand_menu::MenuKind,
+    panel::Plane,
     server_choice::Source,
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 use std::f32::consts::{FRAC_PI_4, TAU};
 use tomori_protocol::{Activity, Attention};
 
@@ -89,11 +90,26 @@ fn hsv(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
+/// How an object's form and highlight turn, their +Z towards the viewer: in the plane of its panel when it is a row of one, as the hand menu's are, and otherwise facing `viewer`.
+fn orientation(object: &Object, viewer: Option<Vec3>) -> Quat {
+    match object.panel {
+        Some(area) => Quat::from_mat3(&Mat3::from_cols(
+            area.plane.right,
+            area.plane.up,
+            area.plane.normal(),
+        )),
+        None => Quat::from_rotation_arc(
+            Vec3::Z,
+            facing_from(object.position, viewer, object.label.tilt),
+        ),
+    }
+}
+
 /// An object's placeholder form, in the world. Replace this to change how arrival looks.
 fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
     let p = object.position;
     let s = object.size;
-    let face = Quat::from_rotation_arc(Vec3::Z, facing_from(p, viewer, object.label.tilt));
+    let face = orientation(object, viewer);
     match object.kind {
         Kind::Server {
             source,
@@ -306,10 +322,7 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
             }
             cube.color = cube.color.map(|v| v * fade);
         }
-        let face = Quat::from_rotation_arc(
-            Vec3::Z,
-            facing_from(object.position, frame.scene.viewer, object.label.tilt),
-        );
+        let face = orientation(object, frame.scene.viewer);
         if hovered {
             for n in 0..16 {
                 let angle = n as f32 * TAU / 16.0 + frame.time;
@@ -360,6 +373,8 @@ struct Styled<'a> {
     label: &'a Label,
     /// Where the viewer is, which the label faces.
     viewer: Option<Vec3>,
+    /// The plane of the panel the label's object is a row of, which it is drawn in instead.
+    plane: Option<Plane>,
     hovered: bool,
     /// How opaque it is, from its own alpha and its object's dimming.
     alpha: f32,
@@ -378,10 +393,14 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
     if columns == 0 {
         return;
     }
-    let normal = facing_from(label.anchor, styled.viewer, label.tilt);
-    let right = Vec3::Y.cross(normal).try_normalize().unwrap_or(Vec3::X);
-    // Upright unless the label tilts to face the viewer.
-    let up = normal.cross(right);
+    // In its panel's plane, or else upright unless the label tilts to face the viewer.
+    let Plane { right, up, .. } = styled.plane.unwrap_or_else(|| {
+        Plane::facing(
+            label.anchor,
+            facing_from(label.anchor, styled.viewer, label.tilt),
+        )
+    });
+    let normal = right.cross(up);
     let width = columns as f32 * 9.0 * p;
     let height = label.lines.len() as f32 * 11.0 * p;
     let origin = match label.align {
@@ -479,12 +498,14 @@ pub fn label_mesh(scene: &Scene, hovered: Option<&Key>) -> Vec<Vertex> {
         .map(|object| Styled {
             label: &object.label,
             viewer: scene.viewer,
+            plane: object.panel.map(|area| area.plane),
             hovered: object.choosable && hovered == Some(&object.key),
             alpha: object.label.alpha * (1.0 - 0.65 * object.dim),
         })
         .chain(heading.iter().map(|label| Styled {
             label,
             viewer: scene.viewer,
+            plane: None,
             hovered: false,
             alpha: label.alpha,
         }))
@@ -824,6 +845,7 @@ mod tests {
             dim: 0.0,
             presence: 1.0,
             choosable: true,
+            panel: None,
         };
         let drawn = |kind: Kind| {
             let mut cubes = Vec::new();
@@ -897,6 +919,7 @@ mod tests {
             dim: 0.0,
             presence: 1.0,
             choosable: true,
+            panel: None,
         }
     }
 
@@ -1093,15 +1116,81 @@ mod tests {
                 viewer: Some(head),
                 ..Default::default()
             };
-            let right = Vec3::Y
-                .cross(facing_from(object.label.anchor, Some(head), true))
-                .normalize();
+            let right = object.panel.unwrap().plane.right;
             let reach = label_mesh(&scene, None)
                 .iter()
                 .map(|vertex| (Vec3::from_array(vertex.position) - object.position).dot(right))
                 .fold(f32::MIN, f32::max);
             assert!(reach <= PANEL, "{reach}");
             assert!(reach > PANEL - 9.0 * PIXEL, "{reach}");
+        }
+    }
+
+    /// Each row of the hand menu, its marker and its label, highlighted or not, is drawn within the rectangle of its panel that points at it, and in the panel's plane, however the panel tilts: what is pointed at is what is drawn.
+    #[test]
+    fn the_hand_menus_rows_are_drawn_within_the_rectangles_that_point_at_them() {
+        use crate::hand_menu::{HandMenu, MenuKey, Model, Palm, Section, WIDTH};
+        let mut menu = HandMenu::default();
+        menu.choose(&MenuKey::Section(Section::PeopleAndSecurity));
+        let model = Model {
+            name: "x".repeat(2 * WIDTH),
+            notice: Some("x".repeat(3 * WIDTH)),
+            pairing: Some("Pair".into()),
+            ..Default::default()
+        };
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.05, -0.35),
+            normal: Vec3::Y,
+        };
+        for tilt in [0.0f32, 30.0, 60.0] {
+            let (sin, cos) = tilt.to_radians().sin_cos();
+            let head = palm.wrist + Vec3::new(0.0, 0.2 + sin * 0.45, cos * 0.45);
+            let objects = menu.objects(&palm, &model, head);
+            for object in &objects {
+                let area = object.panel.unwrap();
+                let normal = area.plane.normal();
+                for hovered in [false, true] {
+                    let scene = Scene {
+                        objects: vec![object.clone()],
+                        viewer: Some(head),
+                        ..Default::default()
+                    };
+                    let key = hovered.then_some(&object.key);
+                    let mesh = label_mesh(&scene, key);
+                    assert!(!mesh.is_empty());
+                    let mut points: Vec<Vec3> = mesh
+                        .iter()
+                        .map(|vertex| Vec3::from_array(vertex.position))
+                        .collect();
+                    // A marker's cube, enlarged when highlighted, to its corners.
+                    let mut forms = Vec::new();
+                    form(object, 0.0, Some(head), &mut forms);
+                    let scale = if hovered { 1.25 } else { 1.0 };
+                    for cube in &forms {
+                        let centre = Vec3::from_array(cube.position);
+                        let orientation = Quat::from_array(cube.orientation);
+                        let half = Vec3::from_array(cube.scale) * scale;
+                        for corner in [-1.0, 1.0] {
+                            points.push(
+                                centre + orientation * (half * Vec3::new(corner, corner, 0.0)),
+                            );
+                            points.push(
+                                centre + orientation * (half * Vec3::new(corner, -corner, 0.0)),
+                            );
+                        }
+                    }
+                    for point in points {
+                        let depth = (point - area.plane.origin).dot(normal);
+                        assert!(depth.abs() < 0.003, "{tilt}: {depth}");
+                        let at = area.local(point);
+                        assert!(
+                            area.rect.contains(at),
+                            "{tilt}: {at} outside {:?}",
+                            area.rect
+                        );
+                    }
+                }
+            }
         }
     }
 
