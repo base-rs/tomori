@@ -14,6 +14,16 @@ pub struct Pose {
     pub orientation: [f32; 4],
 }
 
+/// The same pose, as the protocol carries it in presence.
+impl From<Pose> for tomori_protocol::Pose {
+    fn from(pose: Pose) -> Self {
+        Self {
+            position: pose.position,
+            orientation: pose.orientation,
+        }
+    }
+}
+
 impl Pose {
     pub fn valid(&self) -> bool {
         let q = Quat::from_array(self.orientation);

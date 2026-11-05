@@ -12,13 +12,13 @@ use super::{Buttons, Frame, Marker, Senses, Step};
 use crate::{
     controller::{self, Pose},
     conversation::Conversation,
-    feedback::{Feedback, Hand as Side, Haptic},
     hand_menu::{self, Palm},
     hands,
     log_cadence::Cadence,
     pointing::Ray,
     recording::Trackers,
 };
+use tomori_client::feedback::{Feedback, Hand as Side, Haptic};
 
 /// How often an applied recenter is logged at info, when the runtime repeats them.
 const RECENTER_LOG: Duration = Duration::from_secs(60);
@@ -669,12 +669,9 @@ impl Headset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        feedback::{Hand as Side, Settings},
-        hand_menu::HOLD,
-        scene::fixtures::*,
-    };
+    use crate::{hand_menu::HOLD, scene::fixtures::*};
     use std::time::Duration;
+    use tomori_client::feedback::{Hand as Side, Settings};
     use tomori_protocol::{ConnectionRole, Engagement};
 
     const FRAME: f32 = 1.0 / 72.0;
@@ -1170,7 +1167,7 @@ mod tests {
         let mut feedback = Feedback::new(Settings::default());
         let start = Instant::now();
         let mut headset = Headset::new(&mut conversation, &mut feedback, start);
-        feedback.emit(crate::feedback::Event::Choose, start);
+        feedback.emit(tomori_client::feedback::Event::Choose, start);
         assert!(
             headset.haptics(&mut feedback, start).is_empty(),
             "unfocused"
@@ -1180,7 +1177,7 @@ mod tests {
             "and dropped"
         );
         headset.session(SessionState::Focused, &mut conversation, start);
-        feedback.emit(crate::feedback::Event::Choose, start);
+        feedback.emit(tomori_client::feedback::Event::Choose, start);
         assert_eq!(headset.haptics(&mut feedback, start).len(), 1);
     }
 

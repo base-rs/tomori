@@ -18,7 +18,7 @@ use crate::{
     delegation::{Scene, Workers},
     environment::Environment,
     identity::{Identity, Overrides, Store},
-    interaction, playback,
+    interaction, speaker,
     spectator::Frame,
     swarm::{CENTER, Swarm},
 };
@@ -121,13 +121,11 @@ impl Feed {
     pub fn with_audio(
         options: SpectatorOptions,
         capture: Box<dyn capture::Capture>,
-        playback: Box<dyn playback::Playback>,
+        playback: Box<dyn speaker::Playback>,
     ) -> Self {
-        let overrides = Overrides {
-            server: options.server.clone(),
-            name: None,
-            token: options.token.clone(),
-        };
+        let mut overrides = Overrides::default();
+        overrides.server = options.server.clone();
+        overrides.token = options.token.clone();
         let store = Store::new(None);
         let identity = Identity::new(&store, crate::identity::host_name().as_deref(), overrides);
         let mut conversation = Conversation::new(&identity.name);
@@ -231,7 +229,8 @@ impl Feed {
             },
         };
         self.connection.listen_as(self.following);
-        self.connection.listen(
+        crate::spatial_audio::listen(
+            &mut self.connection,
             Some(listener),
             crate::spatial_audio::centre(&frame.agents),
             &self.conversation,

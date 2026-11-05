@@ -7,10 +7,10 @@
 use crate::{
     environment::Environment,
     pointing::{Shape, Target},
-    server_choice::Source,
 };
 use glam::Vec3;
 use std::f32::consts::{FRAC_PI_2, TAU};
+use tomori_client::server_choice::Source;
 use tomori_protocol::{Activity, Attention, SpaceSummary};
 
 /// Where the participant stands when arrival begins, in scene coordinates; labels turn to face it.

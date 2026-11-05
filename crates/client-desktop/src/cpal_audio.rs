@@ -4,10 +4,11 @@
 //! Desktop audio streams' samples and errors, in cpal's terms: mixing a microphone's samples to mono, rendering the player into a speaker's format, and which stream errors lose audio. `desktop_audio.rs` opens the streams with these.
 
 use cpal::{FromSample, Sample};
-use tomori_scene::{
-    capture::{Failed, downmix},
-    playback::{self, Shared, render_channels},
+use tomori_client::{
+    capture::Failed,
+    speaker::{self, Shared},
 };
+use tomori_scene::{capture::downmix, playback::render_channels};
 
 /// Mixes a desktop input stream's interleaved samples, in its own format, down to mono samples between -1 and 1. Its buffers are kept between callbacks.
 pub struct Mono {
@@ -85,7 +86,7 @@ impl Render {
 }
 
 /// Handle a desktop output stream's `error`. The stream keeps playing after most: a glitch in real-time audio is not worth reopening for, and underruns can come in bursts whenever the system is busy. Anything else is `failed`.
-pub fn output_failed(error: &cpal::Error, failed: &playback::Failed) {
+pub fn output_failed(error: &cpal::Error, failed: &speaker::Failed) {
     match error.kind() {
         cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
             log::info!("Speaker: {error}");
@@ -146,7 +147,7 @@ mod tests {
     fn only_desktop_output_errors_that_stop_it_are_reported() {
         let reported = Arc::new(Mutex::new(Vec::new()));
         let sink = reported.clone();
-        let failed: playback::Failed = Box::new(move |error| sink.lock().unwrap().push(error));
+        let failed: speaker::Failed = Box::new(move |error| sink.lock().unwrap().push(error));
         for kind in [
             cpal::ErrorKind::DeviceChanged,
             cpal::ErrorKind::RealtimeDenied,

@@ -14,21 +14,24 @@ pub mod desktop_window;
 pub mod discover;
 pub mod window;
 
-// The modules this crate's own modules use, from `tomori-scene` and `tomori-render`, under their paths.
-use tomori_render::{graphics, scene_graphics};
-use tomori_scene::{
-    caption, capture, connection, conversation, environment, feedback, hand_menu, playback,
-    pointing, scene, swarm, transcript, ui_text,
-};
+// The modules this crate's own modules use, from `tomori-client`, `tomori-scene` and `tomori-render`, under their paths.
 #[cfg(test)]
-use tomori_scene::{server_choice, test_support};
+use tomori_client::server_choice;
+use tomori_client::{connection, feedback, identity};
+use tomori_render::{graphics, scene_graphics};
+#[cfg(test)]
+use tomori_scene::test_support;
+use tomori_scene::{
+    caption, capture, conversation, environment, hand_menu, pointing, scene, spatial_audio, swarm,
+    transcript, ui_text,
+};
 
 use connection::Connection;
 use conversation::Conversation;
 use desktop::Demo;
 use desktop_participant::Participant;
+use identity::Overrides;
 use tomori_render::scenery::Sceneries;
-use tomori_scene::identity::{self, Overrides};
 use window::Shell;
 
 /// Show the server-less window through `shell`, such as [`desktop_window::Desktop`], without an XR runtime or headset, among `sceneries`, which **E** cycles through, until it is closed.

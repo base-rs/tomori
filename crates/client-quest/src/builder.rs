@@ -49,7 +49,7 @@ impl Builder {
         overrides: crate::Overrides,
     ) -> (
         tomori_scene::conversation::Conversation,
-        tomori_scene::connection::Connection,
+        tomori_client::connection::Connection,
     ) {
         let (mut conversation, connection) = tomori_client_desktop::connection(overrides);
         conversation.set_drawable(self.environments());

@@ -6,13 +6,17 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
+use crate::playback::{Direction, Earcon};
 use serde::{Deserialize, Serialize};
-use tomori_client::playback::{Direction, Earcon};
 
 /// At most one hover tick in this time, so that sweeping across several targets does not chatter.
 pub const HOVER_INTERVAL: Duration = Duration::from_millis(80);
 /// A request still waiting this long, not yet looked at, is cued once more.
 pub const REMINDER: Duration = Duration::from_secs(60);
+/// How far from the server's limit on an utterance a recording turns amber, and its nearing the limit is felt.
+pub const WARNING: Duration = Duration::from_secs(30);
+/// How far from the limit a recording turns red, and is felt again.
+pub const CRITICAL: Duration = Duration::from_secs(10);
 /// How long each vibration of the hold-to-leave ramp lasts; it is renewed every frame while B is held, so it never outlasts the hold by more than this.
 const RAMP_PULSE: Duration = Duration::from_millis(40);
 
@@ -54,7 +58,6 @@ impl Level {
     }
 
     /// The level named `text`, as the console's `feedback` command takes it.
-    #[cfg(not(target_os = "android"))]
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "full" => Some(Self::Full),
@@ -87,6 +90,7 @@ pub struct Settings {
 
 /// Something that changed, which the participant hears and feels. See `design/feedback.md` for exactly when each happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// The ray entered a new target. Felt very lightly, and silent.
     Hover,
@@ -264,6 +268,8 @@ pub struct Feedback {
     /// The hold-to-leave ramp, from 0 to 1, while B is held in a space, and whether it has left.
     ramp: Option<f32>,
     left: bool,
+    /// How close to the server's limit the recording in progress has been cued: 0, 1 at [`WARNING`], 2 at [`CRITICAL`].
+    limit_cued: u8,
     /// Whether the ramp vibrated last frame, so that it is stopped once when the hold ends.
     ramping: bool,
     requests: Vec<Waiting>,
@@ -301,7 +307,6 @@ impl Feedback {
     }
 
     /// Never play cues, as for the spectator. Vibrations are unaffected.
-    #[cfg(not(target_os = "android"))]
     pub fn mute_sounds(&mut self) {
         self.muted = true;
         self.earcons.clear();
@@ -444,6 +449,40 @@ impl Feedback {
     pub fn request_opened(&mut self) {
         for waiting in &mut self.requests {
             waiting.settled = true;
+        }
+    }
+
+    /// How long the participant has been recording, while they are, and the server's limit on an utterance, when it says: reaching [`WARNING`] and then [`CRITICAL`] before the limit is felt, as the recording card turns amber and then red, only the nearer when both are passed at once. See `design/feedback.md`.
+    pub fn observe_recording(
+        &mut self,
+        elapsed: Option<Duration>,
+        limit: Option<Duration>,
+        now: Instant,
+    ) {
+        let Some(elapsed) = elapsed else {
+            self.limit_cued = 0;
+            return;
+        };
+        let Some(left) = limit.map(|limit| limit.saturating_sub(elapsed)) else {
+            return;
+        };
+        let stage = if left <= CRITICAL {
+            2
+        } else if left <= WARNING {
+            1
+        } else {
+            0
+        };
+        if stage > self.limit_cued {
+            self.limit_cued = stage;
+            self.emit(
+                if stage == 2 {
+                    Event::LimitCritical
+                } else {
+                    Event::LimitWarning
+                },
+                now,
+            );
         }
     }
 
@@ -927,5 +966,29 @@ mod tests {
             [Earcon::Knock, Earcon::Knock]
         );
         assert_eq!(feedback.haptics(now).len(), 2);
+    }
+
+    #[test]
+    fn a_recording_nearing_the_limit_is_felt_at_30_and_10_seconds_left() {
+        let mut feedback = Feedback::new(Settings::default());
+        feedback.set_haptics(true);
+        let now = Instant::now();
+        let limit = Some(Duration::from_secs(60));
+        let mut felt = |elapsed: Option<u64>, limit: Option<Duration>| {
+            feedback.observe_recording(elapsed.map(Duration::from_secs), limit, now);
+            feedback.haptics(now + Duration::from_secs(1)).len()
+        };
+        assert_eq!(felt(Some(20), limit), 0);
+        assert_eq!(felt(Some(30), limit), 1);
+        assert_eq!(felt(Some(40), limit), 0);
+        assert_eq!(felt(Some(50), limit), 2);
+        assert_eq!(felt(Some(55), limit), 0);
+        // A new recording starts again; without a limit, nothing is felt.
+        assert_eq!(felt(None, limit), 0);
+        assert_eq!(felt(Some(55), limit), 2);
+        assert_eq!(felt(None, None), 0);
+        assert_eq!(felt(Some(55), None), 0);
+        // Felt, never heard.
+        assert_eq!(feedback.take_earcons().count(), 0);
     }
 }

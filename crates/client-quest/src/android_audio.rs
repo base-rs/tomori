@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The headset's microphone and speaker through AAudio, behind [`tomori_scene::capture::Capture`] and [`tomori_scene::playback::Playback`]. Compiled only for Android.
+//! The headset's microphone and speaker through AAudio, behind [`tomori_client::capture::Capture`] and [`tomori_client::speaker::Playback`]. Compiled only for Android.
 
 pub mod capture {
     use ndk::audio::{
@@ -16,9 +16,8 @@ pub mod capture {
         },
         thread::JoinHandle,
     };
-    use tomori_scene::capture::{
-        Active, Capture, Failed, InputStream, Recording, Samples, run_capture,
-    };
+    use tomori_client::capture::{Active, Capture, Failed, Recording, Samples};
+    use tomori_scene::capture::{InputStream, run_capture};
 
     const SAMPLE_RATE: u32 = 16_000;
 
@@ -317,7 +316,8 @@ pub mod playback {
         AudioSharingMode, AudioStreamBuilder, AudioUsage, SessionId,
     };
     use std::num::NonZeroI32;
-    use tomori_scene::playback::{Failed, Output, Playback, Route, Shared, render_channels};
+    use tomori_client::speaker::{Failed, Output, Playback, Route, Shared};
+    use tomori_scene::playback::render_channels;
 
     pub struct Android;
 

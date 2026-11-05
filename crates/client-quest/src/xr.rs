@@ -291,10 +291,15 @@ pub fn run(
         );
         renderer.update_controllers(&gpu.queue, drawn.controllers, drawn.hands);
         // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
-        connection.listen(drawn.frame.listener, drawn.frame.agent, &conversation);
+        tomori_scene::spatial_audio::listen(
+            &mut connection,
+            drawn.frame.listener,
+            drawn.frame.agent,
+            &conversation,
+        );
         // Report this participant's head, controllers and hands to the server, so the others in the space can render them.
         if let Some(presence) = drawn.frame.presence {
-            connection.send_presence(presence.head, presence.left, presence.right, presence.hands);
+            presence.send(&mut connection);
         }
         let (scene_to_space, projections) = (drawn.scene_to_space, drawn.projections);
         let vibrator = XrVibrator {

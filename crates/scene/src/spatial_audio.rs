@@ -5,10 +5,13 @@
 
 use std::collections::HashMap;
 
-use tomori_client::playback::spatial::{Listener, Position, Scene};
+use tomori_client::{
+    connection::Connection,
+    playback::spatial::{Listener, Position, Scene},
+};
 use tomori_protocol::{AGENT_SOURCE, Pose};
 
-use crate::arrival::HOME;
+use crate::{arrival::HOME, controller, conversation::Conversation};
 
 /// The radius of the circle remote participants sit on, around where the listener stands, so that none sounds as if they stood inside the listener.
 pub const RING: f32 = 2.5;
@@ -55,6 +58,38 @@ pub fn centre(agents: &[[f32; 3]]) -> Position {
         [sum[0] + agent[0], sum[1] + agent[1], sum[2] + agent[2]]
     });
     sum.map(|axis| axis / agents.len() as f32)
+}
+
+/// Place the voices `connection` plays, once a frame: this participant hears from `listener`, in the space's scene coordinates, and the agent is at `agent`, typically the swarm's centre. Every other participant in the joined space sits as [`fill`] says. Without a listener, every source plays centred.
+pub fn listen(
+    connection: &mut Connection,
+    listener: Option<controller::Pose>,
+    agent: Position,
+    conversation: &Conversation,
+) {
+    let participants = conversation
+        .joined_space()
+        .into_iter()
+        .flat_map(|(space, _)| {
+            space
+                .participants
+                .iter()
+                .map(|participant| participant.source)
+        });
+    let listener = listener.map(|pose| Listener {
+        position: pose.position,
+        orientation: pose.orientation,
+    });
+    connection.listen(participants, |scene, voices| {
+        fill(
+            scene,
+            listener,
+            agent,
+            voices.others,
+            voices.heads,
+            voices.mono,
+        )
+    });
 }
 
 /// Fill `scene` for `listener`: the agent at `agent`, and each of `others`, the other participants by number, on their seats and moved by their latest `heads`. Participants share no physical space with each other yet, each standing at their own home, so every other participant is remote and seated. Reuses the scene's storage.

@@ -118,9 +118,10 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
         } => {
             let color = match (available, source) {
                 (false, _) => [0.32, 0.33, 0.36],
-                (true, Source::Remembered | Source::Override) => [1.0, 0.72, 0.38],
                 (true, Source::Discovered) => [0.45, 0.8, 1.0],
                 (true, Source::Usb) => [0.62, 0.74, 0.9],
+                // Remembered or given at startup, or known another way, by a later client.
+                (true, _) => [1.0, 0.72, 0.38],
             };
             let turn = Quat::from_rotation_y(time * 0.4) * Quat::from_rotation_x(0.5);
             out.push(cube(p, Vec3::splat(s * 1.3), color, turn));

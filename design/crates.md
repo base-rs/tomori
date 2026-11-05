@@ -15,7 +15,7 @@ These crates are published to crates.io, and every one of them can be packaged a
 | Crate | Why it is published |
 | --- | --- |
 | `tomori-protocol` | Every client and server needs it, including implementations outside this repository. |
-| `tomori-client` | The client core, for other clients and for headset builds outside this repository. |
+| `tomori-client` | The client core, for other clients and for headset builds outside this repository, with the connection that a client's session drives. |
 | `tomori-discovery` | Needed by `tomori-client` and the server. |
 | `tomori-security` | Needed by `tomori-client` and the server. |
 | `tomori-backend` | The interface other projects implement to add an agent backend. |

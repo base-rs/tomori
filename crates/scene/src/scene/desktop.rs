@@ -10,9 +10,10 @@ use tomori_client::engagement::{Focus, Tracker};
 
 use super::{Buttons, Frame, Marker, Senses, Step};
 use crate::{
-    arrival, controller::Pose, conversation::Conversation, feedback::Feedback, hand_menu::Palm,
-    pointing::Ray, recording::Trackers,
+    arrival, controller::Pose, conversation::Conversation, hand_menu::Palm, pointing::Ray,
+    recording::Trackers,
 };
+use tomori_client::feedback::Feedback;
 
 /// The window's title, followed by any knock waiting.
 pub const TITLE: &str = "Tomori";
@@ -431,8 +432,9 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{conversation::Action, hand_menu::HOLD, scene::fixtures::*};
+    use crate::{hand_menu::HOLD, scene::fixtures::*};
     use std::time::Duration;
+    use tomori_client::connection::Action;
     use tomori_protocol::{ClientMessage, ConnectionRole, Engagement};
 
     const SIZE: Vec2 = Vec2::new(1280.0, 800.0);

@@ -23,15 +23,19 @@ const FEEDBACK_FILE: &str = "feedback.json";
 
 /// Settings given when the app starts, which take precedence over the defaults.
 #[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Overrides {
     /// A server address to connect to straight away.
     pub server: Option<String>,
+    /// The display name to use instead of the device's.
     pub name: Option<String>,
     /// A token for the server this device connects to next, such as one from `tomori-server auth mint`. See `design/security.md`.
     pub token: Option<String>,
 }
 
+/// Who this device is to a server: its participant identity, its display name, and what it was given at startup.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Identity {
     /// A random identity, so the server recognizes a reconnect, or a restart where it is stored, as the same participant.
     pub participant: String,
@@ -82,6 +86,7 @@ impl std::fmt::Debug for Credential {
 }
 
 impl Identity {
+    /// This device's identity: the participant identity kept in `store`, or a new one kept there, and the display name given in `overrides`, or else the `device`'s name, or else a default. The server and token come from `overrides`.
     pub fn new(store: &Store, device: Option<&str>, overrides: Overrides) -> Self {
         let name = overrides
             .name
@@ -126,15 +131,18 @@ pub struct Store {
 
 /// What this device keeps for one server: the certificate it pinned and the token it presents. See `design/security.md`.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Credential {
     /// The fingerprint of the server's TLS certificate, pinned the first time this device connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
+    /// The token this device presents to the server, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
 
 impl Store {
+    /// Keep values in `directory`, or, without one, only in memory while the application runs.
     pub fn new(directory: Option<PathBuf>) -> Self {
         Self {
             directory,
@@ -167,6 +175,7 @@ impl Store {
         });
     }
 
+    /// Keep `token` for `server`, to present when it connects there again.
     pub fn remember_token(&self, server: &str, token: &str) {
         self.change_credential(server, |credential| {
             credential.token = Some(token.to_owned())
@@ -226,6 +235,7 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// Keep the participant's Feedback setting.
     pub fn remember_feedback(&self, settings: crate::feedback::Settings) {
         self.write(
             FEEDBACK_FILE,
@@ -239,6 +249,7 @@ impl Store {
             .filter(|instance| !instance.is_empty())
     }
 
+    /// Keep `instance` as the server last connected to.
     pub fn remember_server(&self, instance: &str) {
         if self.server().as_deref() != Some(instance) {
             self.write(SERVER_FILE, instance);
@@ -295,15 +306,13 @@ fn random_participant() -> String {
     id
 }
 
-/// The name of this computer, for a default display name on the desktop.
-#[cfg(not(target_os = "android"))]
+/// The name of this computer, for a default display name on the desktop, as `hostname` prints it, or `None` where there is no such command, as on a headset.
 pub fn host_name() -> Option<String> {
     let output = std::process::Command::new("hostname").output().ok()?;
     host_from(&output.stdout)
 }
 
 /// The host name `hostname` printed.
-#[cfg(not(target_os = "android"))]
 fn host_from(printed: &[u8]) -> Option<String> {
     // `studio.local` reads better as `studio`; `split` always gives at least one part.
     let host = String::from_utf8_lossy(printed);
@@ -315,7 +324,6 @@ fn host_from(printed: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[cfg(not(target_os = "android"))]
     #[test]
     fn the_host_name_is_its_first_part() {
         assert_eq!(host_from(b"studio.local\n").as_deref(), Some("studio"));

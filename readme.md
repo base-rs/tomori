@@ -303,7 +303,7 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 - `bridge/asr.mjs`, `bridge/asr_worker.py`: GPU/CPU Whisper rolling transcription.
 - `crates/scene/src/caption.rs`, `crates/render/src/caption.wgsl`: head-relative, stereo text panel.
 - `crates/scene/src/conversation.rs`: server list, space list and space panel, driven by server events.
-- `crates/scene/src/connection.rs`: the server connection and Bonjour browsing.
+- `crates/client/src/connection.rs`: the connection that carries out the conversation's actions, with the server, the microphone, the speaker and Bonjour browsing.
 - `bridge/`: official OpenCode V2 client adapter, no longer used by the headset.
 
 The Vulkan device uses the runtime-selected physical GPU and enables the full extension/feature set required by wgpu. Swapchain images remain runtime-owned; wgpu has no permission to destroy them. Each frame waits for submitted GPU work before releasing the XR image, leaving it in `COLOR_ATTACHMENT_OPTIMAL`. This simple conservative synchronization favors correctness over maximum throughput. Tracking loss and non-rendering frames submit no layer; sessions handle ready/stopping/exit events. The scene initially faces the headset; the app uses `LOCAL_FLOOR` when available so the Quest's system Meta-button recenter moves the scene, falling back to `LOCAL` with an approximate 1.6 m floor offset. Reference space changes take effect at the runtime's specified frame time. Recentering doesn't reset the agents, conversation, or interaction state. This is opaque VR, not passthrough; optional tracked-hand skeletons are described above.
@@ -313,14 +313,14 @@ The Vulkan device uses the runtime-selected physical GPU and enables the full ex
 The workspace's crates are named `tomori-` followed by their role, in folders under `crates/` without the prefix. They share one version and one [releases.md](releases.md), and are released together. These are published to crates.io, though none has been published yet:
 
 - [`tomori-protocol`](crates/protocol/readme.md): the wire protocol shared by clients and the server.
-- [`tomori-client`](crates/client/readme.md): a client's connection, reconnection, microphone audio and playback.
+- [`tomori-client`](crates/client/readme.md): a client's connection, reconnection, microphone audio and playback, and the `Connection` that carries out a client's session with a server.
 - [`tomori-discovery`](crates/discovery/readme.md): Bonjour advertising and browsing of servers.
 - [`tomori-security`](crates/security/readme.md): tokens, pairing and certificate pinning.
 - [`tomori-backend`](crates/backend/readme.md) and [`tomori-backend-opencode`](crates/backend-opencode/readme.md): the agent backend interface, and its OpenCode implementation.
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-environment-sky`](crates/environment-sky/readme.md): the Sky environment's renderer, which Tomori's clients draw.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
-- [`tomori-scene`](crates/scene/readme.md): the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code.
+- [`tomori-scene`](crates/scene/readme.md): the platform-neutral client, with the frame step, the conversation, and the panels' layout, free of rendering, windowing and device code.
 - [`tomori-render`](crates/render/readme.md): the wgpu renderers and shaders that the headset, the desktop window and the spectator share, and the `Scenery` that draws an environment.
 - [`tomori-client-desktop`](crates/client-desktop/readme.md): the desktop modes.
 - [`tomori-client-spectator`](crates/client-spectator/readme.md): the spectator, installed with `cargo install tomori-client-spectator` for its `tomori-spectator` executable.

@@ -18,7 +18,6 @@ use crate::{
     controller_ui::{self, Indicator, Moment, Sheet, Wrist, WristFrame},
     conversation::Conversation,
     delegation,
-    feedback::{self, Feedback},
     hand_menu::{self, HandMenu, Palm},
     hands::Hand,
     interaction,
@@ -27,6 +26,7 @@ use crate::{
     recording::Trackers,
     swarm::Swarm,
 };
+use tomori_client::feedback::{self, Feedback};
 
 /// How far a stick must move before it counts.
 const STICK: f32 = 0.6;
@@ -124,6 +124,18 @@ pub struct Presence {
     pub left: Option<Pose>,
     pub right: Option<Pose>,
     pub hands: [Option<Hand>; 2],
+}
+
+impl Presence {
+    /// Report it to the server through `connection`, so the others in the space can render it.
+    pub fn send(&self, connection: &mut tomori_client::connection::Connection) {
+        connection.send_presence(
+            self.head.into(),
+            self.left.map(Into::into),
+            self.right.map(Into::into),
+            self.hands,
+        );
+    }
 }
 
 /// The shared panels this frame.
@@ -640,12 +652,12 @@ impl Step {
 /// Conversations and feedback in the states the frame step's tests need.
 #[cfg(any(test, feature = "testing"))]
 pub mod fixtures {
-    use crate::{
-        conversation::Conversation,
+    use crate::conversation::Conversation;
+    use tomori_client::{
+        ConnectionState, Event,
         feedback::{Feedback, Settings},
         server_choice::{Choice, Source},
     };
-    use tomori_client::{ConnectionState, Event};
     use tomori_protocol::{
         Approval, ApprovalOption, ConnectionRole, EnvironmentInfo, KnockRequest, Participant,
         ServerMessage, SpaceState,
@@ -765,13 +777,13 @@ pub mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
-    use crate::{
-        conversation::{Action, LEAVE_HOLD},
-        feedback::{Hand as Side, Haptic},
-        hand_menu::HOLD,
-    };
+    use crate::{conversation::LEAVE_HOLD, hand_menu::HOLD};
     use std::time::Duration;
-    use tomori_client::playback::Earcon;
+    use tomori_client::{
+        connection::Action,
+        feedback::{Hand as Side, Haptic},
+        playback::Earcon,
+    };
     use tomori_protocol::ConnectionRole;
 
     const FRAME: f32 = 1.0 / 72.0;
@@ -873,10 +885,10 @@ mod tests {
         conversation.set_servers(
             ["10.0.0.1:8765", "10.0.0.2:8765", "10.0.0.3:8765"]
                 .map(|address| {
-                    crate::server_choice::Choice::new(
+                    tomori_client::server_choice::Choice::new(
                         address,
                         address,
-                        crate::server_choice::Source::Discovered,
+                        tomori_client::server_choice::Source::Discovered,
                     )
                 })
                 .to_vec(),
@@ -1465,10 +1477,10 @@ mod tests {
         let now = Instant::now();
         for beam in [true, false] {
             let mut conversation = Conversation::new("Ada");
-            conversation.set_servers(vec![crate::server_choice::Choice::new(
+            conversation.set_servers(vec![tomori_client::server_choice::Choice::new(
                 "Studio",
                 "10.0.0.1:8765",
-                crate::server_choice::Source::Discovered,
+                tomori_client::server_choice::Source::Discovered,
             )]);
             let mut feedback = felt();
             let mut step = Step::default();
@@ -1508,10 +1520,10 @@ mod tests {
     fn a_chooses_what_the_ray_met_last_frame_or_else_accepts() {
         let now = Instant::now();
         let mut conversation = Conversation::new("Ada");
-        conversation.set_servers(vec![crate::server_choice::Choice::new(
+        conversation.set_servers(vec![tomori_client::server_choice::Choice::new(
             "Studio",
             "10.0.0.1:8765",
-            crate::server_choice::Source::Discovered,
+            tomori_client::server_choice::Source::Discovered,
         )]);
         let mut feedback = felt();
         let mut step = Step::default();
@@ -1989,10 +2001,10 @@ mod tests {
     #[test]
     fn while_the_menu_shows_in_arrival_the_ray_meets_only_its_rows() {
         let mut conversation = Conversation::new("Ada");
-        conversation.set_servers(vec![crate::server_choice::Choice::new(
+        conversation.set_servers(vec![tomori_client::server_choice::Choice::new(
             "Studio",
             "10.0.0.1:8765",
-            crate::server_choice::Source::Discovered,
+            tomori_client::server_choice::Source::Discovered,
         )]);
         let mut step = Step::default();
         let now = Instant::now();

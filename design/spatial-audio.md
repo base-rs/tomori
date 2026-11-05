@@ -53,7 +53,7 @@ In November 2026 the user, speaking from the headset, asked for the audio to be 
 
 ## Scope
 
-`crates/client`'s player and mixer (`playback/spatial.rs`, `playback/duck.rs`, `playback/mixer.rs`, `playback/player.rs`), in `crates/scene` the seats and scene (`spatial_audio.rs`), the outputs (`playback.rs`), the live microphone's session (`capture.rs`) and the echo test (`connection.rs`), and in `crates/client-quest` the listener in each frame loop, the desktop's devices (`desktop_audio.rs`, `cpal_audio.rs`), and the headset's devices and echo canceller (`android_audio.rs`, `android.rs`).
+`crates/client`'s player and mixer (`playback/spatial.rs`, `playback/duck.rs`, `playback/mixer.rs`, `playback/player.rs`), its outputs (`speaker.rs`), the live microphone's session (`capture.rs`) and the echo test (`connection.rs`), in `crates/scene` the seats and scene (`spatial_audio.rs`) and the rendering of the player for a device (`playback.rs`), and in `crates/client-quest` the listener in each frame loop, the desktop's devices (`desktop_audio.rs`, `cpal_audio.rs`), and the headset's devices and echo canceller (`android_audio.rs`, `android.rs`).
 
 ## Validation
 

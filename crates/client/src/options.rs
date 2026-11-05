@@ -9,6 +9,7 @@ use crate::Backoff;
 
 /// How a [`crate::Client`] reaches the server. A Tomori server that admits by tokens serves only TLS with a self-signed certificate, which the client pins by its fingerprint. See `design/security.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Transport {
     /// Plain HTTP, as to a server in `--auth open` mode. No token is presented.
     Plain,
@@ -24,6 +25,7 @@ pub enum Transport {
 
 /// How a [`crate::Client`] reaches and identifies itself to the server.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Options {
     /// `host:port`, or a host alone for [`tomori_protocol::DEFAULT_PORT`]. Resolved again on every connection attempt.
     pub address: String,

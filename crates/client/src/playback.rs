@@ -20,6 +20,7 @@ pub use player::{Player, PlayerControl};
 
 /// Counters describing how playback handled imperfect input, summed across sources.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PlaybackStatistics {
     /// Frames that arrived after their slot was played, or duplicates. Dropped.
     pub late_frames: u64,
