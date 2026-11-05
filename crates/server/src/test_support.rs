@@ -15,7 +15,7 @@ use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;
 use tomori_protocol::{
-    AudioFrame, ClientMessage, Frame, FrameDecoder, FrameKind, Gate, PROTOCOL_VERSION, Pointed,
+    AudioFrame, ClientMessage, Frame, FrameDecoder, FrameKind, Gate, PROTOCOL_VERSION, Resource,
     ServerMessage, SpaceState,
 };
 
@@ -419,6 +419,11 @@ impl TestClient {
         self.write_chunk(&Frame::client(message).encode());
     }
 
+    /// Send `message` as a control message, as a client that says what [`ClientMessage`] does not might.
+    pub fn send_json(&mut self, message: &serde_json::Value) {
+        self.write_chunk(&Frame::control(message).encode());
+    }
+
     /// Send one audio frame with the next sequence number.
     pub fn send_audio(&mut self, gate: Gate, samples: Vec<i16>) {
         let frame = AudioFrame {
@@ -440,16 +445,24 @@ impl TestClient {
 
     /// Speak `text` to the agent as one push-to-talk utterance.
     pub fn say(&mut self, utterance: &str, text: &str) {
-        self.say_pointing(utterance, text, None);
+        self.say_attending(utterance, text, Vec::new(), None);
     }
 
-    /// Speak `text` to the agent as [`Self::say`] does, while pointing at `pointed`.
-    pub fn say_pointing(&mut self, utterance: &str, text: &str, pointed: Option<Pointed>) {
+    /// Speak `text` to the agent as [`Self::say`] does, attending to `attention` as the utterance begins, and naming
+    /// `pointed` as it ends, as clients from before attention did.
+    pub fn say_attending(
+        &mut self,
+        utterance: &str,
+        text: &str,
+        attention: Vec<Resource>,
+        pointed: Option<Resource>,
+    ) {
         self.send(&ClientMessage::UtteranceBegin {
             utterance: utterance.to_owned(),
             answer: None,
             progress: false,
             naming: false,
+            attention,
         });
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {

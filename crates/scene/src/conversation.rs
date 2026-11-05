@@ -81,8 +81,8 @@ enum Talk {
         answering: bool,
         /// Whether the words say the participant's new display name rather than being queued.
         naming: bool,
-        /// The worker pointed at most recently since X was pressed, including as it was pressed, which is sent with
-        /// the words. See `design/interaction.md`.
+        /// The worker pointed at as X was pressed, which the utterance began attending to, unless it answers the
+        /// presented question. See `design/interaction.md`.
         pointed: Option<String>,
     },
     /// X was released; waiting for the server's final transcript.
@@ -2450,18 +2450,12 @@ impl Conversation {
             if let Some(Talk::Recording {
                 utterance,
                 heard,
-                pointed,
                 answering,
                 naming,
                 ..
             }) = self.talk.take()
             {
-                // An answer goes to the question presented, and a name to the participant, so either is about nothing pointed at.
-                self.actions.push(Action::EndUtterance(
-                    pointed
-                        .filter(|_| !answering && !naming)
-                        .map(|worker| tomori_protocol::Pointed::Worker { worker }),
-                ));
+                self.actions.push(Action::EndUtterance);
                 self.talk = Some(Talk::Sending {
                     utterance,
                     heard,
@@ -2503,15 +2497,25 @@ impl Conversation {
                     field: question.field.clone(),
                 });
         let answering = answer.is_some();
-        self.actions.push(Action::BeginUtterance(if naming {
-            Utterance::new(utterance.clone(), self.capture_generation).naming()
-        } else {
-            Utterance::new(utterance.clone(), self.capture_generation).answering(answer)
-        }));
+        // What is pointed at as X is pressed is what the words are about, captured now, as the server captures it;
+        // pointing elsewhere while talking does not change it. An answer goes to the question presented, and a name to
+        // the participant, so either is about nothing pointed at.
         let pointed = self
             .pointing_at
             .clone()
             .filter(|id| !naming && self.has_worker(id));
+        let attention = pointed
+            .iter()
+            .filter(|_| !answering)
+            .map(tomori_protocol::Resource::worker)
+            .collect();
+        self.actions.push(Action::BeginUtterance(if naming {
+            Utterance::new(utterance.clone(), self.capture_generation).naming()
+        } else {
+            Utterance::new(utterance.clone(), self.capture_generation)
+                .answering(answer)
+                .attending(attention)
+        }));
         self.talk = Some(Talk::Recording {
             utterance,
             started: Instant::now(),
@@ -2523,19 +2527,11 @@ impl Conversation {
     }
 
     /// The worker the participant points at now, by identifier, or `None`: from the headset's ray each frame, or a
-    /// console command. While X is held, the most recent worker pointed at is remembered and sent with the words, so
-    /// pointing away, or at nothing, before letting go keeps it. See `design/interaction.md`.
+    /// console command. The worker pointed at as X is pressed is sent as the words begin, and pointing elsewhere
+    /// while X is held does not change it. See `design/interaction.md`.
     pub fn point_at(&mut self, worker: Option<&str>) {
         if self.pointing_at.as_deref() != worker {
             self.pointing_at = worker.map(str::to_owned);
-        }
-        let Some(worker) = worker.filter(|id| self.has_worker(id)) else {
-            return;
-        };
-        if let Some(Talk::Recording { pointed, .. }) = &mut self.talk
-            && pointed.as_deref() != Some(worker)
-        {
-            *pointed = Some(worker.to_owned());
         }
     }
 
@@ -2604,7 +2600,7 @@ impl Conversation {
                 let before_end = self
                     .actions
                     .iter()
-                    .position(|action| matches!(action, Action::EndUtterance(_)))
+                    .position(|action| matches!(action, Action::EndUtterance))
                     .unwrap_or(self.actions.len());
                 self.actions.insert(before_end, Action::StopLive);
             }
@@ -2646,14 +2642,14 @@ impl Conversation {
             && self
                 .actions
                 .iter()
-                .any(|action| matches!(action, Action::EndUtterance(_)))
+                .any(|action| matches!(action, Action::EndUtterance))
         {
             cancelled = true;
             let pending = self.actions.iter().any(
                 |action| matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance),
             );
             self.actions.retain(|action| {
-                !matches!(action, Action::EndUtterance(_))
+                !matches!(action, Action::EndUtterance)
                     && !matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance)
             });
             if !pending {
@@ -5760,21 +5756,21 @@ mod tests {
         let text = conversation.text();
         assert!(!text.contains("on the PC"), "{text}");
         assert!(text.ends_with("Hold X to answer | hold B leave"), "{text}");
+        // An answer is about the question, so a worker pointed at as X is pressed is not sent with it.
+        conversation.point_at(Some("worker-1"));
         conversation.talk(true);
         let actions = conversation.take_actions();
         assert!(
             matches!(
                 &actions[..],
-                [Action::BeginUtterance(Utterance { answer: Some(target), naming: false, .. })]
-                    if target.question == "question-1" && target.field == "test"
+                [Action::BeginUtterance(Utterance { answer: Some(target), naming: false, attention, .. })]
+                    if target.question == "question-1" && target.field == "test" && attention.is_empty()
             ),
             "{actions:?}"
         );
         assert!(conversation.text().contains("MIC ANSWER"));
-        // An answer is about the question, so a worker pointed at meanwhile is not sent with it.
-        conversation.point_at(Some("worker-1"));
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
 
         // A question Tomori cannot answer, or a server that cannot route answers, is answered on the PC, and X talks to the agent.
         for change in [
@@ -5864,12 +5860,14 @@ mod tests {
                 id: utterance,
                 answer: None,
                 naming: true,
+                attention,
                 ..
             }),
         ] = &actions[..]
         else {
             unreachable!("{actions:?}")
         };
+        assert!(attention.is_empty(), "{attention:?}");
         let utterance = utterance.clone();
         assert!(!conversation.menu_model().naming, "once only");
         assert!(conversation.text().contains("MIC NAME: listening..."));
@@ -5886,7 +5884,7 @@ mod tests {
         }));
         assert!(conversation.text().contains("MIC NAME: Ada Love"));
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
         assert_eq!(
             conversation.recording_phase(now),
             Some(Phase::Renaming {
@@ -6867,7 +6865,7 @@ mod tests {
         conversation.apply(transcript(&utterance, "hello the", false));
         assert!(conversation.text().contains("MIC AGENT: hello the"));
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
         assert_eq!(conversation.recording(), None);
         assert!(conversation.text().contains("Sending: hello the..."));
         conversation.apply(transcript(&utterance, "hello there", false));
@@ -6895,7 +6893,7 @@ mod tests {
     }
 
     #[test]
-    fn the_worker_pointed_at_while_talking_is_sent_with_the_words() {
+    fn the_worker_pointed_at_as_x_is_pressed_is_sent_as_the_words_begin() {
         let worker = |id: &str, title: &str| tomori_protocol::Worker {
             id: id.into(),
             parent: None,
@@ -6908,39 +6906,51 @@ mod tests {
                 worker("ses_b", "Run the tests"),
             ]
         });
-        let sent = |id: &str| {
-            Action::EndUtterance(Some(tomori_protocol::Pointed::Worker { worker: id.into() }))
+        let attending = |conversation: &mut Conversation| {
+            conversation.talk(true);
+            let actions = conversation.take_actions();
+            let [Action::BeginUtterance(utterance)] = actions.as_slice() else {
+                unreachable!("recording begins")
+            };
+            utterance.attention.clone()
         };
+        let resource = tomori_protocol::Resource::worker;
 
-        // Pointed at as X is pressed, then away before letting go: the worker is kept.
+        // Pointed at as X is pressed, then elsewhere and away before letting go: the worker it began with is kept,
+        // and the words end naming nothing.
         conversation.point_at(Some("ses_a"));
-        press(&mut conversation);
+        assert_eq!(attending(&mut conversation), [resource("ses_a")]);
         assert!(
             conversation
                 .text()
                 .contains("MIC AGENT about Review commit 2657a52")
         );
         assert_fits(&mut conversation);
-        conversation.point_at(None);
-        conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [sent("ses_a")]);
-
-        // Pointed at only while talking: the most recent worker wins.
-        press(&mut conversation);
-        assert!(conversation.text().contains("MIC AGENT: listening..."));
-        conversation.point_at(Some("ses_a"));
         conversation.point_at(Some("ses_b"));
         conversation.point_at(None);
+        assert!(
+            conversation
+                .text()
+                .contains("MIC AGENT about Review commit 2657a52")
+        );
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [sent("ses_b")]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
+
+        // Pointed at only while talking: nothing is sent.
+        assert!(attending(&mut conversation).is_empty());
+        assert!(conversation.text().contains("MIC AGENT: listening..."));
+        conversation.point_at(Some("ses_b"));
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
 
         // Pointing that ended before X was pressed, or at a worker the space does not have, sends nothing.
         conversation.point_at(Some("ses_a"));
         conversation.point_at(None);
-        press(&mut conversation);
-        conversation.point_at(Some("ses_gone"));
+        assert!(attending(&mut conversation).is_empty());
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        conversation.take_actions();
+        conversation.point_at(Some("ses_gone"));
+        assert!(attending(&mut conversation).is_empty());
     }
 
     #[test]
@@ -6952,7 +6962,7 @@ mod tests {
         let utterance = press(&mut conversation);
         assert!(conversation.text().contains("MIC AGENT"));
         conversation.talk(false);
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
         assert!(conversation.text().contains("MIC LIVE"));
         conversation.apply(transcript(&utterance, "hello", true));
         assert!(conversation.text().contains("MIC LIVE"));
@@ -7231,7 +7241,7 @@ mod tests {
         conversation.stop_live();
         assert_eq!(
             conversation.take_actions(),
-            [Action::StopLive, Action::EndUtterance(None)]
+            [Action::StopLive, Action::EndUtterance]
         );
     }
 
@@ -7304,7 +7314,7 @@ mod tests {
         press(&mut conversation);
         conversation.talk(false);
         // The end was taken to be performed, and failed while stopping.
-        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance]);
         conversation.utterance_not_sent("Microphone lost audio; not sent.");
         assert!(conversation.talk.is_none());
         assert_eq!(conversation.take_actions(), [Action::StopLive]);
@@ -7325,7 +7335,7 @@ mod tests {
         // A second press and release land before the first end is performed.
         conversation.talk(true);
         conversation.talk(false);
-        let Some(Action::EndUtterance(None)) = conversation.next_action() else {
+        let Some(Action::EndUtterance) = conversation.next_action() else {
             unreachable!("Some")
         };
         conversation.utterance_not_sent("Microphone lost audio; not sent.");

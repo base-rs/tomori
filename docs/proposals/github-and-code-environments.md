@@ -80,7 +80,7 @@ Not everything at once: capture it all, cut issues, and come back to them later.
 From `origin/main` at `064c4e2`.
 
 - **No environment has state.** Sky and the Minimal grid are scenery; an owner can now change a space's environment from the hand menu (`design/environments.md`). Environments are registered through the server builder (`design/builders.md`), but server halves, synchronization and the generic scene (#75, #76, #77) are not built.
-- **Pointing at workers** is a prototype of shared attention (`design/interaction.md`): the right ray highlights a worker, and the worker pointed at while X is held is sent with the words, for the server to describe to the agent. Nothing else in a space can be pointed at.
+- **Pointing at workers** is a prototype of shared attention (`design/interaction.md`): the right ray highlights a worker, and the worker pointed at as X is pressed is sent as the words begin, for the server to describe to the agent before them. Nothing else in a space can be pointed at.
 - **Panels.** `ui_panel` draws local-space panels of styled monospaced text (`ui_text`) with depth testing, used by the right wrist's transcript. They are the nearest thing to a code panel today.
 - **Safety rules.** `design/interaction.md` says nothing is decided by reflex: choices take **A**, a cancellation waits 3 seconds during which **A** undoes it, and a new request ignores **A** for 0.6 seconds. Write-back to GitHub should follow the same rules.
 - **Roles.** Owners and collaborators are participants; visitors only watch (`design/security.md`).

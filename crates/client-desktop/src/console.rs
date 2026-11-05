@@ -54,7 +54,7 @@ fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
 }
 
 /// `point` lists the space's workers by number, `point N` points at the `N`th until another `point`, and `point off`
-/// points at nothing. While recording, the worker pointed at is sent with the words, as on the headset; see
+/// points at nothing. The worker pointed at as recording begins is sent with the words, as on the headset; see
 /// `design/interaction.md`.
 fn point(conversation: &mut Conversation, argument: &str, out: &mut Out) {
     let workers: Vec<(String, String)> = conversation

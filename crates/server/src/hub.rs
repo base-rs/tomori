@@ -506,9 +506,9 @@ struct UtteranceRecord {
     answer: Option<tomori_protocol::AnswerTarget>,
     /// Whether the transcript is the participant's new display name, rather than being queued or answering.
     naming: bool,
-    /// The worker the participant pointed at while speaking, as the space knew it when the utterance ended. Their
-    /// client names only its identity. See `design/interaction.md`.
-    pointed: Option<crate::space::PointedWorker>,
+    /// What the participant attended to as the utterance began, as the space knew it then. Their client names only
+    /// identities. See `design/spaces.md`.
+    attention: Vec<crate::space::Attended>,
     /// The connection whose client asked for [`ServerMessage::TranscriptProgress`] as it began the utterance, if it did. Progress is sent only there, as the participant may reconnect with an older client, which would refuse it.
     progress: Option<ConnectionId>,
     /// When its end arrived, and with it the last of its audio, from which the time it takes to transcribe is logged.
@@ -2318,6 +2318,7 @@ impl Hub {
                 answer,
                 progress,
                 naming,
+                attention,
             } => {
                 let checked =
                     limits::check(&utterance, limits::UTTERANCE_BYTES, "utterance identifier")
@@ -2351,6 +2352,13 @@ impl Hub {
                         error: "A new utterance started before this one ended.".to_owned(),
                     });
                 }
+                // What the participant attends to is captured now, as they begin: only identities are taken from the
+                // client, which the space resolves, ignoring those it does not have. An answer goes to the question
+                // presented, and a name to the participant, so either is about nothing attended to.
+                let attention = match state.space(&space) {
+                    Some(record) if answer.is_none() && !naming => record.model.resolve(&attention),
+                    _ => Vec::new(),
+                };
                 state.next_utterance += 1;
                 let id = UtteranceId(state.next_utterance);
                 state.utterances.insert(
@@ -2363,7 +2371,7 @@ impl Hub {
                         // Words that name the participant answer nothing, since they are never queued.
                         answer,
                         naming,
-                        pointed: None,
+                        attention,
                         progress: progress.then_some(connection),
                         ended: None,
                         waiting: None,
@@ -2408,24 +2416,25 @@ impl Hub {
                     .get_mut(&connection)
                     .and_then(|record| record.utterance.take())
                     .expect("checked by the previous arm");
-                // Only an identity is taken from the client, and only a worker's, which the space resolves now, as the
-                // participant stops speaking. An oversized one, a worker the space does not have, or a kind this
-                // server does not know, is ignored rather than failing the words spoken with it.
-                let resolved = match pointed {
-                    Some(tomori_protocol::Pointed::Worker { worker })
-                        if worker.len() <= limits::SESSION_BYTES =>
-                    {
-                        state
-                            .utterances
-                            .get(&open.id)
-                            .and_then(|record| state.space(&record.space))
-                            .and_then(|space| space.model.pointed_worker(&worker))
-                    }
-                    _ => None,
-                };
+                // A client from before attention began utterances names what it pointed at as they end instead. That
+                // is taken, resolved now as the space resolves attention, only for an utterance that began attending to
+                // nothing, for the agent and not an answer or a name, so that it can never replace what was captured
+                // as the utterance began.
+                let pointed = pointed.and_then(|resource| {
+                    state
+                        .utterances
+                        .get(&open.id)
+                        .filter(|record| {
+                            record.attention.is_empty() && record.answer.is_none() && !record.naming
+                        })
+                        .and_then(|record| state.space(&record.space))
+                        .map(|space| space.model.resolve(&[resource]))
+                });
                 // Its frames and its end share one ordered stream, so all of its audio has arrived: the participant is told that it is being transcribed, before anything recognition reports.
                 if let Some(record) = state.utterances.get_mut(&open.id) {
-                    record.pointed = resolved;
+                    if let Some(attention) = pointed {
+                        record.attention = attention;
+                    }
                     record.ended = Some(Instant::now());
                     // The end arrives on the connection that began the utterance, as a reconnect closes it.
                     if record.progress.is_some() {
@@ -3188,12 +3197,12 @@ impl Hub {
         let Some(space) = state.space_mut(&record.space) else {
             unreachable!("checked listed above");
         };
-        let queued = space.model.enqueue_pointing(
+        let queued = space.model.enqueue_attending(
             key,
             record.source,
             speaker,
             text.to_owned(),
-            record.pointed,
+            record.attention,
         );
         debug_assert!(queued, "repeats are acknowledged above");
         state.send(

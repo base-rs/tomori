@@ -118,19 +118,32 @@ impl Microphone {
         utterance: impl Into<String>,
         answer: Option<tomori_protocol::AnswerTarget>,
     ) -> Result<(), SendError> {
-        self.start(utterance.into(), answer, false)
+        self.start(utterance.into(), answer, false, Vec::new())
+    }
+
+    /// Start push-to-talk as [`Self::begin`] does, attending to `attention` as it begins, such as the worker the
+    /// participant points at, by identity only, for the server to describe to the agent with the words.
+    pub fn begin_attending(
+        &mut self,
+        utterance: impl Into<String>,
+        attention: Vec<tomori_protocol::Resource>,
+    ) -> Result<(), SendError> {
+        self.start(utterance.into(), None, false, attention)
     }
 
     /// Start push-to-talk as [`Self::begin`] does, for words that say the participant's new display name, which the server renames them with instead of queueing. Only for a server that renames; see `design/security.md`.
     pub fn begin_naming(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
-        self.start(utterance.into(), None, true)
+        self.start(utterance.into(), None, true, Vec::new())
     }
 
-    fn start(
+    /// Start push-to-talk as the utterance `utterance`, answering `answer`, saying a new name when `naming`, and
+    /// attending to `attention`, as the other ways to begin do.
+    pub(crate) fn start(
         &mut self,
         utterance: String,
         answer: Option<tomori_protocol::AnswerTarget>,
         naming: bool,
+        attention: Vec<tomori_protocol::Resource>,
     ) -> Result<(), SendError> {
         if self.utterance.is_some() {
             self.cancel()?;
@@ -145,6 +158,7 @@ impl Microphone {
                     answer,
                     progress: true,
                     naming,
+                    attention,
                 })
             })?;
         self.utterance = Some(utterance);
@@ -153,21 +167,16 @@ impl Microphone {
 
     /// Finish push-to-talk: send the audio captured so far, then `UtteranceEnd`. The server transcribes it and queues the text for the agent. Does nothing without an open utterance.
     pub fn end(&mut self) -> Result<(), SendError> {
-        self.end_pointing(None)
-    }
-
-    /// Finish push-to-talk as [`Self::end`] does, telling the server what the participant pointed at while they spoke, when given, so that it reaches the agent with their words.
-    pub fn end_pointing(
-        &mut self,
-        pointed: Option<tomori_protocol::Pointed>,
-    ) -> Result<(), SendError> {
         if self.utterance.is_none() {
             return Ok(());
         }
         self.flush()?;
         let utterance = self.utterance.take().expect("checked above");
-        self.sender
-            .send(ClientMessage::UtteranceEnd { utterance, pointed })?;
+        // What the participant attends to went with the utterance's beginning, so its end names nothing.
+        self.sender.send(ClientMessage::UtteranceEnd {
+            utterance,
+            pointed: None,
+        })?;
         self.sender.send(ClientMessage::Gate { gate: self.gate })
     }
 
@@ -355,18 +364,30 @@ mod tests {
     }
 
     #[test]
-    fn an_utterance_ends_with_what_was_pointed_at() {
+    fn an_utterance_begins_with_what_is_attended_to_and_ends_naming_nothing() {
         let (mut microphone, sender) = microphone();
-        microphone.begin("u1").unwrap();
-        let pointed = tomori_protocol::Pointed::Worker {
-            worker: "ses_1".into(),
-        };
-        microphone.end_pointing(Some(pointed.clone())).unwrap();
+        let worker = tomori_protocol::Resource::worker("ses_1");
+        microphone
+            .begin_attending("u1", vec![worker.clone()])
+            .unwrap();
+        microphone.end().unwrap();
         let items = sent(sender.outbox());
-        assert!(controls(&items).contains(&ClientMessage::UtteranceEnd {
-            utterance: "u1".into(),
-            pointed: Some(pointed),
-        }));
+        assert_eq!(
+            controls(&items)[1..3],
+            [
+                ClientMessage::UtteranceBegin {
+                    utterance: "u1".into(),
+                    answer: None,
+                    progress: true,
+                    naming: false,
+                    attention: vec![worker],
+                },
+                ClientMessage::UtteranceEnd {
+                    utterance: "u1".into(),
+                    pointed: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -393,6 +414,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    attention: Vec::new(),
                 },
                 ClientMessage::UtteranceEnd {
                     utterance: "u1".into(),
@@ -473,6 +495,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    attention: Vec::new(),
                 },
                 ClientMessage::UtteranceCancel {
                     utterance: "u1".into()
@@ -501,6 +524,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    attention: Vec::new(),
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]
@@ -526,6 +550,7 @@ mod tests {
                 answer: None,
                 progress: true,
                 naming: true,
+                attention: Vec::new(),
             })
         );
     }
@@ -547,6 +572,7 @@ mod tests {
                 answer: None,
                 progress: true,
                 naming: false,
+                attention: Vec::new(),
             })
         );
     }

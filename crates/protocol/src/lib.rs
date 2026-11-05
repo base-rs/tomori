@@ -20,8 +20,8 @@ pub use audio::{AGENT_SOURCE, AUDIO_HEADER_BYTES, AudioError, AudioFrame, Gate, 
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{
-    AnswerTarget, ClientMessage, Decision, Pointed, Pose, ServerMessage, TranscriptPart,
-    TranscriptStage,
+    ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, Pose, Resource, ServerMessage,
+    TranscriptPart, TranscriptStage,
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{

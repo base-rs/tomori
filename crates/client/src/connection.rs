@@ -37,9 +37,8 @@ pub enum Action {
     Send(ClientMessage),
     /// Open the microphone and send what it hears to the agent as this utterance. Without a connection, or for a connection generation that has ended, it fails with [`Report::MicrophoneFailed`].
     BeginUtterance(Utterance),
-    /// Close the microphone and finish the utterance, for the server to transcribe, with what the participant pointed
-    /// at while speaking.
-    EndUtterance(Option<tomori_protocol::Pointed>),
+    /// Close the microphone and finish the utterance, for the server to transcribe.
+    EndUtterance,
     /// Close the microphone and abandon the utterance.
     CancelUtterance,
     /// Close the microphone and forget the utterance, which the server has already ended.
@@ -76,6 +75,9 @@ pub struct Utterance {
     pub answer: Option<tomori_protocol::AnswerTarget>,
     /// Whether the words say the participant's new display name, which the server takes as a rename rather than queueing for the agent; see `design/security.md`.
     pub naming: bool,
+    /// What the participant attends to as they begin speaking, such as the worker they point at, by identity only,
+    /// which the server describes to the agent with the words. See `design/spaces.md`.
+    pub attention: Vec<tomori_protocol::Resource>,
 }
 
 impl Utterance {
@@ -86,6 +88,7 @@ impl Utterance {
             generation,
             answer: None,
             naming: false,
+            attention: Vec::new(),
         }
     }
 
@@ -98,6 +101,12 @@ impl Utterance {
     /// The utterance as the participant's new display name, which the server takes as a rename.
     pub fn naming(mut self) -> Self {
         self.naming = true;
+        self
+    }
+
+    /// The utterance attending to `attention` as it begins, such as the worker the participant points at.
+    pub fn attending(mut self, attention: Vec<tomori_protocol::Resource>) -> Self {
+        self.attention = attention;
         self
     }
 }
@@ -637,6 +646,7 @@ impl Voice {
         generation: u64,
         answer: Option<tomori_protocol::AnswerTarget>,
         naming: bool,
+        attention: Vec<tomori_protocol::Resource>,
     ) -> Result<(), String> {
         let resume_live = self.live && self.recording.is_some();
         if resume_live {
@@ -654,11 +664,7 @@ impl Voice {
         }
         let mut voice = self.lock();
         let microphone = voice.microphone.as_mut().unwrap();
-        let result = if naming {
-            microphone.begin_naming(utterance)
-        } else {
-            microphone.begin_answer(utterance, answer)
-        };
+        let result = microphone.start(utterance, answer, naming, attention);
         drop(voice);
         if let Err(error) = result {
             self.recording = None;
@@ -676,16 +682,6 @@ impl Voice {
 
     /// Close the microphone, after which every captured sample has been passed on, then end or cancel the utterance.
     fn finish(&mut self, client: Option<&Client>, send: bool) -> Result<(), Finish> {
-        self.finish_pointing(client, send, None)
-    }
-
-    /// Finish as [`Self::finish`] does, sending what the participant pointed at with an utterance that is ended.
-    fn finish_pointing(
-        &mut self,
-        client: Option<&Client>,
-        send: bool,
-        pointed: Option<tomori_protocol::Pointed>,
-    ) -> Result<(), Finish> {
         let resume_live = self.live;
         let generation = self.generation;
         // Join the capture thread before changing the gate or checking for
@@ -703,7 +699,7 @@ impl Voice {
             return Err(Finish::Utterance(error));
         }
         let result = if send {
-            microphone.end_pointing(pointed)
+            microphone.end()
         } else {
             microphone.cancel()
         };
@@ -1380,6 +1376,7 @@ impl Connection {
                     generation,
                     answer,
                     naming,
+                    attention,
                 }) => {
                     // The opening tick plays through the silencing, as X is pressed and before the microphone has opened; see `design/live-audio.md`. A live microphone is already open and would hear it, so then it is only felt.
                     self.feedback.emit_heard(
@@ -1398,7 +1395,7 @@ impl Connection {
                     let begun = match &self.client {
                         Some(client) => self
                             .voice
-                            .begin(client, utterance, generation, answer, naming),
+                            .begin(client, utterance, generation, answer, naming, attention),
                         None => Err("Not connected.".into()),
                     };
                     if let Err(error) = begun {
@@ -1410,13 +1407,10 @@ impl Connection {
                         session.report(Report::MicrophoneFailed(error));
                     }
                 }
-                Action::EndUtterance(pointed) => {
+                Action::EndUtterance => {
                     self.feedback.emit(Feedback::RecordingStops, Instant::now());
                     let released = self.recording.take();
-                    match self
-                        .voice
-                        .finish_pointing(self.client.as_ref(), true, pointed)
-                    {
+                    match self.voice.finish(self.client.as_ref(), true) {
                         Ok(()) => {}
                         Err(Finish::Utterance(error)) => {
                             self.utterances.retain(|id| Some(id) != released.as_ref());
