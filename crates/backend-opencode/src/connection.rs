@@ -6065,6 +6065,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        // The client starts once the server has looked for its request and
+        // found none, so that the server is seen waiting however loaded the
+        // machine is.
+        let (looked, looking) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             for attempt in 0..5 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -6078,6 +6082,7 @@ mod tests {
                                 "accept: {error}"
                             );
                             assert!(std::time::Instant::now() < deadline, "no refresh request");
+                            let _ = looked.send(());
                             std::thread::sleep(Duration::from_millis(5));
                         }
                     }
@@ -6109,6 +6114,7 @@ mod tests {
                 write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
+        looking.recv().unwrap();
         block_on(async {
             let scheduler = NativeScheduler::with_options(NativeOptions {
                 workers: 1,
@@ -6171,6 +6177,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        // The client starts once the server has looked for its request and
+        // found none, so that the server is seen waiting however loaded the
+        // machine is.
+        let (looked, looking) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             for attempt in 0..2 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -6184,6 +6194,7 @@ mod tests {
                                 "accept: {error}"
                             );
                             assert!(std::time::Instant::now() < deadline, "no page request");
+                            let _ = looked.send(());
                             std::thread::sleep(Duration::from_millis(5));
                         }
                     }
@@ -6217,6 +6228,7 @@ mod tests {
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
+        looking.recv().unwrap();
         block_on(async {
             let scheduler = NativeScheduler::with_options(NativeOptions {
                 workers: 1,
@@ -9462,17 +9474,19 @@ mod tests {
 
     /// The answer on `answer`, failing the test rather than waiting forever.
     fn answered<T>(answer: &async_channel::Receiver<T>) -> T {
+        // Waits at least once, however soon the answer comes, so that how the
+        // race went changes no coverage.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(value) = answer.try_recv() {
-                return value;
-            }
+        let mut value = None;
+        while value.is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "no answer within 5 seconds"
             );
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(1));
+            value = answer.try_recv().ok();
         }
+        value.unwrap()
     }
 
     /// Send a prompt to `id` on another thread.
@@ -9715,6 +9729,17 @@ mod tests {
             let (result, _) = prompt.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(result.is_err());
         }
+        // The waiting listing was refused as the connection stopped, so a
+        // command sent now, as a session may send one until it is dropped, is
+        // answered at once there, whichever way the connection noticed the
+        // shutdown.
+        let (reply, late) = async_channel::bounded(1);
+        block_on(commands.tx().send(Command::Sessions {
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(answered(&late).unwrap_err().message, SHUTTING_DOWN);
         drop(commands);
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);
@@ -9740,7 +9765,6 @@ mod tests {
                     directory: "/tmp".into(),
                     reply,
                 }))
-                .map(|_| ())
             })
         };
         let first = attach();
@@ -9753,10 +9777,14 @@ mod tests {
         shared.update(|state| {
             state.stalled_records.clear();
         });
+        // The first attachment's events are kept until the second is
+        // answered: a registration whose events are dropped is abandoned,
+        // and another attachment may then replace it.
         let (first, _) = first.recv_timeout(Duration::from_secs(3)).unwrap();
         let (second, _) = second.recv_timeout(Duration::from_secs(3)).unwrap();
-        first.unwrap();
-        assert_eq!(second.unwrap_err().message, ALREADY_ATTACHED);
+        let events = first.unwrap();
+        assert_eq!(second.map(|_| ()).unwrap_err().message, ALREADY_ATTACHED);
+        drop(events);
         drop(commands);
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);
@@ -9794,17 +9822,27 @@ mod tests {
         until(&watched, "the disconnection notice", |event| {
             kind(event) == "reconnecting"
         });
-        let listing = {
-            let commands = commands.clone();
-            in_thread(move || {
-                block_on(commands.reply_with(|reply| Command::Sessions {
-                    directory: "/tmp".into(),
-                    reply,
-                }))
-            })
+        // Sent in order from here, so that the connection takes each before
+        // the next, however loaded the machine is.
+        let listing = |commands: &Commands| {
+            let (reply, answer) = async_channel::bounded(1);
+            block_on(commands.tx().send(Command::Sessions {
+                directory: "/tmp".into(),
+                reply,
+            }))
+            .unwrap();
+            answer
         };
-        let closing_prompt = prompt_in_thread(&commands, &closing, &closing_events, "closed");
-        std::thread::sleep(Duration::from_millis(100));
+        let held_listing = listing(&commands);
+        let (reply, closing_prompt) = async_channel::bounded(1);
+        block_on(commands.tx().send(Command::Prompt {
+            id: closing.clone(),
+            identity: closing_events.identity.clone(),
+            key: "closed".into(),
+            text: "hello".into(),
+            reply,
+        }))
+        .unwrap();
         commands
             .tx()
             .try_send(Command::Close {
@@ -9816,29 +9854,16 @@ mod tests {
             *event == Event::Closed { reason: None }
         });
         // Its command waiting for the next connection fails at once.
-        let (result, _) = closing_prompt
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the closed session's held command was not refused");
+        let result = answered(&closing_prompt);
         assert_eq!(result.unwrap_err().kind, tomori_backend::ErrorKind::Closed);
-        assert!(listing.try_recv().is_err(), "the listing did not wait");
-        // As many wait as while no connection is open; more are refused.
-        let mut held = Vec::new();
-        let refused = loop {
-            let (reply, answer) = async_channel::bounded(1);
-            block_on(commands.tx().send(Command::Sessions {
-                directory: "/tmp".into(),
-                reply,
-            }))
-            .unwrap();
-            std::thread::sleep(Duration::from_millis(1));
-            match answer.try_recv() {
-                Ok(result) => break result,
-                Err(_) => held.push(answer),
-            }
-        };
+        assert!(held_listing.is_empty(), "the listing did not wait");
+        // As many wait as while no connection is open, the listing and the
+        // waiting prompt among them; more are refused. The refusal comes once
+        // those before it are held.
+        let held: Vec<_> = (2..MAX_HELD).map(|_| listing(&commands)).collect();
+        let refused = answered(&listing(&commands));
         assert_eq!(refused.unwrap_err().message, TOO_MANY_HELD);
-        // The listing, the waiting prompt and these.
-        assert_eq!(held.len() + 2, MAX_HELD);
+        assert!(held.iter().all(async_channel::Receiver::is_empty));
         // OpenCode is back before the prompt is answered, so the next attempt,
         // which the held listing waits for, reaches it.
         let second = FakeService::start(shared.clone(), "secret");
@@ -9852,8 +9877,7 @@ mod tests {
             |state| state.event_requests > requests,
         );
         shared.update(|state| state.hold_events = false);
-        let (result, _) = listing.recv_timeout(Duration::from_secs(5)).unwrap();
-        result.unwrap();
+        answered(&held_listing).unwrap();
         let (result, _) = waiting.recv_timeout(Duration::from_secs(5)).unwrap();
         result.unwrap();
         for answer in held {

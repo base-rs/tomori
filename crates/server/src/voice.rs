@@ -857,7 +857,8 @@ mod enabled {
             let (hub, space) = space();
             let (mut pacer, sender) = pacer(&hub, &space);
             drop(sender);
-            pacer.audio(chunk(16_000, 400));
+            // A fifth of a second, twice the lead, so that it waits for the later frames to be due.
+            pacer.audio(chunk(16_000, 3_200));
             // Returns once the frames are sent.
             pacer.run();
         }

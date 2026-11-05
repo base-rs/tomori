@@ -1270,13 +1270,9 @@ pub(crate) mod tests {
         port
     }
 
-    /// A port nothing listens on.
+    /// A port nothing listens on: the discard port, which tests cannot bind, being privileged, and the system never hands out for another test's ephemeral port, as it would a port bound and released here.
     pub(crate) fn unreachable_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        9
     }
 
     /// Run `calls` with a client of the service on `port`, then stop the client.

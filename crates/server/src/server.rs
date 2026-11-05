@@ -493,9 +493,10 @@ impl Server {
                 if connections.len() == self.max_connections {
                     let finished = {
                         let next = pin!(connections.next());
-                        match select(next, pin!(cancellation.cancelled())).await {
-                            Either::Left((finished, _)) => finished,
-                            Either::Right(_) => return Err(Error::Cancelled),
+                        // Cancellation is checked first: it also ends the connections, so one that finishes with it is left to the drain to record, rather than which is noticed first depending on timing.
+                        match select(pin!(cancellation.cancelled()), next).await {
+                            Either::Left(_) => return Err(Error::Cancelled),
+                            Either::Right((finished, _)) => finished,
                         }
                     };
                     tracker.record(finished.expect("connections are waiting"));
@@ -1371,6 +1372,8 @@ mod tests {
         failing_timers: bool,
         /// Closing the listener fails, once it has closed.
         failing_listener_close: bool,
+        /// Called each time a timer's wait ends, before its result is returned.
+        after_wait: Option<Box<dyn Fn() + Send + Sync>>,
     }
 
     impl Faulty {
@@ -1388,6 +1391,7 @@ mod tests {
                 stall_connection_closes: false,
                 failing_timers: false,
                 failing_listener_close: false,
+                after_wait: None,
             }
         }
     }
@@ -1530,10 +1534,71 @@ mod tests {
             if self.failing_timers && !cancellation.is_cancelled() {
                 return Err(io::Error::other("the timer is broken").into());
             }
-            self.inner
+            let result = self
+                .inner
                 .timer_wait_until(timer, deadline, cancellation)
-                .await
+                .await;
+            if let Some(after_wait) = &self.after_wait {
+                after_wait();
+            }
+            result
         }
+    }
+
+    #[test]
+    fn counts_that_change_back_before_they_are_due_are_not_published() {
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let server = {
+            let published = published.clone();
+            server()
+                .with_counts(move |counts| published.lock().unwrap().push(counts))
+                .with_counts_interval(Duration::ZERO)
+        };
+        let listed = server.counts();
+        // One more space than is listed.
+        let more = Counts {
+            spaces: listed.spaces + 1,
+            ..listed
+        };
+        // Serving stops as the wait for each change to be due ends; `listen` is called first.
+        let stopping_after = |listen: Box<dyn Fn() + Send + Sync>| {
+            let live = Cancellation::new();
+            let scheduler = Faulty {
+                after_wait: Some(Box::new({
+                    let live = live.clone();
+                    move || {
+                        listen();
+                        live.cancel();
+                    }
+                })),
+                ..Faulty::new()
+            };
+            (scheduler, live)
+        };
+        // Last published with a space more than is listed, the counts as listed are published once due.
+        let (scheduler, live) = stopping_after(Box::new(|| {}));
+        block_on(server.publish(&scheduler, more, &live));
+        assert_eq!(*published.lock().unwrap(), [listed]);
+        // But if a space is listed by then, as there was when they were last published, nothing is.
+        let hub = server.hub.clone();
+        let (scheduler, live) = stopping_after(Box::new(move || {
+            let (commands, _) = async_channel::unbounded();
+            let request = crate::hub::CreateRequest {
+                title: "Space".to_owned(),
+                backend: "fake".to_owned(),
+                directory: "/tmp".to_owned(),
+                session: None,
+                creator: "nobody".to_owned(),
+                creator_space: None,
+                environment: "sky".to_owned(),
+                instructions: String::new(),
+            };
+            hub.register_space(&request, "session".to_owned(), Default::default(), commands)
+                .unwrap();
+        }));
+        block_on(server.publish(&scheduler, more, &live));
+        assert_eq!(server.counts(), more);
+        assert_eq!(*published.lock().unwrap(), [listed]);
     }
 
     /// A server running on its own thread with a [`Faulty`] scheduler.
@@ -2021,6 +2086,20 @@ mod tests {
         assert!(supervision.backend.started()[1].log().closed);
         assert!(supervision.hub.status().spaces.is_empty());
         assert!(supervision.slots.acquire().is_some());
+        // Closing such a session may succeed too.
+        let supervision = Supervision::new(1);
+        supervision.hub.stopping();
+        supervision.create(supervision.request("fake"), &live);
+        assert!(supervision.backend.started()[0].log().closed);
+    }
+
+    #[test]
+    fn a_space_whose_place_was_taken_after_the_hub_let_it_through_starts_nothing() {
+        // The hub refuses a create once every place is taken, but creates made at once may all pass it before any takes a place.
+        let supervision = Supervision::new(0);
+        supervision.create(supervision.request("fake"), &Cancellation::new());
+        assert!(supervision.backend.started().is_empty());
+        assert!(supervision.hub.status().spaces.is_empty());
     }
 
     #[test]
@@ -2451,10 +2530,16 @@ mod tests {
         let cancelled = Instant::now();
         running.cancellation.cancel();
         // New peers are refused while the connection drains, rather than queued. A peer that connects as the server is cancelled may still be accepted, since an accept that completes wins over a concurrent cancellation, but the accept after it is already cancelled, so at most one is.
+        // Probed at least once, whether or not the first probe still connects, so that how the race went changes no coverage.
         let mut probes = 0;
-        while TcpStream::connect(running.address).is_ok() {
-            probes += 1;
-            assert!(cancelled.elapsed() < drain / 2, "the listener stayed open");
+        let mut open = true;
+        while open {
+            open = TcpStream::connect(running.address).is_ok();
+            probes += usize::from(open);
+            assert!(
+                !open | (cancelled.elapsed() < drain / 2),
+                "the listener stayed open"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(

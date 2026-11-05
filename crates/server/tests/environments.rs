@@ -120,6 +120,9 @@ fn an_owner_changes_the_environment_for_everyone_in_the_space() {
     ada.space(|state| state.activity == Activity::Closed);
     change(&mut ada, "minimal");
     assert_eq!(ada.error(), "The agent session has stopped.");
+    // Cal is still in the space, with snapshots from before unread, so leaves first: the snapshot after joining again is of the space as it is now.
+    cal.send(&ClientMessage::Leave);
+    cal.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
     assert_eq!(join(&mut cal, &space.id).environment, "sky");
 }
 
