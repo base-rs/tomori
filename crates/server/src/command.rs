@@ -911,29 +911,24 @@ pub(crate) fn configure(
         server = server.with_request_timeout(timeout);
     }
     let server = synthesis(server, root, &arguments.speech_segmentation, engines);
-    let server = github(
-        server,
-        arguments,
-        std::env::var_os("GITHUB_TOKEN"),
-        std::process::Command::new("gh").args(["auth", "token"]),
-    )?;
-    Ok((
-        hooks.into_iter().fold(server, |server, hook| hook(server)),
-        fingerprint,
-    ))
+    github(server, arguments, crate::github::Token::from_environment).map(|server| {
+        (
+            hooks.into_iter().fold(server, |server, hook| hook(server)),
+            fingerprint,
+        )
+    })
 }
 
-/// `server` offering the GitHub environment, if `arguments` name a repository, with the token in `variable`, the value of `GITHUB_TOKEN`, or else from `command`, `gh auth token`.
+/// `server` offering the GitHub environment, if `arguments` name a repository, with the token `find` finds: `GITHUB_TOKEN`, or else `gh auth token`, as [`crate::github::Token::from_environment`] does.
 fn github(
     server: Server,
     arguments: &Arguments,
-    variable: Option<std::ffi::OsString>,
-    command: &mut std::process::Command,
+    find: impl FnOnce() -> Result<crate::github::Token, String>,
 ) -> Result<Server, String> {
     let Some(repository) = &arguments.github_repository else {
         return Ok(server);
     };
-    crate::github::Token::find(variable, command).map(|token| {
+    find().map(|token| {
         eprintln!("GitHub environment: showing {repository}, read-only.");
         server.with_github(crate::github::GitHub::new(repository.clone(), token))
     })
@@ -1966,15 +1961,20 @@ mod tests {
                 .iter()
                 .any(|environment| environment.id == crate::github::ENVIRONMENT)
         };
-        let mut never = std::process::Command::new("/nonexistent/gh");
-        // Without the flag, no token is looked for.
-        let plain = github(server(), &arguments(&[]).unwrap(), None, &mut never).unwrap();
+        // Without the flag, no token is looked for: the server's own lookup is not run.
+        let plain = github(
+            server(),
+            &arguments(&[]).unwrap(),
+            crate::github::Token::from_environment,
+        )
+        .unwrap();
         assert!(!offered(&plain));
-        // With it, the token is looked for; finding it with `gh` is tested in `tests/github_token.rs`.
+        // With it, the token is looked for, and the server does not start without one. Finding it with `gh` is tested
+        // in `tests/github_token.rs`, a process of its own.
         let flagged = arguments(&["--github-repository", "ioquatix/tomori"]).unwrap();
-        let token = Some("not-a-real-token".into());
-        assert!(offered(
-            &github(server(), &flagged, token, &mut never).unwrap()
-        ));
+        let missing = github(server(), &flagged, || Err("no token".to_owned()));
+        assert_eq!(missing.err().as_deref(), Some("no token"));
+        let token = || Ok(crate::github::Token::new("not-a-real-token").unwrap());
+        assert!(offered(&github(server(), &flagged, token).unwrap()));
     }
 }

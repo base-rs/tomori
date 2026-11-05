@@ -2078,8 +2078,13 @@ fn cards_are_rendered_only_for_a_watcher_in_a_space_that_shows_them() {
             commands,
         )
         .unwrap();
-    // In the lobby, and in the space before watching, cards render as nothing.
+    // In the lobby, and in the space before watching, cards render as nothing, and none can be placed.
     assert_eq!(hub.render(ada.connection, Outgoing::Cards), None);
+    ada.send(ClientMessage::PlaceCard {
+        card: "github://o/r/issues/1".into(),
+        placement: None,
+    });
+    assert_eq!(ada.errors(), ["Join a space first."]);
     ada.join(&id);
     assert_eq!(hub.render(ada.connection, Outgoing::Cards), None);
     assert_eq!(hub.cards_next(Instant::now()), crate::cards::Next::Idle);

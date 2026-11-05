@@ -154,6 +154,14 @@ impl Token {
             .ok_or_else(|| format!("{missing} (`gh auth token` printed no token)"))
     }
 
+    /// The token in `GITHUB_TOKEN`, or else what `gh auth token` prints, as [`Self::find`] finds it.
+    pub fn from_environment() -> Result<Self, String> {
+        Self::find(
+            std::env::var_os("GITHUB_TOKEN"),
+            Command::new("gh").args(["auth", "token"]),
+        )
+    }
+
     fn authorization(&self) -> String {
         format!("bearer {}", self.0)
     }

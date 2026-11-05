@@ -149,8 +149,8 @@ fn cards(client: &TestClient, mut predicate: impl FnMut(&Cards) -> bool) -> Card
     })
 }
 
-fn card<'a>(cards: &'a Cards, id: &str) -> &'a Card {
-    cards.cards.iter().find(|card| card.id == id).unwrap()
+fn card<'a>(cards: &'a Cards, id: &str) -> Option<&'a Card> {
+    cards.cards.iter().find(|card| card.id == id)
 }
 
 fn pose(x: f32) -> Pose {
@@ -242,10 +242,12 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
         card: ISSUE.into(),
         placement: Some(pose(0.5)),
     });
-    let placed = cards(&bob, |cards| card(cards, ISSUE).placement.is_some());
-    assert_eq!(card(&placed, ISSUE).placement, Some(pose(0.5)));
+    let placed = cards(&bob, |cards| {
+        card(cards, ISSUE).is_some_and(|card| card.placement.is_some())
+    });
+    assert_eq!(card(&placed, ISSUE).unwrap().placement, Some(pose(0.5)));
     cards(&ada, |cards| {
-        card(cards, ISSUE).placement == Some(pose(0.5))
+        card(cards, ISSUE).is_some_and(|card| card.placement == Some(pose(0.5)))
     });
     // Somewhere no card can be, a card not on the board, and an oversized identity are refused.
     ada.send(&ClientMessage::PlaceCard {
@@ -399,7 +401,7 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
     assert!(ada.space(|state| state.id == space.id).cards);
     ada.send(&ClientMessage::WatchCards);
     let restored = cards(&ada, |cards| cards.cards.len() == 3);
-    assert_eq!(card(&restored, ISSUE).placement, Some(pose(0.5)));
+    assert_eq!(card(&restored, ISSUE).unwrap().placement, Some(pose(0.5)));
     assert!(
         LOG.0
             .lock()
@@ -418,9 +420,7 @@ fn a_failed_read_is_shown_to_watchers_and_tried_again_later() {
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     create(&mut ada, "github");
     ada.send(&ClientMessage::WatchCards);
-    // Before the first read, the cards say they are being read; then why they could not be.
-    let reading = cards(&ada, |_| true);
-    assert!(reading.cards.is_empty());
+    // Once tried, the cards say why they could not be read.
     let refused = cards(&ada, |cards| {
         cards
             .status
@@ -431,6 +431,7 @@ fn a_failed_read_is_shown_to_watchers_and_tried_again_later() {
         refused.status.as_deref(),
         Some("Could not read o/r: GitHub refused the server's token.")
     );
+    assert!(refused.cards.is_empty());
     // Not asked again at once, though someone still watches.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(github.requests(), 1);

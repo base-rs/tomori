@@ -36,6 +36,13 @@ fn a_token_is_found_with_a_command_whose_failures_never_show_it() {
         assert!(error.contains(said), "{error}");
         assert!(!error.contains(TOKEN));
     }
+    // The server's own lookup reads the environment and runs `gh`, whatever they hold here, and never shows a token.
+    if let Err(error) = Token::from_environment() {
+        assert!(
+            error.starts_with("--github-repository needs a token"),
+            "{error}"
+        );
+    }
     // A command that prints something that is not a token, such as an error on its standard output, is refused without repeating it.
     let error = Token::find(
         None,

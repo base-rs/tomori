@@ -1822,9 +1822,10 @@ mod tests {
         block_on(scheduler.inner.shutdown());
     }
 
-    /// Cards read from a script, last first, after `delay`, panicking once it is empty.
+    /// Cards read from a script, last first, panicking once it is empty. A gated read waits until its gate is opened
+    /// or dropped, so that a test can end serving while it is under way without depending on how long it takes.
     struct Scripted {
-        delay: Duration,
+        gate: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
         results: Mutex<Vec<Result<crate::cards::Fetched, crate::cards::Failure>>>,
     }
 
@@ -1834,7 +1835,9 @@ mod tests {
         }
 
         fn fetch(&self) -> Result<crate::cards::Fetched, crate::cards::Failure> {
-            std::thread::sleep(self.delay);
+            if let Some(gate) = &self.gate {
+                let _ = gate.lock().unwrap().recv();
+            }
             self.results
                 .lock()
                 .unwrap()
@@ -1844,13 +1847,25 @@ mod tests {
     }
 
     fn scripted(
-        delay: Duration,
         results: Vec<Result<crate::cards::Fetched, crate::cards::Failure>>,
     ) -> Arc<dyn crate::cards::CardSource> {
         Arc::new(Scripted {
-            delay,
+            gate: None,
             results: Mutex::new(results),
         })
+    }
+
+    /// A source whose one read answers only once the returned gate is opened or dropped.
+    fn gated() -> (
+        Arc<dyn crate::cards::CardSource>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (open, gate) = std::sync::mpsc::channel();
+        let source = Arc::new(Scripted {
+            gate: Some(Mutex::new(gate)),
+            results: Mutex::new(vec![Ok(crate::cards::Fetched::default())]),
+        });
+        (source, open)
     }
 
     #[test]
@@ -1859,21 +1874,16 @@ mod tests {
         let live = Cancellation::new();
         let read = |source, cancellation: &Cancellation| block_on(read_cards(source, cancellation));
         assert_eq!(
-            read(
-                scripted(Duration::ZERO, vec![Ok(Fetched::default())]),
-                &live
-            ),
+            read(scripted(vec![Ok(Fetched::default())]), &live),
             Some(Ok(Fetched::default()))
         );
         // A read that panics answers nothing.
         assert_eq!(
-            read(scripted(Duration::ZERO, Vec::new()), &live),
+            read(scripted(Vec::new()), &live),
             Some(Err(Failure::new("reading ended without an answer")))
         );
         crate::system::refuse("tomori-cards");
-        let refused = read(scripted(Duration::ZERO, Vec::new()), &live)
-            .unwrap()
-            .unwrap_err();
+        let refused = read(scripted(Vec::new()), &live).unwrap().unwrap_err();
         assert!(
             refused.message.starts_with("could not start reading: "),
             "{refused:?}"
@@ -1881,8 +1891,9 @@ mod tests {
         // Serving ends while it reads: its answer is ignored.
         let cancelled = Cancellation::new();
         cancelled.cancel();
-        let slow = scripted(Duration::from_millis(200), vec![Ok(Fetched::default())]);
+        let (slow, open) = gated();
         assert_eq!(read(slow, &cancelled), None);
+        drop(open);
     }
 
     /// A server showing `source`'s cards, with an owner watching them in a space that shows them.
@@ -1937,7 +1948,7 @@ mod tests {
         let live = Cancellation::new();
         // A server without cards reads none.
         block_on(server().refresh_cards(&scheduler, &live));
-        let server = server().with_cards("github", "GitHub", scripted(Duration::ZERO, Vec::new()));
+        let server = server().with_cards("github", "GitHub", scripted(Vec::new()));
         assert!(
             server
                 .environments()
@@ -1955,14 +1966,13 @@ mod tests {
             .cards_fetched(Ok(crate::cards::Fetched::default()), Instant::now());
         block_on(server.refresh_cards(&scheduler, &live));
         // Serving ends while a read is under way: its answer is not waited for.
-        let watched = server_with_watcher(scripted(
-            Duration::from_millis(500),
-            vec![Ok(crate::cards::Fetched::default())],
-        ));
+        let (slow, open) = gated();
+        let watched = server_with_watcher(slow);
         let later = Cancellation::new();
         block_on(zip(watched.refresh_cards(&Faulty::new(), &later), async {
             later.cancel()
         }));
+        drop(open);
         // A timer cancelled as serving ends is no failure.
         let later = Cancellation::new();
         block_on(zip(server.refresh_cards(&Faulty::new(), &later), async {

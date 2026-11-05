@@ -23,18 +23,16 @@ fn service(answer: fn(&str, &str) -> Vec<u8>) -> (u16, mpsc::Receiver<(String, S
             let mut reader = BufReader::new(socket.try_clone().unwrap());
             let mut head = String::new();
             let mut length = 0;
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                    break;
-                }
+            let lines = (&mut reader)
+                .lines()
+                .map_while(Result::ok)
+                .take_while(|line| !line.is_empty());
+            for line in lines {
                 if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                     length = value.trim().parse().unwrap();
                 }
                 head.push_str(&line);
-                if line == "\r\n" {
-                    break;
-                }
+                head.push_str("\r\n");
             }
             let mut body = vec![0; length];
             let _ = reader.read_exact(&mut body);
@@ -434,12 +432,17 @@ fn limits_and_failures_of_the_exchange_are_reported() {
         unresolvable.fetch().unwrap_err(),
         Failure::new("could not resolve bad\0host")
     );
-    // HTTPS is checked against the trusted roots: a local service is not GitHub.
-    let (port, _) = service(|_, _| b"not tls".to_vec());
+    // HTTPS is checked against the trusted roots: a local service that answers with something else is not GitHub.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let _ = socket.write_all(b"HTTP/1.1 400 Not TLS\r\n\r\n");
+    });
     let encrypted = GitHub::with_api(
         repository(),
         Token::new(TOKEN).unwrap(),
-        &format!("https://localhost:{port}/graphql"),
+        &format!("https://127.0.0.1:{port}/graphql"),
     )
     .unwrap();
     let failure = encrypted.fetch().unwrap_err();
