@@ -9740,7 +9740,6 @@ mod tests {
                     directory: "/tmp".into(),
                     reply,
                 }))
-                .map(|_| ())
             })
         };
         let first = attach();
@@ -9753,10 +9752,14 @@ mod tests {
         shared.update(|state| {
             state.stalled_records.clear();
         });
+        // The first attachment's events are kept until the second is
+        // answered: a registration whose events are dropped is abandoned,
+        // and another attachment may then replace it.
         let (first, _) = first.recv_timeout(Duration::from_secs(3)).unwrap();
         let (second, _) = second.recv_timeout(Duration::from_secs(3)).unwrap();
-        first.unwrap();
-        assert_eq!(second.unwrap_err().message, ALREADY_ATTACHED);
+        let events = first.unwrap();
+        assert_eq!(second.map(|_| ()).unwrap_err().message, ALREADY_ATTACHED);
+        drop(events);
         drop(commands);
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);
