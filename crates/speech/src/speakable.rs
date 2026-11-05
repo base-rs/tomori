@@ -66,6 +66,25 @@ pub enum BlockKind {
     Other,
 }
 
+impl BlockKind {
+    /// The kind of the block that `first`, its first event, begins.
+    fn of(first: &EventKind<'_>) -> Self {
+        match first {
+            EventKind::Start(Tag::Paragraph { .. }) => Self::Paragraph,
+            EventKind::Start(Tag::Heading(level)) => Self::Heading(*level),
+            EventKind::Start(Tag::BlockQuote) => Self::BlockQuote,
+            EventKind::Start(Tag::List { .. }) => Self::List,
+            EventKind::Start(Tag::Table) => Self::Table,
+            EventKind::Start(Tag::FootnoteDefinition(_)) => Self::FootnoteDefinition,
+            EventKind::CodeBlock { .. } => Self::Code,
+            EventKind::Html { .. } => Self::Html,
+            EventKind::Rule => Self::Rule,
+            EventKind::Definition { .. } => Self::Definition,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// One closed document-level block of a message: its complete structure and what is spoken for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
@@ -172,19 +191,7 @@ impl Speakable {
 
     fn block(&self, events: Vec<Event<'static>>) -> Block {
         let first = &events[0];
-        let kind = match &first.kind {
-            EventKind::Start(Tag::Paragraph { .. }) => BlockKind::Paragraph,
-            EventKind::Start(Tag::Heading(level)) => BlockKind::Heading(*level),
-            EventKind::Start(Tag::BlockQuote) => BlockKind::BlockQuote,
-            EventKind::Start(Tag::List { .. }) => BlockKind::List,
-            EventKind::Start(Tag::Table) => BlockKind::Table,
-            EventKind::Start(Tag::FootnoteDefinition(_)) => BlockKind::FootnoteDefinition,
-            EventKind::CodeBlock { .. } => BlockKind::Code,
-            EventKind::Html { .. } => BlockKind::Html,
-            EventKind::Rule => BlockKind::Rule,
-            EventKind::Definition { .. } => BlockKind::Definition,
-            _ => BlockKind::Other,
-        };
+        let kind = BlockKind::of(&first.kind);
         let span = first.span.clone();
         let mut sentences = Vec::new();
         for leaf in blocks::leaves(self.source(), &events, self.options.code_notice.as_deref()) {

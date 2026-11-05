@@ -168,22 +168,25 @@ fn returns_each_document_level_block_with_its_structure() {
         .filter(|event| matches!(event.kind, EventKind::Start(Tag::TableCell { .. })))
         .count();
     assert_eq!(cells, 4);
-    assert!(matches!(
-        table.events.last().unwrap().kind,
-        EventKind::End(base_markdown::stream::TagKind::Table)
-    ));
+    let EventKind::End(base_markdown::stream::TagKind::Table) = table.events.last().unwrap().kind
+    else {
+        unreachable!("expected EventKind::End(base_markdown::stream::TagKind::Table)");
+    };
     let code = &blocks[2];
     assert!(code.source(DOCUMENT).starts_with("```rust\n"));
-    assert!(matches!(
-        &code.events[..],
-        [Event {
+    let [
+        Event {
             kind: EventKind::CodeBlock {
-                unclosed: false,
-                ..
+                unclosed: false, ..
             },
             ..
-        }]
-    ));
+        },
+    ] = &code.events[..]
+    else {
+        unreachable!(
+            "expected [Event {{ kind: EventKind::CodeBlock {{ unclosed: false, .. }}, .. }}]"
+        );
+    };
     // Every event of a block lies within its span, and blocks do not overlap.
     let mut end = 0;
     for block in &blocks {
@@ -396,10 +399,9 @@ fn speaks_a_notice_for_a_code_block_left_open() {
     assert!(push(&mut speakable, "```\nnever closed\n").is_empty());
     let blocks = speakable.finish();
     assert_eq!(blocks.len(), 1);
-    assert!(matches!(
-        blocks[0].events[0].kind,
-        EventKind::CodeBlock { unclosed: true, .. }
-    ));
+    let EventKind::CodeBlock { unclosed: true, .. } = blocks[0].events[0].kind else {
+        unreachable!("expected EventKind::CodeBlock {{ unclosed: true, .. }}");
+    };
     assert_eq!(blocks[0].sentences, ["Code omitted."]);
 }
 
@@ -604,4 +606,13 @@ fn a_paragraph_that_leads_into_a_list_waits_for_the_list() {
         ["Here is how:", "First.", "Second."]
     );
     assert_eq!(finish(&mut speakable), ["Done."]);
+}
+
+#[test]
+fn a_block_begun_by_anything_else_is_of_another_kind() {
+    use base_markdown::stream::{EventKind, Tag};
+    assert_eq!(
+        BlockKind::of(&EventKind::Start(Tag::Emphasis)),
+        BlockKind::Other
+    );
 }

@@ -66,20 +66,21 @@ pub(crate) fn leaves(source: &str, events: &[Event<'_>], code_notice: Option<&st
                     leaf.protected.retain(|range| range.end <= link.text_start);
                 }
             }
+            // Outside silent containers, text is always within a paragraph or heading.
             EventKind::Text(value) if silent == 0 => {
-                if let Some(leaf) = current.as_mut() {
+                for leaf in current.iter_mut() {
                     leaf.text.push_str(resolve(source, value));
                 }
             }
             EventKind::Code { value, .. } if silent == 0 => {
-                if let Some(leaf) = current.as_mut() {
+                for leaf in current.iter_mut() {
                     let start = leaf.text.len();
                     leaf.text.push_str(resolve(source, value));
                     leaf.protected.push(start..leaf.text.len());
                 }
             }
             EventKind::SoftBreak(_) | EventKind::HardBreak if silent == 0 => {
-                if let Some(leaf) = current.as_mut() {
+                for leaf in current.iter_mut() {
                     leaf.text.push(' ');
                 }
             }

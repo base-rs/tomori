@@ -101,18 +101,12 @@ mod tests {
     fn converts_lengths_by_the_rate_ratio() {
         let input = vec![1000i16; 48_000];
         let output = resample(48_000, 16_000, &input, 480);
-        assert!(
-            (15_990..=16_000).contains(&output.len()),
-            "{}",
-            output.len()
-        );
+        let length = output.len();
+        assert!((15_990..=16_000).contains(&length), "{length}");
         assert!(output[10..].iter().all(|&sample| sample == 1000));
         let output = resample(8_000, 16_000, &input[..8_000], 160);
-        assert!(
-            (15_990..=16_000).contains(&output.len()),
-            "{}",
-            output.len()
-        );
+        let length = output.len();
+        assert!((15_990..=16_000).contains(&length), "{length}");
     }
 
     #[test]
