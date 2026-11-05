@@ -17,6 +17,28 @@ fn role(client: &TestClient) -> ConnectionRole {
     })
 }
 
+/// Join `space`, returning the role the client is then told and the space's snapshot, in whichever order they come: snapshots are coalesced, so one already waiting when the client joins is sent ahead of its role, carrying the space it joined. See `design/server.md`.
+fn join(client: &mut TestClient, space: &str) -> (ConnectionRole, SpaceState) {
+    client.send(&ClientMessage::Join {
+        space: space.to_owned(),
+    });
+    let (mut role, mut state) = (None, None);
+    while role.is_none() || state.is_none() {
+        client.wait_for(|message| match message {
+            ServerMessage::Role { role: told } => {
+                role = Some(*told);
+                Some(())
+            }
+            ServerMessage::Space { state: snapshot } if snapshot.id == space => {
+                state = Some((**snapshot).clone());
+                Some(())
+            }
+            _ => None,
+        });
+    }
+    (role.unwrap(), state.unwrap())
+}
+
 fn spaces(client: &mut TestClient) -> Vec<tomori_protocol::SpaceSummary> {
     client.send(&ClientMessage::ListSpaces);
     client.wait_for(|message| match message {
@@ -219,12 +241,9 @@ fn a_collaborator_takes_part_only_in_their_space() {
     assert_eq!(bob.role, ConnectionRole::Visitor);
 
     // In the space they were admitted to, they are a participant who can talk to the agent.
-    bob.send(&ClientMessage::Join {
-        space: studio.id.clone(),
-    });
-    assert_eq!(role(&bob), ConnectionRole::Collaborator);
+    let (role_in_studio, state) = join(&mut bob, &studio.id);
+    assert_eq!(role_in_studio, ConnectionRole::Collaborator);
     // Ada moved to the other space when she created it, so Bob is the studio's only participant.
-    let state = bob.space(|state| state.id == studio.id);
     let names: Vec<&str> = state
         .participants
         .iter()
@@ -246,11 +265,8 @@ fn a_collaborator_takes_part_only_in_their_space() {
     assert_eq!(bob.error(), "Only owners can do that.");
 
     // Elsewhere they are a visitor.
-    bob.send(&ClientMessage::Join {
-        space: other.id.clone(),
-    });
-    assert_eq!(role(&bob), ConnectionRole::Visitor);
-    let state = bob.space(|state| state.id == other.id);
+    let (role_elsewhere, state) = join(&mut bob, &other.id);
+    assert_eq!(role_elsewhere, ConnectionRole::Visitor);
     let names: Vec<&str> = state
         .participants
         .iter()
