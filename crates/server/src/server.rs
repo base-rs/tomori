@@ -493,7 +493,7 @@ impl Server {
                 if connections.len() == self.max_connections {
                     let finished = {
                         let next = pin!(connections.next());
-                        // Cancellation is checked first: it also ends the connections, so one that finishes with it is left to the drain to record, rather than which is noticed first depending on timing.
+                        // Cancellation is checked first: it also ends the connections, so one that finishes with it is usually left to the drain to record. One can still finish first, since cancelling marks every signal before it wakes any waiter; the next accept is then cancelled instead.
                         match select(pin!(cancellation.cancelled()), next).await {
                             Either::Left(_) => return Err(Error::Cancelled),
                             Either::Right((finished, _)) => finished,
@@ -1845,11 +1845,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
         assert_eq!(result.unwrap().connections, 0);
-        // Cancelled while as many connections as it serves are open.
-        let running = start_with(Faulty::new(), |server| {
-            server.max_connections = 1;
-            server.drain_timeout = Duration::ZERO;
-        });
         // A response kept alive shows that the connection was accepted and stays open.
         let healthy = |connection: &mut TcpStream| {
             write!(
@@ -1864,20 +1859,44 @@ mod tests {
                 response.extend_from_slice(&buffer[..count]);
             }
         };
+        // Cancelled while as many connections as it serves are open. The connection is served only while the server waits at the limit, and it can never finish, since its socket never finishes closing, so only the cancellation can end that wait. A connection that could finish might do so first: cancelling marks every signal before it wakes any waiter, so the connection can see its own cancellation and end before the wait is woken.
+        let running = start_with(
+            Faulty {
+                stall_connection_closes: true,
+                ..Faulty::new()
+            },
+            |server| {
+                server.max_connections = 1;
+                server.drain_timeout = Duration::ZERO;
+            },
+        );
         let mut idle = TcpStream::connect(running.address).unwrap();
         healthy(&mut idle);
-        // Another is served only once it closes.
-        let mut next = TcpStream::connect(running.address).unwrap();
-        drop(idle);
-        healthy(&mut next);
-        let idle = next;
         running.cancellation.cancel();
         let (result, _) = running
             .finished
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
-        assert!(result.is_ok());
+        assert_eq!(result.unwrap().connections, 1);
         drop(idle);
+        // At the limit, another is served only once the open connection closes.
+        let running = start_with(Faulty::new(), |server| {
+            server.max_connections = 1;
+            server.drain_timeout = Duration::ZERO;
+        });
+        let mut idle = TcpStream::connect(running.address).unwrap();
+        healthy(&mut idle);
+        let mut next = TcpStream::connect(running.address).unwrap();
+        drop(idle);
+        healthy(&mut next);
+        // Whether the cancellation ends the wait at the limit or the next accept, which depends on timing, both are covered elsewhere.
+        running.cancellation.cancel();
+        let (result, _) = running
+            .finished
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(result.unwrap().connections, 2);
+        drop(next);
     }
 
     /// A scheduler that refuses the `step`th of opening, configuring, binding and listening, and does nothing else.
