@@ -70,6 +70,8 @@ pub enum ConnectionState {
         environments: Vec<tomori_protocol::EnvironmentInfo>,
         /// The longest utterance the server's speech recognition takes, when it has a limit, so that recording can warn before it.
         utterance_limit: Option<Duration>,
+        /// The display name the server knows this participant by, which may differ from the one this client suggested, such as the name kept with its token. `None` from an older server, which takes the suggested name and does not rename. A [`tomori_protocol::ServerMessage::Name`] follows whenever it changes. See `design/security.md`.
+        name: Option<String>,
     },
     /// The connection ended; another attempt follows after `retry_in`.
     Disconnected {
@@ -131,6 +133,7 @@ mod tests {
                 roots: vec![],
                 environments: vec![],
                 utterance_limit: None,
+                name: None,
             }
             .is_connected()
         );

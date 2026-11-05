@@ -48,8 +48,15 @@ fn wait_connected(client: &Client) -> u32 {
     match wait_for(client, |event| {
         matches!(event, Event::State(ConnectionState::Connected { .. }))
     }) {
-        Event::State(ConnectionState::Connected { source, server, .. }) => {
+        Event::State(ConnectionState::Connected {
+            source,
+            server,
+            name,
+            ..
+        }) => {
             assert_eq!(server, "mini");
+            // The name the server knows this participant by, rather than the one it suggested.
+            assert_eq!(name.as_deref(), Some("Ada Lovelace"));
             source
         }
         _ => unreachable!(),
@@ -146,7 +153,7 @@ fn streams_control_and_audio_in_both_directions_at_once() {
     // Hello always comes first.
     assert!(matches!(
         server.received(1).first(),
-        Some(Received::Message(ClientMessage::Hello { participant, name, .. })) if participant == "quest-1" && name == "Ada"
+        Some(Received::Message(ClientMessage::Hello { participant, name, names, .. })) if participant == "quest-1" && name == "Ada" && *names
     ));
 }
 
@@ -230,6 +237,28 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
             Received::Message(ClientMessage::Gate { gate: Gate::Agent }),
             Received::Message(ClientMessage::ListSpaces),
         ]
+    ));
+}
+
+#[test]
+fn a_name_the_server_gives_is_suggested_when_reconnecting() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let client = Client::connect(options(server.address)).unwrap();
+    assert_eq!(wait_connected(&client), 1);
+    client
+        .send(ClientMessage::SetName { name: "Vic".into() })
+        .unwrap();
+    wait_for(
+        &client,
+        |event| matches!(event, Event::Message(ServerMessage::Name { name }) if name == "Vic"),
+    );
+    client.send(kick()).unwrap();
+    assert_eq!(wait_disconnected(&client), Disconnect::Closed);
+    assert_eq!(wait_connected(&client), 2);
+    // A server that keeps no name for this participant, as for a visitor, hears it again.
+    assert!(matches!(
+        server.received(2).first(),
+        Some(Received::Message(ClientMessage::Hello { name, .. })) if name == "Vic"
     ));
 }
 

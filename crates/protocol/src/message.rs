@@ -76,8 +76,11 @@ pub enum ClientMessage {
         protocol: u32,
         /// A stable identity chosen by the client, so a reconnect is recognized as the same participant. A secret of the device: the server never sends it to other clients. See `design/security.md`.
         participant: String,
-        /// The display name used for speaker attribution.
+        /// The display name this device suggests, used for speaker attribution. A server keeps a token holder's name with their token, so it takes this only from a connection without one, such as a visitor's; [`ServerMessage::Welcome`] says which name it uses. See `design/security.md`.
         name: String,
+        /// Whether this client understands [`ServerMessage::Name`]. Absent from older clients, which are never sent it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        names: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
@@ -120,6 +123,9 @@ pub enum ClientMessage {
         /// by older servers, which send none. See `design/speech.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         progress: bool,
+        /// Set when the words say the participant's new display name, so that the server renames them with the transcript rather than queueing it. Sent only to a server whose [`ServerMessage::Welcome`] gives a `name`, as an older server would queue it. See `design/security.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        naming: bool,
     },
     /// Finalize the utterance; the server finishes recognition and queues the transcript.
     UtteranceEnd {
@@ -216,6 +222,10 @@ pub enum ClientMessage {
     SetSpeech {
         speech: crate::SpeechSetting,
     },
+    /// Change this participant's own display name, for everyone using the same token, and for the agent's attribution. Sent only to a server whose [`ServerMessage::Welcome`] gives a `name`. See `design/security.md`.
+    SetName {
+        name: String,
+    },
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,
@@ -248,6 +258,9 @@ pub enum ServerMessage {
         /// The longest utterance, in seconds, that the server's speech recognition takes, so that a client can warn before it is reached. Absent from older servers and for recognition without a limit. See `design/speech.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         utterance_limit: Option<u32>,
+        /// The display name the server knows this participant by: the one kept with their token, or for a connection without one the name Hello suggested. Absent from older servers, which take the name Hello gives and do not rename. See `design/security.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
@@ -342,6 +355,10 @@ pub enum ServerMessage {
     /// This visitor was admitted to the space as a collaborator: a token to present from now on, over TLS to the certificate this connection presented. The connection is a collaborator's at once, and a [`ServerMessage::Role`] follows.
     Admitted {
         token: String,
+    },
+    /// This participant's display name changed, as by a rename from this or another device using the same token, or by `tomori-server auth rename`. Sent only to a client whose Hello set `names`.
+    Name {
+        name: String,
     },
     /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
     Ping {
@@ -555,6 +572,7 @@ mod tests {
                 utterance: "u".into(),
                 answer: None,
                 progress: false,
+                naming: false,
             }
         );
         assert_eq!(
@@ -565,6 +583,7 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: true,
+            naming: false,
         };
         assert_eq!(serde_json::to_value(&asking).unwrap()["progress"], true);
 
@@ -753,10 +772,88 @@ mod tests {
             protocol: 2,
             participant: "p".into(),
             name: "Ada".into(),
+            names: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
             serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"})
+        );
+    }
+
+    #[test]
+    fn names_are_additions_older_peers_ignore() {
+        // A newer client says it understands names; an older one, saying nothing, is read as not.
+        let hello = ClientMessage::Hello {
+            protocol: 2,
+            participant: "p".into(),
+            name: "Quest 3".into(),
+            names: true,
+        };
+        let json = serde_json::to_value(&hello).unwrap();
+        assert_eq!(json["names"], true);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            hello
+        );
+        let older: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"}),
+        )
+        .unwrap();
+        assert_eq!(
+            older,
+            ClientMessage::Hello {
+                protocol: 2,
+                participant: "p".into(),
+                name: "Ada".into(),
+                names: false,
+            }
+        );
+
+        // An older server gives no name, and a newer one gives the name it keeps.
+        let welcome: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "welcome", "protocol": 2, "server": "tomori", "source": 1, "backends": [], "roots": [],
+            "name": "Ada",
+        }))
+        .unwrap();
+        assert!(
+            matches!(welcome, ServerMessage::Welcome { name: Some(name), .. } if name == "Ada")
+        );
+
+        assert_eq!(
+            serde_json::to_value(ClientMessage::SetName { name: "Ada".into() }).unwrap(),
+            serde_json::json!({"type": "set_name", "name": "Ada"})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerMessage::Name { name: "Ada".into() }).unwrap(),
+            serde_json::json!({"type": "name", "name": "Ada"})
+        );
+        // Naming is marked only when set, so an utterance from an older client is queued as before.
+        let begin = ClientMessage::UtteranceBegin {
+            utterance: "u".into(),
+            answer: None,
+            progress: false,
+            naming: true,
+        };
+        let json = serde_json::to_value(&begin).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "utterance_begin", "utterance": "u", "naming": true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            begin
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(
+                serde_json::json!({"type": "utterance_begin", "utterance": "u"})
+            )
+            .unwrap(),
+            ClientMessage::UtteranceBegin {
+                utterance: "u".into(),
+                answer: None,
+                progress: false,
+                naming: false,
+            }
         );
     }
 }

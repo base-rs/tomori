@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! `tomori-server auth mint|list|revoke`: manage the tokens in the server's state directory. A running server applies changes within a few seconds. See `design/security.md`.
+//! `tomori-server auth mint|list|rename|revoke`: manage the tokens in the server's state directory. A running server applies changes within a few seconds. See `design/security.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -10,11 +10,14 @@ use tomori_security::{Grant, TokenStore};
 pub const USAGE: &str =
     "Usage: tomori-server auth mint --owner --name NAME [--state-directory PATH]
        tomori-server auth list [--state-directory PATH]
+       tomori-server auth rename ID NAME [--state-directory PATH]
        tomori-server auth revoke ID [--state-directory PATH]
 
   mint      Issue an owner token and print it once. Give it to a client with --token, the
             tomori.token intent extra, or the sign-in page.
   list      List the issued tokens by identifier, name and role, without revealing them.
+  rename    Change the display name of the token with this identifier, which everyone
+            using it is known by, in spaces and to the agent.
   revoke    Revoke the token with this identifier; its connections end.";
 
 /// The default state directory: `$XDG_STATE_HOME/tomori`, or else `~/.local/state/tomori`.
@@ -39,6 +42,7 @@ pub fn run(
     let mut owner = false;
     let mut name = None;
     let mut id = None;
+    let mut new_name = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--state-directory" => {
@@ -54,8 +58,15 @@ pub fn run(
                 name = Some(arguments.next().ok_or("--name needs a name")?)
             }
             "--help" | "-h" => return Err(USAGE.to_owned()),
-            other if command == "revoke" && id.is_none() && !other.starts_with('-') => {
+            other
+                if matches!(command.as_str(), "revoke" | "rename")
+                    && id.is_none()
+                    && !other.starts_with('-') =>
+            {
                 id = Some(other.to_owned())
+            }
+            other if command == "rename" && id.is_some() && new_name.is_none() => {
+                new_name = Some(other.to_owned())
             }
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
         }
@@ -74,11 +85,10 @@ pub fn run(
             if !owner {
                 return Err(format!("mint needs --owner\n\n{USAGE}"));
             }
-            let name = name
-                .filter(|name| !name.trim().is_empty())
-                .ok_or_else(|| format!("mint needs --name\n\n{USAGE}"))?;
+            let name = name.ok_or_else(|| format!("mint needs --name\n\n{USAGE}"))?;
+            let name = crate::limits::name(&name)?;
             let (entry, token) = open()?
-                .issue(name.trim(), Grant::Owner)
+                .issue(&name, Grant::Owner)
                 .map_err(|error| format!("Could not issue the token: {error}."))?;
             Ok(format!(
                 "Issued owner token {} for {:?}. It is shown only once:\n\n{token}\n",
@@ -100,6 +110,28 @@ pub fn run(
                     format!("{}  {}  {:?}\n", entry.id, role, entry.name)
                 })
                 .collect())
+        }
+        "rename" => {
+            let (Some(id), Some(name)) = (id, new_name) else {
+                return Err(format!(
+                    "rename needs a token identifier and a name\n\n{USAGE}"
+                ));
+            };
+            let name = crate::limits::name(&name)?;
+            let key = tomori_protocol::text::name_key(&name);
+            let taken = |other: &str| tomori_protocol::text::name_key(other) == key;
+            match open()?
+                .rename(&id, &name, taken)
+                .map_err(|error| format!("Could not rename the token: {error}."))?
+            {
+                tomori_security::Renamed::Renamed => {
+                    Ok(format!("Renamed token {id} to {name:?}.\n"))
+                }
+                tomori_security::Renamed::Taken => Err(format!(
+                    "Another token is called {name:?}, so token {id} was not renamed."
+                )),
+                _ => Err(format!("No token has the identifier {id:?}.")),
+            }
         }
         "revoke" => {
             let id = id.ok_or_else(|| format!("revoke needs a token identifier\n\n{USAGE}"))?;
@@ -174,6 +206,41 @@ mod tests {
                 .contains("collaborator in studio  \"Bob\"")
         );
 
+        // Renaming keeps the token, and its holders are known by the new name.
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, " Ada Lovelace "]).unwrap(),
+            format!("Renamed token {} to \"Ada Lovelace\".\n", entry.id)
+        );
+        assert!(
+            run_in(&state, &["list"])
+                .unwrap()
+                .starts_with(&format!("{}  owner  \"Ada Lovelace\"\n", entry.id))
+        );
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "/admin"]).unwrap_err(),
+            "A name must not start with \"/\"."
+        );
+        assert_eq!(
+            run_in(&state, &["rename", "missing", "Ada"]).unwrap_err(),
+            "No token has the identifier \"missing\"."
+        );
+        // A name is cleaned before it is kept, and one another token has, in any case or hidden among invisible characters, is refused.
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "Ada\u{202E}\n Lovelace"]).unwrap(),
+            format!("Renamed token {} to \"Ada Lovelace\".\n", entry.id)
+        );
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "Ada: hi"]).unwrap_err(),
+            "A name must not contain \":\", \"[\" or \"]\"."
+        );
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "b\u{200B}OB"]).unwrap_err(),
+            format!(
+                "Another token is called \"bOB\", so token {} was not renamed.",
+                entry.id
+            )
+        );
+
         assert_eq!(
             run_in(&state, &["revoke", &entry.id]).unwrap(),
             format!("Revoked token {}.\n", entry.id)
@@ -191,7 +258,11 @@ mod tests {
             &["mint", "--owner"],
             &["mint", "--owner", "--name", " "],
             &["mint", "--owner", "--name"],
+            &["mint", "--owner", "--name", "/admin"],
             &["revoke"],
+            &["rename"],
+            &["rename", "abc"],
+            &["rename", "abc", "Ada", "extra"],
             &["list", "--owner"],
             &["forge"],
             &["list", "--help"],
@@ -223,6 +294,7 @@ mod tests {
         for arguments in [
             &["mint", "--owner", "--name", "Ada"][..],
             &["list"][..],
+            &["rename", "abc", "Ada"][..],
             &["revoke", "abc"][..],
         ] {
             let error = run_in(&state, arguments).unwrap_err();
@@ -238,6 +310,8 @@ mod tests {
         assert!(error.starts_with("Could not issue the token"), "{error}");
         let error = run_in(&state, &["revoke", "abc"]).unwrap_err();
         assert!(error.starts_with("Could not revoke the token"), "{error}");
+        let error = run_in(&state, &["rename", "abc", "Ada"]).unwrap_err();
+        assert!(error.starts_with("Could not rename the token"), "{error}");
         std::fs::remove_dir_all(&state).unwrap();
     }
 }

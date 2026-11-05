@@ -377,11 +377,19 @@ impl Desktop {
         let title = (knocks != self.knocks).then(|| {
             self.knocks = knocks;
             for knock in conversation.knocks() {
-                log::info!("{} is knocking: + admits, - declines.", knock.name);
+                log::info!(
+                    "{}{} is knocking: + admits, - declines.",
+                    knock.name,
+                    crate::hand_menu::VISITOR
+                );
             }
             match conversation.knocks().first() {
                 Some(knock) => {
-                    format!("{TITLE} — {} is knocking: + admits, - declines", knock.name)
+                    format!(
+                        "{TITLE} — {}{} is knocking: + admits, - declines",
+                        knock.name,
+                        crate::hand_menu::VISITOR
+                    )
                 }
                 None => TITLE.to_owned(),
             }
@@ -638,7 +646,7 @@ mod tests {
             .title;
         assert_eq!(
             title.as_deref(),
-            Some("Tomori — Grace is knocking: + admits, - declines")
+            Some("Tomori — Grace (visitor) is knocking: + admits, - declines")
         );
         assert!(
             desktop

@@ -118,11 +118,24 @@ impl Microphone {
         utterance: impl Into<String>,
         answer: Option<tomori_protocol::AnswerTarget>,
     ) -> Result<(), SendError> {
+        self.start(utterance.into(), answer, false)
+    }
+
+    /// Start push-to-talk as [`Self::begin`] does, for words that say the participant's new display name, which the server renames them with instead of queueing. Only for a server that renames; see `design/security.md`.
+    pub fn begin_naming(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
+        self.start(utterance.into(), None, true)
+    }
+
+    fn start(
+        &mut self,
+        utterance: String,
+        answer: Option<tomori_protocol::AnswerTarget>,
+        naming: bool,
+    ) -> Result<(), SendError> {
         if self.utterance.is_some() {
             self.cancel()?;
         }
         self.flush()?;
-        let utterance = utterance.into();
         self.sender
             .send(ClientMessage::Gate { gate: Gate::Agent })
             .and_then(|()| {
@@ -131,6 +144,7 @@ impl Microphone {
                     utterance: utterance.clone(),
                     answer,
                     progress: true,
+                    naming,
                 })
             })?;
         self.utterance = Some(utterance);
@@ -378,6 +392,7 @@ mod tests {
                     utterance: "u1".into(),
                     answer: None,
                     progress: true,
+                    naming: false,
                 },
                 ClientMessage::UtteranceEnd {
                     utterance: "u1".into(),
@@ -457,6 +472,7 @@ mod tests {
                     utterance: "u1".into(),
                     answer: None,
                     progress: true,
+                    naming: false,
                 },
                 ClientMessage::UtteranceCancel {
                     utterance: "u1".into()
@@ -484,6 +500,7 @@ mod tests {
                     utterance: "u1".into(),
                     answer: None,
                     progress: true,
+                    naming: false,
                 },
                 ClientMessage::Gate { gate: Gate::Off },
             ]
@@ -494,6 +511,22 @@ mod tests {
             !controls(&sent(sender.outbox()))
                 .iter()
                 .any(|message| matches!(message, ClientMessage::UtteranceCancel { .. }))
+        );
+    }
+
+    #[test]
+    fn an_utterance_can_say_a_new_name() {
+        let (mut microphone, sender) = microphone();
+        microphone.begin_naming("u1").unwrap();
+        assert_eq!(microphone.utterance(), Some("u1"));
+        assert_eq!(
+            controls(&sent(sender.outbox())).last(),
+            Some(&ClientMessage::UtteranceBegin {
+                utterance: "u1".into(),
+                answer: None,
+                progress: true,
+                naming: true,
+            })
         );
     }
 
@@ -513,6 +546,7 @@ mod tests {
                 utterance: "u2".into(),
                 answer: None,
                 progress: true,
+                naming: false,
             })
         );
     }

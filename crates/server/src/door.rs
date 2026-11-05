@@ -65,13 +65,15 @@ impl Door {
             Outcome::Anonymous => to_pair.then(Access::pairing),
             Outcome::Refused => None,
             Outcome::Authenticated(principal) => {
-                // The store decides what the principal may do; a token revoked since it authenticated admits nothing.
-                let grant = match store.entry(&principal.id)?.grant {
+                // The store decides what the principal may do, and what they are called; a token revoked since it authenticated admits nothing.
+                let entry = store.entry(&principal.id)?;
+                let grant = match entry.grant {
                     Granted::Owner => Grant::Owner,
                     Granted::Collaborator { space } => Grant::Collaborator { space },
                 };
                 Some(Access {
                     principal: Some(principal.id),
+                    name: Some(entry.name),
                     grant,
                 })
             }
@@ -164,6 +166,7 @@ mod tests {
             door.admit(&token(&owner_token), false),
             Some(Access {
                 principal: Some(owner.principal().id),
+                name: Some(owner.name.clone()),
                 grant: Grant::Owner,
             })
         );

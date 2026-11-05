@@ -45,6 +45,7 @@ fn welcome_message(utterance_limit: Option<u32>) -> ServerMessage {
         roots: vec![],
         environments: vec![],
         utterance_limit,
+        name: Some("Ada Lovelace".into()),
     }
 }
 

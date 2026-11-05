@@ -80,6 +80,18 @@ struct State {
     entries: Vec<Entry>,
 }
 
+/// What [`TokenStore::rename`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Renamed {
+    /// The token is called by the new name from now on.
+    Renamed,
+    /// No token has the identifier, as after it was revoked.
+    Missing,
+    /// Another token is called by the name already, so nothing changed.
+    Taken,
+}
+
 /// The tokens a server has issued, kept in a file readable only by the server's user. The `tomori-server auth` commands and the running server share the file: each change is made under an exclusive lock on a lock file beside it, against the file as it is then, and [`reload`](Self::reload) picks up changes made by another process. See `design/security.md`.
 pub struct TokenStore {
     path: PathBuf,
@@ -127,6 +139,30 @@ impl TokenStore {
             found = entries.len() != before;
         })?;
         Ok(found)
+    }
+
+    /// Rename the token with identifier `id`, and so the display name of the principal it identifies, to `name`, unless another token's name is `taken`, as the caller compares names, read under the lock so that two renames cannot both take a name. The caller checks that the name is one it shows. See `design/security.md`.
+    pub fn rename(
+        &self,
+        id: &str,
+        name: &str,
+        taken: impl Fn(&str) -> bool,
+    ) -> Result<Renamed, StoreError> {
+        let mut renamed = Renamed::Missing;
+        self.change(|entries| {
+            let elsewhere = entries
+                .iter()
+                .any(|entry| entry.id != id && taken(&entry.name));
+            renamed = match entries.iter_mut().find(|entry| entry.id == id) {
+                None => Renamed::Missing,
+                Some(_) if elsewhere => Renamed::Taken,
+                Some(entry) => {
+                    entry.name = name.to_owned();
+                    Renamed::Renamed
+                }
+            };
+        })?;
+        Ok(renamed)
     }
 
     /// The issued tokens, oldest first.
@@ -306,6 +342,28 @@ mod tests {
     }
 
     #[test]
+    fn a_store_written_before_names_could_change_keeps_its_names() {
+        // As a server wrote it before renaming: each token's name, such as the device's that paired, is its holder's display name.
+        let directory = directory("earlier");
+        create_private_directory(&directory).unwrap();
+        let token = token::generate();
+        let earlier = serde_json::json!({"tokens": [{
+            "id": "0a1b2c3d4e5f", "name": "Quest 3", "grant": {"role": "owner"}, "issued": 1_790_000_000u64,
+            "hash": token::hash(&token),
+        }]});
+        fs::write(directory.join(TOKENS_FILE), earlier.to_string()).unwrap();
+        let store = TokenStore::open(&directory).unwrap();
+        assert_eq!(
+            store.authenticate(&presented(&token)),
+            Verdict::Authenticated(Principal {
+                id: "token:0a1b2c3d4e5f".into(),
+                name: "Quest 3".into(),
+            })
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn other_tokens_pass_to_the_next_authenticator() {
         let directory = directory("pass");
         let store = TokenStore::open(&directory).unwrap();
@@ -341,6 +399,37 @@ mod tests {
         assert_eq!(
             server.authenticate(&presented(&token)),
             Verdict::Authenticated(entry.principal())
+        );
+
+        // A rename names the principal from then on, here and, once it reloads, in the server.
+        let none = |_: &str| false;
+        assert_eq!(
+            command.rename(&entry.id, "Robert", none).unwrap(),
+            Renamed::Renamed
+        );
+        assert_eq!(
+            command.rename("missing", "Nobody", none).unwrap(),
+            Renamed::Missing
+        );
+        // A name another token has is refused, as the caller compares names; the token's own name is not compared.
+        let (other, _) = command.issue("Ada", Grant::Owner).unwrap();
+        let same = |name: &str| name.eq_ignore_ascii_case("ADA");
+        assert_eq!(
+            command.rename(&entry.id, "ADA", same).unwrap(),
+            Renamed::Taken
+        );
+        assert_eq!(
+            command.rename(&other.id, "ADA", same).unwrap(),
+            Renamed::Renamed
+        );
+        assert!(command.revoke(&other.id).unwrap());
+        assert!(server.reload().unwrap());
+        let renamed = server.entry(&entry.principal().id).unwrap();
+        assert_eq!(renamed.name, "Robert");
+        assert_eq!(renamed.principal().id, entry.principal().id);
+        assert_eq!(
+            server.authenticate(&presented(&token)),
+            Verdict::Authenticated(renamed.principal())
         );
 
         assert!(command.revoke(&entry.id).unwrap());
@@ -440,6 +529,9 @@ mod tests {
             assert_eq!(error.to_string(), message);
             unchanged();
             let error = store.revoke(&kept.id).err().unwrap();
+            assert_eq!(error.to_string(), message);
+            unchanged();
+            let error = store.rename(&kept.id, "lost", |_| false).err().unwrap();
             assert_eq!(error.to_string(), message);
             unchanged();
         }

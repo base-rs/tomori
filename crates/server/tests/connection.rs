@@ -167,6 +167,7 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
         protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: "ada".into(),
         name: "Ada".into(),
+        names: false,
     }));
     request.extend(chunk(&ClientMessage::Join {
         space: space.to_owned(),

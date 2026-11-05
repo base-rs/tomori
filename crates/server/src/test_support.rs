@@ -172,6 +172,16 @@ impl TestServer {
             .expect("the token store is written")
     }
 
+    /// Rename a token as `tomori-server auth rename` does, from another process's view of the token store, which the server notices when it next reads the store.
+    pub fn rename_elsewhere(&self, id: &str, name: &str) -> bool {
+        let state = self.state.as_ref().expect("the server admits by tokens");
+        tomori_security::TokenStore::open(state)
+            .expect("the token store opens")
+            .rename(id, name, |_| false)
+            .expect("the token store is written")
+            == tomori_security::Renamed::Renamed
+    }
+
     /// Open a connection presenting `token`, say hello and wait for the welcome.
     pub fn connect_with_token(&self, participant: &str, name: &str, token: &str) -> TestClient {
         let mut client = TestClient::open_with(
@@ -382,6 +392,7 @@ impl TestClient {
             protocol: PROTOCOL_VERSION,
             participant: participant.to_owned(),
             name: name.to_owned(),
+            names: false,
         });
         // The welcome is the first reply to hello.
         (self.source, self.role) = self.wait_for(|message| {
@@ -438,6 +449,7 @@ impl TestClient {
             utterance: utterance.to_owned(),
             answer: None,
             progress: false,
+            naming: false,
         });
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {
@@ -544,6 +556,16 @@ fn read_chunk(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Called only from the integration tests otherwise, where it is inlined and its coverage is not counted as its own.
+    #[test]
+    fn skipping_sequence_numbers_moves_the_next_one_on() {
+        let server = TestServer::start();
+        let mut client = server.connect("ada", "Ada");
+        let sequence = client.sequence;
+        client.skip_sequence(3);
+        assert_eq!(client.sequence, sequence + 3);
+    }
 
     #[test]
     fn eventually_checks_again_until_there_is_a_value() {

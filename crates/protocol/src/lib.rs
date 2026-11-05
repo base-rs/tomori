@@ -14,6 +14,7 @@ mod keepalive;
 mod message;
 mod presence;
 mod space;
+pub mod text;
 
 pub use audio::{AGENT_SOURCE, AUDIO_HEADER_BYTES, AudioError, AudioFrame, Gate, REPLAY_SOURCE};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};

@@ -74,6 +74,8 @@ pub struct Utterance {
     pub generation: u64,
     /// The presented question's field it answers, if it answers one, rather than being queued for the agent.
     pub answer: Option<tomori_protocol::AnswerTarget>,
+    /// Whether the words say the participant's new display name, which the server takes as a rename rather than queueing for the agent; see `design/security.md`.
+    pub naming: bool,
 }
 
 impl Utterance {
@@ -83,12 +85,19 @@ impl Utterance {
             id: id.into(),
             generation,
             answer: None,
+            naming: false,
         }
     }
 
     /// The utterance as the answer to the presented question's field `answer`, when given.
     pub fn answering(mut self, answer: Option<tomori_protocol::AnswerTarget>) -> Self {
         self.answer = answer;
+        self
+    }
+
+    /// The utterance as the participant's new display name, which the server takes as a rename.
+    pub fn naming(mut self) -> Self {
+        self.naming = true;
         self
     }
 }
@@ -224,6 +233,8 @@ pub struct Connection {
     others: Vec<u32>,
     /// Measures how much of the speaker the live microphone hears, when started with it.
     echo_test: Option<EchoTest>,
+    /// The name each server, by its link's key, last called this participant, which a new connection to it suggests in place of the device's for the rest of this run: so that a name it does not keep, such as a visitor's, survives connecting again. Never written down. See `design/security.md`.
+    names: HashMap<String, String>,
 }
 
 /// Speech played again to this participant: a replay they asked for, or a catch-up on joining or returning.
@@ -625,6 +636,7 @@ impl Voice {
         utterance: String,
         generation: u64,
         answer: Option<tomori_protocol::AnswerTarget>,
+        naming: bool,
     ) -> Result<(), String> {
         let resume_live = self.live && self.recording.is_some();
         if resume_live {
@@ -640,12 +652,14 @@ impl Voice {
         } else {
             self.open(client, false, generation)?;
         }
-        let result = self
-            .lock()
-            .microphone
-            .as_mut()
-            .unwrap()
-            .begin_answer(utterance, answer);
+        let mut voice = self.lock();
+        let microphone = voice.microphone.as_mut().unwrap();
+        let result = if naming {
+            microphone.begin_naming(utterance)
+        } else {
+            microphone.begin_answer(utterance, answer)
+        };
+        drop(voice);
         if let Err(error) = result {
             self.recording = None;
             return Err(format!("Cannot send: {error}"));
@@ -963,6 +977,7 @@ impl Connection {
             listening_as: None,
             others: Vec::new(),
             echo_test: None,
+            names: HashMap::new(),
         }
     }
 
@@ -1162,6 +1177,10 @@ impl Connection {
                     self.heads.clear();
                 }
                 Event::Message(ServerMessage::Left) => self.heads.clear(),
+                Event::Message(ServerMessage::Name { name }) => {
+                    let link = self.link.as_ref().expect("a client is kept with its link");
+                    self.names.insert(link.key.clone(), name.clone());
+                }
                 _ => {}
             }
             // The spectator renders presence.
@@ -1360,6 +1379,7 @@ impl Connection {
                     id: utterance,
                     generation,
                     answer,
+                    naming,
                 }) => {
                     // The opening tick plays through the silencing, as X is pressed and before the microphone has opened; see `design/live-audio.md`. A live microphone is already open and would hear it, so then it is only felt.
                     self.feedback.emit_heard(
@@ -1376,7 +1396,9 @@ impl Connection {
                     self.utterances.push(utterance.clone());
                     self.recording = Some(utterance.clone());
                     let begun = match &self.client {
-                        Some(client) => self.voice.begin(client, utterance, generation, answer),
+                        Some(client) => self
+                            .voice
+                            .begin(client, utterance, generation, answer, naming),
                         None => Err("Not connected.".into()),
                     };
                     if let Err(error) = begun {
@@ -1464,11 +1486,8 @@ impl Connection {
         self.disconnect();
         // The new client has presented no certificate yet.
         link.certificate = None;
-        let mut options = Options::new(
-            link.address.clone(),
-            &self.identity.participant,
-            &self.identity.name,
-        );
+        let name = self.names.get(&link.key).unwrap_or(&self.identity.name);
+        let mut options = Options::new(link.address.clone(), &self.identity.participant, name);
         options.microphone_rearm_on_disconnect = true;
         options.transport = link.transport;
         options.token = link.token.clone();

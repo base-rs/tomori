@@ -17,6 +17,9 @@ use crate::panel::{Area, Plane, Rect};
 use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines};
 use tomori_client::feedback::Hand as Side;
 
+/// Shown after a visitor's display name wherever others see it, as on a knock: the name is the one their device suggested or they chose, with no token behind it, so nothing vouches for it. See `design/security.md`.
+pub const VISITOR: &str = " (visitor)";
+
 /// A palm shows what its hand holds once it has faced within this angle of straight up for [`HOLD`], whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up. See `design/hand-menu.md`.
 pub const SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
 /// It hides once the palm has turned further than this from straight up, so that it does not flicker at the edge.
@@ -191,6 +194,8 @@ pub enum MenuKey {
     Admit(String),
     Decline(String),
     Pair,
+    /// Say a new display name with the next press of X, or not after all.
+    Rename,
     /// Open a layer of the agent's instructions.
     Layer(Layer),
     /// Remove the space's own instructions, as an owner.
@@ -241,7 +246,12 @@ pub enum MenuKind {
 /// What the menu shows, from the conversation.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Model {
+    /// The participant's display name, as the server knows them.
     pub name: String,
+    /// Whether they can say a new one: the server renames, and they take part in the space they are in.
+    pub renames: bool,
+    /// Whether the next press of X says their new name.
+    pub naming: bool,
     pub role: ConnectionRole,
     pub in_space: bool,
     pub participants: Vec<String>,
@@ -313,6 +323,8 @@ pub enum Choice {
     Admit(String),
     Decline(String),
     Pair,
+    /// Say a new display name with the next press of X, or not after all.
+    Rename,
     /// Remove the space's own instructions to the agent.
     ClearInstructions,
     /// Switch the agent to this mode.
@@ -667,6 +679,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         row(&[
                             Part::Kept("Let "),
                             Part::Cut(&knock.name),
+                            Part::Kept(VISITOR),
                             Part::Kept(" in"),
                         ]),
                     );
@@ -676,6 +689,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         row(&[
                             Part::Kept("Turn "),
                             Part::Cut(&knock.name),
+                            Part::Kept(VISITOR),
                             Part::Kept(" away"),
                         ]),
                     );
@@ -715,6 +729,18 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     Part::Kept(")"),
                 ]),
             );
+            // The name is said aloud, since typing on the headset is not practical yet; choosing again changes nothing after all.
+            if model.renames {
+                button(
+                    &mut items,
+                    MenuKey::Rename,
+                    if model.naming {
+                        "Hold X, say your name".into()
+                    } else {
+                        "Change your name".into()
+                    },
+                );
+            }
             if model.in_space {
                 if model.people.is_empty() {
                     let here = if model.participants.is_empty() {
@@ -862,6 +888,7 @@ impl HandMenu {
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
             MenuKey::Pair => Some(Choice::Pair),
+            MenuKey::Rename => Some(Choice::Rename),
             MenuKey::Text(_) | MenuKey::Cue | MenuKey::WristCue => None,
         }
     }
@@ -1283,8 +1310,8 @@ mod tests {
             [
                 "< Back",
                 "Requests",
-                "Let Vic in",
-                "Turn Vic away",
+                "Let Vic (visitor) in",
+                "Turn Vic (visitor) away",
                 "Roles & security",
                 "You: Ada (owner)",
                 "Here: Ada, Bob",
@@ -1334,6 +1361,40 @@ mod tests {
         };
         assert!(
             texts(&items(Some(Section::PeopleAndSecurity), &idle)).contains(&"Nothing waiting")
+        );
+    }
+
+    #[test]
+    fn a_participant_can_say_a_new_name_where_the_server_renames() {
+        let mut model = Model {
+            name: "Quest 3".into(),
+            role: ConnectionRole::Collaborator,
+            in_space: true,
+            renames: true,
+            ..Default::default()
+        };
+        let rows = items(Some(Section::PeopleAndSecurity), &model);
+        let at = texts(&rows)
+            .iter()
+            .position(|text| *text == "You: Quest 3 (collaborator)")
+            .unwrap();
+        assert_eq!(rows[at + 1].key, MenuKey::Rename);
+        assert_eq!(rows[at + 1].text, "Change your name");
+        assert_eq!(rows[at + 1].kind, MenuKind::Button);
+        // Chosen, the next press of X says it.
+        model.naming = true;
+        assert!(
+            texts(&items(Some(Section::PeopleAndSecurity), &model))
+                .contains(&"Hold X, say your name")
+        );
+        let mut menu = HandMenu::default();
+        assert_eq!(menu.choose(&MenuKey::Rename), Some(Choice::Rename));
+        // A server that does not rename offers nothing.
+        model.renames = false;
+        assert!(
+            !items(Some(Section::PeopleAndSecurity), &model)
+                .iter()
+                .any(|item| item.key == MenuKey::Rename)
         );
     }
 
@@ -2150,9 +2211,13 @@ mod tests {
         model.pairing = Some(long.into());
         // The role, "away", "in" and the action words survive.
         let people = rows(Some(Section::PeopleAndSecurity), &model);
-        assert!(cut_between(&people, "Let Bartholomew", " in"), "{people:?}");
+        // A knock's visitor stays marked as one, however long their name.
         assert!(
-            cut_between(&people, "Turn Bartholomew", " away"),
+            cut_between(&people, "Let Bartholomew", " (visitor) in"),
+            "{people:?}"
+        );
+        assert!(
+            cut_between(&people, "Turn Bartholomew", " (visitor) away"),
             "{people:?}"
         );
         assert!(

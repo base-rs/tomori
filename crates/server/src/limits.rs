@@ -10,8 +10,8 @@ use tomori_protocol::{SpaceState, SpaceSummary};
 /// Longest participant identity in `Hello`, in bytes.
 pub const PARTICIPANT_BYTES: usize = 128;
 
-/// Longest display name in `Hello`, in bytes.
-pub const NAME_BYTES: usize = 64;
+/// Longest display name, in `Hello`, a rename or a token's name, in bytes, and the longest backend name.
+pub const NAME_BYTES: usize = tomori_protocol::text::NAME_BYTES;
 
 /// Longest space title, in bytes.
 pub const TITLE_BYTES: usize = 200;
@@ -72,6 +72,17 @@ pub fn check(value: &str, limit: usize, what: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// A display name as the server keeps it, cleaned, or why it is refused, by the rules of [`tomori_protocol::text::display_name`]: on one line, composed, without format characters, not empty, not starting with `/`, without `:`, `[` or `]`, and at most [`tomori_protocol::text::NAME_CHARS`] characters and [`NAME_BYTES`] bytes. They apply to a rename and to a token's name. See `design/security.md`.
+pub fn name(name: &str) -> Result<String, String> {
+    tomori_protocol::text::display_name(name).map_err(|error| error.to_string())
+}
+
+/// The display name a device suggests in `Hello`, by the same rules as [`name`], but cut to [`tomori_protocol::text::NAME_CHARS`] characters rather than refused for them, since a device's own name is not one a person chose to fit. A client cuts it to [`NAME_BYTES`] before sending it, so a longer one is refused.
+pub fn suggested_name(name: &str) -> Result<String, String> {
+    check(name, NAME_BYTES, "name")?;
+    tomori_protocol::text::suggested_name(name).map_err(|error| error.to_string())
 }
 
 /// Cut `text` to at most `limit` bytes on a character boundary, marking the cut.
@@ -428,6 +439,29 @@ mod tests {
     fn checks_and_cuts_never_repeat_the_value() {
         let error = check(&"secret".repeat(100), 10, "title").unwrap_err();
         assert!(!error.contains("secret"));
+        assert_eq!(name("  Ada  "), Ok("Ada".to_owned()));
+        assert_eq!(name(" \t"), Err("A name is required.".to_owned()));
+        assert_eq!(
+            suggested_name(&format!("{} ", "a".repeat(40))),
+            Ok("a".repeat(32))
+        );
+        assert_eq!(
+            suggested_name(&"a".repeat(65)),
+            Err("The name is too long; the limit is 64 bytes.".to_owned())
+        );
+        assert_eq!(
+            suggested_name("Ada: x"),
+            Err("A name must not contain \":\", \"[\" or \"]\".".to_owned())
+        );
+        assert_eq!(
+            name(" /ada"),
+            Err("A name must not start with \"/\".".to_owned())
+        );
+        let error = name(&"secret".repeat(20)).unwrap_err();
+        assert!(
+            !error.contains("secret") && error.contains("name"),
+            "{error}"
+        );
         let cut = truncate(&"é".repeat(1000), ERROR_BYTES);
         assert!(cut.len() <= ERROR_BYTES && cut.ends_with(TRUNCATED));
     }

@@ -681,6 +681,7 @@ pub mod fixtures {
                 label: "Sky".into(),
             }],
             utterance_limit: None,
+            name: None,
         }));
         conversation.take_actions();
         conversation
@@ -1908,6 +1909,7 @@ mod tests {
                 })
                 .to_vec(),
             utterance_limit: None,
+            name: None,
         }));
         conversation.apply(space(|state| {
             state.modes = [

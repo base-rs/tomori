@@ -23,6 +23,8 @@ pub enum Grant {
 pub struct Access {
     /// The authenticated principal, if the connection presented credentials.
     pub principal: Option<String>,
+    /// The display name kept with the principal, such as its token's name, which the server knows them by rather than the one their client suggests. See `design/security.md`.
+    pub name: Option<String>,
     pub grant: Grant,
 }
 
@@ -31,6 +33,7 @@ impl Access {
     pub fn open() -> Self {
         Self {
             principal: None,
+            name: None,
             grant: Grant::Owner,
         }
     }
@@ -39,6 +42,7 @@ impl Access {
     pub fn visitor() -> Self {
         Self {
             principal: None,
+            name: None,
             grant: Grant::Visitor,
         }
     }
@@ -47,6 +51,7 @@ impl Access {
     pub fn pairing() -> Self {
         Self {
             principal: None,
+            name: None,
             grant: Grant::Pairing,
         }
     }
@@ -83,10 +88,12 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::PairCancel => true,
         // Ignored from a visitor, whose client may report it before it knows its role. See `design/spaces.md`.
         ClientMessage::Engagement { .. } => watcher,
+        // Everyone renames only themselves: a token holder's name is kept with their token, and a visitor's is theirs while they are kept. See `design/security.md`.
         ClientMessage::ListSpaces
         | ClientMessage::Join { .. }
         | ClientMessage::Leave
-        | ClientMessage::Knock => watcher,
+        | ClientMessage::Knock
+        | ClientMessage::SetName { .. } => watcher,
         ClientMessage::CreateSpace { .. }
         | ClientMessage::ListSessions { .. }
         | ClientMessage::SetInstructions { .. }
@@ -128,6 +135,7 @@ mod tests {
                 protocol: 2,
                 participant: "p".into(),
                 name: "n".into(),
+                names: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },
@@ -151,6 +159,7 @@ mod tests {
                 utterance: "u".into(),
                 answer: None,
                 progress: false,
+                naming: false,
             },
             ClientMessage::UtteranceEnd {
                 utterance: "u".into(),
@@ -198,6 +207,7 @@ mod tests {
             ClientMessage::PairReveal { nonce: "n".into() },
             ClientMessage::PairCancel,
             ClientMessage::Knock,
+            ClientMessage::SetName { name: "n".into() },
             ClientMessage::DecideKnock {
                 knock: "k".into(),
                 admit: true,
@@ -230,6 +240,7 @@ mod tests {
             "pair_reveal",
             "pair_cancel",
             "knock",
+            "set_name",
         ];
         assert_eq!(permitted(ConnectionRole::Visitor), watching);
         assert_eq!(permitted(ConnectionRole::Unknown), watching);
@@ -284,6 +295,7 @@ mod tests {
     fn a_collaborator_is_one_only_in_their_space() {
         let collaborator = Access {
             principal: Some("token:1".into()),
+            name: None,
             grant: Grant::Collaborator {
                 space: "studio".into(),
             },

@@ -46,7 +46,7 @@ TOMORI_TOKEN=tomori_… bash scripts/android.sh run     # or: tomori --xr --serv
 
 A token given this way goes only to the server given with `TOMORI_SERVER` or `--server`, or over USB, never to a server found on the network.
 
-`tomori-server auth list` lists the tokens and `auth revoke ID` revokes one. The server keeps its tokens and TLS certificate in `~/.local/state/tomori` (`--state-directory` changes it), serves only TLS, and shows owners its status page at `https://<server>:8765/`, where they sign in with a token. Pass `--no-visitors` to refuse anyone without a token, or `--auth open` to let anyone in as an owner, as before.
+`tomori-server auth list` lists the tokens, `auth rename ID NAME` renames one, and with it everyone using it, and `auth revoke ID` revokes one. The server keeps its tokens and TLS certificate in `~/.local/state/tomori` (`--state-directory` changes it), serves only TLS, and shows owners its status page at `https://<server>:8765/`, where they sign in with a token. Pass `--no-visitors` to refuse anyone without a token, or `--auth open` to let anyone in as an owner, as before.
 
 The headset creates spaces with its **New space** object (see [Controls](#controls)), shown to owners. To create one from the PC instead, use the example client with an owner token: give it the server's address, then type `create` with the backend and a directory beneath a workspace root.
 
@@ -57,7 +57,7 @@ create opencode /home/sam/project
 
 The space stays on the server after the example quits.
 
-It advertises itself with Bonjour, so the headset lists it when both are on the same network. Over USB, `bash scripts/android.sh run` forwards the headset's port 8765 to the PC with `adb reverse`, and the list's **USB** entry connects through it; set `TOMORI_SERVER_PORT` when the server listens on another port. To skip the list, give an address: `TOMORI_SERVER=192.168.1.10:8765 bash scripts/android.sh run`, or pass the intent extras `tomori.server` and `tomori.name` to `am start`. Your name defaults to the headset's model name. The headset remembers the last server it connected to, and connects to it again when it finds it, unless you move the selection first. The headset draws with 4× multisample anti-aliasing; pass the intent extra `-e tomori.msaa off` to `am start` to compare without it.
+It advertises itself with Bonjour, so the headset lists it when both are on the same network. Over USB, `bash scripts/android.sh run` forwards the headset's port 8765 to the PC with `adb reverse`, and the list's **USB** entry connects through it; set `TOMORI_SERVER_PORT` when the server listens on another port. To skip the list, give an address: `TOMORI_SERVER=192.168.1.10:8765 bash scripts/android.sh run`, or pass the intent extras `tomori.server` and `tomori.name` to `am start`. Your name defaults to the headset's model name, as a suggestion: once the headset is paired, the server keeps your name with its token, the same on every device using it, and you change it from the hand menu's **People & security**, by choosing **Change your name** in a space and saying the name while holding **X**. An owner can rename any token on the server with `tomori-server auth rename ID NAME`. The headset remembers the last server it connected to, and connects to it again when it finds it, unless you move the selection first. The headset draws with 4× multisample anti-aliasing; pass the intent extra `-e tomori.msaa off` to `am start` to compare without it.
 
 ### Controls
 

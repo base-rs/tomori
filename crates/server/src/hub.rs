@@ -300,6 +300,8 @@ struct ConnectionRecord {
     access: Access,
     /// The role the client was last told, so that it is told again only when it changes.
     role: Option<ConnectionRole>,
+    /// Whether the client said in Hello that it reads [`ServerMessage::Name`].
+    names: bool,
     participant: Option<String>,
     utterance: Option<OpenUtterance>,
     /// The client's id for the utterance the server last closed by failing it, so that an end or cancel already on its way is ignored rather than refused.
@@ -379,6 +381,8 @@ struct ParticipantRecord {
     visitor: bool,
     /// The order in which participants last disconnected, so that the longest gone are forgotten first.
     departure: u64,
+    /// The principal they authenticated as, whose token keeps their name. See `design/security.md`.
+    principal: Option<String>,
     name: String,
     source: u32,
     connection: Option<ConnectionId>,
@@ -500,6 +504,8 @@ struct UtteranceRecord {
     space: String,
     /// The question and field the transcript answers, rather than being queued.
     answer: Option<tomori_protocol::AnswerTarget>,
+    /// Whether the transcript is the participant's new display name, rather than being queued or answering.
+    naming: bool,
     /// The worker the participant pointed at while speaking, as the space knew it when the utterance ended. Their
     /// client names only its identity. See `design/interaction.md`.
     pointed: Option<crate::space::PointedWorker>,
@@ -544,6 +550,24 @@ enum Deferred {
     Keep,
     /// Issue a collaborator token for an admitted knock, outside the lock, and admit its visitor.
     Admit(KnockRecord),
+    /// Keep a principal's new name with their token, outside the lock, and then call everyone holding it by it.
+    Rename(Rename),
+}
+
+/// A token holder's new name, to keep with their token. See [`Hub::keep_name`].
+struct Rename {
+    tokens: Arc<tomori_security::TokenStore>,
+    principal: String,
+    name: String,
+    /// The participant who asked, by hub key, and the utterance that said the name, if they spoke it, to answer once it is kept. A name kept on their behalf, as when their token had none, answers nobody.
+    asked: Option<(String, Option<String>)>,
+}
+
+/// A name said aloud, as recognition writes it, without the full stop or other mark it may end with: "Ada." is Ada.
+fn spoken_name(text: &str) -> &str {
+    text.trim()
+        .trim_end_matches(['.', '!', '?', ',', ';', ':'])
+        .trim_end()
 }
 
 /// A token for this server run, so space identifiers are not reused after a restart: 64 random bits as hexadecimal. `RandomState` is seeded from the operating system's random source.
@@ -906,6 +930,136 @@ impl HubState {
         }
     }
 
+    /// Call `name` everyone `named` picks out by hub key and record: the participants holding a principal's token, on every device, or one participant without one. Each whose client reads names is told, and so is everyone in the spaces they are in, and the participants of spaces they knock on. Their queued input keeps the name it was spoken under. See `design/security.md`.
+    fn rename(&mut self, named: impl Fn(&str, &ParticipantRecord) -> bool, name: &str) {
+        let renamed: Vec<String> = self
+            .participants
+            .iter_mut()
+            .filter(|(key, record)| named(key, record) && record.name != name)
+            .map(|(key, record)| {
+                record.name = name.to_owned();
+                key.clone()
+            })
+            .collect();
+        let mut spaces = Vec::new();
+        for key in &renamed {
+            let record = &self.participants[key];
+            if let Some(connection) = record.connection.and_then(|id| self.connections.get(&id))
+                && connection.names
+            {
+                connection.outbox.message(ServerMessage::Name {
+                    name: name.to_owned(),
+                });
+            }
+            // A visitor's name is in no snapshot, so only the spaces they take part in are told.
+            spaces.extend(record.space.clone().filter(|space| {
+                self.space(space)
+                    .is_some_and(|space| space.model.participants.contains(key))
+            }));
+        }
+        let mut knocked = Vec::new();
+        for knock in &mut self.knocks {
+            if renamed.contains(&knock.participant) {
+                knock.name = name.to_owned();
+                knocked.push(knock.space.clone());
+            }
+        }
+        for space in spaces {
+            self.touch_space(&space);
+        }
+        for space in knocked {
+            self.announce_knocks(&space);
+        }
+    }
+
+    /// Whether `name` is taken from `participant`, as a name they cannot choose: whoever else is in the space they are in has it, or another token than theirs does, compared as [`tomori_protocol::text::name_key`] compares names. Their own devices, holding their token, do not count. See `design/security.md`.
+    fn name_taken(
+        &self,
+        participant: &str,
+        name: &str,
+        tokens: Option<&tomori_security::TokenStore>,
+    ) -> bool {
+        let key = tomori_protocol::text::name_key(name);
+        let (principal, space) = self
+            .participants
+            .get(participant)
+            .map(|record| (record.principal.as_deref(), record.space.as_ref()))
+            .unwrap_or_default();
+        let present = space.is_some_and(|space| {
+            self.participants.iter().any(|(other, there)| {
+                other != participant
+                    && (principal.is_none() || there.principal.as_deref() != principal)
+                    && there.space.as_ref() == Some(space)
+                    && tomori_protocol::text::name_key(&there.name) == key
+            })
+        });
+        present
+            || tokens.is_some_and(|tokens| {
+                tokens.entries().iter().any(|entry| {
+                    Some(entry.principal().id.as_str()) != principal
+                        && tomori_protocol::text::name_key(&entry.name) == key
+                })
+            })
+    }
+
+    /// Rename `participant`, as they asked, from a message or an utterance's transcript, `utterance`, unless the name is taken (see [`Self::name_taken`]). A token holder's name is kept with their token, which the server writes outside the lock, and everyone holding it is renamed once it is written; anyone else's is kept only while the server keeps them. Renaming to the name they have already changes nothing. See `design/security.md`.
+    fn rename_request(
+        &mut self,
+        participant: &str,
+        name: &str,
+        utterance: Option<String>,
+        tokens: Option<Arc<tomori_security::TokenStore>>,
+        deferred: &mut Vec<Deferred>,
+    ) {
+        let (principal, unchanged) = self
+            .participants
+            .get(participant)
+            .map(|record| (record.principal.clone(), record.name == name))
+            .unwrap_or_default();
+        if !unchanged && self.name_taken(participant, name, tokens.as_deref()) {
+            let error = "That name is taken.";
+            match utterance {
+                Some(utterance) => self.send(
+                    participant,
+                    ServerMessage::TranscriptFailed {
+                        utterance,
+                        error: error.to_owned(),
+                    },
+                ),
+                None => self.error(participant, format!("Name not changed: {error}")),
+            }
+            return;
+        }
+        match (principal, tokens) {
+            (Some(principal), Some(tokens)) if !unchanged => {
+                deferred.push(Deferred::Rename(Rename {
+                    tokens,
+                    principal,
+                    name: name.to_owned(),
+                    asked: Some((participant.to_owned(), utterance)),
+                }));
+                return;
+            }
+            // The name they have already, which is not written again or told.
+            _ if unchanged => {}
+            // A visitor, or anyone on a server that keeps no tokens, as in `--auth open` mode.
+            _ => {
+                self.rename(|key, _| key == participant, name);
+                log::info!("A participant without a token is now called {name:?}.");
+            }
+        }
+        if let Some(utterance) = utterance {
+            self.send(
+                participant,
+                ServerMessage::Transcript {
+                    utterance,
+                    text: name.to_owned(),
+                    finished: true,
+                },
+            );
+        }
+    }
+
     /// Withdraw the knock of `participant` on `space`, if any, telling them if they are still connected.
     fn withdraw_knock(&mut self, participant: &str, space: &str) {
         let before = self.knocks.len();
@@ -954,6 +1108,7 @@ impl HubState {
         self.knocks
             .retain(|waiting| waiting.participant != knock.participant);
         record.visitor = false;
+        record.principal = Some(principal.clone());
         let space = record.space.clone();
         self.participants.insert(key.clone(), record);
         let connection = self
@@ -963,6 +1118,8 @@ impl HubState {
         connection.participant = Some(key.clone());
         connection.access = Access {
             principal: Some(principal),
+            // The token is named after the visitor, as they were called when they knocked.
+            name: Some(knock.name.clone()),
             grant: Grant::Collaborator {
                 space: knock.space.clone(),
             },
@@ -1455,6 +1612,7 @@ impl Hub {
                 Deferred::End(id) => self.transcriber.end(id),
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
                 Deferred::Admit(knock) => self.admit(knock),
+                Deferred::Rename(rename) => self.keep_name(rename),
                 Deferred::Keep => self.keep(),
                 Deferred::PairingPrompt(event) => {
                     if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
@@ -1464,6 +1622,83 @@ impl Hub {
                 }
             }
         }
+    }
+
+    /// Keep a token holder's new name with their token, then call everyone holding it by it, on every device, and answer whoever asked. Called outside the lock, since renaming writes the token store.
+    fn keep_name(&self, rename: Rename) {
+        let Rename {
+            tokens,
+            principal,
+            name,
+            asked,
+        } = rename;
+        let id = principal.strip_prefix("token:").unwrap_or_default();
+        let key = tomori_protocol::text::name_key(&name);
+        let kept = match tokens.rename(id, &name, |other| {
+            tomori_protocol::text::name_key(other) == key
+        }) {
+            Ok(tomori_security::Renamed::Renamed) => Ok(()),
+            Ok(tomori_security::Renamed::Taken) => Err("That name is taken."),
+            Ok(_) => Err("Your token is no longer issued."),
+            Err(error) => {
+                log::warn!("Could not keep the name of token {id}: {error}.");
+                Err("Your name could not be kept. Try again.")
+            }
+        };
+        let mut state = self.lock();
+        if kept.is_ok() {
+            log::info!("Token {id} is now called {name:?}.");
+            state.rename(
+                |_, record| record.principal.as_deref() == Some(principal.as_str()),
+                &name,
+            );
+        }
+        let Some((participant, utterance)) = asked else {
+            return;
+        };
+        let reply = match (kept, utterance) {
+            (Ok(()), Some(utterance)) => ServerMessage::Transcript {
+                utterance,
+                text: name,
+                finished: true,
+            },
+            (Ok(()), None) => return,
+            (Err(error), Some(utterance)) => ServerMessage::TranscriptFailed {
+                utterance,
+                error: error.to_owned(),
+            },
+            (Err(error), None) => error_message(format!("Name not changed: {error}")),
+        };
+        state.send(&participant, reply);
+    }
+
+    /// Call each token holder by the name kept with their token, where it changed, such as by `tomori-server auth rename` in another process. `kept` gives a principal's name, or `None` once their token is revoked. A name that is not one the server shows is ignored. See `design/security.md`.
+    pub fn refresh_names(&self, kept: impl Fn(&str) -> Option<String>) {
+        let mut state = self.lock();
+        let mut changed: Vec<(String, String)> = state
+            .participants
+            .values()
+            .filter_map(|record| {
+                let principal = record.principal.as_deref()?;
+                let name = kept(principal)?;
+                let name = limits::name(&name).ok()?;
+                (name != record.name).then(|| (principal.to_owned(), name))
+            })
+            .collect();
+        changed.sort_unstable();
+        changed.dedup();
+        for (principal, name) in changed {
+            log::info!("The token of {principal} is now called {name:?}.");
+            state.rename(
+                |_, record| record.principal.as_deref() == Some(principal.as_str()),
+                &name,
+            );
+        }
+    }
+
+    /// The token store, if the server keeps tokens, so that a token holder's name is kept with their token.
+    fn token_store(&self) -> Option<Arc<tomori_security::TokenStore>> {
+        self.tokens.read().expect("never left poisoned").clone()
     }
 
     /// Register a connection admitted at the door as `access`. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`]. Returns `None` for a visitor while the most visitors are connected; see `design/security.md`.
@@ -1490,6 +1725,7 @@ impl Hub {
                 outbox: outbox.clone(),
                 access,
                 role: None,
+                names: false,
                 participant: None,
                 utterance: None,
                 failed: None,
@@ -1723,15 +1959,14 @@ impl Hub {
                 protocol,
                 participant,
                 name,
-                ..
+                names,
             } = message
             {
                 self.hello(
                     &mut state,
                     connection,
                     protocol,
-                    participant,
-                    name,
+                    (participant, name, names),
                     &mut deferred,
                 );
             } else if let Some((participant, space)) = state.member(connection) {
@@ -1764,8 +1999,7 @@ impl Hub {
         state: &mut HubState,
         connection: ConnectionId,
         protocol: u32,
-        participant: String,
-        name: String,
+        (participant, name, names): (String, String, bool),
         deferred: &mut Vec<Deferred>,
     ) {
         let Some(outbox) = state
@@ -1786,27 +2020,44 @@ impl Hub {
             outbox.close();
             return;
         }
-        let invalid = if participant.is_empty() {
+        let suggested = if participant.is_empty() {
             Err("A participant identity is required.".to_owned())
-        } else if name.trim().is_empty() {
-            Err("A name is required.".to_owned())
-        } else if name.trim_start().starts_with('/') {
-            // The name begins each attributed prompt, where a leading slash could read as a command to the agent.
-            Err("A name must not start with \"/\".".to_owned())
         } else {
-            limits::check(
-                &participant,
-                limits::PARTICIPANT_BYTES,
-                "participant identity",
-            )
-            .and_then(|()| limits::check(&name, limits::NAME_BYTES, "name"))
+            limits::suggested_name(&name).and_then(|name| {
+                limits::check(
+                    &participant,
+                    limits::PARTICIPANT_BYTES,
+                    "participant identity",
+                )
+                .map(|()| name)
+            })
         };
-        if let Err(error) = invalid {
-            outbox.message(error_message(error));
-            outbox.close();
-            return;
-        }
+        let suggested = match suggested {
+            Ok(suggested) => suggested,
+            Err(error) => {
+                outbox.message(error_message(error));
+                outbox.close();
+                return;
+            }
+        };
         let access = state.connections[&connection].access.clone();
+        // A token holder is called by the name kept with their token, whatever their device suggests. A token without a name the server shows, as no token issued by this server is, takes the suggestion as its name. See `design/security.md`.
+        let kept = access
+            .name
+            .as_deref()
+            .and_then(|kept| limits::name(kept).ok());
+        if kept.is_none()
+            && let Some(principal) = &access.principal
+            && let Some(tokens) = self.token_store()
+        {
+            deferred.push(Deferred::Rename(Rename {
+                tokens,
+                principal: principal.clone(),
+                name: suggested.clone(),
+                asked: None,
+            }));
+        }
+        let name = kept.unwrap_or(suggested);
         let participant = participant_key(access.principal.as_deref(), &participant);
         if !state.participants.contains_key(&participant) {
             state.next_source += 1;
@@ -1816,6 +2067,7 @@ impl Hub {
                 ParticipantRecord {
                     visitor: access.is_visitor(),
                     departure: 0,
+                    principal: access.principal.clone(),
                     name: String::new(),
                     source,
                     connection: None,
@@ -1851,6 +2103,7 @@ impl Hub {
             .get_mut(&connection)
             .expect("checked above");
         record.participant = Some(participant.clone());
+        record.names = names;
         record.liveness.greeted = true;
         let role = access.role(None);
         record.role = Some(role);
@@ -1877,6 +2130,7 @@ impl Hub {
                 .transcriber
                 .utterance_limit()
                 .map(|limit| limit.as_secs().min(u64::from(u32::MAX)) as u32),
+            name: Some(state.participants[&participant].name.clone()),
         });
         // The space they were in, unless it was forgotten meanwhile.
         let rejoined = rejoin.is_some_and(|space| state.join(&participant, &space));
@@ -1911,6 +2165,12 @@ impl Hub {
                 unreachable!("handled before membership")
             }
             ClientMessage::ListSpaces => outbox.spaces(),
+            ClientMessage::SetName { name } => match limits::name(&name) {
+                Ok(name) => {
+                    state.rename_request(participant, &name, None, self.token_store(), deferred)
+                }
+                Err(error) => state.error(participant, format!("Name not changed: {error}")),
+            },
             ClientMessage::CreateSpace {
                 title,
                 backend,
@@ -2057,6 +2317,7 @@ impl Hub {
                 utterance,
                 answer,
                 progress,
+                naming,
             } => {
                 let checked =
                     limits::check(&utterance, limits::UTTERANCE_BYTES, "utterance identifier")
@@ -2099,7 +2360,9 @@ impl Hub {
                         source: state.participants[participant].source,
                         client: utterance.clone(),
                         space,
+                        // Words that name the participant answer nothing, since they are never queued.
                         answer,
+                        naming,
                         pointed: None,
                         progress: progress.then_some(connection),
                         ended: None,
@@ -2795,6 +3058,32 @@ impl Hub {
                 "was transcribed"
             },
         );
+        // Words that say the participant's new name rename them, wherever they are now, and are never queued. Renaming again to the same name, as a repeated finalization does, changes nothing. Words with no speech in them fail below, as any others do.
+        if record.naming && !text.is_empty() {
+            match limits::name(spoken_name(text)) {
+                Ok(name) => {
+                    let mut deferred = Vec::new();
+                    let tokens = self.token_store();
+                    state.rename_request(
+                        &record.participant,
+                        &name,
+                        Some(record.client),
+                        tokens,
+                        &mut deferred,
+                    );
+                    drop(state);
+                    self.run(deferred);
+                }
+                Err(error) => state.send(
+                    &record.participant,
+                    ServerMessage::TranscriptFailed {
+                        utterance: record.client,
+                        error,
+                    },
+                ),
+            }
+            return;
+        }
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
         // A repeated finalization of an answer already applied is acknowledged in the same way.
@@ -3630,6 +3919,7 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 participant: "ada".into(),
                 name: "Ada".into(),
+                names: false,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -3724,6 +4014,7 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 participant: participant.to_owned(),
                 name: participant.to_owned(),
+                names: false,
             },
         );
         connection
@@ -3788,6 +4079,7 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 participant: "vic".to_owned(),
                 name: "Vic".to_owned(),
+                names: false,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -3819,6 +4111,7 @@ mod tests {
                     protocol: PROTOCOL_VERSION,
                     participant: identity.to_owned(),
                     name: identity.to_owned(),
+                    names: false,
                 },
             );
             connection
@@ -4013,6 +4306,7 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
                 participant: "vic".to_owned(),
                 name: "Vic".to_owned(),
+                names: false,
             },
         );
         hub.handle(

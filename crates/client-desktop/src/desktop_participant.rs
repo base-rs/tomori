@@ -417,7 +417,7 @@ mod tests {
                 surface
                     .titles
                     .last()
-                    .is_some_and(|title| title.contains("Vic is knocking"))
+                    .is_some_and(|title| title.contains("Vic (visitor) is knocking"))
             );
             // + admits the first knock, and the title says no one is knocking.
             window

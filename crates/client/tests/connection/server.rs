@@ -141,6 +141,7 @@ impl<B: ReadableBody> Session<B> {
                             roots: vec![],
                             environments: vec![],
                             utterance_limit: None,
+                            name: Some("Ada Lovelace".into()),
                         });
                     }
                     ClientMessage::Join { space } => self.reply(ServerMessage::Space {
@@ -150,6 +151,8 @@ impl<B: ReadableBody> Session<B> {
                         }),
                     }),
                     ClientMessage::Leave => self.reply(ServerMessage::Left),
+                    // Renamed, as a visitor is, without keeping the name.
+                    ClientMessage::SetName { name } => self.reply(ServerMessage::Name { name }),
                     ClientMessage::ListSpaces => {
                         self.reply(ServerMessage::Spaces { spaces: Vec::new() })
                     }

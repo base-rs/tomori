@@ -52,6 +52,7 @@ fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
         protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: participant.into(),
         name: participant.into(),
+        names: false,
     });
     client.wait_for(|message| {
         matches!(message, ServerMessage::Welcome { .. }).then(|| message.clone())
@@ -221,6 +222,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        naming: false,
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");
     assert!(ada.next_audio(Duration::from_millis(300)).is_none());
@@ -300,6 +302,42 @@ fn revoking_a_token_ends_its_connections_and_refuses_it() {
             .0,
         401
     );
+}
+
+#[test]
+fn a_token_renamed_elsewhere_renames_its_holders_within_a_sweep() {
+    let server = TestServer::with_tokens(true, |server| server);
+    let (entry, token) = server.issue("Ada", Grant::Owner);
+    let mut ada = TestClient::open_with(
+        server.address,
+        &[("Authorization", &format!("Bearer {token}"))],
+    );
+    ada.send(&ClientMessage::Hello {
+        protocol: tomori_protocol::PROTOCOL_VERSION,
+        participant: "ada".to_owned(),
+        name: "Quest 3".to_owned(),
+        names: true,
+    });
+    let welcomed = ada.wait_for(|message| match message {
+        ServerMessage::Welcome { name, .. } => Some(name.clone()),
+        _ => None,
+    });
+    assert_eq!(welcomed.as_deref(), Some("Ada"));
+    let space = ada.create_space("Studio");
+    assert_eq!(space.participants[0].name, "Ada");
+    // Renamed by another process, as `tomori-server auth rename` does: the server notices within its sweep, tells the holder and shows everyone the name.
+    assert!(server.rename_elsewhere(&entry.id, "Ada Lovelace"));
+    let named = ada.wait_for(|message| match message {
+        ServerMessage::Name { name } => Some(name.clone()),
+        _ => None,
+    });
+    assert_eq!(named, "Ada Lovelace");
+    ada.space(|state| {
+        state
+            .participants
+            .iter()
+            .any(|participant| participant.name == "Ada Lovelace")
+    });
 }
 
 #[test]

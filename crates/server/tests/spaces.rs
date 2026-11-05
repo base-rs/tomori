@@ -136,6 +136,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: "ada".into(),
         name: "Ada".into(),
+        names: false,
     });
     let offered = ada.wait_for(|message| match message {
         ServerMessage::Welcome { environments, .. } => Some(environments.clone()),
@@ -1387,6 +1388,7 @@ fn say_answer(
             field: question.field.clone(),
         }),
         progress: false,
+        naming: false,
     });
     client.send_audio(
         tomori_protocol::Gate::Agent,
@@ -1636,6 +1638,7 @@ fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
         utterance: "u1".to_owned(),
         answer: None,
         progress: false,
+        naming: false,
     });
     ada.send_audio(Gate::Agent, speech("he"));
     // The gate switches to live and back; some live frames were not sent.
@@ -1669,6 +1672,7 @@ fn a_lost_frame_fails_the_utterance() {
         utterance: "u1".to_owned(),
         answer: None,
         progress: false,
+        naming: false,
     });
     ada.send_audio(Gate::Agent, speech("ab"));
     ada.skip_sequence(2);

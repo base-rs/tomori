@@ -538,6 +538,7 @@ mod tests {
                 roots: vec![],
                 environments: vec![],
                 utterance_limit: None,
+                name: None,
             }));
         let mut space = SpaceState {
             id: "space".into(),
@@ -583,6 +584,7 @@ mod tests {
                 roots: vec![],
                 environments: vec![],
                 utterance_limit: None,
+                name: None,
             }));
         let frame = |feed: &mut Feed, environment: &str| {
             feed.conversation
