@@ -79,6 +79,7 @@ impl Client {
             protocol: PROTOCOL_VERSION,
             participant: participant.to_owned(),
             name: participant.to_owned(),
+            names: false,
         });
     }
 
@@ -219,6 +220,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         protocol: PROTOCOL_VERSION + 1,
         participant: "bob".to_owned(),
         name: "Bob".to_owned(),
+        names: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -287,6 +289,7 @@ fn a_new_utterance_fails_the_one_still_open() {
         utterance: utterance.to_owned(),
         answer: None,
         progress: false,
+        naming: false,
     };
     client.send(begin("one"));
     client.send(begin("two"));
@@ -901,6 +904,7 @@ fn the_status_lists_those_connected_in_the_lobby_by_what_they_were_admitted_as()
     let (hub, _jobs) = hub();
     let collaborator = Access {
         principal: Some("token:abc".to_owned()),
+        name: None,
         grant: Grant::Collaborator {
             space: "elsewhere".to_owned(),
         },
@@ -922,6 +926,7 @@ fn utterances_are_ended_or_cancelled_only_while_open() {
         utterance: "one".to_owned(),
         answer: None,
         progress: false,
+        naming: false,
     };
     client.send(begin.clone());
     assert_eq!(client.errors(), ["Join a space first."]);
@@ -982,6 +987,7 @@ fn progress_is_told_only_to_a_client_that_asks_from_the_end_until_the_outcome() 
             utterance: utterance.to_owned(),
             answer: None,
             progress: asks,
+            naming: false,
         });
     }
     let (new, old) = (utterance_of(&newer), utterance_of(&older));
@@ -1043,6 +1049,7 @@ fn progress_is_told_only_on_the_connection_that_asked_while_it_is_the_participan
         utterance: "u1".to_owned(),
         answer: None,
         progress: true,
+        naming: false,
     });
     newer.send(ClientMessage::UtteranceEnd {
         utterance: "u1".to_owned(),
@@ -1089,6 +1096,7 @@ fn an_utterance_transcribed_before_it_ended_is_still_ended() {
         utterance: "one".to_owned(),
         answer: None,
         progress: false,
+        naming: false,
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_finished(utterance, "Deploy it.");
@@ -1191,6 +1199,7 @@ fn a_transcript_comes_to_nothing_for_an_utterance_unknown_unheard_or_left_behind
             utterance: "one".to_owned(),
             answer: None,
             progress: false,
+            naming: false,
         });
         client.send(ClientMessage::UtteranceEnd {
             utterance: "one".to_owned(),
@@ -1246,6 +1255,7 @@ fn only_the_latest_spoken_answers_are_remembered() {
             field: "field-1".to_owned(),
         }),
         progress: false,
+        naming: false,
     });
     client.send(ClientMessage::UtteranceEnd {
         utterance: "one".to_owned(),
@@ -1315,6 +1325,7 @@ fn words_for_a_driver_that_has_stopped_are_marked_unsent() {
         utterance: "one".to_owned(),
         answer: None,
         progress: false,
+        naming: false,
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_partial(UtteranceId(99), "nobody");
@@ -1425,4 +1436,401 @@ fn audio_from_the_lobby_goes_nowhere() {
     let client = Client::greeted(&hub, Access::open(), "ada");
     hub.receive(client.connection, Frame::audio(&frame(320)));
     assert!(client.read().is_empty());
+}
+
+/// Say Hello as `participant`, suggesting `name`, as a client that reads names if `names`, and read what that sent.
+fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<ServerMessage> {
+    client.send(ClientMessage::Hello {
+        protocol: PROTOCOL_VERSION,
+        participant: participant.to_owned(),
+        name: name.to_owned(),
+        names,
+    });
+    client.read()
+}
+
+/// The name the Welcome that begins `messages` gives.
+fn welcomed(messages: &[ServerMessage]) -> Option<String> {
+    let [ServerMessage::Welcome { name, .. }, ..] = messages else {
+        unreachable!("no Welcome first: {messages:?}")
+    };
+    name.clone()
+}
+
+/// The names `messages` tell the client it is now called.
+fn named(messages: &[ServerMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            ServerMessage::Name { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The names of the participants in the latest space state among `messages`.
+fn present(messages: &[ServerMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ServerMessage::Space { state } => Some(
+                state
+                    .participants
+                    .iter()
+                    .map(|participant| participant.name.clone())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// What a token admits at the door, as it is now in `tokens`.
+fn admitted(tokens: &Arc<tomori_security::TokenStore>, token: &str) -> Access {
+    crate::door::Door::tokens(tokens.clone(), true)
+        .admit(
+            &tomori_security::Credentials {
+                token: Some(token.to_owned()),
+            },
+            false,
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_token_holder_is_known_by_the_name_kept_with_their_token_on_every_device() {
+    let store = Store::new("names");
+    // Paired from a headset, whose name the token took.
+    let (entry, token) = store
+        .tokens
+        .issue("Quest 3", tomori_security::Grant::Owner)
+        .unwrap();
+    let (hub, _jobs) = hub_waiting();
+    hub.set_tokens(store.tokens.clone());
+    let id = stopped(&hub, Snapshot::default());
+
+    // The device suggests another name, but the server keeps the token's.
+    let quest = Client::connect(&hub, admitted(&store.tokens, &token));
+    assert_eq!(
+        welcomed(&hello_as(&quest, "quest", "Samuel's PC", true)).as_deref(),
+        Some("Quest 3")
+    );
+    quest.join(&id);
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    bob.join(&id);
+
+    // Renaming keeps the name with the token, tells the device, and shows everyone in the space.
+    quest.send(ClientMessage::SetName {
+        name: "  Ada ".to_owned(),
+    });
+    let told = quest.read();
+    assert_eq!(named(&told), ["Ada"]);
+    assert_eq!(present(&told), ["Ada", "bob"]);
+    assert_eq!(present(&bob.read()), ["Ada", "bob"]);
+    assert_eq!(
+        store.tokens.entry(&entry.principal().id).unwrap().name,
+        "Ada"
+    );
+    // The same name again changes nothing, and tells nobody.
+    quest.send(ClientMessage::SetName {
+        name: "Ada".to_owned(),
+    });
+    assert!(quest.read().is_empty() && bob.read().is_empty());
+
+    // A second device using the same token, an older client that does not read names, is called the same.
+    let laptop = Client::connect(&hub, admitted(&store.tokens, &token));
+    assert_eq!(
+        welcomed(&hello_as(&laptop, "laptop", "Laptop", false)).as_deref(),
+        Some("Ada")
+    );
+    laptop.join(&id);
+    assert_eq!(present(&bob.read()), ["Ada", "bob", "Ada"]);
+    // A rename from either device renames both; the older client is not sent a message it does not know.
+    quest.send(ClientMessage::SetName {
+        name: "Ada Lovelace".to_owned(),
+    });
+    assert_eq!(named(&quest.read()), ["Ada Lovelace"]);
+    let laptop_told = laptop.read();
+    assert!(named(&laptop_told).is_empty());
+    assert_eq!(
+        present(&laptop_told),
+        ["Ada Lovelace", "bob", "Ada Lovelace"]
+    );
+
+    // The agent reads their words under the new name.
+    laptop.send(ClientMessage::UtteranceBegin {
+        utterance: "u".to_owned(),
+        answer: None,
+        progress: false,
+        naming: false,
+    });
+    laptop.send(ClientMessage::UtteranceEnd {
+        utterance: "u".to_owned(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(utterance, "Run the tests.");
+    let queued = hub.space_state(&id).queue.remove(0);
+    assert_eq!(
+        crate::space::attributed(&queued.speaker, &queued.text, true),
+        "Ada Lovelace: Run the tests."
+    );
+    // Both devices are kept under the new name.
+    assert_eq!(
+        hub.lock()
+            .participants
+            .values()
+            .filter(|record| record.name == "Ada Lovelace")
+            .count(),
+        2
+    );
+
+    // Reconnecting keeps it.
+    hub.disconnect(quest.connection);
+    let again = Client::connect(&hub, admitted(&store.tokens, &token));
+    assert_eq!(
+        welcomed(&hello_as(&again, "quest", "Quest 3", true)).as_deref(),
+        Some("Ada Lovelace")
+    );
+
+    // So does a restart: a new server reads the token store again.
+    let reopened = Arc::new(tomori_security::TokenStore::open(&store.directory).unwrap());
+    let (restarted, _jobs) = super::rarer::hub();
+    restarted.set_tokens(reopened.clone());
+    let after = Client::connect(&restarted, admitted(&reopened, &token));
+    assert_eq!(
+        welcomed(&hello_as(&after, "quest", "Quest 3", true)).as_deref(),
+        Some("Ada Lovelace")
+    );
+}
+
+#[test]
+fn a_name_changed_elsewhere_reaches_everyone_holding_the_token() {
+    let store = Store::new("renamed-elsewhere");
+    let (entry, token) = store
+        .tokens
+        .issue("Quest 3", tomori_security::Grant::Owner)
+        .unwrap();
+    let (hub, _jobs) = hub();
+    hub.set_tokens(store.tokens.clone());
+    let quest = Client::connect(&hub, admitted(&store.tokens, &token));
+    hello_as(&quest, "quest", "Quest 3", true);
+    let visitor = Client::greeted(&hub, Access::visitor(), "vic");
+    let refresh =
+        || hub.refresh_names(|principal| store.tokens.entry(principal).map(|entry| entry.name));
+
+    // As `tomori-server auth rename` would, in another process.
+    let command = tomori_security::TokenStore::open(&store.directory).unwrap();
+    command.rename(&entry.id, "Ada").unwrap();
+    refresh();
+    assert!(quest.read().is_empty(), "not until the store is read again");
+    store.tokens.reload().unwrap();
+    refresh();
+    assert_eq!(named(&quest.read()), ["Ada"]);
+    refresh();
+    assert!(quest.read().is_empty());
+    // A name the server would not show is not used, and a visitor has no token to follow.
+    command.rename(&entry.id, "/admin").unwrap();
+    store.tokens.reload().unwrap();
+    refresh();
+    assert!(quest.read().is_empty() && visitor.read().is_empty());
+    assert_eq!(hub.status().lobby[0].0, "Ada");
+    // Nor is a revoked token's.
+    command.revoke(&entry.id).unwrap();
+    store.tokens.reload().unwrap();
+    refresh();
+    assert!(quest.read().is_empty());
+}
+
+#[test]
+fn a_token_without_a_name_takes_the_one_its_device_suggests() {
+    let store = Store::new("unnamed");
+    let (entry, token) = store
+        .tokens
+        .issue(" ", tomori_security::Grant::Owner)
+        .unwrap();
+    let (hub, _jobs) = hub();
+    hub.set_tokens(store.tokens.clone());
+    let quest = Client::connect(&hub, admitted(&store.tokens, &token));
+    assert_eq!(
+        welcomed(&hello_as(&quest, "quest", "Quest 3", true)).as_deref(),
+        Some("Quest 3")
+    );
+    assert_eq!(
+        store.tokens.entry(&entry.principal().id).unwrap().name,
+        "Quest 3"
+    );
+    // Without a token store, as in a server that keeps none, the suggestion is used and kept nowhere.
+    let (bare, _jobs) = super::rarer::hub();
+    let unkept = Client::connect(&bare, admitted(&store.tokens, &token));
+    bare.lock()
+        .connections
+        .get_mut(&unkept.connection)
+        .unwrap()
+        .access
+        .name = None;
+    assert_eq!(
+        welcomed(&hello_as(&unkept, "quest", "Laptop", true)).as_deref(),
+        Some("Laptop")
+    );
+}
+
+#[test]
+fn a_visitor_renames_only_themselves_and_nothing_is_kept() {
+    let store = Store::new("visitor-name");
+    let (hub, id, owner, visitor) = knocked(&store);
+    // Another visitor knocking keeps their own name.
+    let other = Client::greeted(&hub, Access::visitor(), "wes");
+    other.join(&id);
+    other.send(ClientMessage::Knock);
+    owner.read();
+    visitor.send(ClientMessage::SetName {
+        name: "Victor".to_owned(),
+    });
+    // Its client does not read names, so it is not told; the participants see the knock under the new name.
+    assert!(named(&visitor.read()).is_empty());
+    let knocks = owner.read().into_iter().find_map(|message| match message {
+        ServerMessage::Knocks { knocks } => Some(knocks),
+        _ => None,
+    });
+    let names: Vec<String> = knocks
+        .unwrap()
+        .into_iter()
+        .map(|knock| knock.name)
+        .collect();
+    assert_eq!(names, ["Victor", "wes"]);
+    assert!(store.tokens.entries().is_empty());
+    // Admitted, its token takes the name it knocked under.
+    let knock = take_knock(&hub);
+    hub.admit(knock);
+    assert_eq!(store.tokens.entries()[0].name, "Victor");
+    // A name the server would not show is refused, and nothing changes.
+    owner.send(ClientMessage::SetName {
+        name: "/compact".to_owned(),
+    });
+    assert_eq!(owner.errors(), ["A name must not start with \"/\"."]);
+    assert!(
+        hub.status().spaces[0]
+            .participants
+            .iter()
+            .any(|(name, _)| name == "ada")
+    );
+}
+
+/// Speak `text` as `client`'s new name, as transcribed, and read what that sent.
+fn say_name(hub: &Arc<Hub>, client: &Client, text: &str) -> Vec<ServerMessage> {
+    client.send(ClientMessage::UtteranceBegin {
+        utterance: "name".to_owned(),
+        // Naming answers nothing, even when a client says otherwise.
+        answer: Some(tomori_protocol::AnswerTarget {
+            question: "question-1".to_owned(),
+            field: "field-1".to_owned(),
+        }),
+        progress: false,
+        naming: true,
+    });
+    client.send(ClientMessage::UtteranceEnd {
+        utterance: "name".to_owned(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(utterance, text);
+    client.read()
+}
+
+fn finished(messages: &[ServerMessage]) -> Option<Result<String, String>> {
+    messages.iter().find_map(|message| match message {
+        ServerMessage::Transcript {
+            text,
+            finished: true,
+            ..
+        } => Some(Ok(text.clone())),
+        ServerMessage::TranscriptFailed { error, .. } => Some(Err(error.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_name_said_aloud_renames_the_speaker_and_is_never_queued() {
+    let store = Store::new("spoken-name");
+    let (_, token) = store
+        .tokens
+        .issue("Quest 3", tomori_security::Grant::Owner)
+        .unwrap();
+    let (hub, _jobs) = hub_waiting();
+    hub.set_tokens(store.tokens.clone());
+    let id = stopped(&hub, Snapshot::default());
+    let quest = Client::connect(&hub, admitted(&store.tokens, &token));
+    hello_as(&quest, "quest", "Quest 3", true);
+    quest.join(&id);
+
+    let said = say_name(&hub, &quest, " Ada Lovelace. ");
+    assert_eq!(finished(&said), Some(Ok("Ada Lovelace".to_owned())));
+    assert_eq!(named(&said), ["Ada Lovelace"]);
+    assert_eq!(store.tokens.entries()[0].name, "Ada Lovelace");
+    assert!(hub.space_state(&id).queue.is_empty());
+
+    // Words with no speech in them fail as any others do, and rename nobody.
+    assert_eq!(
+        finished(&say_name(&hub, &quest, "  ")),
+        Some(Err("no speech heard".to_owned()))
+    );
+    let said = say_name(&hub, &quest, "/clear");
+    assert_eq!(
+        finished(&said),
+        Some(Err(
+            "A name must not start with \"/\". Your name was not changed.".to_owned()
+        ))
+    );
+
+    // Without a token, the name is kept only while the server keeps the participant.
+    let owner = Client::greeted(&hub, Access::open(), "ada");
+    owner.join(&id);
+    let said = say_name(&hub, &owner, "Bob!");
+    assert_eq!(finished(&said), Some(Ok("Bob".to_owned())));
+    assert_eq!(present(&said), ["Ada Lovelace", "Bob"]);
+    assert_eq!(store.tokens.entries().len(), 1);
+}
+
+#[test]
+fn a_name_that_cannot_be_kept_is_not_changed() {
+    let store = Store::new("unkept-name");
+    let (entry, token) = store
+        .tokens
+        .issue("Quest 3", tomori_security::Grant::Owner)
+        .unwrap();
+    let (hub, _jobs) = hub_waiting();
+    hub.set_tokens(store.tokens.clone());
+    let id = stopped(&hub, Snapshot::default());
+    let quest = Client::connect(&hub, admitted(&store.tokens, &token));
+    hello_as(&quest, "quest", "Quest 3", true);
+    quest.join(&id);
+
+    store.refuse_writes();
+    quest.send(ClientMessage::SetName {
+        name: "Ada".to_owned(),
+    });
+    assert_eq!(
+        quest.errors(),
+        ["Your name could not be kept, so it was not changed. Try again."]
+    );
+    assert_eq!(
+        finished(&say_name(&hub, &quest, "Ada")),
+        Some(Err(
+            "Your name could not be kept, so it was not changed. Try again.".to_owned()
+        ))
+    );
+    std::fs::remove_dir(store.directory.join("tokens.tmp")).unwrap();
+
+    // A token revoked meanwhile keeps no name.
+    store.tokens.revoke(&entry.id).unwrap();
+    quest.send(ClientMessage::SetName {
+        name: "Ada".to_owned(),
+    });
+    assert_eq!(
+        quest.errors(),
+        ["Your token is no longer issued, so your name was not changed."]
+    );
+    assert_eq!(hub.status().spaces[0].participants[0].0, "Quest 3");
 }

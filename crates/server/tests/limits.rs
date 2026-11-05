@@ -57,6 +57,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         utterance: "u".repeat(10_000),
         answer: None,
         progress: false,
+        naming: false,
     });
     let error = ada.error();
     assert!(error.contains("utterance") && error.len() < 100, "{error}");
@@ -112,6 +113,7 @@ fn an_oversized_hello_is_refused() {
             protocol: tomori_protocol::PROTOCOL_VERSION,
             participant,
             name,
+            names: false,
         });
         let error = client.error();
         assert!(

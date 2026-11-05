@@ -382,6 +382,7 @@ impl TestClient {
             protocol: PROTOCOL_VERSION,
             participant: participant.to_owned(),
             name: name.to_owned(),
+            names: false,
         });
         // The welcome is the first reply to hello.
         (self.source, self.role) = self.wait_for(|message| {
@@ -438,6 +439,7 @@ impl TestClient {
             utterance: utterance.to_owned(),
             answer: None,
             progress: false,
+            naming: false,
         });
         self.send_audio(Gate::Agent, speech(text));
         self.send(&ClientMessage::UtteranceEnd {

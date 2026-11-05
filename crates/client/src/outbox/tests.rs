@@ -123,6 +123,7 @@ fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() 
             utterance: "new".into(),
             answer: None,
             progress: false,
+            naming: false,
         })
         .unwrap();
     let mut agent = audio(5);
@@ -358,6 +359,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         protocol: 1,
         participant: "p".into(),
         name: "n".into(),
+        names: false,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();
@@ -483,6 +485,7 @@ fn begin(utterance: &str) -> ClientMessage {
         utterance: utterance.into(),
         answer: None,
         progress: false,
+        naming: false,
     }
 }
 

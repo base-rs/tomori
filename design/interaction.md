@@ -18,7 +18,7 @@ This describes how the headset presents a space and what its controls do there. 
 |---|---|
 | A | on the right wrist's transcript, expand or collapse a turn, confirm the focused choice, or remove the focused queue entry, or undo that; otherwise choose from the list; it decides nothing elsewhere |
 | B | on the right wrist's transcript, back out of it first (see `wrist-transcript.md`); otherwise close the list, or dismiss the problem; hold for a second to leave |
-| X (hold) | push-to-talk to the agent; while a question Tomori can answer is presented, the answer to its current field (see `spaces.md`) |
+| X (hold) | push-to-talk to the agent; while a question Tomori can answer is presented, the answer to its current field (see `spaces.md`); once after choosing Change your name in the hand menu, the participant's new display name (see `security.md`) |
 | Y | pin the hand menu open at its Space section, whatever the left hand's pose, until Y or B (see `hand-menu.md`); the console's `y` opens or closes the list of the agent's modes, with their descriptions, and the space's speech setting, and a space with neither fetches its state again |
 | Left stick | nothing on the headset and desktop window, where the transcript is on the right wrist; the console pages through text (up and down), moves between messages (left and right), or moves in the list |
 | Right stick | while the right wrist's transcript shows, move its focus (up and down) or between turns (left and right); otherwise page result cards |

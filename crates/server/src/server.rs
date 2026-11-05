@@ -696,7 +696,7 @@ impl Server {
         }
     }
 
-    /// End the connections whose tokens are no longer issued, such as after `tomori-server auth revoke` in another process. Every connection is checked each sweep, not only after the store changes, so that one admitted just before a revocation is ended too. See `design/security.md`.
+    /// End the connections whose tokens are no longer issued, such as after `tomori-server auth revoke` in another process, and call those still issued by the names kept with them. Every connection is checked each sweep, not only after the store changes, so that one admitted just before a revocation is ended too. See `design/security.md`.
     fn revoke_withdrawn(&self) {
         let Some(store) = self.application.door().store() else {
             return;
@@ -715,6 +715,9 @@ impl Server {
         }
         self.hub
             .revoke(|principal| store.entry(principal).is_some());
+        // A name changed elsewhere, such as by `tomori-server auth rename`, is used from now on.
+        self.hub
+            .refresh_names(|principal| store.entry(principal).map(|entry| entry.name));
     }
 
     /// Start requested spaces and drive their sessions until cancelled.

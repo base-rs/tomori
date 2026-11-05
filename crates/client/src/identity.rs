@@ -12,7 +12,7 @@ use std::{
 };
 
 /// The server's limit on a display name, in bytes.
-const NAME_BYTES: usize = 64;
+pub const NAME_BYTES: usize = 64;
 /// Identities stored before protocol 2, in the file `participant`, were sent to other clients and may be recorded in agent sessions, so they are never reused; see `design/security.md`.
 const PARTICIPANT_FILE: &str = "participant-2";
 const SERVER_FILE: &str = "server";

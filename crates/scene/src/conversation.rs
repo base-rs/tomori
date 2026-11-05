@@ -74,6 +74,8 @@ enum Talk {
         heard: String,
         /// Whether the words answer the presented question rather than being queued.
         answering: bool,
+        /// Whether the words say the participant's new display name rather than being queued.
+        naming: bool,
         /// The worker pointed at most recently since X was pressed, including as it was pressed, which is sent with
         /// the words. See `design/interaction.md`.
         pointed: Option<String>,
@@ -86,6 +88,7 @@ enum Talk {
         /// What the server last said it is doing with the words, once it has them all; `None` until then, and
         /// throughout from a server that does not say. See `design/speech.md`.
         received: Option<crate::recording::Received>,
+        naming: bool,
     },
 }
 
@@ -111,6 +114,8 @@ struct TranscriptKey {
 enum Outcome {
     /// Transcribed as `text`, and queued, or applied as an answer.
     Sent { answered: bool, text: String },
+    /// Taken as the participant's new display name.
+    Named(String),
     /// Not sent, with why, which is also the problem shown.
     Failed(String),
 }
@@ -125,6 +130,12 @@ impl Talk {
     fn answering(&self) -> bool {
         match self {
             Talk::Recording { answering, .. } | Talk::Sending { answering, .. } => *answering,
+        }
+    }
+
+    fn naming(&self) -> bool {
+        match self {
+            Talk::Recording { naming, .. } | Talk::Sending { naming, .. } => *naming,
         }
     }
 }
@@ -175,7 +186,12 @@ pub struct Conversation {
     knocks: Vec<tomori_protocol::KnockRequest>,
     /// What became of this visitor's knock on the space, if they knocked.
     knock: Option<tomori_protocol::KnockState>,
+    /// The display name this device suggests to servers.
     name: String,
+    /// The display name the connected server knows this participant by, from its Welcome and the names that follow, or `None` from a server that does not rename, which takes the suggested one. See `design/security.md`.
+    server_name: Option<String>,
+    /// Whether the next press of X says a new display name, as chosen in the hand menu.
+    naming: bool,
     mode: Mode,
     servers: Vec<Choice>,
     server: usize,
@@ -314,6 +330,8 @@ impl Conversation {
             knock: None,
 
             name: name.into(),
+            server_name: None,
+            naming: false,
             mode: Mode::Servers,
             servers: Vec::new(),
             server: 0,
@@ -484,6 +502,9 @@ impl Conversation {
         self.knocks.clear();
         self.knock = None;
         self.jumping = false;
+        // Each server keeps its own name for this participant.
+        self.server_name = None;
+        self.naming = false;
 
         self.spaces.clear();
         self.listed = false;
@@ -585,9 +606,11 @@ impl Conversation {
             roots,
             environments,
             utterance_limit,
+            name,
         } = &state
         {
             log::info!("Connected to {server} as {role:?}");
+            self.server_name = name.clone();
             self.source = Some(*source);
             self.utterance_limit = *utterance_limit;
             self.role = *role;
@@ -696,6 +719,10 @@ impl Conversation {
                 }
             }
             ServerMessage::Space { state } => self.update_space(*state),
+            ServerMessage::Name { name } => {
+                log::info!("Now called {name:?}");
+                self.server_name = Some(name);
+            }
             // The answer to a session list, shown on the session ring after "New session".
             ServerMessage::Sessions { sessions } => {
                 if self.step == LobbyStep::Session {
@@ -760,8 +787,16 @@ impl Conversation {
                 let ours = self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str());
                 if ours && finished {
                     // The queue entry now shows the words. An earlier utterance's failure stays shown.
-                    let answered = self.talk.take().is_some_and(|talk| talk.answering());
-                    self.outcome = Some((Outcome::Sent { answered, text }, Instant::now()));
+                    let talk = self.talk.take();
+                    let outcome = if talk.as_ref().is_some_and(Talk::naming) {
+                        // The words were the name the server now uses.
+                        self.server_name = Some(text.clone());
+                        Outcome::Named(text)
+                    } else {
+                        let answered = talk.is_some_and(|talk| talk.answering());
+                        Outcome::Sent { answered, text }
+                    };
+                    self.outcome = Some((outcome, Instant::now()));
                 } else if ours
                     && let Some(Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) =
                         self.talk.as_mut()
@@ -1103,7 +1138,9 @@ impl Conversation {
     pub fn menu_model(&self) -> crate::hand_menu::Model {
         let space = self.space.as_ref().filter(|_| self.mode == Mode::Space);
         crate::hand_menu::Model {
-            name: self.name.clone(),
+            name: self.display_name().to_owned(),
+            renames: self.renames(),
+            naming: self.naming,
             role: self.role,
             in_space: space.is_some(),
             participants: space
@@ -1178,6 +1215,39 @@ impl Conversation {
             pill: self.pill,
             pointed: None,
             feedback: self.feedback,
+        }
+    }
+
+    /// The display name this participant goes by: the one the server knows them by, or else the one this device suggests.
+    pub fn display_name(&self) -> &str {
+        self.server_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Whether this participant can say a new name here: the server renames, and they take part in the space they are in, since the words are recorded as push-to-talk. See `design/security.md`.
+    fn renames(&self) -> bool {
+        self.server_name.is_some()
+            && self.mode == Mode::Space
+            && self.space.is_some()
+            && self.role.participates()
+    }
+
+    /// Change this participant's display name to `name`, as typed on the console, on a server that renames. The server keeps it with their token, or for a visitor while it keeps them. Says what happened in the notice.
+    pub fn rename(&mut self, name: &str) {
+        let name = name.trim();
+        if self.server_name.is_none()
+            || !matches!(self.state, Some(ConnectionState::Connected { .. }))
+        {
+            self.notice = Some("This server does not change names.".into());
+        } else if tomori_client::identity::name(name).as_deref() != Some(name) {
+            self.notice = Some(format!(
+                "A name must not be empty, start with \"/\" or be longer than {} bytes.",
+                tomori_client::identity::NAME_BYTES
+            ));
+        } else {
+            self.send(ClientMessage::SetName {
+                name: name.to_owned(),
+            });
+            self.notice = Some(format!("Changing your name to {name}."));
         }
     }
 
@@ -1272,6 +1342,8 @@ impl Conversation {
                 self.change_feedback(None, Some(self.feedback.vibration.next()))
             }
             crate::hand_menu::Choice::Mono => self.set_mono(!self.feedback.mono),
+            // The next press of X says the new name; choosing again changes nothing after all.
+            crate::hand_menu::Choice::Rename => self.naming = !self.naming && self.renames(),
         }
     }
 
@@ -2360,13 +2432,14 @@ impl Conversation {
                 heard,
                 pointed,
                 answering,
+                naming,
                 ..
             }) = self.talk.take()
             {
-                // An answer goes to the question presented, so it is about nothing pointed at.
+                // An answer goes to the question presented, and a name to the participant, so either is about nothing pointed at.
                 self.actions.push(Action::EndUtterance(
                     pointed
-                        .filter(|_| !answering)
+                        .filter(|_| !answering && !naming)
                         .map(|worker| tomori_protocol::Pointed::Worker { worker }),
                 ));
                 self.talk = Some(Talk::Sending {
@@ -2374,6 +2447,7 @@ impl Conversation {
                     heard,
                     answering,
                     received: None,
+                    naming,
                 });
             }
             return;
@@ -2399,22 +2473,31 @@ impl Conversation {
         self.outcome = None;
         // A problem shown stays until it is dismissed or replaced; see `design/interaction.md`.
         self.notice = None;
-        let answer = self
-            .answerable()
-            .map(|question| tomori_protocol::AnswerTarget {
-                question: question.id.clone(),
-                field: question.field.clone(),
-            });
+        // Words chosen to say a new name answer nothing; see `design/security.md`.
+        let naming = std::mem::take(&mut self.naming) && self.renames();
+        let answer =
+            self.answerable()
+                .filter(|_| !naming)
+                .map(|question| tomori_protocol::AnswerTarget {
+                    question: question.id.clone(),
+                    field: question.field.clone(),
+                });
         let answering = answer.is_some();
-        self.actions.push(Action::BeginUtterance(
-            Utterance::new(utterance.clone(), self.capture_generation).answering(answer),
-        ));
-        let pointed = self.pointing_at.clone().filter(|id| self.has_worker(id));
+        self.actions.push(Action::BeginUtterance(if naming {
+            Utterance::new(utterance.clone(), self.capture_generation).naming()
+        } else {
+            Utterance::new(utterance.clone(), self.capture_generation).answering(answer)
+        }));
+        let pointed = self
+            .pointing_at
+            .clone()
+            .filter(|id| !naming && self.has_worker(id));
         self.talk = Some(Talk::Recording {
             utterance,
             started: Instant::now(),
             heard: String::new(),
             answering,
+            naming,
             pointed,
         });
     }
@@ -2571,6 +2654,26 @@ impl Conversation {
             Some(Talk::Recording {
                 started,
                 heard,
+                naming: true,
+                ..
+            }) => {
+                return Some(Phase::Naming {
+                    elapsed: now.saturating_duration_since(*started),
+                    heard: heard.clone(),
+                });
+            }
+            Some(Talk::Sending {
+                heard,
+                naming: true,
+                ..
+            }) => {
+                return Some(Phase::Renaming {
+                    heard: heard.clone(),
+                });
+            }
+            Some(Talk::Recording {
+                started,
+                heard,
                 answering,
                 pointed,
                 ..
@@ -2643,6 +2746,11 @@ impl Conversation {
                     answered: *answered,
                     position,
                 })
+            }
+            Some((Outcome::Named(name), at))
+                if now.saturating_duration_since(*at) < crate::recording::OUTCOME =>
+            {
+                Some(Phase::Named { name: name.clone() })
             }
             // Until B dismisses the problem, or another recording starts.
             Some((Outcome::Failed(reason), _)) if self.error.as_ref() == Some(reason) => {
@@ -3355,6 +3463,7 @@ impl Conversation {
             Some(Talk::Recording {
                 heard,
                 answering: false,
+                naming: false,
                 pointed: Some(pointed),
                 ..
             }) if heard.is_empty() && space.workers.iter().any(|worker| &worker.id == pointed) => {
@@ -3364,27 +3473,24 @@ impl Conversation {
                     worker.map_or("", |worker| worker.title.as_str())
                 )))
             }
-            Some(Talk::Recording {
-                heard, answering, ..
-            }) if heard.is_empty() => Some(
-                if *answering {
-                    "MIC ANSWER: listening..."
-                } else {
-                    "MIC AGENT: listening..."
-                }
-                .to_owned(),
-            ),
-            Some(Talk::Recording {
-                heard, answering, ..
-            }) => Some(format!(
-                "{}: {}",
-                if *answering {
+            Some(
+                talk @ Talk::Recording {
+                    heard, answering, ..
+                },
+            ) => {
+                let label = if talk.naming() {
+                    "MIC NAME"
+                } else if *answering {
                     "MIC ANSWER"
                 } else {
                     "MIC AGENT"
-                },
-                tail(heard, COLUMNS - 12)
-            )),
+                };
+                Some(if heard.is_empty() {
+                    format!("{label}: listening...")
+                } else {
+                    format!("{label}: {}", tail(heard, COLUMNS - 12))
+                })
+            }
             Some(Talk::Sending {
                 heard, received, ..
             }) => {
@@ -3605,6 +3711,8 @@ impl Conversation {
             "R-stick choose | A confirm"
         } else if space.approval.is_some() {
             "Sending decision..."
+        } else if self.naming {
+            "Hold X to say your name | hold B leave"
         } else if self.answerable().is_some() {
             "Hold X to answer | hold B leave"
         } else if self.cancelling.is_some() {
@@ -3850,6 +3958,7 @@ mod tests {
             roots,
             environments: sky(),
             utterance_limit: None,
+            name: None,
         })
     }
 
@@ -4530,6 +4639,7 @@ mod tests {
             roots: vec![],
             environments: sky(),
             utterance_limit: None,
+            name: None,
         }));
         conversation.take_actions();
         conversation
@@ -4690,6 +4800,7 @@ mod tests {
             roots: vec![],
             environments: sky(),
             utterance_limit: None,
+            name: None,
         }));
         assert!(sent(&mut conversation).is_empty());
         let view = conversation.arrival().unwrap();
@@ -5157,6 +5268,7 @@ mod tests {
                 },
             ],
             utterance_limit: None,
+            name: None,
         }));
         conversation.take_actions();
         create_in(&mut conversation);
@@ -5254,6 +5366,7 @@ mod tests {
             roots: roots(),
             environments: vec![],
             utterance_limit: None,
+            name: None,
         }));
         conversation.take_actions();
         create_in(&mut conversation);
@@ -5609,7 +5722,7 @@ mod tests {
         assert!(
             matches!(
                 &actions[..],
-                [Action::BeginUtterance(Utterance { answer: Some(target), .. })]
+                [Action::BeginUtterance(Utterance { answer: Some(target), naming: false, .. })]
                     if target.question == "question-1" && target.field == "test"
             ),
             "{actions:?}"
@@ -5638,13 +5751,142 @@ mod tests {
             let mut conversation = joined(change);
             assert!(conversation.text().contains("on the PC"));
             conversation.talk(true);
-            let [Action::BeginUtterance(Utterance { answer: None, .. })] =
-                &conversation.take_actions()[..]
+            let [
+                Action::BeginUtterance(Utterance {
+                    answer: None,
+                    naming: false,
+                    ..
+                }),
+            ] = &conversation.take_actions()[..]
             else {
                 unreachable!("[Action::BeginUtterance")
             };
             assert!(conversation.text().contains("MIC AGENT"));
         }
+    }
+
+    #[test]
+    fn a_new_name_is_said_with_x_once_chosen_and_the_servers_name_is_shown() {
+        use crate::hand_menu::Choice as MenuChoice;
+        use crate::recording::Phase;
+        let mut conversation = joined(|state| {
+            state.voice_answers = true;
+            state.question = Some(question());
+            state.workers = vec![tomori_protocol::Worker {
+                id: "worker-1".into(),
+                parent: None,
+                title: "Run the tests".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        });
+        // An older server says no name, so the suggested one is shown and nothing renames.
+        assert_eq!(conversation.display_name(), "Ada");
+        assert!(!conversation.menu_model().renames);
+        conversation.choose_menu(MenuChoice::Rename);
+        assert!(!conversation.menu_model().naming);
+
+        // A newer server says the name it keeps, which may differ.
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![],
+            roots: vec![],
+            environments: vec![],
+            utterance_limit: None,
+            name: Some("Quest 3".into()),
+        }));
+        conversation.take_actions();
+        assert_eq!(conversation.menu_model().name, "Quest 3");
+        assert!(conversation.menu_model().renames);
+        // Chosen and chosen again, nothing changes after all.
+        conversation.choose_menu(MenuChoice::Rename);
+        conversation.choose_menu(MenuChoice::Rename);
+        assert!(!conversation.menu_model().naming);
+        conversation.choose_menu(MenuChoice::Rename);
+        assert!(conversation.menu_model().naming);
+        assert!(
+            conversation
+                .text()
+                .ends_with("Hold X to say your name | hold B leave")
+        );
+
+        // X then says the name, which answers no question and is about no worker.
+        conversation.point_at(Some("worker-1"));
+        conversation.talk(true);
+        let actions = conversation.take_actions();
+        let [
+            Action::BeginUtterance(Utterance {
+                id: utterance,
+                answer: None,
+                naming: true,
+                ..
+            }),
+        ] = &actions[..]
+        else {
+            unreachable!("{actions:?}")
+        };
+        let utterance = utterance.clone();
+        assert!(!conversation.menu_model().naming, "once only");
+        assert!(conversation.text().contains("MIC NAME: listening..."));
+        let now = Instant::now();
+        assert!(matches!(
+            conversation.recording_phase(now),
+            Some(Phase::Naming { heard, .. }) if heard.is_empty()
+        ));
+        conversation.point_at(Some("worker-1"));
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance: utterance.clone(),
+            text: "Ada Love".into(),
+            finished: false,
+        }));
+        assert!(conversation.text().contains("MIC NAME: Ada Love"));
+        conversation.talk(false);
+        assert_eq!(conversation.take_actions(), [Action::EndUtterance(None)]);
+        assert_eq!(
+            conversation.recording_phase(now),
+            Some(Phase::Renaming {
+                heard: "Ada Love".into()
+            })
+        );
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance,
+            text: "Ada Lovelace".into(),
+            finished: true,
+        }));
+        assert_eq!(conversation.display_name(), "Ada Lovelace");
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Named {
+                name: "Ada Lovelace".into()
+            })
+        );
+        assert_eq!(
+            conversation.recording_phase(Instant::now() + crate::recording::OUTCOME),
+            None
+        );
+
+        // Offline, nothing is sent.
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: tomori_client::Disconnect::Closed,
+            retry_in: Duration::from_secs(1),
+        }));
+        conversation.take_actions();
+        conversation.rename("Ada");
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("This server does not change names.")
+        );
+
+        // A rename from elsewhere is shown too, and the next server starts afresh.
+        conversation.apply(Event::Message(ServerMessage::Name { name: "Ada".into() }));
+        assert_eq!(conversation.menu_model().name, "Ada");
+        conversation.choose_menu(MenuChoice::Rename);
+        conversation.connect(Choice::new("Other", "10.0.0.2:8765", Source::Discovered));
+        assert_eq!(conversation.display_name(), "Ada");
+        assert!(!conversation.menu_model().naming);
     }
 
     #[test]
@@ -6116,6 +6358,7 @@ mod tests {
             roots: vec![],
             environments: sky(),
             utterance_limit: None,
+            name: None,
         }));
         assert!(conversation.text().contains("- Ada queued"));
         // Choosing another server forgets the number until it welcomes you.
@@ -7331,6 +7574,7 @@ mod tests {
             roots: vec![],
             environments: sky(),
             utterance_limit: Some(Duration::from_secs(300)),
+            name: None,
         }));
         assert_eq!(
             conversation.utterance_limit(),
@@ -7824,6 +8068,7 @@ mod tests {
                     },
                 ],
                 utterance_limit: None,
+                name: None,
             }));
             conversation.take_actions();
             conversation
@@ -8893,6 +9138,7 @@ mod tests {
             roots: vec![],
             environments: sky(),
             utterance_limit: Some(Duration::from_secs(10)),
+            name: None,
         }));
         conversation.apply(space(|_| {}));
         conversation.talk(true);

@@ -19,7 +19,7 @@ macro_rules! say {
     };
 }
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), name NAME (change your display name, which the server keeps with your token, on every device using it), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
 
 /// `feedback` shows the Feedback setting, and `feedback sounds LEVEL` or `feedback vibration LEVEL` changes one half of it, as the hand menu's Sound section does. See `design/feedback.md`.
 fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
@@ -158,6 +158,14 @@ fn serve(
                     conversation.change_environment(rest.trim());
                     poll(conversation);
                     // Changing always says what happened.
+                    let notice = conversation.menu_model().notice.unwrap_or_default();
+                    say!(out, "({notice})");
+                    continue;
+                }
+                // Changing this participant's display name; the rest of the line is the name.
+                if let Some(rest) = line.trim_start().strip_prefix("name ") {
+                    conversation.rename(rest);
+                    poll(conversation);
                     let notice = conversation.menu_model().notice.unwrap_or_default();
                     say!(out, "({notice})");
                     continue;
@@ -573,6 +581,30 @@ mod tests {
             out.contains("(This server does not change a space's environment.)"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn name_changes_the_display_name_where_the_server_keeps_names() {
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["name Ada Lovelace"]);
+        assert!(
+            out.contains("(This server does not change names.)"),
+            "{out}"
+        );
+        conversation.apply(tomori_client::Event::Message(
+            tomori_protocol::ServerMessage::Name { name: "Ada".into() },
+        ));
+        let (out, _) = session(&mut conversation, &["name  /clear", "name Ada Lovelace "]);
+        assert!(
+            out.contains("(A name must not be empty, start with \"/\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("(Changing your name to Ada Lovelace.)"),
+            "{out}"
+        );
+        let (out, _) = session(&mut conversation, &["m"]);
+        assert!(out.contains("You: Ada ("), "{out}");
     }
 
     #[test]

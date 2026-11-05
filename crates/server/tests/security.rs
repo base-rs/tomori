@@ -52,6 +52,7 @@ fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
         protocol: tomori_protocol::PROTOCOL_VERSION,
         participant: participant.into(),
         name: participant.into(),
+        names: false,
     });
     client.wait_for(|message| {
         matches!(message, ServerMessage::Welcome { .. }).then(|| message.clone())
@@ -221,6 +222,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        naming: false,
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");
     assert!(ada.next_audio(Duration::from_millis(300)).is_none());

@@ -83,6 +83,7 @@ fn a_space_is_created_with_the_placeholder_backend_in_the_placeholder_environmen
         protocol: PROTOCOL_VERSION,
         participant: "quest".into(),
         name: "Ada".into(),
+        names: false,
     });
     let (backends, environments) = client.wait_for(|message| match message {
         ServerMessage::Welcome {

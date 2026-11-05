@@ -10,7 +10,7 @@ use tomori_protocol::{SpaceState, SpaceSummary};
 /// Longest participant identity in `Hello`, in bytes.
 pub const PARTICIPANT_BYTES: usize = 128;
 
-/// Longest display name in `Hello`, in bytes.
+/// Longest display name, in `Hello`, a rename or a token's name, in bytes.
 pub const NAME_BYTES: usize = 64;
 
 /// Longest space title, in bytes.
@@ -71,6 +71,19 @@ pub fn check(value: &str, limit: usize, what: &str) -> Result<(), String> {
         ))
     } else {
         Ok(())
+    }
+}
+
+/// A display name as the server keeps it, trimmed, or why it is refused: one is required, it must not start with `/`, and it is at most [`NAME_BYTES`]. The same rules apply to a name in `Hello`, a rename and a token's name. See `design/security.md`.
+pub fn name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err("A name is required.".to_owned())
+    } else if name.starts_with('/') {
+        // The name begins each attributed prompt, where a leading slash could read as a command to the agent.
+        Err("A name must not start with \"/\".".to_owned())
+    } else {
+        check(name, NAME_BYTES, "name").map(|()| name)
     }
 }
 
@@ -428,6 +441,17 @@ mod tests {
     fn checks_and_cuts_never_repeat_the_value() {
         let error = check(&"secret".repeat(100), 10, "title").unwrap_err();
         assert!(!error.contains("secret"));
+        assert_eq!(name("  Ada  "), Ok("Ada"));
+        assert_eq!(name(" \t"), Err("A name is required.".to_owned()));
+        assert_eq!(
+            name(" /ada"),
+            Err("A name must not start with \"/\".".to_owned())
+        );
+        let error = name(&"secret".repeat(20)).unwrap_err();
+        assert!(
+            !error.contains("secret") && error.contains("name"),
+            "{error}"
+        );
         let cut = truncate(&"é".repeat(1000), ERROR_BYTES);
         assert!(cut.len() <= ERROR_BYTES && cut.ends_with(TRUNCATED));
     }

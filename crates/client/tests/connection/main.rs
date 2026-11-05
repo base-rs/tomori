@@ -48,8 +48,15 @@ fn wait_connected(client: &Client) -> u32 {
     match wait_for(client, |event| {
         matches!(event, Event::State(ConnectionState::Connected { .. }))
     }) {
-        Event::State(ConnectionState::Connected { source, server, .. }) => {
+        Event::State(ConnectionState::Connected {
+            source,
+            server,
+            name,
+            ..
+        }) => {
             assert_eq!(server, "mini");
+            // The name the server knows this participant by, rather than the one it suggested.
+            assert_eq!(name.as_deref(), Some("Ada Lovelace"));
             source
         }
         _ => unreachable!(),
@@ -146,7 +153,7 @@ fn streams_control_and_audio_in_both_directions_at_once() {
     // Hello always comes first.
     assert!(matches!(
         server.received(1).first(),
-        Some(Received::Message(ClientMessage::Hello { participant, name, .. })) if participant == "quest-1" && name == "Ada"
+        Some(Received::Message(ClientMessage::Hello { participant, name, names, .. })) if participant == "quest-1" && name == "Ada" && *names
     ));
 }
 

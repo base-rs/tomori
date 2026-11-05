@@ -306,6 +306,8 @@ async fn exchange(
             protocol: PROTOCOL_VERSION,
             participant: options.participant.clone(),
             name: options.name.clone(),
+            // Every client built with this crate reads `Name`, which it hands on as any other message.
+            names: true,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
@@ -432,6 +434,7 @@ fn welcome(
             roots,
             environments,
             utterance_limit,
+            name,
         } => {
             if protocol != PROTOCOL_VERSION {
                 return Err(Disconnect::Protocol(format!(
@@ -447,6 +450,7 @@ fn welcome(
                 roots,
                 environments,
                 utterance_limit: utterance_limit.map(|seconds| Duration::from_secs(seconds.into())),
+                name,
             });
             Ok(source)
         }

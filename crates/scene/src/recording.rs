@@ -72,6 +72,12 @@ pub enum Phase {
     },
     /// The words were not sent, with why. Shown until X is pressed again or B dismisses the problem.
     Failed { reason: String },
+    /// X is held to say the participant's new display name, as chosen in the hand menu. See `design/security.md`.
+    Naming { elapsed: Duration, heard: String },
+    /// X was released; the server is taking the words as the new name.
+    Renaming { heard: String },
+    /// The server now calls the participant `name`.
+    Named { name: String },
 }
 
 /// The time against the limit, as "1:42 / 5:00", or alone without a limit.
@@ -263,6 +269,45 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             rows.extend(lines.into_iter().map(Row::new));
             rows.push(Row::text("B dismisses", Style::plain(DIM), COLUMNS));
             canvas.border = Some(RED);
+        }
+        Phase::Naming { elapsed, heard } => {
+            let dot = [AMBER[0], AMBER[1], AMBER[2], 0.45 + 0.55 * pulse];
+            let rows = &mut canvas.rows;
+            rows.push(Row::new(cut(
+                &[
+                    Span::new("● ", Style::plain(dot)),
+                    Span::new("NAME ", Style::bold(AMBER)),
+                    Span::new(clock(*elapsed, None), Style::plain(AMBER)),
+                ],
+                COLUMNS,
+            )));
+            rows.push(Row::text("Say your new name", Style::plain(DIM), COLUMNS));
+            if heard.trim().is_empty() {
+                rows.push(Row::text("Listening…", Style::plain(DIM), COLUMNS));
+            } else {
+                rows.extend(tail(heard, 2, Style::plain(TEXT)));
+            }
+            rows.push(Row::text(
+                "Release X to rename",
+                Style::plain(TEXT),
+                COLUMNS,
+            ));
+        }
+        Phase::Renaming { heard } => {
+            let rows = &mut canvas.rows;
+            rows.push(Row::text("Renaming…", Style::bold(TEXT), COLUMNS));
+            if !heard.trim().is_empty() {
+                rows.extend(tail(heard, 2, Style::plain(DIM)));
+            }
+        }
+        Phase::Named { name } => {
+            canvas.rows.push(Row::new(cut(
+                &[
+                    Span::new("✓ You are ", Style::bold(GREEN)),
+                    Span::new(name.as_str(), Style::bold(TEXT)),
+                ],
+                COLUMNS,
+            )));
         }
     }
     canvas
@@ -598,6 +643,40 @@ mod tests {
     }
 
     #[test]
+    fn saying_a_new_name_says_so_from_holding_x_to_the_name_taken() {
+        let naming = |heard: &str| {
+            text(&canvas(
+                &Phase::Naming {
+                    elapsed: Duration::from_secs(2),
+                    heard: heard.into(),
+                },
+                Some(Duration::from_secs(300)),
+                0.0,
+            ))
+        };
+        let quiet = naming("");
+        assert!(quiet.starts_with("● NAME 0:02"), "{quiet}");
+        assert!(quiet.contains("Say your new name") && quiet.contains("Listening…"));
+        assert!(quiet.ends_with("Release X to rename"), "{quiet}");
+        assert!(naming("Ada Lovelace").contains("\"Ada Lovelace\""));
+        let renaming = |heard: &str| {
+            text(&canvas(
+                &Phase::Renaming {
+                    heard: heard.into(),
+                },
+                None,
+                0.0,
+            ))
+        };
+        assert_eq!(renaming(" "), "Renaming…");
+        assert!(renaming("Ada").contains("\"Ada\""));
+        assert_eq!(
+            text(&canvas(&Phase::Named { name: "Ada".into() }, None, 0.0)),
+            "✓ You are Ada"
+        );
+    }
+
+    #[test]
     fn every_state_fits_the_indicator() {
         let limit = Some(Duration::from_secs(300));
         for phase in [
@@ -605,6 +684,13 @@ mod tests {
             recording(299, &"word ".repeat(80)),
             Phase::Failed {
                 reason: "x".repeat(500),
+            },
+            Phase::Naming {
+                elapsed: Duration::from_secs(4),
+                heard: "word ".repeat(80),
+            },
+            Phase::Named {
+                name: "W".repeat(64),
             },
         ] {
             let canvas = canvas(&phase, limit, 0.5);

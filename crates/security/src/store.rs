@@ -129,6 +129,18 @@ impl TokenStore {
         Ok(found)
     }
 
+    /// Rename the token with identifier `id`, and so the display name of the principal it identifies, to `name`. Returns false if there is none. The caller checks that the name is one it shows. See `design/security.md`.
+    pub fn rename(&self, id: &str, name: &str) -> Result<bool, StoreError> {
+        let mut found = false;
+        self.change(|entries| {
+            for entry in entries.iter_mut().filter(|entry| entry.id == id) {
+                entry.name = name.to_owned();
+                found = true;
+            }
+        })?;
+        Ok(found)
+    }
+
     /// The issued tokens, oldest first.
     pub fn entries(&self) -> Vec<Entry> {
         self.read_state().entries.clone()
@@ -306,6 +318,28 @@ mod tests {
     }
 
     #[test]
+    fn a_store_written_before_names_could_change_keeps_its_names() {
+        // As a server wrote it before renaming: each token's name, such as the device's that paired, is its holder's display name.
+        let directory = directory("earlier");
+        create_private_directory(&directory).unwrap();
+        let token = token::generate();
+        let earlier = serde_json::json!({"tokens": [{
+            "id": "0a1b2c3d4e5f", "name": "Quest 3", "grant": {"role": "owner"}, "issued": 1_790_000_000u64,
+            "hash": token::hash(&token),
+        }]});
+        fs::write(directory.join(TOKENS_FILE), earlier.to_string()).unwrap();
+        let store = TokenStore::open(&directory).unwrap();
+        assert_eq!(
+            store.authenticate(&presented(&token)),
+            Verdict::Authenticated(Principal {
+                id: "token:0a1b2c3d4e5f".into(),
+                name: "Quest 3".into(),
+            })
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn other_tokens_pass_to_the_next_authenticator() {
         let directory = directory("pass");
         let store = TokenStore::open(&directory).unwrap();
@@ -341,6 +375,18 @@ mod tests {
         assert_eq!(
             server.authenticate(&presented(&token)),
             Verdict::Authenticated(entry.principal())
+        );
+
+        // A rename names the principal from then on, here and, once it reloads, in the server.
+        assert!(command.rename(&entry.id, "Robert").unwrap());
+        assert!(!command.rename("missing", "Nobody").unwrap());
+        assert!(server.reload().unwrap());
+        let renamed = server.entry(&entry.principal().id).unwrap();
+        assert_eq!(renamed.name, "Robert");
+        assert_eq!(renamed.principal().id, entry.principal().id);
+        assert_eq!(
+            server.authenticate(&presented(&token)),
+            Verdict::Authenticated(renamed.principal())
         );
 
         assert!(command.revoke(&entry.id).unwrap());
@@ -440,6 +486,9 @@ mod tests {
             assert_eq!(error.to_string(), message);
             unchanged();
             let error = store.revoke(&kept.id).err().unwrap();
+            assert_eq!(error.to_string(), message);
+            unchanged();
+            let error = store.rename(&kept.id, "lost").err().unwrap();
             assert_eq!(error.to_string(), message);
             unchanged();
         }
