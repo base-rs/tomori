@@ -128,6 +128,11 @@ mod tests {
     }
 
     #[test]
+    fn the_default_is_the_grid_that_older_headset_builds_drew() {
+        assert_eq!(Environment::default(), Environment::MINIMAL);
+    }
+
+    #[test]
     fn selection_roundtrips_and_rejects_unknown_presets() {
         for value in Environment::BUILT_IN {
             assert_eq!(
