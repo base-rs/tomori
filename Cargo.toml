@@ -3,7 +3,7 @@ members = ["crates/environment-sky", "crates/protocol", "crates/security", "crat
 resolver = "3"
 
 [workspace.package]
-# One version for every crate: they are released together, with one `releases.md` and one tag. `cargo bake cargo:version:*` updates it and the versions of the crates' dependencies on each other.
+# One version for every crate: they are released together, with one `releases.md` and one tag. `cargo bake cargo:release:*` updates it and the versions of the crates' dependencies on each other.
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
