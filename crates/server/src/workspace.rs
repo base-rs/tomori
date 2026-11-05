@@ -7,8 +7,8 @@
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// The only reply a client receives when a directory is refused, whatever the reason.
@@ -197,14 +197,15 @@ impl WorkspaceRoots {
         let (sender, receiver) = async_channel::bounded(1);
         let roots = self.clone();
         let requested = directory.to_owned();
-        // As the server's other threads, a thread the system cannot start is not survived.
-        std::thread::Builder::new()
-            .name("tomori-directory".to_owned())
-            .spawn(move || {
-                let _place = place;
-                let _ = sender.try_send(roots.resolve_str(&requested));
-            })
-            .expect("spawn a directory check");
+        // If the thread cannot start, the closure and the place it holds are dropped, and this request is refused.
+        crate::system::spawn("tomori-directory", move || {
+            let _place = place;
+            let _ = sender.try_send(roots.resolve_str(&requested));
+        })
+        .map_err(|error| {
+            log::warn!("Refused directory {directory:?}: could not start a check: {error}.");
+            Unavailable
+        })?;
         Ok(receiver)
     }
 }
@@ -253,7 +254,7 @@ impl Drop for ResolvingPlace {
 /// Counts the spaces whose sessions are starting or running, so that no more than the limit run at once.
 #[derive(Debug)]
 pub struct SpaceSlots {
-    running: AtomicUsize,
+    running: Mutex<usize>,
     limit: AtomicUsize,
 }
 
@@ -266,7 +267,7 @@ pub struct SpaceSlot {
 impl SpaceSlots {
     pub fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self {
-            running: AtomicUsize::new(0),
+            running: Mutex::new(0),
             limit: AtomicUsize::new(limit),
         })
     }
@@ -281,7 +282,7 @@ impl SpaceSlots {
 
     /// Whether the limit is reached now, so that a request can be refused before its directory is checked. Only [`acquire`](Self::acquire) takes a place.
     pub fn is_full(&self) -> bool {
-        self.running.load(Ordering::Acquire) >= self.limit()
+        *self.count() >= self.limit()
     }
 
     /// The error a request beyond the limit receives.
@@ -294,22 +295,31 @@ impl SpaceSlots {
 
     /// Take a place, or `None` if the limit is reached.
     pub fn acquire(self: &Arc<Self>) -> Option<SpaceSlot> {
-        // The place is taken first, and given back as it drops if the limit was reached, so concurrent requests cannot pass the limit together.
-        let slot = SpaceSlot {
-            slots: self.clone(),
-        };
-        (self.running.fetch_add(1, Ordering::AcqRel) < self.limit()).then_some(slot)
+        let limit = self.limit();
+        // A place is taken only below the limit, under the lock, so concurrent requests cannot pass the limit together, and a refused one is never counted as running.
+        let mut running = self.count();
+        (*running < limit).then(|| {
+            *running += 1;
+            SpaceSlot {
+                slots: self.clone(),
+            }
+        })
+    }
+
+    /// The spaces running, locked. Nothing panics while it is held.
+    fn count(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     #[cfg(test)]
     fn running(&self) -> usize {
-        self.running.load(Ordering::Acquire)
+        *self.count()
     }
 }
 
 impl Drop for SpaceSlot {
     fn drop(&mut self) {
-        self.slots.running.fetch_sub(1, Ordering::AcqRel);
+        *self.slots.count() -= 1;
     }
 }
 
@@ -535,6 +545,28 @@ mod tests {
         assert_eq!(missing.recv_blocking().unwrap(), Err(Unavailable));
         // Outside the roots as written: refused without starting a check.
         assert!(roots.resolve_in_background("/", &resolving).is_err());
+    }
+
+    #[test]
+    fn a_check_whose_thread_cannot_start_refuses_the_directory_and_gives_back_its_place() {
+        let scratch = Scratch::new("unstarted");
+        let root = scratch.directory("root");
+        let roots = WorkspaceRoots::new([&root]).unwrap();
+        let resolving = Arc::new(Resolving::default());
+        crate::system::refuse("tomori-directory");
+        assert_eq!(
+            roots.resolve_in_background(text(&root), &resolving).err(),
+            Some(Unavailable)
+        );
+        assert_eq!(resolving.0.load(Ordering::Acquire), 0);
+        // The next request starts its check.
+        let resolved = roots
+            .resolve_in_background(text(&root), &resolving)
+            .unwrap();
+        assert_eq!(
+            resolved.recv_blocking().unwrap(),
+            Ok(text(&root).to_owned())
+        );
     }
 
     #[test]
