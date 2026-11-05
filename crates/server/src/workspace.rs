@@ -434,6 +434,21 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_root_given_again_through_a_symbolic_link_is_listed_once() {
+        let scratch = Scratch::new("repeated-root");
+        let root = scratch.directory("root");
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let roots = WorkspaceRoots::new([&root, &link]).unwrap();
+        assert_eq!(roots.roots(), std::slice::from_ref(&root));
+        // Both are still matched as written.
+        for given in [&root, &link] {
+            assert_eq!(roots.resolve(text(given)), Ok(root.clone()), "{given:?}");
+        }
+    }
+
     #[test]
     fn a_missing_path_is_refused_like_a_forbidden_one() {
         let scratch = Scratch::new("missing");
