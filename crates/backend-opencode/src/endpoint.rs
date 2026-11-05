@@ -208,16 +208,16 @@ pub fn resolve_from(
         }
     }
     if let Some(path) = service_file {
-        if let Some(resolved) = read_service_file_at(path) {
-            return (resolved, Source::ServiceFile);
-        }
         // A file that exists but cannot be read may be mid-rewrite by a
-        // restarting service; read it once more before going on.
-        if path.exists() {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        // restarting service; it is read once more before going on.
+        for again in [false, true] {
             if let Some(resolved) = read_service_file_at(path) {
                 return (resolved, Source::ServiceFile);
             }
+            if again || !path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
     (
