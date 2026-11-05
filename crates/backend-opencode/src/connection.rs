@@ -6065,6 +6065,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        // The client starts once the server has looked for its request and
+        // found none, so that the server is seen waiting however loaded the
+        // machine is.
+        let (looked, looking) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             for attempt in 0..5 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -6078,6 +6082,7 @@ mod tests {
                                 "accept: {error}"
                             );
                             assert!(std::time::Instant::now() < deadline, "no refresh request");
+                            let _ = looked.send(());
                             std::thread::sleep(Duration::from_millis(5));
                         }
                     }
@@ -6109,6 +6114,7 @@ mod tests {
                 write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
+        looking.recv().unwrap();
         block_on(async {
             let scheduler = NativeScheduler::with_options(NativeOptions {
                 workers: 1,
@@ -6171,6 +6177,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
+        // The client starts once the server has looked for its request and
+        // found none, so that the server is seen waiting however loaded the
+        // machine is.
+        let (looked, looking) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             for attempt in 0..2 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -6184,6 +6194,7 @@ mod tests {
                                 "accept: {error}"
                             );
                             assert!(std::time::Instant::now() < deadline, "no page request");
+                            let _ = looked.send(());
                             std::thread::sleep(Duration::from_millis(5));
                         }
                     }
@@ -6217,6 +6228,7 @@ mod tests {
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
+        looking.recv().unwrap();
         block_on(async {
             let scheduler = NativeScheduler::with_options(NativeOptions {
                 workers: 1,
@@ -9462,17 +9474,19 @@ mod tests {
 
     /// The answer on `answer`, failing the test rather than waiting forever.
     fn answered<T>(answer: &async_channel::Receiver<T>) -> T {
+        // Waits at least once, however soon the answer comes, so that how the
+        // race went changes no coverage.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(value) = answer.try_recv() {
-                return value;
-            }
+        let mut value = None;
+        while value.is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "no answer within 5 seconds"
             );
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(1));
+            value = answer.try_recv().ok();
         }
+        value.unwrap()
     }
 
     /// Send a prompt to `id` on another thread.
@@ -9715,6 +9729,17 @@ mod tests {
             let (result, _) = prompt.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(result.is_err());
         }
+        // The waiting listing was refused as the connection stopped, so a
+        // command sent now, as a session may send one until it is dropped, is
+        // answered at once there, whichever way the connection noticed the
+        // shutdown.
+        let (reply, late) = async_channel::bounded(1);
+        block_on(commands.tx().send(Command::Sessions {
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap();
+        assert_eq!(answered(&late).unwrap_err().message, SHUTTING_DOWN);
         drop(commands);
         join_within(connection, Duration::from_secs(5));
         shared.update(|state| state.stopping = true);
