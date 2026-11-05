@@ -1,10 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The controllers' vibration: what [`crate::feedback::Feedback`] hands out each frame, applied through OpenXR's haptic output action, one action, `haptic`, for both hands, which `xr.rs` creates and calls. See `design/feedback.md`.
+//! The controllers' vibration: what [`tomori_client::feedback::Feedback`] hands out each frame, applied through OpenXR's haptic output action, one action, `haptic`, for both hands, which `xr.rs` creates and calls. See `design/feedback.md`.
 
-use crate::feedback::{Hand, Haptic};
 use std::time::Duration;
+use tomori_client::feedback::{Hand, Haptic};
 
 /// A controller vibration output, as OpenXR's haptic action provides it.
 pub trait Vibrator {

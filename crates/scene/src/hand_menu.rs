@@ -12,10 +12,10 @@ use tomori_protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockStat
 
 use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
-use crate::feedback::Hand as Side;
 use crate::hands::Hand;
 use crate::panel::{Area, Plane, Rect};
 use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines};
+use tomori_client::feedback::Hand as Side;
 
 /// A palm shows what its hand holds once it has faced within this angle of straight up for [`HOLD`], whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up. See `design/hand-menu.md`.
 pub const SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
@@ -265,7 +265,7 @@ pub struct Model {
     /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
     pub pointed: Option<MenuKey>,
     /// This device's Feedback setting.
-    pub feedback: crate::feedback::Settings,
+    pub feedback: tomori_client::feedback::Settings,
 }
 
 /// The joined space, as the menu shows it.
@@ -1168,7 +1168,7 @@ mod tests {
             role: ConnectionRole::Owner,
             pill: true,
             space: Some(space),
-            feedback: crate::feedback::Settings {
+            feedback: tomori_client::feedback::Settings {
                 mono: true,
                 ..Default::default()
             },
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn the_sound_section_steps_the_feedback_setting_in_and_out_of_a_space() {
-        use crate::feedback::{Level, Settings};
+        use tomori_client::feedback::{Level, Settings};
         let mut model = Model {
             feedback: Settings {
                 sounds: Level::Reduced,

@@ -9,7 +9,7 @@ The crates share one version and are released together, so depend on the same ve
 | Crate | Purpose |
 | --- | --- |
 | `tomori-protocol` | The wire protocol: control messages, audio frames and the framing of a connection. Every other crate builds on it. See [Using the Tomori Protocol](protocol.md). |
-| `tomori-client` | A client's connection to a server, with reconnection, keepalive, microphone audio and playback. Start here to build a client. |
+| `tomori-client` | A client's connection to a server, with reconnection, keepalive, microphone audio and playback, and the `Connection` that carries out a client's session with a server as Tomori's own clients do. Start here to build a client. |
 | `tomori-discovery` | Bonjour advertising and browsing of servers (`_tomori._tcp`). `tomori-client` re-exports it as `tomori_client::discovery`. |
 | `tomori-security` | Tokens, pairing codes and certificate pinning, shared by clients and the server. The `issue` feature adds the server's token store and certificate. |
 | `tomori-backend` | The backend-neutral interface between the server and coding agents: implement `Backend` and `Session` to drive another agent. |

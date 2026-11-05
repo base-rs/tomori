@@ -421,9 +421,9 @@ mod tests {
     use super::*;
 
     use crate::controller;
-    use crate::feedback::Hand as Side;
     use crate::hand_menu::{HOLD, head_centre, head_turned};
     use glam::Quat;
+    use tomori_client::feedback::Hand as Side;
 
     /// Where the right controller is held, low in front and to the right; the head turns about [`NECK`].
     const GRIP: Vec3 = Vec3::new(0.2, 1.1, -0.35);

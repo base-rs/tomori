@@ -9,6 +9,7 @@ use crate::{
     graphics::Renderer,
     scene::desktop::{Button, Desktop, Direction, Key, KeyResult, TITLE},
     scene_graphics::{self, Panels},
+    spatial_audio,
     window::{Contents, Flow, Gpu, Input, Settings, Surface, Wake},
 };
 use anyhow::Result;
@@ -163,9 +164,14 @@ impl Participant {
             &drawn.frame,
         );
         // Every source is heard from where it is, relative to this participant's head; see `design/spatial-audio.md`.
-        connection.listen(drawn.frame.listener, drawn.frame.agent, conversation);
+        spatial_audio::listen(
+            connection,
+            drawn.frame.listener,
+            drawn.frame.agent,
+            conversation,
+        );
         if let Some(presence) = drawn.frame.presence {
-            connection.send_presence(presence.head, presence.left, presence.right, presence.hands);
+            presence.send(connection);
         }
         drawn.view_projection
     }

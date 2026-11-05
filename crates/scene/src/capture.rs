@@ -1,75 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The platform microphone, opened for live audio or push-to-talk. See `design/live-audio.md`.
+//! Helpers for the platform microphone's device adapters. See `design/live-audio.md`.
 //!
-//! Capture hands mono samples to a callback on its own thread; [`crate::connection::Connection`] passes them to the client's [`tomori_client::Microphone`], which frames and sends them.
-//!
-//! # Device adapters
-//!
-//! Each client's microphone is a [`Capture`], which its own crate implements over the platform's audio interface. Two helpers keep those adapters thin, so that their logic is tested here:
+//! Each client's microphone is a [`tomori_client::capture::Capture`], which its own crate implements over the platform's audio interface. Two helpers keep those adapters thin, so that their logic is tested here:
 //!
 //! - a device that pushes interleaved frames to a callback, such as cpal's, passes them through [`downmix`];
 //! - a device that is read from, such as AAudio's, implements [`InputStream`] and runs [`run_capture`] on its capture thread, which decides what is delivered at the push-to-talk boundary and when a lost connection stops live capture.
 
-/// Receives captured mono samples in the range -1 to 1, on the capture thread.
-pub type Samples = Box<dyn FnMut(&[f32]) + Send>;
-
-/// Told, from any thread, why capture stopped early.
-pub type Failed = Box<dyn Fn(String) + Send + Sync>;
-
-/// Whether the connection on which live capture started is still usable.
-pub type Active = Box<dyn Fn() -> bool + Send>;
-
-/// Capture in progress, stopped when dropped. Samples already delivered are not lost.
-pub struct Recording {
-    pub sample_rate: u32,
-    _stream: Box<dyn std::any::Any>,
-}
-
-impl Recording {
-    pub fn new(sample_rate: u32, stream: impl std::any::Any) -> Self {
-        Self {
-            sample_rate,
-            _stream: Box::new(stream),
-        }
-    }
-}
-
-/// A source of microphone audio.
-pub trait Capture {
-    /// Whether the app may record, asking the participant if it has not yet. A request is answered later, so `Ok(false)` means ask again after they respond.
-    fn permit(&mut self) -> Result<bool, String> {
-        Ok(true)
-    }
-
-    /// Ask for permission ahead of the first recording, without using up the
-    /// request [`Self::permit`] makes, so that a dismissed request is asked
-    /// again when the participant first uses the microphone.
-    fn request(&mut self) -> Result<bool, String> {
-        Ok(true)
-    }
-
-    /// Start capturing at a rate between 8 and 48 kHz, which the protocol carries.
-    fn open(&mut self, samples: Samples, failed: Failed) -> Result<Recording, String>;
-
-    /// Capture for an open microphone, stopping when its connection is lost.
-    /// Platforms must opt in with a capture implementation that can stop on
-    /// the capture thread, even if the application thread is stalled.
-    fn open_live(
-        &mut self,
-        _samples: Samples,
-        _failed: Failed,
-        _active: Active,
-    ) -> Result<Recording, String> {
-        Err("Live microphone is not available on this platform.".into())
-    }
-
-    /// The audio session the open live microphone captures in, where the platform allocates one, so that the speaker can play in the same session while it is open. See `design/spatial-audio.md`.
-    fn live_session(&self) -> Option<i32> {
-        None
-    }
-}
+use tomori_client::capture::Active;
 
 /// Average interleaved channels into mono, for a device adapter whose device delivers `channels` samples per frame. `output` is cleared first, and receives one sample per whole frame; a trailing partial frame is dropped.
 pub fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
@@ -93,7 +32,7 @@ pub trait InputStream {
     /// Start the device capturing. Nothing is read before this succeeds.
     fn start(&mut self) -> Result<(), String>;
     /// Read up to `buffer.len()` mono samples, in the range -1 to 1 at the
-    /// [`Recording`]'s rate, into the start of `buffer`, and return how many,
+    /// [`tomori_client::capture::Recording`]'s rate, into the start of `buffer`, and return how many,
     /// waiting at most `timeout_ns`; zero returns only what the device has
     /// already captured, without waiting, and returns 0 once that is all read.
     fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String>;
@@ -247,9 +186,7 @@ pub fn protocol_rate(rate: u32) -> u32 {
 mod tests {
     #[cfg(not(target_os = "android"))]
     use super::protocol_rate;
-    use super::{
-        Active, CONNECTION_LOST, Capture, InputStream, MAX_DRAIN_READS, downmix, run_capture,
-    };
+    use super::{Active, CONNECTION_LOST, InputStream, MAX_DRAIN_READS, downmix, run_capture};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -627,22 +564,5 @@ mod tests {
         assert_eq!(mono, [0.5, 0.5, -0.75]);
         downmix(&[0.25, 0.75], 1, &mut mono);
         assert_eq!(mono, [0.25, 0.75]);
-    }
-
-    #[test]
-    fn platforms_without_independently_stoppable_live_capture_refuse_it() {
-        // A capture that opens only for push-to-talk, as the test microphone does.
-        let samples = |_: &[f32]| {};
-        let failed = |_: String| {};
-        let active = || true;
-        // What a capture that opened would call.
-        samples(&[]);
-        failed(String::new());
-        assert!(active());
-        let error = crate::test_support::Silent
-            .open_live(Box::new(samples), Box::new(failed), Box::new(active))
-            .map(drop)
-            .unwrap_err();
-        assert!(error.contains("not available"));
     }
 }

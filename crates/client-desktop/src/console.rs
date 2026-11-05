@@ -614,7 +614,7 @@ mod tests {
             sent.iter()
                 .filter(|action| matches!(
                     action,
-                    crate::conversation::Action::Send(
+                    tomori_client::connection::Action::Send(
                         tomori_protocol::ClientMessage::DecideKnock { .. }
                     )
                 ))
@@ -642,7 +642,7 @@ mod tests {
         assert_ne!(conversation.menu_model().muted, muted, "mute");
         let sent = conversation.take_actions();
         assert!(
-            sent.contains(&crate::conversation::Action::SetAgentMuted(true)),
+            sent.contains(&tomori_client::connection::Action::SetAgentMuted(true)),
             "{sent:?}"
         );
         // X starts recording, and x again sends it.

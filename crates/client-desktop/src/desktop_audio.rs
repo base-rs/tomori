@@ -3,16 +3,16 @@
 
 //! The desktop's default microphone and speaker, opened through cpal. It needs audio hardware, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
 //!
-//! Only the device calls belong here: what each stream does with its samples and its errors is in [`crate::cpal_audio`], [`crate::capture`] and [`crate::playback`], where it is tested. See `design/live-audio.md`.
+//! Only the device calls belong here: what each stream does with its samples and its errors is in [`crate::cpal_audio`], [`crate::capture`] and [`tomori_scene::playback`], where it is tested. See `design/live-audio.md`.
 
-use crate::{
-    capture::{self, Capture, Failed, Recording, Samples},
-    cpal_audio,
-    playback::{Output, Playback, Route, Shared},
-};
+use crate::{capture, cpal_audio};
 use cpal::{
     FromSample, SampleFormat, SizedSample, StreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
+};
+use tomori_client::{
+    capture::{Capture, Failed, Recording, Samples},
+    speaker::{Output, Playback, Route, Shared},
 };
 
 /// The default input device.

@@ -572,8 +572,8 @@ mod tests {
     use crate::{
         arrival::{Item, Ring, Step, View},
         pointing::{Pointer, Ray},
-        server_choice::Source,
     };
+    use tomori_client::server_choice::Source;
 
     const FRAME: f32 = 1.0 / 72.0;
 

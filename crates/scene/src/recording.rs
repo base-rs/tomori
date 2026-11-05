@@ -31,9 +31,8 @@ pub const GROW: f32 = 0.12;
 pub const OUTCOME: Duration = Duration::from_millis(1500);
 /// How long the words heard may stay empty before the indicator says they come when X is released, as from a recognizer that streams none.
 pub const QUIET: Duration = Duration::from_secs(3);
-/// How far from the limit the time turns amber, and then red.
-pub const WARNING: Duration = Duration::from_secs(30);
-pub const CRITICAL: Duration = Duration::from_secs(10);
+/// How far from the limit the time turns amber, and then red, as its nearing the limit is felt.
+pub use tomori_client::feedback::{CRITICAL, WARNING};
 
 const RED: [f32; 4] = [1.0, 0.25, 0.2, 1.0];
 const AMBER: [f32; 4] = [1.0, 0.65, 0.12, 1.0];

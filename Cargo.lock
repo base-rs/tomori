@@ -3522,10 +3522,14 @@ dependencies = [
  "base-scheduler",
  "base-scheduler-native",
  "futures-lite",
+ "log",
  "rustls",
+ "serde",
+ "serde_json",
  "tomori-discovery",
  "tomori-protocol",
  "tomori-security",
+ "tomori-server",
 ]
 
 [[package]]
@@ -3662,6 +3666,7 @@ dependencies = [
  "naga",
  "pollster",
  "serde_json",
+ "tomori-client",
  "tomori-environment-sky",
  "tomori-protocol",
  "tomori-scene",
@@ -3679,9 +3684,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "tomori-backend",
  "tomori-client",
- "tomori-discovery",
  "tomori-protocol",
  "tomori-security",
  "tomori-server",

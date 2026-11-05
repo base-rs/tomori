@@ -18,10 +18,11 @@ mod test_support;
 pub mod ui_panel;
 pub mod workspace_graphics;
 
-// The platform-neutral modules, from `tomori-scene`, under the paths this crate's own modules use.
+// The platform-neutral modules, from `tomori-client` and `tomori-scene`, under the paths this crate's own modules use.
+use tomori_client::server_choice;
 use tomori_scene::{
     arrival, arrival_motion, controller_ui, delegation, environment, hand_menu, hands, interaction,
-    panel, scene, server_choice, swarm, ui_text,
+    panel, scene, swarm, ui_text,
 };
 
 /// The licence of the bundled controller models, which [`controller_graphics`] draws.

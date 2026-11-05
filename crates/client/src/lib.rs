@@ -3,10 +3,18 @@
 
 //! The Tomori client: one long-lived duplex connection to the server, with automatic reconnection, plus real-time playback of received audio.
 //!
-//! See `design/server.md` and `design/live-audio.md`.
+//! [`Client`] is the connection itself. [`connection::Connection`] builds a whole client's connection on it for a [`connection::Session`], the client's conversation with the server: it chooses the server, keeps its certificate and token for this device, records from the microphone, plays through the speaker and cues what happens.
+//!
+//! See `design/server.md`, `design/live-audio.md` and `design/clients.md`.
 
+pub mod capture;
+pub mod connection;
 pub mod engagement;
+pub mod feedback;
+pub mod identity;
 pub mod playback;
+pub mod server_choice;
+pub mod speaker;
 
 /// Finding servers on the local network with Bonjour: [`tomori_discovery::browse`] yields servers to list, and [`tomori_discovery::Server::address`] gives the address for [`Options::new`]. On Android, hold a Wi-Fi multicast lock while browsing; see the [`tomori_discovery`] crate documentation.
 pub use tomori_discovery as discovery;
@@ -21,6 +29,8 @@ mod outbox;
 mod resolve;
 mod session;
 mod system;
+#[cfg(test)]
+mod test_support;
 
 pub use backoff::Backoff;
 pub use client::{Client, Sender};

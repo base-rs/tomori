@@ -3,18 +3,22 @@
 
 //! The panel's conversation with a Tomori server: choosing a server, the lobby, then the joined space.
 //!
-//! This is pure state. It applies [`tomori_client::Event`]s and controller input, and queues [`Action`]s for [`crate::connection::Connection`] to carry out, so nothing here touches the network.
+//! This is pure state. It applies [`tomori_client::Event`]s and controller input, and queues [`Action`]s for a [`tomori_client::connection::Connection`] to carry out, as its [`Session`], so nothing here touches the network.
 use crate::{
     arrival,
     caption::{COLUMNS, ROWS, wrapped_lines},
     environment::Environment,
     interaction::SessionActivity,
-    server_choice::{self, Choice},
 };
 #[cfg(any(not(target_os = "android"), test))]
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tomori_client::{ConnectionState, Event, UtteranceFailure};
+use tomori_client::{
+    ConnectionState, Event, UtteranceFailure,
+    connection::{Action, Report, Session},
+    feedback,
+    server_choice::{self, Choice},
+};
 use tomori_protocol::{
     Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, Engagement, EnvironmentInfo,
     QueueState, Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, SpeechSetting,
@@ -46,44 +50,6 @@ const LOST: &str = "Connection lost; your words were not sent.";
 
 /// How long after the remembered server is found the headset waits before connecting to it automatically, so that other servers browsing finds at about the same time are known, and one that needs attention can hold the connection back. See `design/arrival.md`.
 pub const AUTOMATIC_SETTLE: Duration = Duration::from_millis(1500);
-
-/// What the conversation needs done with the connection.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Action {
-    /// Connect to this server, closing any current connection.
-    Connect(Choice),
-    /// Close the connection.
-    Disconnect,
-    /// Forget the servers found so far and browse again.
-    Rescan,
-    Send(ClientMessage),
-    /// Open the microphone and send what it hears to the agent as this utterance, or as the answer to the presented question's field, when given.
-    BeginUtterance(String, u64, Option<tomori_protocol::AnswerTarget>),
-    /// Close the microphone and finish the utterance, for the server to transcribe, with what the participant pointed
-    /// at while speaking.
-    EndUtterance(Option<tomori_protocol::Pointed>),
-    /// Close the microphone and abandon the utterance.
-    CancelUtterance,
-    /// Close the microphone and forget the utterance, which the server has already ended.
-    AbandonUtterance,
-    /// Open or close the microphone for other participants without addressing the agent.
-    StartLive(u64),
-    StopLive,
-    /// Pairing gave this device an owner token for the server, to keep with the certificate the pairing connection presented, and connect with. See `design/security.md`.
-    Paired {
-        token: String,
-        certificate: tomori_client::Fingerprint,
-    },
-    /// A knock admitted this device to its space as a collaborator: a token to keep for the server with its certificate. The connection is already a collaborator's.
-    Admitted {
-        token: String,
-        certificate: tomori_client::Fingerprint,
-    },
-    /// Mute or unmute agent speech locally, live or played again.
-    SetAgentMuted(bool),
-    /// Change and keep this device's Feedback setting. See `design/feedback.md`.
-    SetFeedback(crate::feedback::Settings),
-}
 
 /// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
 #[derive(Clone, Debug, PartialEq)]
@@ -289,7 +255,7 @@ pub struct Conversation {
     /// Whether a replay or catch-up was playing at the last frame.
     replaying: bool,
     /// This device's Feedback setting, which the hand menu and console change.
-    feedback: crate::feedback::Settings,
+    feedback: feedback::Settings,
     /// Whether the last [`Self::accept`] refused, saying why, rather than acting or having nothing to do.
     refused: bool,
     /// The problem shown and when it first appeared, so that its age can be shown.
@@ -395,7 +361,7 @@ impl Conversation {
             reports_engagement: true,
             muted: false,
             replaying: false,
-            feedback: crate::feedback::Settings::default(),
+            feedback: feedback::Settings::default(),
             refused: false,
             problem_seen: None,
             dismissed: None,
@@ -448,12 +414,6 @@ impl Conversation {
     #[cfg(any(test, feature = "testing"))]
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
-    }
-
-    /// Queue `action` as though the conversation had asked for it.
-    #[cfg(test)]
-    pub fn push_action(&mut self, action: Action) {
-        self.actions.push(action);
     }
 
     /// Take one action so a failure can cancel later queued microphone starts.
@@ -1003,17 +963,17 @@ impl Conversation {
     }
 
     /// This device's Feedback setting, as kept on it.
-    pub fn set_feedback(&mut self, settings: crate::feedback::Settings) {
+    pub fn set_feedback(&mut self, settings: feedback::Settings) {
         self.feedback = settings;
     }
 
     /// Change one half of the Feedback setting, sounds or vibration, and keep it.
     pub fn change_feedback(
         &mut self,
-        sounds: Option<crate::feedback::Level>,
-        vibration: Option<crate::feedback::Level>,
+        sounds: Option<feedback::Level>,
+        vibration: Option<feedback::Level>,
     ) {
-        let settings = crate::feedback::Settings {
+        let settings = feedback::Settings {
             sounds: sounds.unwrap_or(self.feedback.sounds),
             vibration: vibration.unwrap_or(self.feedback.vibration),
             ..self.feedback
@@ -1023,13 +983,13 @@ impl Conversation {
 
     /// Play every source in both ears alike, or place each where it is, and keep it. See `design/spatial-audio.md`.
     pub fn set_mono(&mut self, mono: bool) {
-        self.keep_feedback(crate::feedback::Settings {
+        self.keep_feedback(feedback::Settings {
             mono,
             ..self.feedback
         });
     }
 
-    fn keep_feedback(&mut self, settings: crate::feedback::Settings) {
+    fn keep_feedback(&mut self, settings: feedback::Settings) {
         log::info!(
             "Feedback: sounds {}, vibration {}, {}",
             settings.sounds.label(),
@@ -3794,11 +3754,69 @@ fn paginate(text: &str, rows: usize) -> Vec<Vec<String>> {
     }
 }
 
+/// The conversation is the session its connection carries out: see `design/clients.md`.
+impl Session for Conversation {
+    fn next_action(&mut self) -> Option<Action> {
+        Conversation::next_action(self)
+    }
+
+    fn apply(&mut self, event: Event) {
+        Conversation::apply(self, event);
+    }
+
+    fn report(&mut self, report: Report) {
+        match report {
+            Report::Connecting(choice) => self.connect(choice),
+            Report::Feedback(settings) => self.set_feedback(settings),
+            Report::Unfocused => {
+                self.stop_live();
+                self.stop_talking();
+            }
+            Report::Servers(servers) => self.set_servers(servers),
+            Report::Tick { now, browsing } => {
+                if browsing {
+                    self.tick(now);
+                }
+                self.expire_pairing(now);
+            }
+            Report::Generation(generation) => self.set_capture_generation(generation),
+            Report::Failed(error) => self.fail(error),
+            Report::MicrophoneFailed(error) => self.microphone_failed(error),
+            Report::NotSent(error) => self.utterance_not_sent(error),
+            Report::SecurityNotice(notice) => self.security_notice(notice),
+            Report::Replaying(replaying) => self.set_replaying(replaying),
+        }
+    }
+
+    fn is_browsing(&self) -> bool {
+        Conversation::is_browsing(self)
+    }
+
+    /// The approval and question waiting in the joined space, the knocks on it, and the recording, nearing the server's limit. Visitors cannot decide requests or let anyone in, so nothing waits for them.
+    fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
+        feedback.observe_recording(self.recording(), self.utterance_limit(), now);
+        let space = self
+            .joined_space()
+            .map(|(space, _)| space)
+            .filter(|_| self.role().participates());
+        let requests = space.into_iter().flat_map(|space| {
+            let approval = space.approval.as_ref().map(|approval| approval.id.as_str());
+            let question = space.question.as_ref().map(|question| question.id.as_str());
+            approval.into_iter().chain(question)
+        });
+        feedback.observe_requests(requests, now);
+        let knocks = space
+            .into_iter()
+            .flat_map(|_| self.knocks().iter().map(|knock| knock.id.as_str()));
+        feedback.observe_knocks(knocks, now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server_choice::{Source, USB};
     use std::time::Duration;
+    use tomori_client::server_choice::{Source, USB};
     use tomori_protocol::TranscriptStage;
     use tomori_protocol::{
         AgentInstructions, Approval, ApprovalOption, Message, Participant, Question, QueueEntry,
@@ -4543,6 +4561,12 @@ mod tests {
         let expected = display(&code(certificate, device, server));
         assert_eq!(pairing_label(&conversation), Some(expected.clone()));
         assert!(conversation.status().unwrap().contains(&expected));
+        assert_eq!(conversation.menu_model().pairing, Some(expected.clone()));
+        // The server waits for the operator to confirm it: the code stays shown, and the device waits too.
+        conversation.apply(Event::Message(ServerMessage::PairWaiting));
+        conversation.expire_pairing(Instant::now());
+        assert!(conversation.status().unwrap().contains(&expected));
+        assert!(conversation.take_actions().is_empty());
 
         conversation.apply(Event::Message(ServerMessage::Paired {
             token: "tomori_paired".into(),
@@ -6508,7 +6532,7 @@ mod tests {
 
     #[test]
     fn the_sound_section_steps_and_keeps_the_feedback_setting() {
-        use crate::feedback::{Level, Settings};
+        use feedback::{Level, Settings};
         let mut conversation = Conversation::new("Ada");
         let kept = Settings {
             sounds: Level::Off,
@@ -8705,5 +8729,141 @@ mod tests {
             assert_eq!(queue_label(QueueState::Failed), "failed");
             assert_eq!(activity_label(Activity::Closed), "closed");
         }
+    }
+
+    #[test]
+    fn as_its_connections_session_it_applies_what_the_connection_reports() {
+        // The server given at startup is connected to as though it were chosen.
+        let mut conversation = Conversation::new("Ada");
+        assert!(Session::is_browsing(&conversation));
+        let given = Choice::new("10.0.0.1:8765", "10.0.0.1:8765", Source::Override);
+        Session::report(&mut conversation, Report::Connecting(given.clone()));
+        assert_eq!(conversation.server(), Some(&given));
+        assert_eq!(
+            Session::next_action(&mut conversation),
+            Some(Action::Connect(given))
+        );
+        assert_eq!(Session::next_action(&mut conversation), None);
+        // The device's setting is shown, and what fails and what concerns security is said.
+        let quiet = feedback::Settings {
+            sounds: feedback::Level::Off,
+            ..Default::default()
+        };
+        Session::report(&mut conversation, Report::Feedback(quiet));
+        assert_eq!(conversation.menu_model().feedback, quiet);
+        Session::report(&mut conversation, Report::Failed("Not connected.".into()));
+        assert_eq!(conversation.problem().as_deref(), Some("Not connected."));
+        Session::report(&mut conversation, Report::SecurityNotice("Changed.".into()));
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Changed.")
+        );
+        // In a space, the microphone records for the connection reported, and stops when focus is lost.
+        let mut conversation = joined(|_| {});
+        Session::apply(&mut conversation, role(ConnectionRole::Owner));
+        Session::report(&mut conversation, Report::Generation(7));
+        conversation.toggle_live();
+        assert_eq!(conversation.take_actions(), [Action::StartLive(7)]);
+        Session::report(&mut conversation, Report::Unfocused);
+        assert_eq!(conversation.take_actions(), [Action::StopLive]);
+        // A microphone that fails, or words that cannot be sent, are said.
+        conversation.talk(true);
+        conversation.take_actions();
+        Session::report(
+            &mut conversation,
+            Report::MicrophoneFailed("Overrun.".into()),
+        );
+        assert_eq!(conversation.problem().as_deref(), Some("Overrun."));
+        conversation.talk(true);
+        conversation.talk(false);
+        conversation.take_actions();
+        Session::report(
+            &mut conversation,
+            Report::NotSent("The last read failed.".into()),
+        );
+        assert_eq!(
+            conversation.problem().as_deref(),
+            Some("The last read failed.")
+        );
+        // What plays again is shown.
+        Session::report(&mut conversation, Report::Replaying(true));
+        assert!(conversation.text().contains("Replaying"));
+        // At the server list, the remembered server is connected to once it has been listed a while, but only while the list is seen.
+        let start = Instant::now();
+        let mut conversation = Conversation::new("Ada");
+        let mut remembered = advertising("Desktop", "10.0.0.1:8765", 0, 0);
+        remembered.source = Source::Remembered;
+        Session::report(&mut conversation, Report::Servers(vec![remembered.clone()]));
+        let tick = |now, browsing| Report::Tick { now, browsing };
+        Session::report(&mut conversation, tick(start, true));
+        Session::report(&mut conversation, tick(start + AUTOMATIC_SETTLE, false));
+        assert!(conversation.take_actions().is_empty());
+        Session::report(&mut conversation, tick(start + AUTOMATIC_SETTLE, true));
+        assert_eq!(conversation.take_actions(), [Action::Connect(remembered)]);
+    }
+
+    #[test]
+    fn as_its_connections_session_it_says_what_waits_for_the_participant() {
+        use tomori_client::playback::Earcon;
+        let observed = |conversation: &Conversation| {
+            let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+            feedback.set_haptics(true);
+            let now = Instant::now();
+            Session::observe(conversation, &mut feedback, now);
+            let earcons: Vec<_> = feedback.take_earcons().map(|(earcon, _)| earcon).collect();
+            (
+                earcons,
+                feedback.haptics(now + Duration::from_secs(1)).len(),
+            )
+        };
+        let waiting = |state: &mut SpaceState| {
+            state.approval = Some(Approval {
+                id: "request-1".into(),
+                title: "Bash".into(),
+                text: "cargo test".into(),
+                options: vec![],
+            });
+        };
+        // A question waits.
+        let asked = joined(|state| {
+            state.question = Some(Question {
+                id: "question-1".into(),
+                title: "Which?".into(),
+                text: "Which parser?".into(),
+                field: "which".into(),
+                supported: true,
+            });
+        });
+        assert_eq!(observed(&asked).0, [Earcon::Request]);
+        // An approval and a knock wait for an owner.
+        let mut conversation = joined(waiting);
+        conversation.apply(Event::Message(ServerMessage::Knocks {
+            knocks: vec![tomori_protocol::KnockRequest {
+                id: "knock-1".into(),
+                name: "Grace".into(),
+            }],
+        }));
+        let (heard, _) = observed(&conversation);
+        assert_eq!(heard, [Earcon::Request, Earcon::Knock]);
+        // Nothing waits for a visitor, who cannot decide or let anyone in.
+        let mut visiting = joined(waiting);
+        visiting.apply(role(ConnectionRole::Visitor));
+        assert_eq!(observed(&visiting), (vec![], 0));
+        // A recording ten seconds from the server's limit is felt.
+        let mut conversation = Conversation::new("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![],
+            roots: vec![],
+            environments: sky(),
+            utterance_limit: Some(Duration::from_secs(10)),
+        }));
+        conversation.apply(space(|_| {}));
+        conversation.talk(true);
+        assert_eq!(observed(&conversation), (vec![], 2));
     }
 }

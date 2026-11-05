@@ -53,4 +53,49 @@ Send control messages with `Client::send`, or from other threads through `Client
 - **Microphone:** create a `Microphone` with the client's `Sender` and the capture sample rate, and `push` captured samples from the audio thread. `set_gate` chooses whether others hear the participant live; `begin` and `end` send a push-to-talk utterance for the agent, and `cancel` abandons it. Its utterances ask for `ServerMessage::TranscriptProgress`, which says from the end of each until its transcript whether the server is transcribing it or waiting to.
 - **Playback:** create a `playback::Player` from the receiver `take_audio` returns, `prepare` it at the device's rate, `render` it from the output device's callback in mono or stereo (`playback::Layout`), and control it from the application through its `PlayerControl`. It mixes participants and agent speech with a jitter buffer per source. For stereo, give it the listener and each source's position with `PlayerControl::set_scene`, about once a frame, and it places each voice where it is. `PlayerControl::play` plays a synthesized sound cue (`playback::Earcon`) from a `playback::Direction`, and `set_silenced` silences playback while the microphone records push-to-talk.
 
-The [`connect` example](https://github.com/ioquatix/tomori/blob/main/crates/client/examples/connect.rs) is a complete console client. The requirements the client follows are in [`design/server.md`](https://github.com/ioquatix/tomori/blob/main/design/server.md), [`design/live-audio.md`](https://github.com/ioquatix/tomori/blob/main/design/live-audio.md) and [`design/security.md`](https://github.com/ioquatix/tomori/blob/main/design/security.md).
+The [`connect` example](https://github.com/ioquatix/tomori/blob/main/crates/client/examples/connect.rs) is a complete console client.
+
+## A connection for a session
+
+`connection::Connection` is the whole of a client's connection, as Tomori's headset, desktop window, console and spectator use it. It owns the `Client`, the microphone and the speaker, and carries out a `connection::Session`: the client's conversation with the server, which decides what to do and is told what happens, and touches neither the network nor a device. `tomori-scene`'s `Conversation` is Tomori's session; implement the trait for another.
+
+```rust
+use std::time::Instant;
+use tomori_client::{
+    Event,
+    connection::{Action, Connection, Report, Session},
+    feedback::Feedback,
+    identity::{Identity, Overrides, Store},
+};
+
+#[derive(Default)]
+struct Bot {
+    actions: std::collections::VecDeque<Action>,
+}
+
+impl Session for Bot {
+    fn next_action(&mut self) -> Option<Action> {
+        self.actions.pop_front()
+    }
+    fn apply(&mut self, _event: Event) {
+        // Server messages and connection states, as `Client::events` gives them.
+    }
+    fn report(&mut self, report: Report) {
+        // What the connection itself says: the server to connect to at startup, the servers found, failures and security notices.
+        if let Report::Connecting(choice) = report {
+            self.actions.push_back(Action::Connect(choice));
+        }
+    }
+    fn is_browsing(&self) -> bool {
+        false
+    }
+    fn observe(&self, _feedback: &mut Feedback, _now: Instant) {}
+}
+```
+
+- **Creating it:** `Connection::new(identity, store, multicast, capture, playback, &mut session)`. `identity::Identity::new(&store, device_name, overrides)` makes this device's participant identity and display name; `identity::Store::new(Some(directory))` keeps it, each server's pinned certificate and token, the last server and the Feedback setting across runs (`None` keeps nothing). `capture::Capture` and `speaker::Playback` are the platform's microphone and speaker; `()` is the multicast permission of a platform that needs none.
+- **Each frame:** call `poll(focused, &mut session)`. It applies the client's `Event`s and the connection's `Report`s to the session, then takes its `Action`s one at a time, in order, so that a report such as `Report::MicrophoneFailed` can withdraw those queued behind the one that failed. `Report::Tick` comes once a frame, and `Report::Unfocused` when the application has lost focus, before the microphone closes.
+- **Connecting:** a server given at startup is reported as `Report::Connecting`; the session connects with `Action::Connect`. The connection pins the certificate the server presents, presents a token given at startup only to a server given at startup or reached over USB, forgets a token the server refuses, distrusts a server whose certificate changed, asks a server that refuses visitors to pair, and keeps what pairing (`Action::Paired`) or an admitted knock (`Action::Admitted`) gives. See `design/security.md`.
+- **The microphone:** `Action::BeginUtterance` and `Action::EndUtterance` record push-to-talk for the agent, and `Action::StartLive` and `Action::StopLive` the live microphone, each for the connection generation that `Report::Generation` gave.
+- **Feedback:** `feedback()` is the participant's cues and vibrations: the frame loop reports pointing and choosing to it and takes its vibrations, and the connection plays its sound cues. `Session::observe` tells it, once a frame, what waits for the participant.
+- **Voices:** `listen(participants, place)` places each other participant's voice once a frame, and `send_presence` reports this participant's head, controllers and hands to the others. The requirements the client follows are in [`design/server.md`](https://github.com/ioquatix/tomori/blob/main/design/server.md), [`design/live-audio.md`](https://github.com/ioquatix/tomori/blob/main/design/live-audio.md) and [`design/security.md`](https://github.com/ioquatix/tomori/blob/main/design/security.md).

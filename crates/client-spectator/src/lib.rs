@@ -14,15 +14,17 @@ pub mod spectator_feed;
 pub mod spectator_view;
 pub mod spectator_window;
 
-// The modules this crate's own modules use, from `tomori-scene`, `tomori-render` and `tomori-client-desktop`, under their paths.
+// The modules this crate's own modules use, from `tomori-client`, `tomori-scene`, `tomori-render` and `tomori-client-desktop`, under their paths.
+#[cfg(test)]
+use tomori_client::server_choice;
+use tomori_client::{capture, connection, identity, speaker};
 use tomori_client_desktop::desktop_audio;
 use tomori_render::{controller, graphics};
-use tomori_scene::{
-    capture, connection, conversation, delegation, environment, hands, identity, interaction,
-    playback, spatial_audio, swarm,
-};
 #[cfg(test)]
-use tomori_scene::{server_choice, test_support};
+use tomori_scene::test_support;
+use tomori_scene::{
+    conversation, delegation, environment, hands, interaction, spatial_audio, swarm,
+};
 
 pub use spectator_feed::SpectatorOptions;
 

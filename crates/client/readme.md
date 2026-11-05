@@ -30,6 +30,8 @@ while let Ok(event) = client.events().recv() {
 
 `discovery::browse` finds servers on the local network with Bonjour. `Microphone` turns captured samples into audio frames and push-to-talk utterances, and `playback::Player` mixes received audio for an output device. The [`connect` example](https://github.com/ioquatix/tomori/blob/main/crates/client/examples/connect.rs) is a complete console client.
 
+A client with Tomori's own behaviour drives a `connection::Connection` instead, once a frame, for its `connection::Session`: the client's conversation with the server, which asks for `connection::Action`s and is told what happens. The connection chooses the server, keeps its certificate and token for this device (`identity::Store`), browses for servers, records from a `capture::Capture`, plays through a `speaker::Playback` and cues what happens (`feedback`). [`tomori-scene`](https://crates.io/crates/tomori-scene)'s `Conversation` is Tomori's session.
+
 ## See Also
 
 - [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.

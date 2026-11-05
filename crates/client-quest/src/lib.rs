@@ -12,11 +12,12 @@ mod vulkan;
 mod xr;
 mod xr_types;
 
-// The modules this crate's own modules use, from `tomori-scene` and `tomori-render`, under their paths.
-use tomori_render::{controller, graphics, scene_graphics};
+// The modules this crate's own modules use, from `tomori-client`, `tomori-scene` and `tomori-render`, under their paths.
 #[cfg(target_os = "android")]
-use tomori_scene::identity;
-use tomori_scene::{connection, conversation, feedback, hands, haptics, log_cadence, scene};
+use tomori_client::identity;
+use tomori_client::{connection, feedback};
+use tomori_render::{controller, graphics, scene_graphics};
+use tomori_scene::{conversation, hands, haptics, log_cadence, scene};
 
 /// The Android activity a downstream build's `android_main` is given, at the version Tomori uses.
 #[cfg(target_os = "android")]
@@ -24,6 +25,7 @@ pub use android_activity::AndroidApp;
 pub use builder::Builder;
 #[cfg(not(target_os = "android"))]
 pub use cli::{Command, Mode};
+pub use tomori_client::identity::Overrides;
 /// The desktop's modes, from `tomori-client-desktop`.
 #[cfg(not(target_os = "android"))]
 pub use tomori_client_desktop::{
@@ -38,7 +40,6 @@ pub use tomori_client_spectator::{
     SpectatorOptions, run_pipewire as run_spectator_pipewire,
     run_pipewire_preview as run_spectator_pipewire_preview, run_window as run_spectator,
 };
-pub use tomori_scene::identity::Overrides;
 
 /// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop` and the server-less window draw its sceneries, and `--console` names its environments. The spectator modes draw Tomori's own sceneries, as `tomori-spectator` does, whatever the build. A downstream build's `main` is `tomori::main(builder)`.
 #[cfg(not(target_os = "android"))]
