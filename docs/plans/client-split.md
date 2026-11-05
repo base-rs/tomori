@@ -1,6 +1,6 @@
 # Plan: Splitting the Headset Crate, and the Headset as a Library
 
-Status: **proposed**, November 2026, for discussion. Nothing here is a requirement until the maintainer agrees to it. Once it is agreed, its parts become changes to `design/clients.md` and `design/crates.md`, made in the steps below.
+Status: **agreed, steps 1–5 in progress**, November 2026. The maintainer's decisions on the open questions are recorded under [Decisions](#decisions), and what the implementation changed from this plan under [Progress](#progress). The parts agreed become changes to `design/clients.md`, `design/crates.md` and `design/builders.md`, made in the steps below.
 
 This covers:
 
@@ -182,8 +182,8 @@ The recommendation is to publish all five, together with `tomori-environment-sky
 Only what exists today, and what #90 has already agreed, is given an interface now:
 
 - **Sceneries exist today.** Sky is one, drawn natively through the per-eye hooks listed above.
-  - #90 §1 says a client half provides "optional scenery, drawn natively as Sky is".
-  - #90 §4 says "sceneries and client halves use the same contract".
+  - \#90 §1 says a client half provides "optional scenery, drawn natively as Sky is".
+  - \#90 §4 says "sceneries and client halves use the same contract".
   - So the contract that Sky already implements becomes `tomori_render::Scenery`.
 - **Client halves wait for #75.** Their trait, their state replicas (#76) and their protocol version are not designed yet. The builder gains `environment(…)` when #75 defines them, not before.
 
@@ -230,12 +230,15 @@ What changes to fit it:
   - `Environment::for_space` becomes `Sceneries::contains`.
   - The desktop window's **E** key cycles through the registered identifiers, and `TOMORI_ENVIRONMENT` names one.
   - Behaviour is unchanged: Sky and the grid, with the grid and the missing name for an unknown identifier.
+
 - `graphics.rs` holds `Option<Box<dyn Scenery>>` in place of its `Sky` field.
+
 - `tomori-environment-sky` implements `Scenery` and exports a constructor:
 
   ```rust
   pub fn register(sceneries: &mut tomori_render::Sceneries)
   ```
+
 - The registry later becomes the list of environments that a client sends in `Hello` (#90 §1). That needs #75's version agreement, so this plan sends nothing new.
 
 ### The builder, in `tomori-client-quest`
@@ -265,6 +268,7 @@ impl Builder {
 ```
 
 - `tomori-client-desktop` gets the same registration, through a `Sceneries` passed to its runners, so that a downstream environment also shows in the desktop window and the spectator.
+
 - The executable's command line becomes a function that takes a `Builder`:
 
   ```rust
@@ -272,7 +276,9 @@ impl Builder {
   ```
 
   A downstream desktop binary is then one line long.
+
 - The names follow `tomori-server`'s builder where it has the same concept, once its PR lands. For example, both use `Builder` and register with a method per kind.
+
 - `examples/headset` registers a placeholder scenery, such as a coloured floor:
   - CI builds it for the host and packages it for Android;
   - its test shows the placeholder drawn on the shared test GPU when a space names it;
@@ -430,7 +436,60 @@ Each step is one pull request that can land on its own:
 - **Signing.** Losing the release key strands installed copies, and a leak lets others sign updates. Hence the separate environment, a required reviewer, an offline backup and a committed fingerprint.
 - **Divergence between the desktop and Quest.** #111 decided that their UIs may diverge. Putting per-platform logic in `tomori-scene` keeps it covered, but it must not force one UX. `scene/headset.rs` and `scene/desktop.rs` remain separate.
 
-## Open questions for the maintainer
+## Decisions
+
+The maintainer answered the open questions on #132:
+
+1. **What to publish:** all five crates: `tomori-scene`, `tomori-render`, `tomori-client-desktop`, `tomori-client-spectator` and `tomori-client-quest`. `tomori-environment-sky` stays private until the shared environment interface, #75, exists. This conflicts with the dependencies as they stand; see [Progress](#progress).
+2. **The spectator:** `tomori-client-spectator` has its own executable, `tomori-spectator`. The OBS and huddle docs use it.
+3. **Placement:** the conversation state lives in `tomori-scene`, and the connection in the existing `tomori-client` crate.
+4. **The release APK:** kept. It is signed with a private release key, stored as a secret in a protected GitHub environment, such as `android-release`, deployable only from `main` with the maintainer's approval. The maintainer keeps the key's backup. Pull requests build the release profile with a throwaway key, as section 4 proposes.
+5. **The application ID** moves to `com.codeotaku.tomori`, once. The new app installs alongside `io.github.ioquatix.tomori`, and the headset is paired again; the old app is removed when ready. `docs/naming.md` changes with it. This is in a later phase, with packaging.
+
+## Progress
+
+The first phase is steps 1–5, as one pull request each:
+
+| Step | Pull request | State |
+| --- | --- | --- |
+| Housekeeping: `releases.md`'s duplicated entry | #138 | Merged |
+| 1. Rename to `tomori-client-quest` | #139 | Merged |
+| 2. Extract `tomori-scene` | #144 | Draft, for review |
+| 3. Extract `tomori-render` | #150 | Draft, stacked on #144 |
+| 4. Extract `tomori-client-desktop` and `tomori-client-spectator` | #160 | Draft, stacked on #150 |
+| 5. Sceneries and the builder | #161 | Draft, stacked on #160 |
+
+Steps 6–8 (packaging, the application ID, publishing and the release APK) are the next phase.
+
+What the implementation changed from this plan:
+
+- **`tomori-scene`:**
+  - `capture.rs` and `playback.rs` also held code in cpal's terms (`Mono`, `input_failed`, `Render`, `output_failed`). It became `cpal_audio.rs`, which moved with `desktop_audio.rs` to `tomori-client-desktop`, so the scene doesn't depend on cpal.
+  - `workspace_graphics.rs`'s navigation and paging became the scene's `cards.rs`, and `ui_panel.rs`'s `Canvas` its `canvas.rs`. `controller.rs`'s `Pose`, `LEFT` and `RIGHT` became the scene's `controller.rs`, and `Beam` and the ray lengths moved to `pointing.rs`.
+  - Test-only helpers that other crates' tests use, such as `scene::fixtures` and `system::refuse`, are behind the `testing` feature too.
+  - `tests/dependencies.rs` runs `cargo tree` for the host and Android, and fails if the scene reaches a rendering, windowing or device crate.
+- **`tomori-render`:**
+  - `test_gpu` stays in `tomori-environment-sky` for now. Sky's own tests use it, and the render crate depends on Sky, so moving it would need a dev-dependency cycle. It moves once Sky depends on `tomori-render`.
+  - The controller models and their licence notices are in `crates/render/assets`. The APK's manifest points `assets` there, so the APK carries the same files.
+- **Desktop and spectator:**
+  - These are one pull request, because the spectator's window was the same contents type as the server-less window, `Demo`. `Demo` is now the server-less window only, and the spectator crate has its own `SpectatorWindow`.
+  - `desktop_window.rs` keeps the server-less and participant runners and gains `show(settings, open, with)` for other crates' contents. The closures that start contents once the window has a device stay in that excluded file.
+  - `tomori --spectator…` still works beside `tomori-spectator`.
+- **The connection is not yet in `tomori-client`.** It is not a move:
+  - The connection calls 22 of the conversation's methods and carries out its `Action`s. In `tomori-client` it would drive the conversation through a public trait, with `Action`, the server choices, identity, the audio device traits, the feedback model and the poses moving with it.
+  - Its 2,250 lines of tests reach into its private state and use the real `Conversation`. They cannot stay in the scene, and in `tomori-client` they cannot use the scene's `Conversation`: a dev-dependency cycle would give them a second copy of `tomori-client`. They would have to be rewritten against a test session.
+  - That is a design change to a published crate's interface, so it is proposed as its own pull request, after the builder.
+- **Sceneries and the builder:**
+  - `Scenery::prepare` and `encode` take `&self`, as Sky's hooks do, because the renderer draws with `&self`.
+  - `Scenery` gains `resize`, which Sky needs.
+  - Sky implements `Scenery` through an adapter in `tomori-render`, so the dependency is not inverted yet.
+  - `Environment` is now a `Copy` identifier, with `MINIMAL` and `SKY` constants. `Conversation::set_drawable` gives a conversation the environments its build draws.
+  - The builder registers sceneries by `&'static str` identifiers, and runs a build with `run_android`, `run_xr`, `run_desktop`, `run_demo` or `tomori::main(builder)`.
+  - The spectator and the console still draw Tomori's own sceneries.
+  - The example is `examples/headset`. It draws a placeholder floor for `examples/server`'s placeholder environment, and is tested on the shared test GPU. CI does not package it for Android yet; that is step 6.
+- **Publishing conflicts with Sky staying private.** `tomori-render` depends on `tomori-environment-sky` for Tomori's default scenery, and every client crate depends on `tomori-render`. So none of them can be published while Sky is not: `cargo package` stops at `tomori-render`. `tomori-scene` packages and verifies. Before step 7, either Sky is published, or Tomori's own Sky registration moves out of the published crates, for example into an unpublished `tomori` app package, which open question 7 already considered.
+
+## Open questions for the maintainer (answered above)
 
 1. **What to publish.** Should all five crates and `tomori-environment-sky` be published at step 7? Or should the APK be the only release of the headset at first, with the client crates kept unpublished until a downstream crate needs them?
 2. **The spectator's executable.** Keep `tomori --spectator…` as it is (the recommendation), or add a `tomori-spectator` executable to `tomori-client-spectator`? Moving it would change `docs/slack-huddle.md` and any script that runs the spectator.
