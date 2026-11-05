@@ -9822,17 +9822,27 @@ mod tests {
         until(&watched, "the disconnection notice", |event| {
             kind(event) == "reconnecting"
         });
-        let listing = {
-            let commands = commands.clone();
-            in_thread(move || {
-                block_on(commands.reply_with(|reply| Command::Sessions {
-                    directory: "/tmp".into(),
-                    reply,
-                }))
-            })
+        // Sent in order from here, so that the connection takes each before
+        // the next, however loaded the machine is.
+        let listing = |commands: &Commands| {
+            let (reply, answer) = async_channel::bounded(1);
+            block_on(commands.tx().send(Command::Sessions {
+                directory: "/tmp".into(),
+                reply,
+            }))
+            .unwrap();
+            answer
         };
-        let closing_prompt = prompt_in_thread(&commands, &closing, &closing_events, "closed");
-        std::thread::sleep(Duration::from_millis(100));
+        let held_listing = listing(&commands);
+        let (reply, closing_prompt) = async_channel::bounded(1);
+        block_on(commands.tx().send(Command::Prompt {
+            id: closing.clone(),
+            identity: closing_events.identity.clone(),
+            key: "closed".into(),
+            text: "hello".into(),
+            reply,
+        }))
+        .unwrap();
         commands
             .tx()
             .try_send(Command::Close {
@@ -9844,29 +9854,16 @@ mod tests {
             *event == Event::Closed { reason: None }
         });
         // Its command waiting for the next connection fails at once.
-        let (result, _) = closing_prompt
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the closed session's held command was not refused");
+        let result = answered(&closing_prompt);
         assert_eq!(result.unwrap_err().kind, tomori_backend::ErrorKind::Closed);
-        assert!(listing.try_recv().is_err(), "the listing did not wait");
-        // As many wait as while no connection is open; more are refused.
-        let mut held = Vec::new();
-        let refused = loop {
-            let (reply, answer) = async_channel::bounded(1);
-            block_on(commands.tx().send(Command::Sessions {
-                directory: "/tmp".into(),
-                reply,
-            }))
-            .unwrap();
-            std::thread::sleep(Duration::from_millis(1));
-            match answer.try_recv() {
-                Ok(result) => break result,
-                Err(_) => held.push(answer),
-            }
-        };
+        assert!(held_listing.is_empty(), "the listing did not wait");
+        // As many wait as while no connection is open, the listing and the
+        // waiting prompt among them; more are refused. The refusal comes once
+        // those before it are held.
+        let held: Vec<_> = (2..MAX_HELD).map(|_| listing(&commands)).collect();
+        let refused = answered(&listing(&commands));
         assert_eq!(refused.unwrap_err().message, TOO_MANY_HELD);
-        // The listing, the waiting prompt and these.
-        assert_eq!(held.len() + 2, MAX_HELD);
+        assert!(held.iter().all(async_channel::Receiver::is_empty));
         // OpenCode is back before the prompt is answered, so the next attempt,
         // which the held listing waits for, reaches it.
         let second = FakeService::start(shared.clone(), "secret");
@@ -9880,8 +9877,7 @@ mod tests {
             |state| state.event_requests > requests,
         );
         shared.update(|state| state.hold_events = false);
-        let (result, _) = listing.recv_timeout(Duration::from_secs(5)).unwrap();
-        result.unwrap();
+        answered(&held_listing).unwrap();
         let (result, _) = waiting.recv_timeout(Duration::from_secs(5)).unwrap();
         result.unwrap();
         for answer in held {
