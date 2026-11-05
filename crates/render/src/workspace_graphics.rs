@@ -1043,7 +1043,7 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
 mod tests {
     use super::*;
     use crate::delegation::{Kind, Node, Presentation, Scene};
-    use tomori_environment_sky::test_gpu;
+    use crate::test_gpu;
     use tomori_scene::cards::{CardNavigation, content_pages};
 
     fn node(id: &str, state: State) -> Node {

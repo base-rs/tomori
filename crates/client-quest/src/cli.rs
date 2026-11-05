@@ -196,8 +196,8 @@ impl Command {
 pub fn licenses() -> String {
     format!(
         "Bundled WebXR Input Profiles controller assets:\n\n{}\n\nBasis Universal transcoder:\n\n{}",
-        include_str!("../assets/controllers/LICENSE.md"),
-        include_str!("../assets/licenses/basisu-LICENSE.txt")
+        tomori_render::CONTROLLER_LICENSE,
+        tomori_render::BASISU_LICENSE
     )
 }
 

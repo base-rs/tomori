@@ -6,25 +6,20 @@ rust-version.workspace = true
 description = "Tomori's moonlit sky environment renderer"
 repository.workspace = true
 license.workspace = true
-publish = false
-
-[features]
-# `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with `tomori-client-quest`'s tests. Enabled only by tests.
-test-gpu = ["dep:naga", "dep:pollster"]
+readme = "readme.md"
+keywords = ["tomori", "wgpu", "xr", "sky", "environment"]
+categories = ["rendering", "graphics"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
-# The WGSL front end wgpu uses, at its version, to validate shaders in tests.
-naga = { version = "30.0.1", features = ["wgsl-in"], optional = true }
-# Blocks on the adapter and device requests that create the tests' shared device.
-pollster = { version = "0.4", optional = true }
 
 [dev-dependencies]
-naga = { version = "30.0.1", features = ["wgsl-in"] }
 pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The device for offscreen rendering tests and WGSL validation. `tomori-render` depends on this crate, which Cargo allows for a development dependency. It has no version, so that packaging leaves it out: only the tests use it.
+tomori-render = { path = "../render", features = ["test-gpu"] }
 
 [build-dependencies]
 bytemuck = { version = "1", features = ["derive"] }

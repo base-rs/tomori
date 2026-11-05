@@ -1,0 +1,43 @@
+[package]
+name = "tomori-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tomori's wgpu renderers and shaders, shared by the headset, the desktop window and the spectator"
+repository.workspace = true
+license.workspace = true
+# Published once the headset's builder has proved its interfaces; see design/crates.md.
+publish = false
+
+[features]
+# `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with Sky's and the clients' tests. Enabled only by tests.
+test-gpu = ["dep:naga", "dep:pollster"]
+
+[dependencies]
+anyhow = "1"
+basisu = "0.1"
+bytemuck = { version = "1", features = ["derive"] }
+font8x8 = "0.3"
+glam = "0.30"
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+log = "0.4"
+tomori-environment-sky = { version = "0.1.0", path = "../environment-sky" }
+tomori-protocol = { version = "0.1.0", path = "../protocol" }
+tomori-scene = { version = "0.1.0", path = "../scene" }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+# The WGSL front end wgpu uses, at its version, to validate shaders in tests.
+naga = { version = "30.0.1", features = ["wgsl-in"], optional = true }
+# Blocks on the adapter and device requests that create the tests' shared device.
+pollster = { version = "0.4", optional = true }
+
+# Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+pollster = "0.4"
+serde_json = "1"
+# The scene's test devices and fixtures.
+tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }

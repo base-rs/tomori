@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use crate::test_gpu;
 use glam::{Mat4, Vec3};
+use tomori_render::test_gpu;
 
 #[test]
 fn cloud_target_size_is_bounded_for_headsets_spectators_and_tiny_windows() {

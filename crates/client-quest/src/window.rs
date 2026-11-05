@@ -205,7 +205,7 @@ pub(crate) mod test {
     pub fn with_gpu(format: wgpu::TextureFormat, test: impl FnOnce(Gpu)) {
         // The contents log what they set up, such as the adapter, which tests exercise.
         crate::test_support::log_everything();
-        tomori_environment_sky::test_gpu::with(|gpu| {
+        tomori_render::test_gpu::with(|gpu| {
             test(Gpu {
                 adapter: gpu.adapter,
                 device: gpu.device,

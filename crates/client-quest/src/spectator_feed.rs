@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(frame.head[12], 0.5);
         assert!(frame.controllers[crate::controller::RIGHT].is_some());
         // The followed participant's right controller stands in for the spectator's marker.
-        tomori_environment_sky::test_gpu::with(|gpu| {
+        tomori_render::test_gpu::with(|gpu| {
             let mut renderer = crate::graphics::Renderer::new(
                 &gpu.device,
                 &gpu.queue,

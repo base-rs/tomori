@@ -113,13 +113,15 @@ cargo test -p tomori-environment-sky --locked
 The Vulkan tests render on a GPU, or on a software driver such as Mesa's lavapipe,
 and are skipped, saying so, where there is no Vulkan adapter at all, unless
 `TOMORI_REQUIRE_GPU=1` is set, as CI sets it. Every shader is also validated with naga.
+They use `tomori-render`'s shared test device and WGSL validation, its `test-gpu` feature,
+as the clients' tests do; only the tests depend on `tomori-render`.
 
 CPU tests check bounded, finite, deterministic geometry and an unobstructed
 central work volume, periodic noise and render-target size bounds. A Vulkan
 cloud regression checks partial alpha, premultiplication, per-eye parallax,
 repeatability, foreground depth occlusion and resize. Tomori additionally renders stereo,
 switches Sky/Minimal without changing the swarm, and checks recenter compensation
-and translation-invariant sky rendering; see the [root readme](../../readme.md).
+and translation-invariant sky rendering; see the [root readme](https://github.com/ioquatix/tomori/blob/main/readme.md).
 Shadow tests additionally check caster/frustum coverage, light-depth direction,
 actual localized cast-shadow darkening, unchanged lantern emission and stable
 results after camera movement/resize, plus visible lantern illumination and AO

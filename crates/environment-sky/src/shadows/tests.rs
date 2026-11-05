@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use crate::test_gpu;
+use tomori_render::test_gpu;
 
 #[test]
 fn moon_frustum_contains_all_static_casters_and_receivers() {
