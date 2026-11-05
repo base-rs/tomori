@@ -1,6 +1,33 @@
 # Proposal: Reaching 100% Region Coverage When Some Code Can't Run in CI
 
-Status: **partly decided**, November 2026. The maintainer's decisions are recorded below; the change to Bake's coverage task is not decided. It covers [#55](https://github.com/ioquatix/tomori/issues/55) and touches stage 3 of [#73](https://github.com/ioquatix/tomori/issues/73), the server and headset builders.
+Status: **decided, and carried out in the pull requests below**, November 2026. Once they merge, the gate is required, with exclusions per file rather than per crate, as Bake's coverage task came to support them; see the outcome below. The rest of this document is the proposal as it was decided, kept for its reasoning. It covers [#55](https://github.com/ioquatix/tomori/issues/55) and touches stage 3 of [#73](https://github.com/ioquatix/tomori/issues/73), the server and headset builders.
+
+## Outcome
+
+`bake-test` 0.3.5 added the exclusion, as `[[package.metadata.bake.test.coverage.exclude]]` entries in a package's own `Cargo.toml`, one per file, each with a `path` and a required `reason`. The task fails on an entry without a reason, on a file that does not exist, and on a file listed twice. Its report always lists each excluded file with its reason and its size, in regions run and lines, whether the gate passes or fails. That answers decision 5, though per file rather than per crate. The other rules are as decided: exclusion is a last resort, the excluded code is thin, and the logic around it is covered.
+
+A file is a finer boundary than a crate, so the headset did not have to be split for the gate. The device calls went into thin files of their own instead, and everything around them was tested. The split in #119 remains worth doing for its own reasons. The excluded files, as the gate's report lists them in CI:
+
+| File | Regions | Run by tests | Lines the regions span |
+| --- | ---: | ---: | ---: |
+| `crates/client-quest/src/xr.rs` | 1,083 | 12 | 586 |
+| `crates/client-quest/src/desktop_window.rs` | 277 | 14 | 167 |
+| `crates/client-quest/src/vulkan.rs` | 244 | 0 | 187 |
+| `crates/client-quest/src/desktop_audio.rs` | 145 | 0 | 85 |
+| `crates/server/src/process.rs` | 59 | 49 | 52 |
+| `crates/discovery/src/daemon.rs` | 32 | 23 | 19 |
+| `crates/client-quest/src/child_process.rs` | 15 | 6 | 12 |
+
+That is 1,855 regions, about 1.5% of the workspace, under the 3,600 this proposal estimated. Every one of the other 120,989 measured regions runs, and Bake leaves out the 161 inside `unreachable!`. With #137, the Test workflow runs the gate on stable Rust, the main branch requires it through `test-result`, `coverage.yml` is gone, and `design/testing.md` records the requirement.
+
+The work is in [#130](https://github.com/ioquatix/tomori/pull/130) (Bake 0.3.5 and the exclusions), [#131](https://github.com/ioquatix/tomori/pull/131) (the headset), [#135](https://github.com/ioquatix/tomori/pull/135) (the server and discovery), [#136](https://github.com/ioquatix/tomori/pull/136) (the OpenCode backend, speech, client and bake) and [#137](https://github.com/ioquatix/tomori/pull/137) (making the gate required). Reaching 100% found these bugs, each fixed with a regression test:
+- a Markdown hard break and a double space after a task marker;
+- `tomori discover` running a space's backend and its participant count together;
+- the pause between spoken segments following only a segment that produced no audio;
+- a message shorter than the truncation marker being replaced by it;
+- a list emptied to fit a snapshot or listing being a byte over budget.
+
+Unreachable branches were removed, or became `expect` or `unreachable!` with their reasons. Branches that only a race could take were restructured so that coverage does not depend on timing.
 
 ## The request
 
