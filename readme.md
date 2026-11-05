@@ -320,8 +320,13 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-environment-sky`](crates/environment-sky/readme.md): the Sky environment's renderer, which Tomori's clients draw.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
+- [`tomori-scene`](crates/scene/readme.md): the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code.
+- [`tomori-render`](crates/render/readme.md): the wgpu renderers and shaders that the headset, the desktop window and the spectator share, and the `Scenery` that draws an environment.
+- [`tomori-client-desktop`](crates/client-desktop/readme.md): the desktop modes.
+- [`tomori-client-spectator`](crates/client-spectator/readme.md): the spectator, installed with `cargo install tomori-client-spectator` for its `tomori-spectator` executable.
+- [`tomori-client-quest`](crates/client-quest/readme.md): the headset and desktop application, the `tomori` library and executable, and the library another project builds a headset of its own on, registering its own sceneries through `tomori::Builder`. [examples/headset](examples/headset/readme.md) is an example. Tomori's own headset is an APK.
 
-`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead. The application is being split into crates of its own, unpublished until the publishing step planned in #132: `tomori-scene`, in `crates/scene`, is the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code; and `tomori-render`, in `crates/render`, holds the wgpu renderers and shaders that the headset, the desktop window and the spectator share; `tomori-client-desktop`, in `crates/client-desktop`, holds the desktop modes; and `tomori-client-spectator`, in `crates/client-spectator`, the spectator and its `tomori-spectator` executable. The `tomori` library is also what another project builds a headset of its own on, registering its own sceneries through `tomori::Builder`; [examples/headset](examples/headset/readme.md) is an example. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
+[design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
 ## Third-Party Components
 
@@ -336,7 +341,17 @@ Original project code is released under the MIT License; see [license.md](licens
 
 Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or `bump --version X.Y.Z`) from a clean checkout of `main`; it bumps the version, commits with the `Release: vVERSION` trailer, validates the candidate, and opens the pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it, then creates or updates the matching GitHub Release from `releases.md`. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
 
-No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions.
+No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
+
+1. `tomori-protocol`, `tomori-security`, `tomori-backend` and `tomori-environment-sky`;
+2. `tomori-discovery`, `tomori-speech` and `tomori-backend-opencode`;
+3. `tomori-client`;
+4. `tomori-server`;
+5. `tomori-scene`, which depends on `tomori-server` for the test server behind its `testing` feature;
+6. `tomori-render`;
+7. `tomori-client-desktop`;
+8. `tomori-client-spectator`;
+9. `tomori-client-quest`.
 
 ## Releases
 

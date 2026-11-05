@@ -6,8 +6,9 @@ rust-version.workspace = true
 description = "Tomori on the desktop: the server-less window, taking part from a window or a terminal, and finding servers"
 repository.workspace = true
 license.workspace = true
-# Published once the headset's builder has proved its interfaces; see design/crates.md.
-publish = false
+readme = "readme.md"
+keywords = ["tomori", "desktop", "agents", "wgpu", "client"]
+categories = ["gui", "multimedia"]
 
 [features]
 # `window::test`: a surface and the shared test device for testing a window's contents without a display, for the spectator's tests. Enabled only by tests.

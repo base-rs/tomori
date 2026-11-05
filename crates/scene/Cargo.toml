@@ -6,8 +6,9 @@ rust-version.workspace = true
 description = "The platform-neutral Tomori client: the frame step, the conversation and the panels' layout, free of rendering, windowing and device code"
 repository.workspace = true
 license.workspace = true
-# Published once the headset's builder has proved its interfaces; see design/crates.md.
-publish = false
+readme = "readme.md"
+keywords = ["tomori", "xr", "agents", "client", "scene"]
+categories = ["game-development", "network-programming"]
 
 [features]
 # `test_support`: a microphone and a speaker without hardware, and a TLS test server with scripted agent sessions, with `scene::fixtures` and `Conversation::take_actions`, shared with the other client crates' tests. Enabled only by tests; every other test hook is `cfg(test)`.
