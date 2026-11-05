@@ -26,11 +26,13 @@ pub struct Haptics<E> {
     failure: Option<E>,
 }
 
-impl<E: Copy + PartialEq + std::fmt::Display> Haptics<E> {
-    pub fn new() -> Self {
+impl<E> Default for Haptics<E> {
+    fn default() -> Self {
         Self { failure: None }
     }
+}
 
+impl<E: Copy + PartialEq + std::fmt::Display> Haptics<E> {
     /// Vibrate `hand` through `output`, or stop it. A failure never stops the frame.
     pub fn apply(&mut self, output: &impl Vibrator<Error = E>, hand: Hand, haptic: Haptic) {
         let result = match haptic {
@@ -107,7 +109,7 @@ mod tests {
     #[test]
     fn vibrations_and_stops_reach_the_output() {
         let output = Recorder::default();
-        let mut haptics = Haptics::new();
+        let mut haptics = Haptics::default();
         haptics.apply(
             &output,
             Hand::Left,
@@ -126,7 +128,7 @@ mod tests {
 
     #[test]
     fn a_failure_is_kept_until_vibration_works_again() {
-        let mut haptics = Haptics::new();
+        let mut haptics = Haptics::default();
         let failing = Recorder {
             fail: Some("lost"),
             ..Default::default()

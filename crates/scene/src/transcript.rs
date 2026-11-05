@@ -3,7 +3,7 @@
 
 //! The right wrist's transcript: the conversation as styled rows, with a colour bar and name per speaker, turns grouped, Markdown-lite, tool chips, a pinned card for an approval or question with a button per choice, and the pinned queue with its remove action. See `design/wrist-transcript.md`.
 //!
-//! [`State`] is what the participant has done on it: what is focused, which groups are expanded, and whether it follows live. [`layout`] lays the space out for a [`State`], into rows for a [`Canvas`](crate::ui_panel::Canvas) or the console. Both are free of rendering code; the conversation acts on what is focused.
+//! [`State`] is what the participant has done on it: what is focused, which groups are expanded, and whether it follows live. [`layout`] lays the space out for a [`State`], into rows for a [`Canvas`](crate::canvas::Canvas) or the console. Both are free of rendering code; the conversation acts on what is focused.
 
 use std::collections::HashSet;
 

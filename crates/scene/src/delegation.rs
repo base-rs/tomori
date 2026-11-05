@@ -1090,7 +1090,7 @@ fn stable_hash(id: &str) -> u64 {
 /// All 192 remembered slots have distinct sightlines, not hidden radial layers.
 /// Early slots flank the coordinator; large workspaces require looking around
 /// and up. This is fixed scene-home geometry, never a head-locked overlay.
-pub(crate) fn slot_position(slot: usize) -> Vec3 {
+pub fn slot_position(slot: usize) -> Vec3 {
     // Fill two comfortable front columns and two rows before wrapping around
     // the observer. Slot identity is permanent, independent of membership size.
     let lane = slot % 4 + (slot % 32) / 8 * 4;

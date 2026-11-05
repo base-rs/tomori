@@ -3536,7 +3536,6 @@ dependencies = [
  "android_logger",
  "anyhow",
  "ash",
- "base-markdown",
  "basisu",
  "bytemuck",
  "cpal",
@@ -3553,12 +3552,10 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
- "tomori-backend",
  "tomori-client",
- "tomori-discovery",
  "tomori-environment-sky",
  "tomori-protocol",
- "tomori-security",
+ "tomori-scene",
  "tomori-server",
  "wgpu",
  "wgpu-hal",
@@ -3603,6 +3600,25 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tomori-scene"
+version = "0.1.0"
+dependencies = [
+ "base-markdown",
+ "bytemuck",
+ "font8x8",
+ "glam",
+ "log",
+ "serde",
+ "serde_json",
+ "tomori-backend",
+ "tomori-client",
+ "tomori-discovery",
+ "tomori-protocol",
+ "tomori-security",
+ "tomori-server",
 ]
 
 [[package]]

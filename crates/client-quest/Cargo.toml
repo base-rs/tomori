@@ -22,10 +22,7 @@ tomori-environment-sky = { version = "0.1.0", path = "../environment-sky" }
 ash = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 basisu = "0.1"
-base-markdown = "0.1.4"
 tomori-client = { version = "0.1.0", path = "../client" }
-tomori-security = { version = "0.1.0", path = "../security" }
-tomori-discovery = { version = "0.1.0", path = "../discovery" }
 glam = "0.30"
 gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -33,8 +30,8 @@ font8x8 = "0.3"
 log = "0.4"
 openxr = "0.22"
 tomori-protocol = { version = "0.1.0", path = "../protocol" }
+tomori-scene = { version = "0.1.0", path = "../scene" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 wgpu-hal = { version = "30.0.1", features = ["vulkan"] }
 
@@ -59,8 +56,10 @@ wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
 pollster = "0.4"
-# A server on a loopback port, with a scripted backend, for the tests that take part in its spaces, and the backend's events to script it with.
-tomori-backend = { version = "0.1.0", path = "../backend" }
+serde_json = "1"
+# The scene's test devices and TLS test server.
+tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
+# A server on a loopback port, with a scripted backend, for the command's tests.
 tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
 tomori-environment-sky = { version = "0.1.0", path = "../environment-sky", features = ["test-gpu"] }
 

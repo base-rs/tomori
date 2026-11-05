@@ -62,7 +62,7 @@ The user then found it "really hard to get it to show up", needing "a very speci
 
 ## Scope
 
-The headset and desktop client (`crates/client-quest`): showing and placing the transcript from the right hand and controller, its layout, its controls and the cue; and the console's text form of it.
+The headset and desktop client (`crates/scene`, drawn by `crates/client-quest`): showing and placing the transcript from the right hand and controller, its layout, its controls and the cue; and the console's text form of it.
 
 ## Validation
 

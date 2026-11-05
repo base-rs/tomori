@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Releases now start with one command, `cargo bake cargo:release:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), which creates the release branch, bumps the version, writes the release notes and the `Release:` trailer, validates the candidate and opens the pull request; `cargo bake cargo:version:*` no longer exists. A crate's first upload is `cargo bake cargo:bootstrap PACKAGE`. This uses Base's `base-project` 0.1.7 and `bake-cargo` 0.7.0.
+- The headset and desktop application's platform-neutral logic is now its own crate, `tomori-scene`, in `crates/scene`: the frame step that the headset and the desktop window share with each platform's own logic, the conversation and its connection, arrival, the hand menu, the transcript, pointing, the swarm and the workers, feedback and spatial audio logic, and the panels' layout. It depends on no rendering, windowing or platform audio crate, which a test checks for the host and the headset, and CI builds it for Android on its own. The renderers, the desktop's cpal streams (`cpal_audio.rs`) and the headset's AAudio streams (`android_audio.rs`) stay in `tomori-client-quest`. Nothing changes for people using Tomori. `tomori-scene` is not published yet (#56).
 
 - When GStreamer exits while the PipeWire spectator is writing a frame to it, the spectator now says how GStreamer exited, as it does between frames, rather than only that its video writer disconnected.
 

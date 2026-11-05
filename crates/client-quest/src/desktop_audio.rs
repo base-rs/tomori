@@ -3,11 +3,12 @@
 
 //! The desktop's default microphone and speaker, opened through cpal. It needs audio hardware, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
 //!
-//! Only the device calls belong here: what each stream does with its samples and its errors is in [`crate::capture`] and [`crate::playback`], where it is tested. See `design/live-audio.md`.
+//! Only the device calls belong here: what each stream does with its samples and its errors is in [`crate::cpal_audio`], [`crate::capture`] and [`crate::playback`], where it is tested. See `design/live-audio.md`.
 
 use crate::{
     capture::{self, Capture, Failed, Recording, Samples},
-    playback::{self, Output, Playback, Route, Shared},
+    cpal_audio,
+    playback::{Output, Playback, Route, Shared},
 };
 use cpal::{
     FromSample, SampleFormat, SizedSample, StreamConfig,
@@ -61,12 +62,12 @@ where
     T: SizedSample,
     f32: FromSample<T>,
 {
-    let mut mono = capture::Mono::new(config.channels);
+    let mut mono = cpal_audio::Mono::new(config.channels);
     device
         .build_input_stream::<T, _, _>(
             *config,
             move |data: &[T], _| samples(mono.mix(data)),
-            move |error: cpal::Error| capture::input_failed(&error, &failed),
+            move |error: cpal::Error| cpal_audio::input_failed(&error, &failed),
             None,
         )
         .map_err(|error| format!("Cannot open the microphone: {error}"))
@@ -116,12 +117,12 @@ fn output<T>(
 where
     T: SizedSample + FromSample<i16>,
 {
-    let mut render = playback::Render::new(player, config.sample_rate, config.channels);
+    let mut render = cpal_audio::Render::new(player, config.sample_rate, config.channels);
     device
         .build_output_stream::<T, _, _>(
             *config,
             move |data: &mut [T], _| render.fill(data),
-            move |error: cpal::Error| playback::output_failed(&error, &failed),
+            move |error: cpal::Error| cpal_audio::output_failed(&error, &failed),
             None,
         )
         .map_err(|error| format!("Cannot open the speaker: {error}"))

@@ -831,7 +831,7 @@ mod tests {
                     WIDTH,
                     HEIGHT,
                 );
-                let mut swarm = Swarm::new();
+                let mut swarm = Swarm::default();
                 for _ in 0..240 {
                     swarm.set_visual(
                         crate::interaction::Visual {
@@ -1068,7 +1068,7 @@ mod tests {
 
     #[test]
     fn activity_geometry_is_bounded_and_ready_halo_is_persistent() {
-        let mut swarm = Swarm::new();
+        let mut swarm = Swarm::default();
         for mode in [
             Mode::Neutral,
             Mode::Ready,
@@ -1156,7 +1156,7 @@ mod tests {
                     Mode::Waiting,
                     Mode::Listening,
                 ] {
-                    let mut swarm = Swarm::new();
+                    let mut swarm = Swarm::default();
                     for _ in 0..240 {
                         swarm.set_visual(
                             crate::interaction::Visual {
@@ -1262,7 +1262,7 @@ mod tests {
                     128,
                     128,
                 );
-                let mut swarm = Swarm::new();
+                let mut swarm = Swarm::default();
                 swarm.agents.clear();
                 renderer.update(&queue, &swarm, None, false);
                 let capture = |renderer: &Renderer| {
@@ -1468,7 +1468,7 @@ mod tests {
                     256,
                     256,
                 );
-                let mut swarm = Swarm::new();
+                let mut swarm = Swarm::default();
                 swarm.agents.clear();
                 renderer.update(&queue, &swarm, None, false);
                 let projection = Mat4::perspective_rh(1.0, 1.0, 0.05, 50.0);
@@ -1778,7 +1778,7 @@ mod tests {
                     HEIGHT,
                 );
                 renderer.set_environment(Environment::Minimal);
-                let swarm = Swarm::new();
+                let swarm = Swarm::default();
                 let eye = glam::Vec3::new(0.0, 1.6, 0.0);
                 let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
                     * Mat4::look_at_rh(eye, crate::arrival::CENTRE, glam::Vec3::Y);
@@ -1966,14 +1966,14 @@ mod tests {
                     }],
                     ..Default::default()
                 });
-                let pill = crate::pill::rows(&crate::pill::Status {
+                let pill = tomori_scene::pill::rows(&tomori_scene::pill::Status {
                     activity: tomori_protocol::Activity::Running,
                     mode: Some("build".into()),
                     title: "Hello from the desktop window.".into(),
                     replaying: false,
-                    need: Some(crate::pill::Need::Approval),
+                    need: Some(tomori_scene::pill::Need::Approval),
                 });
-                let mut swarm = Swarm::new();
+                let mut swarm = Swarm::default();
                 for _ in 0..120 {
                     swarm.step(1.0 / 72.0, None);
                 }
@@ -2009,8 +2009,10 @@ mod tests {
                         },
                     );
                     let mut panel = renderer.panel(&device, 24_000);
-                    let mut canvas =
-                        crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                    let mut canvas = crate::ui_panel::Canvas::new(
+                        tomori_scene::pill::COLUMNS,
+                        tomori_scene::pill::PIXEL,
+                    );
                     canvas.rows = pill.clone();
                     panel.set(&queue, &canvas);
                     renderer.render(
@@ -2180,8 +2182,8 @@ mod tests {
                     for _ in 0..30 {
                         workers.update(Some("root"), &workspace, 0.05);
                     }
-                    let indicator = crate::recording::canvas(
-                        &crate::recording::Phase::Recording {
+                    let indicator = tomori_scene::recording::canvas(
+                        &tomori_scene::recording::Phase::Recording {
                             elapsed: std::time::Duration::from_secs(15),
                             heard: "Hello from the headset.".into(),
                             answering: None,
@@ -2190,7 +2192,7 @@ mod tests {
                         Some(std::time::Duration::from_secs(60)),
                         0.5,
                     );
-                    let mut swarm = Swarm::new();
+                    let mut swarm = Swarm::default();
                     for _ in 0..120 {
                         swarm.step(1.0 / 72.0, None);
                     }
@@ -2244,12 +2246,14 @@ mod tests {
                             },
                         );
                         let mut pill = renderer.panel(&device, 24_000);
-                        let mut canvas =
-                            crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                        let mut canvas = crate::ui_panel::Canvas::new(
+                            tomori_scene::pill::COLUMNS,
+                            tomori_scene::pill::PIXEL,
+                        );
                         canvas.rows = vec![crate::ui_text::Row::text(
                             "Hello from the headset.",
                             crate::ui_text::Style::plain([1.0; 4]),
-                            crate::pill::COLUMNS,
+                            tomori_scene::pill::COLUMNS,
                         )];
                         pill.set(&queue, &canvas);
                         let mut card = renderer.panel(&device, 24_000);
@@ -2260,7 +2264,7 @@ mod tests {
                         )];
                         panels.push((
                             &card,
-                            crate::recording::facing(
+                            tomori_scene::recording::facing(
                                 glam::Vec3::new(-0.2, 1.4, -0.6),
                                 glam::Vec3::new(0.0, 1.6, 0.0),
                                 1.0,
@@ -2380,7 +2384,7 @@ mod tests {
                     128,
                     128,
                 );
-                renderer.update(&queue, &Swarm::new(), None, false);
+                renderer.update(&queue, &Swarm::default(), None, false);
                 renderer.update_controllers(
                     &queue,
                     [
@@ -2399,12 +2403,14 @@ mod tests {
                 let matrices = [-0.032, 0.032]
                     .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
                 let mut pill = renderer.panel(&device, 24_000);
-                let mut canvas =
-                    crate::ui_panel::Canvas::new(crate::pill::COLUMNS, crate::pill::PIXEL);
+                let mut canvas = crate::ui_panel::Canvas::new(
+                    tomori_scene::pill::COLUMNS,
+                    tomori_scene::pill::PIXEL,
+                );
                 canvas.rows = vec![crate::ui_text::Row::text(
                     "Hello from the Quest microphone!",
                     crate::ui_text::Style::plain([1.0; 4]),
-                    crate::pill::COLUMNS,
+                    tomori_scene::pill::COLUMNS,
                 )];
                 pill.set(&queue, &canvas);
                 // Exercise the recording indicator through its states, beside the panel, and drawing no panel at all.
@@ -2418,8 +2424,8 @@ mod tests {
                     if let Some(elapsed) = elapsed {
                         indicator.set(
                             &queue,
-                            &crate::recording::canvas(
-                                &crate::recording::Phase::Recording {
+                            &tomori_scene::recording::canvas(
+                                &tomori_scene::recording::Phase::Recording {
                                     elapsed: std::time::Duration::from_secs(elapsed),
                                     heard: "Hello from the Quest microphone!".into(),
                                     answering: None,
@@ -2431,7 +2437,7 @@ mod tests {
                         );
                         panels.push((
                             &indicator,
-                            crate::recording::facing(
+                            tomori_scene::recording::facing(
                                 glam::Vec3::new(-0.2, 1.2, -0.4),
                                 glam::Vec3::new(0.0, 1.6, 0.0),
                                 1.0,
@@ -2448,7 +2454,7 @@ mod tests {
                     );
                 }
                 // Exercise every activity shape/halo through both eye targets.
-                let mut swarm = Swarm::new();
+                let mut swarm = Swarm::default();
                 for mode in [
                     Mode::Ready,
                     Mode::Working,

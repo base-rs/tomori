@@ -20,8 +20,8 @@ pub struct Swarm {
     time: f32,
 }
 
-impl Swarm {
-    pub fn new() -> Self {
+impl Default for Swarm {
+    fn default() -> Self {
         // A deterministic spherical distribution: no RNG or assets required.
         let agents: Vec<_> = (0..AGENT_COUNT)
             .map(|i| {
@@ -42,7 +42,9 @@ impl Swarm {
             time: 0.0,
         }
     }
+}
 
+impl Swarm {
     /// Smooth the audio envelope, but never smooth away a discrete turn state.
     pub fn set_visual(&mut self, mut visual: Visual, dt: f32) {
         visual.time = self.visual.time + dt.clamp(0.0, 0.1);
@@ -144,7 +146,7 @@ mod tests {
 
     #[test]
     fn an_agent_with_no_neighbours_still_moves() {
-        let mut swarm = Swarm::new();
+        let mut swarm = Swarm::default();
         for (i, agent) in swarm.agents.iter_mut().enumerate() {
             agent.position = Vec3::new(i as f32 * 10.0, 0.0, 0.0);
         }
@@ -156,7 +158,7 @@ mod tests {
 
     #[test]
     fn conversational_shapes_stay_finite_and_settle_without_teleporting() {
-        let mut swarm = Swarm::new();
+        let mut swarm = Swarm::default();
         for mode in [
             Mode::Working,
             Mode::Speaking,
@@ -187,8 +189,8 @@ mod tests {
 
     #[test]
     fn swarm_is_finite_bounded_and_deterministic() {
-        let mut a = Swarm::new();
-        let mut b = Swarm::new();
+        let mut a = Swarm::default();
+        let mut b = Swarm::default();
         for _ in 0..1500 {
             a.step(1.0 / 72.0, None);
             b.step(1.0 / 72.0, None);
@@ -204,7 +206,7 @@ mod tests {
 
     #[test]
     fn trigger_attractor_moves_the_swarm() {
-        let mut swarm = Swarm::new();
+        let mut swarm = Swarm::default();
         let target = CENTER + Vec3::X * 1.5;
         for _ in 0..1000 {
             swarm.step(1.0 / 72.0, Some(target));
@@ -218,7 +220,7 @@ mod tests {
 
     #[test]
     fn zero_delta_and_resume_stalls_are_safe() {
-        let mut swarm = Swarm::new();
+        let mut swarm = Swarm::default();
         let start = swarm.agents[0].position;
         swarm.step(0.0, None);
         assert_eq!(start, swarm.agents[0].position);

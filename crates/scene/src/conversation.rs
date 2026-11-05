@@ -439,7 +439,7 @@ impl Conversation {
         self.capture_generation = generation;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
     }
@@ -1418,7 +1418,7 @@ impl Conversation {
         self.pairing = Some(Pairing::Waiting(code, began));
     }
 
-    /// Give up on a pairing that has waited longer than [`PAIRING_PATIENCE`] at `now`, cancelling it on the server. Called every frame.
+    /// Give up on a pairing that has waited longer than the device waits for one, the server's timeout and a margin, at `now`, cancelling it on the server. Called every frame.
     pub fn expire_pairing(&mut self, now: Instant) {
         let began = match &self.pairing {
             Some(Pairing::Committed(_, began) | Pairing::Waiting(_, began)) => *began,

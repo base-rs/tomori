@@ -4,6 +4,13 @@
 //! The platform microphone, opened for live audio or push-to-talk. See `design/live-audio.md`.
 //!
 //! Capture hands mono samples to a callback on its own thread; [`crate::connection::Connection`] passes them to the client's [`tomori_client::Microphone`], which frames and sends them.
+//!
+//! # Device adapters
+//!
+//! Each client's microphone is a [`Capture`], which its own crate implements over the platform's audio interface. Two helpers keep those adapters thin, so that their logic is tested here:
+//!
+//! - a device that pushes interleaved frames to a callback, such as cpal's, passes them through [`downmix`];
+//! - a device that is read from, such as AAudio's, implements [`InputStream`] and runs [`run_capture`] on its capture thread, which decides what is delivered at the push-to-talk boundary and when a lost connection stops live capture.
 
 /// Receives captured mono samples in the range -1 to 1, on the capture thread.
 pub type Samples = Box<dyn FnMut(&[f32]) + Send>;
@@ -64,9 +71,8 @@ pub trait Capture {
     }
 }
 
-/// Average interleaved channels into mono.
-#[cfg_attr(target_os = "android", allow(dead_code))]
-fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
+/// Average interleaved channels into mono, for a device adapter whose device delivers `channels` samples per frame. `output` is cleared first, and receives one sample per whole frame; a trailing partial frame is dropped.
+pub fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
     output.clear();
     if channels <= 1 {
         output.extend_from_slice(samples);
@@ -79,40 +85,44 @@ fn downmix(samples: &[f32], channels: usize, output: &mut Vec<f32>) {
     );
 }
 
-/// A pull-based input stream, such as AAudio's. Separated from the device so
+/// A pull-based input stream, such as AAudio's, which a device adapter implements for [`run_capture`]. Separated from the device so
 /// that the capture boundary can be tested deterministically.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-trait InputStream {
+///
+/// [`run_capture`] calls [`Self::start`] once, then reads until capture ends, then [`Self::stop`] once, whatever the result. An error from any of them ends capture with that error.
+pub trait InputStream {
+    /// Start the device capturing. Nothing is read before this succeeds.
     fn start(&mut self) -> Result<(), String>;
-    /// Read up to `buffer.len()` samples, waiting at most `timeout_ns`; zero
-    /// returns only what the device has already captured.
+    /// Read up to `buffer.len()` mono samples, in the range -1 to 1 at the
+    /// [`Recording`]'s rate, into the start of `buffer`, and return how many,
+    /// waiting at most `timeout_ns`; zero returns only what the device has
+    /// already captured, without waiting, and returns 0 once that is all read.
     fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String>;
+    /// Stop the device. Called once, after the last read.
     fn stop(&mut self);
     /// How many times the device has discarded audio because it was not read
-    /// in time. A device that cannot tell reports a constant, such as zero or
-    /// an error code, which is never taken as a loss.
+    /// in time, a count that only grows while started: any increase between
+    /// reads is taken as lost audio. A device that cannot tell reports a
+    /// constant, such as zero or an error code, which is never taken as a loss.
     fn overruns(&self) -> i32;
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const CONNECTION_LOST: &str = "Connection lost; live microphone stopped.";
 
 /// How long one read may wait for audio, so that stop and disconnection are
 /// noticed promptly.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const READ_TIMEOUT_NS: i64 = 100_000_000;
 
 /// The most non-blocking reads made to collect what the device had already
 /// captured when capture was stopped; a well-behaved device runs dry first.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const MAX_DRAIN_READS: usize = 64;
 
 /// The shortest interval between warnings that the live microphone lost audio.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const OVERRUN_LOG: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Capture until `stop` is set or, for live audio, `active` reports that the
-/// connection ended.
+/// Capture from the stream `open` makes until `stop` is set or, for live
+/// audio, `active` reports that the connection ended, delivering what is read
+/// to `samples`, through `buffer`. A device adapter runs this on its capture
+/// thread; `active` is `None` for push-to-talk.
 ///
 /// The capture boundary is the moment `stop` is observed. Every sample the
 /// device captured before it is delivered: a read in flight when stop is set,
@@ -125,8 +135,7 @@ const OVERRUN_LOG: std::time::Duration = std::time::Duration::from_secs(30);
 /// A connection that ended before or while the device opened never starts
 /// the stream, and no sample is delivered once `active` reports false. A
 /// disconnection racing the start itself stops the stream before any read.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn run_capture<S: InputStream>(
+pub fn run_capture<S: InputStream>(
     open: impl FnOnce() -> Result<S, String>,
     samples: &mut dyn FnMut(&[f32]),
     stop: &std::sync::atomic::AtomicBool,
@@ -198,13 +207,11 @@ fn run_capture<S: InputStream>(
     result
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn warn_overruns(lost: u64) {
     log::warn!("The live microphone lost audio ({lost} overruns).");
 }
 
 /// Deliver what the device captured before the boundary, without waiting.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn drain<S: InputStream>(
     stream: &mut S,
     samples: &mut dyn FnMut(&[f32]),
@@ -236,367 +243,13 @@ pub fn protocol_rate(rate: u32) -> u32 {
     rate.clamp(*RATES.start(), *RATES.end())
 }
 
-/// Mixes a desktop input stream's interleaved samples, in its own format, down to mono samples between -1 and 1. Its buffers are kept between callbacks.
-#[cfg(not(target_os = "android"))]
-pub struct Mono {
-    channels: usize,
-    converted: Vec<f32>,
-    mono: Vec<f32>,
-}
-
-#[cfg(not(target_os = "android"))]
-impl Mono {
-    pub fn new(channels: u16) -> Self {
-        Self {
-            channels: usize::from(channels),
-            converted: Vec::new(),
-            mono: Vec::new(),
-        }
-    }
-
-    /// `data`, `channels` samples per frame, as mono.
-    pub fn mix<T: cpal::Sample>(&mut self, data: &[T]) -> &[f32]
-    where
-        f32: cpal::FromSample<T>,
-    {
-        self.converted.clear();
-        self.converted
-            .extend(data.iter().map(|sample| sample.to_sample::<f32>()));
-        downmix(&self.converted, self.channels, &mut self.mono);
-        &self.mono
-    }
-}
-
-/// Handle a desktop input stream's `error`: some leave it capturing without a gap, and anything else, including an overrun, loses audio, which must not be sent as if whole, and so is `failed`.
-#[cfg(not(target_os = "android"))]
-pub fn input_failed(error: &cpal::Error, failed: &Failed) {
-    match error.kind() {
-        cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
-            log::info!("Microphone: {error}");
-        }
-        _ => failed(format!("The microphone failed: {error}")),
-    }
-}
-
-#[cfg(target_os = "android")]
-pub use android::Android;
-
-/// AAudio, at the 16 kHz the recognizer uses, after asking for `RECORD_AUDIO`.
-#[cfg(target_os = "android")]
-mod android {
-    use super::{Active, Capture, Failed, InputStream, Recording, Samples, run_capture};
-    use ndk::audio::{
-        AudioDirection, AudioFormat, AudioInputPreset, AudioSharingMode, AudioStream,
-        AudioStreamBuilder, SessionId,
-    };
-    use std::{
-        num::NonZeroI32,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicI32, Ordering},
-        },
-        thread::JoinHandle,
-    };
-
-    const SAMPLE_RATE: u32 = 16_000;
-
-    pub struct Android {
-        android: Arc<crate::android::Android>,
-        requested: bool,
-        requested_early: bool,
-        /// The live microphone's audio session while it is open, or 0.
-        session: Arc<AtomicI32>,
-        /// The audio session the live microphone last used, or 0, used again each time it opens so that the speaker, playing in it, need not reopen; as when push-to-talk during live audio ends.
-        kept: Arc<AtomicI32>,
-        /// Capture live audio with the recognition preset and no echo canceller, so that the echo test can compare; see `design/spatial-audio.md`.
-        uncancelled: bool,
-        /// Enable the echo canceller on the live microphone's session, or disable it, for the echo test to compare.
-        canceller: bool,
-    }
-
-    impl Android {
-        pub fn new(
-            android: Arc<crate::android::Android>,
-            uncancelled: bool,
-            canceller: bool,
-        ) -> Self {
-            Self {
-                android,
-                requested: false,
-                requested_early: false,
-                session: Arc::default(),
-                kept: Arc::default(),
-                uncancelled,
-                canceller,
-            }
-        }
-    }
-
-    impl Capture for Android {
-        /// Asks once per launch; after that, the participant must allow it in Settings, since Android may not ask again.
-        fn permit(&mut self) -> Result<bool, String> {
-            let asked = self.requested;
-            let granted = self
-                .android
-                .check_or_request("android.permission.RECORD_AUDIO", &mut self.requested)
-                .map_err(|error| format!("Cannot ask for the microphone: {error:#}"))?;
-            if !granted && asked {
-                return Err("Allow the microphone for Tomori in Settings.".into());
-            }
-            Ok(granted)
-        }
-
-        fn request(&mut self) -> Result<bool, String> {
-            self.android
-                .check_or_request("android.permission.RECORD_AUDIO", &mut self.requested_early)
-                .map_err(|error| format!("Cannot ask for the microphone: {error:#}"))
-        }
-
-        /// The stream opens on the capture thread, so that the frame does not wait for it; failing to open is reported through `failed`.
-        fn open(&mut self, samples: Samples, failed: Failed) -> Result<Recording, String> {
-            self.start(samples, failed, AudioInputPreset::VoiceRecognition, None)
-        }
-
-        fn open_live(
-            &mut self,
-            samples: Samples,
-            failed: Failed,
-            active: Active,
-        ) -> Result<Recording, String> {
-            let preset = if self.uncancelled {
-                AudioInputPreset::VoiceRecognition
-            } else {
-                AudioInputPreset::VoiceCommunication
-            };
-            self.start(samples, failed, preset, Some(active))
-        }
-
-        fn live_session(&self) -> Option<i32> {
-            Some(self.session.load(Ordering::Relaxed)).filter(|session| *session != 0)
-        }
-    }
-
-    impl Android {
-        fn start(
-            &mut self,
-            samples: Samples,
-            failed: Failed,
-            preset: AudioInputPreset,
-            active: Option<Active>,
-        ) -> Result<Recording, String> {
-            let stop = Arc::new(AtomicBool::new(false));
-            let thread_stop = stop.clone();
-            // Live audio with the communication preset captures in an audio session of its own, with the platform's echo canceller attached where it has one.
-            // Live audio without a session, as the echo test's `uncancelled` run captures, still says what shapes it, on the capture thread.
-            let unsessioned = (active.is_some() && preset != AudioInputPreset::VoiceCommunication)
-                .then(|| self.android.clone());
-            let session = (active.is_some() && preset == AudioInputPreset::VoiceCommunication)
-                .then(|| Session {
-                    current: self.session.clone(),
-                    kept: self.kept.clone(),
-                    android: self.android.clone(),
-                    canceller: self.canceller,
-                });
-            let thread = std::thread::Builder::new()
-                .name("tomori-microphone".into())
-                .spawn(move || {
-                    if let Some(android) = unsessioned {
-                        android.log_audio_state(None, log::Level::Info);
-                    }
-                    if let Err(error) = capture(samples, &thread_stop, preset, active, session) {
-                        failed(error);
-                    }
-                })
-                .map_err(|error| format!("Cannot start the microphone thread: {error}"))?;
-            Ok(Recording::new(
-                SAMPLE_RATE,
-                Worker {
-                    stop,
-                    thread: Some(thread),
-                },
-            ))
-        }
-    }
-
-    /// Stops and joins the capture thread when dropped, so that every captured sample is delivered first.
-    struct Worker {
-        stop: Arc<AtomicBool>,
-        thread: Option<JoinHandle<()>>,
-    }
-
-    impl Drop for Worker {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::Release);
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
-
-    fn capture(
-        mut samples: Samples,
-        stop: &AtomicBool,
-        preset: AudioInputPreset,
-        active: Option<Active>,
-        session: Option<Session>,
-    ) -> Result<(), String> {
-        // Shared mode supports Android's resampler, so ask for the recognizer's 16 kHz mono directly.
-        let builder = |session: Option<Option<SessionId>>| {
-            let builder = AudioStreamBuilder::new()
-                .map_err(|error| format!("Cannot open the microphone: {error}"))?
-                .direction(AudioDirection::Input)
-                .sharing_mode(AudioSharingMode::Shared)
-                .channel_count(1)
-                .sample_rate(SAMPLE_RATE as i32)
-                .format(AudioFormat::PCM_Float)
-                .input_preset(preset);
-            // `Some(None)` allocates a new session.
-            Ok::<_, String>(match session {
-                Some(session) => builder.session_id(session),
-                None => builder,
-            })
-        };
-        let open = || {
-            let kept = session
-                .as_ref()
-                .and_then(|session| NonZeroI32::new(session.kept.load(Ordering::Relaxed)));
-            let opened = |session| {
-                builder(session)?
-                    .open_stream()
-                    .map_err(|error| format!("Cannot open the microphone: {error}"))
-            };
-            let stream = match (&session, kept) {
-                (None, _) => opened(None),
-                (Some(_), None) => opened(Some(None)),
-                // The session used before, or a new one if it is refused.
-                (Some(_), Some(kept)) => {
-                    opened(Some(Some(SessionId::Allocated(kept)))).or_else(|error| {
-                        log::info!("{error} in audio session {kept} again, so allocating another");
-                        opened(Some(None))
-                    })
-                }
-            }?;
-            if stream.sample_rate() != SAMPLE_RATE as i32
-                || stream.channel_count() != 1
-                || stream.format() != AudioFormat::PCM_Float
-            {
-                return Err("The microphone opened in an unexpected format.".into());
-            }
-            let mut canceller = None;
-            if let Some(session) = &session {
-                match stream.session_id() {
-                    SessionId::Allocated(id) => {
-                        // In full the first time in a session; again, as when push-to-talk during live audio ends, only at debug.
-                        let level = if session.kept.load(Ordering::Relaxed) == id.get() {
-                            log::Level::Debug
-                        } else {
-                            log::Level::Info
-                        };
-                        log::log!(
-                            level,
-                            "Live microphone in audio session {}, preset {preset:?}",
-                            id.get()
-                        );
-                        // The platform attaches its echo canceller to this preset where it has one; ask for it by session, enable it (or disable it, for the echo test), and say what it and the other effects report. See `design/client-logging.md`.
-                        canceller = session
-                            .android
-                            .echo_canceller(id.get(), session.canceller, level)
-                            .unwrap_or_else(|error| {
-                                log::warn!("Cannot reach the echo canceller: {error:#}");
-                                None
-                            });
-                        session.android.log_audio_state(Some(id.get()), level);
-                        session.kept.store(id.get(), Ordering::Relaxed);
-                        session.current.store(id.get(), Ordering::Relaxed);
-                    }
-                    SessionId::None => {
-                        log::info!("Live microphone has no audio session, preset {preset:?}")
-                    }
-                }
-            }
-            Ok(Input(stream, canceller))
-        };
-        // 20 ms reads, one outgoing frame each.
-        let mut buffer = [0.0_f32; (SAMPLE_RATE / 50) as usize];
-        log::info!("Microphone opening (16 kHz mono, {preset:?})");
-        let result = run_capture(open, &mut *samples, stop, active.as_ref(), &mut buffer);
-        if let Some(session) = &session {
-            session.current.store(0, Ordering::Relaxed);
-        }
-        log::info!("Microphone closed");
-        result
-    }
-
-    /// What live capture with the communication preset needs for its audio session.
-    struct Session {
-        /// Where the session is published while the stream is open.
-        current: Arc<AtomicI32>,
-        /// The session to capture in again, and where a new one is kept.
-        kept: Arc<AtomicI32>,
-        android: Arc<crate::android::Android>,
-        /// Whether to enable the echo canceller, or disable it for the echo test.
-        canceller: bool,
-    }
-
-    /// The stream, and the echo canceller attached to its session while it is open.
-    struct Input(
-        AudioStream,
-        #[expect(
-            dead_code,
-            reason = "kept for its lifetime: dropping it releases the canceller"
-        )]
-        Option<crate::android::EchoCanceller>,
-    );
-
-    impl InputStream for Input {
-        fn start(&mut self) -> Result<(), String> {
-            self.0
-                .request_start()
-                .map_err(|error| format!("Cannot start the microphone: {error}"))
-        }
-
-        fn read(&mut self, buffer: &mut [f32], timeout_ns: i64) -> Result<usize, String> {
-            // SAFETY: `buffer` holds `buffer.len()` samples of the negotiated mono float format, and only this thread uses the stream.
-            let read = unsafe {
-                self.0
-                    .read(buffer.as_mut_ptr().cast(), buffer.len() as i32, timeout_ns)
-            };
-            frame_count(read.map_err(i32::from), buffer.len())
-        }
-
-        fn stop(&mut self) {
-            let _ = self.0.request_stop();
-        }
-
-        fn overruns(&self) -> i32 {
-            self.0.x_run_count()
-        }
-    }
-
-    /// The samples read. ndk 0.9 returns a positive count from `AAudioStream_read` as an error code, so only negative values are errors.
-    fn frame_count(result: Result<u32, i32>, capacity: usize) -> Result<usize, String> {
-        let count = match result {
-            Ok(count) => i64::from(count),
-            Err(code) => i64::from(code),
-        };
-        if count < 0 {
-            return Err(format!("The microphone failed (AAudio error {count})."));
-        }
-        if count as usize > capacity {
-            return Err("The microphone returned more samples than asked for.".into());
-        }
-        Ok(count as usize)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        Active, CONNECTION_LOST, Capture, Failed, InputStream, MAX_DRAIN_READS, downmix,
-        run_capture,
-    };
     #[cfg(not(target_os = "android"))]
-    use super::{Mono, input_failed, protocol_rate};
+    use super::protocol_rate;
+    use super::{
+        Active, CONNECTION_LOST, Capture, InputStream, MAX_DRAIN_READS, downmix, run_capture,
+    };
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -965,31 +618,6 @@ mod tests {
         assert_eq!(protocol_rate(4_000), 8_000);
         assert_eq!(protocol_rate(16_000), 16_000);
         assert_eq!(protocol_rate(96_000), 48_000);
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn desktop_input_in_any_format_is_mixed_to_mono() {
-        let mut mono = Mono::new(2);
-        assert_eq!(mono.mix(&[1.0_f32, 0.0, -0.5, -0.5]), [0.5, -0.5]);
-        assert_eq!(mono.mix(&[i16::MIN, i16::MIN]), [-1.0]);
-        let mut single = Mono::new(1);
-        assert_eq!(single.mix(&[0_u16]), [-1.0]);
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn desktop_input_errors_that_lose_audio_fail_the_capture() {
-        let reported = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = reported.clone();
-        let failed: Failed = Box::new(move |error| sink.lock().unwrap().push(error));
-        input_failed(&cpal::Error::new(cpal::ErrorKind::DeviceChanged), &failed);
-        input_failed(&cpal::Error::new(cpal::ErrorKind::RealtimeDenied), &failed);
-        assert!(reported.lock().unwrap().is_empty());
-        input_failed(&cpal::Error::new(cpal::ErrorKind::Xrun), &failed);
-        let reported = reported.lock().unwrap();
-        assert_eq!(reported.len(), 1);
-        assert!(reported[0].starts_with("The microphone failed: "));
     }
 
     #[test]

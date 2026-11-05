@@ -21,19 +21,7 @@ pub const MAX_CUBES: usize = 2048;
 /// The most label vertices, which bounds the buffer.
 const MAX_VERTICES: usize = 1 << 19;
 const INITIAL_VERTICES: usize = 1 << 14;
-/// How far the ray reaches when it meets nothing.
-pub const RAY_LENGTH: f32 = 3.0;
-/// How far the ray reaches in a space when it meets no worker: far enough to show where it points, but short of the workers, so that an idle ray does not streak through the space. It reaches a worker once it meets one.
-pub const SPACE_RAY_LENGTH: f32 = 1.0;
-
-/// The pointing ray, from the controller to where it ends.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Beam {
-    pub origin: Vec3,
-    pub end: Vec3,
-    /// Whether it ends on something it points at, which draws it highlighted.
-    pub hit: bool,
-}
+pub use tomori_scene::pointing::Beam;
 
 /// The colour of the participant cubes around a space, distinct from the swarm's blues so that people read differently from the agent.
 const PARTICIPANT: [f32; 3] = [1.0, 0.55, 0.75];

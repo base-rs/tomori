@@ -119,7 +119,7 @@ impl Demo {
             queue: gpu.queue,
             width: gpu.width,
             height: gpu.height,
-            swarm: Swarm::new(),
+            swarm: Swarm::default(),
             camera: Camera::default(),
             cursor: Vec2::new(gpu.width as f32, gpu.height as f32) * 0.5,
             attracting: false,
@@ -270,7 +270,7 @@ impl Contents for Demo {
                 repeat: false,
             } => match code {
                 KeyCode::Escape => return Ok(Flow::Exit),
-                KeyCode::KeyR if interactive => self.swarm = Swarm::new(),
+                KeyCode::KeyR if interactive => self.swarm = Swarm::default(),
                 KeyCode::KeyE if interactive => {
                     self.renderer
                         .set_environment(self.renderer.environment().next());

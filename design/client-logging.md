@@ -17,10 +17,10 @@ In November 2026, per-frame `info` lines ("Submitted stereo frame", swarm intera
 
 ## Scope
 
-Logging in `crates/client-quest`, in particular its XR frame loop, input sampling, connection polling, and the audio device callbacks and capture loop. The desktop and spectator modes share this code and follow the same rule; the server's logging is covered by `server.md`.
+Logging in `crates/scene` and `crates/client-quest`, in particular the XR frame loop, input sampling, connection polling, and the audio device callbacks and capture loop. The desktop and spectator modes share this code and follow the same rule; the server's logging is covered by `server.md`.
 
 ## Validation
 
-- Inspect each `info`, `warn` and `error` log call in `crates/client-quest` that can run from the frame loop, a polling loop or an audio callback, and check that it is guarded by a change of state or by a cadence of at least 30 seconds.
-- The cadence is unit tested in `crates/client-quest/src/log_cadence.rs`: the first occurrence is logged, later ones are skipped and counted until the interval has passed, and the rate is reported.
+- Inspect each `info`, `warn` and `error` log call in `crates/scene` and `crates/client-quest` that can run from the frame loop, a polling loop or an audio callback, and check that it is guarded by a change of state or by a cadence of at least 30 seconds.
+- The cadence is unit tested in `crates/scene/src/log_cadence.rs`: the first occurrence is logged, later ones are skipped and counted until the interval has passed, and the rate is reported.
 - On the headset, run `adb logcat -s tomori` through several minutes of use, including joining a space, talking and recentering, and check that steady use adds only a summary line about once a minute while lifecycle events remain in the buffer.

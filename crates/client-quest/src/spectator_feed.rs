@@ -51,7 +51,7 @@ impl SwarmAnimation {
     fn new() -> Self {
         Self {
             signals: interaction::Signals::default(),
-            swarm: Swarm::new(),
+            swarm: Swarm::default(),
         }
     }
 
@@ -488,7 +488,7 @@ mod tests {
                     device: &gpu.device,
                     queue: &gpu.queue,
                     renderer: &mut renderer,
-                    swarm: &mut Swarm::new(),
+                    swarm: &mut Swarm::default(),
                     target: target.create_view(&Default::default()),
                     aspect: 4.0 / 3.0,
                 },
@@ -627,7 +627,7 @@ mod tests {
     fn swarm_uses_the_same_simulation_as_the_headset() {
         let mut animation = SwarmAnimation::new();
         let mut signals = interaction::Signals::default();
-        let mut headset = Swarm::new();
+        let mut headset = Swarm::default();
         for activity in [
             interaction::SessionActivity::Working,
             interaction::SessionActivity::Waiting,

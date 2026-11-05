@@ -717,7 +717,7 @@ impl Input {
             audience_grip,
             transcript_grip,
             haptic,
-            haptics: Haptics::new(),
+            haptics: Haptics::default(),
             set,
             hand_paths,
             location_errors: [None, None],

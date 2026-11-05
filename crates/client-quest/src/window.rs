@@ -203,6 +203,8 @@ pub(crate) mod test {
 
     /// Run `test` with the shared test device, as a window would give it, at the test surface's size; skipped where there is no GPU.
     pub fn with_gpu(format: wgpu::TextureFormat, test: impl FnOnce(Gpu)) {
+        // The contents log what they set up, such as the adapter, which tests exercise.
+        crate::test_support::log_everything();
         tomori_environment_sky::test_gpu::with(|gpu| {
             test(Gpu {
                 adapter: gpu.adapter,
