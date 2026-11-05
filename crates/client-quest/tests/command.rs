@@ -5,6 +5,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::RwLock;
+
+/// Held to start a process, and exclusively to write a program that a test then runs: a child forked while the program is open for writing keeps it open until it executes its own, and running the program meanwhile fails with "Text file busy".
+static SPAWN: RwLock<()> = RwLock::new(());
 
 /// `tomori` with `arguments`, in an environment without a display, an OpenXR runtime, a server or the user's PipeWire settings; with `path` for its `PATH`, if given.
 fn tomori(arguments: &[&str], path: Option<&Path>) -> Output {
@@ -19,11 +23,17 @@ fn tomori(arguments: &[&str], path: Option<&Path>) -> Output {
         .env_remove("PIPEWIRE_NODE")
         .env("XR_RUNTIME_JSON", "/nonexistent/openxr_runtime.json")
         .env("RUST_LOG", "info")
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(path) = path {
         command.env("PATH", path);
     }
-    command.output().expect("tomori runs")
+    let child = {
+        let _spawning = SPAWN.read().unwrap();
+        command.spawn().expect("tomori starts")
+    };
+    child.wait_with_output().expect("tomori runs")
 }
 
 fn stdout(output: &Output) -> String {
@@ -106,11 +116,15 @@ fn the_pipewire_source_stops_when_gstreamer_does() {
     // GStreamer that takes the video for a moment, then stops, as when PipeWire goes away.
     let bin = directory("gstreamer-stops");
     let gstreamer = bin.join("gst-launch-1.0");
-    std::fs::write(&gstreamer, "#!/bin/sh\nexec /bin/sleep 1\n").unwrap();
-    std::fs::set_permissions(&gstreamer, std::fs::Permissions::from_mode(0o755)).unwrap();
+    {
+        let _writing = SPAWN.write().unwrap();
+        std::fs::write(&gstreamer, "#!/bin/sh\nexec /bin/sleep 1\n").unwrap();
+        std::fs::set_permissions(&gstreamer, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let output = tomori(&["--spectator-pipewire"], Some(&bin));
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("GStreamer exited"));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("GStreamer exited"), "{stderr}");
 }
 
 #[test]

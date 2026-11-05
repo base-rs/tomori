@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- When GStreamer exits while the PipeWire spectator is writing a frame to it, the spectator now says how GStreamer exited, as it does between frames, rather than only that its video writer disconnected.
+
 - The headset and desktop application's package is renamed from `tomori-quest` to `tomori-client-quest`, so that each client is named `tomori-client-<target>` after its folder, as the other crates are. Cargo commands name it, such as `cargo run -p tomori-client-quest` and `cargo apk build -p tomori-client-quest --lib`. Its library and executable are still `tomori`, and the Android application ID and `tomori.apk` are unchanged. This is the first step of splitting it into the scene, rendering and per-client crates planned in #132 (#56).
 
 - Pull requests must now keep the workspace at 100% source-region coverage. The Test workflow checks it on stable Rust, and the main branch requires it through `test-result`. The only exceptions are seven thin files of headset, window, audio, child-process, process-exit and multicast DNS calls that CI cannot make, each excluded in its crate's `Cargo.toml` with its reason. `design/testing.md` records the requirement. Reaching it found and fixed bugs in Markdown hard breaks and task markers, `tomori discover`'s participant counts, the pause between spoken segments, and the fitting of snapshots and listings to their budgets (#55).
