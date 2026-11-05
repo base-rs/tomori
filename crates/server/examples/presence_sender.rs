@@ -9,7 +9,7 @@
 //! where `ADDRESS` defaults to `127.0.0.1:8766`. It creates a space, prints
 //! its id, and reports presence for `PRESENCE_SECS` seconds (default 30).
 //! Start the spectator in another shell with the printed space id:
-//! `./target/debug/tomori --spectator-pipewire --server ADDRESS --space ID`.
+//! `./target/debug/tomori-spectator --pipewire --server ADDRESS --space ID`.
 
 use std::io::{BufRead, Read, Write};
 use std::net::TcpStream;

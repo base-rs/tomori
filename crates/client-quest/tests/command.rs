@@ -135,5 +135,8 @@ fn discover_lists_the_spaces_on_a_server_given_to_it() {
     let output = tomori(&["discover", "--server", &server.address.to_string()], None);
     assert!(output.status.success());
     assert!(stdout(&output).contains(&format!("{:<12} Studio", space.id)));
-    assert!(stderr(&output).contains("Join one with:"));
+    assert!(
+        stderr(&output)
+            .contains("Join one with: tomori-spectator --server ADDRESS --space SPACE_ID")
+    );
 }

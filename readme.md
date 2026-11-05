@@ -176,7 +176,7 @@ cmake -S /tmp/opencode/obs-pwvideo-build -B /tmp/opencode/obs-pwvideo-build/buil
 cmake --build /tmp/opencode/obs-pwvideo-build/build
 ```
 
-Run these commands from the project directory; the clone directory must not already exist. The plugin is **not installed automatically**. When ready to change OBS, follow [the plugin's installation instructions](https://github.com/hoshinolina/obs-pwvideo#how-to-build-from-source), using the patched build and its `data` directory. Check for an existing installation before copying anything. Do not install both patched and AUR versions at once. OBS must be restarted to load a different plugin; do not restart during a stream. Verify the live preview, performance and audio/video sync before going live. Keep `--spectator` and window capture as the fallback.
+Run these commands from the project directory; the clone directory must not already exist. The plugin is **not installed automatically**. When ready to change OBS, follow [the plugin's installation instructions](https://github.com/hoshinolina/obs-pwvideo#how-to-build-from-source), using the patched build and its `data` directory. Check for an existing installation before copying anything. Do not install both patched and AUR versions at once. OBS must be restarted to load a different plugin; do not restart during a stream. Verify the live preview, performance and audio/video sync before going live. Keep the `tomori-spectator` window and window capture as the fallback.
 
 ### Legacy PC bridge audio (not used by server clients)
 
