@@ -6,9 +6,11 @@ This describes the test coverage Tomori's workspace must keep.
 
 Every measured source region in the workspace runs under its tests: `cargo bake test:coverage --all-targets true` passes on current stable Rust, on CI's Linux runner with lavapipe and the speech models. The Test workflow's `test-result` job requires it, and the main branch requires `test-result`. The target is 100%, never a lower floor.
 
-Uncovered code gets a test, or is removed if nothing needs it. A branch that only an impossible error could take becomes an `expect` with its reason, or an `unreachable!` where the state rules it out. A branch that only a race could take is restructured, so that whether it runs does not depend on timing. Bake does not count regions inside `unreachable!`.
+Uncovered code gets a test, or is removed if nothing needs it. A branch that only a race could take is restructured, so that whether it runs does not depend on timing. Bake does not count regions inside `unreachable!`, which is left only where the types or an immediately preceding check rule the branch out, with a comment saying why.
 
-The only other exception is a file of raw device or platform calls that cannot run in CI, listed with its reason under `[[package.metadata.bake.test.coverage.exclude]]` in its crate's `Cargo.toml`. Such a file is thin. It makes the calls and passes their results on, and the decisions around them are in covered modules. The exclusions are:
+A failure that the system causes only rarely, such as a thread or scheduler it cannot start, is handled as it was before coverage was required: the clients report it and carry on or try again, and the server refuses the one request it affects. A private `#[cfg(test)]` shim refuses the start in tests, so that the handling runs; production code calls the system directly. Threads the server cannot run without, such as its speech engines', are still expected to start. State that only the code's own invariants keep consistent, such as the server hub's, is looked up without panicking where input from the network, OpenCode, files or the system leads to it, and the hub's lock recovers if a request ever panics holding it, so that one mistake costs one request rather than the server.
+
+The only other exception is a file of raw device or platform calls that cannot run in CI, listed with its reason under `[[package.metadata.bake.test.coverage.exclude]]` in its crate's `Cargo.toml`. Such a file is thin. It makes the calls and passes their results on, and decisions around them belong in covered modules. Two still make some that could move out: `xr.rs` decides which controller models to load, decode and retry, how often to try again, how hand tracking falls back, and when to log poses; `desktop_window.rs` translates window events into the window's input and decides what each surface status does. The exclusions are:
 
 | File | What cannot run in CI |
 | --- | --- |
@@ -17,7 +19,7 @@ The only other exception is a file of raw device or platform calls that cannot r
 | `crates/client-quest/src/desktop_window.rs` | winit's event loop and window, and the window's Vulkan or Metal surface, which need a display. |
 | `crates/client-quest/src/desktop_audio.rs` | The default microphone and speaker, opened through cpal. |
 | `crates/client-quest/src/child_process.rs` | What a forked child runs before it executes its program, whose coverage counters the child discards. |
-| `crates/server/src/process.rs` | The server process's scheduler, signal handling and console thread, and `_exit`, after which a process writes no coverage. |
+| `crates/server/src/exit.rs` | Ending the server process at once with `_exit`, after which it writes no coverage. |
 | `crates/discovery/src/daemon.rs` | Starting the multicast DNS responder and querier, whose failures come only from the system. |
 
 Coverage is not achieved through `#[coverage(off)]` or `cfg(coverage)`, nor by measuring less of the workspace.
