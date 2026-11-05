@@ -7,3 +7,6 @@ publish = false
 [dependencies]
 bake = ">=0.20.1"
 base-project = ">=0.1.7"
+
+[dev-dependencies]
+tempfile = "3"

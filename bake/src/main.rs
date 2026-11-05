@@ -3,6 +3,7 @@
 
 use std::process::ExitCode;
 
+mod android;
 mod test;
 
 fn main() -> ExitCode {

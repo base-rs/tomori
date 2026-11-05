@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# bake-cargo's release artifacts build step, which .github/workflows/release-artifacts.yml runs from the release commit with no secrets: Tomori's headset APK in the release profile, unsigned, as $RELEASE_ARTIFACTS/tomori-$RELEASE_VERSION.apk, by `cargo bake android:apk:build`. See design/android-release.md.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+: "${RELEASE_ARTIFACTS:?Set RELEASE_ARTIFACTS to the directory to write the APK to}"
+: "${RELEASE_VERSION:?Set RELEASE_VERSION to the version released}"
+source scripts/release-artifacts/android-tools.sh
+android_tools build
+cargo bake android:apk:build "$RELEASE_ARTIFACTS/tomori-$RELEASE_VERSION.apk"

@@ -239,7 +239,7 @@ bash scripts/android.sh build  # build without deploying
 adb shell am start -n com.codeotaku.tomori/android.app.NativeActivity -e tomori.msaa off  # start it with intent extras
 ```
 
-`--package NAME` builds another headset build than Tomori's own, such as `bash scripts/android.sh --package tomori-example-headset run`, with its own application ID, label, icon and assets; see [Packaging a Headset Build for the Quest](crates/client-quest/context/android.md). The script reads them from `cargo metadata`, so it needs `jq`.
+`--release` builds the release profile, signed with the keystore that `CARGO_APK_RELEASE_KEYSTORE` and `CARGO_APK_RELEASE_KEYSTORE_PASSWORD` name; a release's APK is built, signed and checked by `cargo bake android:apk:build`, `sign` and `verify` instead (see [Releasing](#releasing)). `--package NAME` builds another headset build than Tomori's own, such as `bash scripts/android.sh --package tomori-example-headset run`, with its own application ID, label, icon and assets; see [Packaging a Headset Build for the Quest](crates/client-quest/context/android.md). The script reads them from `cargo metadata`, so it needs `jq`.
 
 You can save machine-local exports in `.android-env` (gitignored). The SDK, NDK, JDK (`java`/`keytool`), `cargo-apk`, and ADB must be available. Debug builds use optimization level 1; the example is for local sideloading, not store submission. This machine uses isolated tools in the ignored `.tools/` directory, referenced by `.android-env`; system Rust is not modified.
 
@@ -352,6 +352,15 @@ Original project code is released under the MIT License; see [license.md](licens
 ## Releasing
 
 Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or `bump --version X.Y.Z`) from a clean checkout of `main`; it bumps the version, commits with the `Release: vVERSION` trailer, validates the candidate, and opens the pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it, then creates or updates the matching GitHub Release from `releases.md`. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
+
+Each release also attaches Tomori's headset APK to its GitHub Release, as `tomori-VERSION.apk` with its `.sha256`, built from the release's commit on `main` by bake-cargo's release artifacts workflow, `.github/workflows/release-artifacts.yml`, once publishing succeeds, with `scripts/release-artifacts/` and Tomori's `cargo bake android:apk:*` tasks. It is signed with Tomori's release key, held in the protected `android-release` environment, whose certificate's SHA-256 digest is committed in `android/release-certificate.sha256` once the maintainer has created the key; see [design/android-release.md](design/android-release.md). To check a download, with `ANDROID_HOME` naming the Android SDK:
+
+```sh
+sha256sum -c tomori-0.2.0.apk.sha256
+cargo bake android:apk:verify tomori-0.2.0.apk
+```
+
+A release APK cannot update a locally built one, or the other way round: they are the same app, `com.codeotaku.tomori`, signed with different keys, so switching between them means uninstalling first, which loses the app's pairing.
 
 No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
 

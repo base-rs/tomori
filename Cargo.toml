@@ -14,6 +14,12 @@ rust-version = "1.90"
 [workspace.metadata.bake.release]
 reviewers = ["ioquatix"]
 
+# The headset application that a release attaches to its GitHub Release, which `cargo bake android:apk:build`, `sign` and `verify` build, sign and check: its package, whose `[package.metadata.android]` names its application ID and APK; the file holding its release certificate's SHA-256 digest; and the SDK build tools they use. See design/android-release.md.
+[workspace.metadata.bake.android.apk]
+package = "tomori-client-quest"
+certificate = "android/release-certificate.sha256"
+build-tools = "35.0.0"
+
 [profile.release]
 lto = "thin"
 strip = "debuginfo"

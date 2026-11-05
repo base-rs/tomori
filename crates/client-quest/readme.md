@@ -4,7 +4,7 @@
 
 ## Usage
 
-Tomori's own headset is an APK, `com.codeotaku.tomori`, which [`scripts/android.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/android.sh) builds from Tomori's repository. On the desktop:
+Tomori's own headset is an APK, `com.codeotaku.tomori`, attached to each [GitHub Release](https://github.com/ioquatix/tomori/releases) as `tomori-VERSION.apk`; [`scripts/android.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/android.sh) builds it from Tomori's repository too. On the desktop:
 
 ```sh
 cargo install tomori-client-quest
