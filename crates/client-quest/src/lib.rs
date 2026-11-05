@@ -27,8 +27,11 @@ pub use cli::{Command, Mode};
 /// The desktop's modes, from `tomori-client-desktop`.
 #[cfg(not(target_os = "android"))]
 pub use tomori_client_desktop::{
-    DESKTOP_CONTROLS, audio_application_name, pipewire_alsa_properties, run_console, run_discover,
+    DESKTOP_CONTROLS, audio_application_name, pipewire_alsa_properties, run_discover,
 };
+/// What shows the desktop's windows: [`Desktop`], the window system, or a test's, such as `tomori_client_desktop::window::test::Headless`.
+#[cfg(not(target_os = "android"))]
+pub use tomori_client_desktop::{desktop_window::Desktop, window::Shell};
 /// The spectator's modes, from `tomori-client-spectator`.
 #[cfg(not(target_os = "android"))]
 pub use tomori_client_spectator::{
@@ -37,7 +40,7 @@ pub use tomori_client_spectator::{
 };
 pub use tomori_scene::identity::Overrides;
 
-/// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop` and the server-less window draw its sceneries. A downstream build's `main` is `tomori::main(builder)`.
+/// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop` and the server-less window draw its sceneries, and `--console` names its environments. The spectator modes draw Tomori's own sceneries, as `tomori-spectator` does, whatever the build. A downstream build's `main` is `tomori::main(builder)`.
 #[cfg(not(target_os = "android"))]
 pub fn main(builder: Builder) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -50,7 +53,7 @@ pub fn main(builder: Builder) -> anyhow::Result<()> {
         // SAFETY: the process has started no other thread yet, so nothing reads the environment concurrently.
         unsafe { std::env::set_var(name, value) };
     }
-    command.run_with(builder)
+    command.run_with(builder, &Desktop)
 }
 
 // Bound each input batch so that a continuous input stream cannot prevent the
@@ -161,8 +164,8 @@ impl<'a> AndroidEventPump<'a> {
     }
 }
 
-/// Tomori's own headset, [`Builder::default`].
-#[cfg(target_os = "android")]
+/// Tomori's own headset, [`Builder::default`], with the default `app` feature, which a build of its own turns off to write its own `android_main`; see [`Builder::run_android`].
+#[cfg(all(target_os = "android", feature = "app"))]
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     Builder::default().run_android(app)

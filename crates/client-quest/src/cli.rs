@@ -167,13 +167,13 @@ impl Command {
         }
     }
 
-    /// Run the command as `builder` builds the headset, until its window or connection closes.
-    pub fn run_with(self, builder: crate::Builder) -> Result<()> {
+    /// Run the command as `builder` builds the headset, with its windows shown by `shell`, [`crate::Desktop`] or a test's, until its window or connection closes.
+    pub fn run_with(self, builder: crate::Builder, shell: &impl crate::Shell) -> Result<()> {
         match self.mode {
-            Mode::Demo => builder.run_demo(),
-            Mode::Desktop => builder.run_desktop(self.overrides),
+            Mode::Demo => builder.run_demo(shell),
+            Mode::Desktop => builder.run_desktop(shell, self.overrides),
             Mode::Xr => builder.run_xr(self.overrides),
-            Mode::Console => crate::run_console(self.overrides),
+            Mode::Console => builder.run_console(self.overrides),
             Mode::Discover => crate::run_discover(self.overrides.server),
             Mode::Spectator => crate::run_spectator(self.spectator_options()),
             Mode::SpectatorPipewire => crate::run_spectator_pipewire(self.spectator_options()),
@@ -350,6 +350,37 @@ mod tests {
                 "{ application.name = \"Tomori\" }".to_owned()
             )]
         );
+    }
+
+    /// A build with a counted scenery alone, for the environment `floor`, and the scenery.
+    fn counted() -> (crate::Builder, tomori_render::scenery::test::Counted) {
+        let counted = tomori_render::scenery::test::Counted::default();
+        let scenery = counted.clone();
+        let builder = crate::Builder::empty().scenery("floor", move |_| scenery.create());
+        (builder, counted)
+    }
+
+    #[test]
+    fn the_window_modes_draw_the_builds_sceneries() {
+        use tomori_client_desktop::window::test::{Headless, KeyCode, press, with_gpu};
+        with_gpu(wgpu::TextureFormat::Rgba8UnormSrgb, |_| {
+            // The server-less window draws the build's floor once E reaches it.
+            let (builder, floor) = counted();
+            let e = press(KeyCode::KeyE);
+            let drawn = floor.clone();
+            parse(&[])
+                .unwrap()
+                .run_with(builder, &Headless::new(vec![e], move |_| drawn.drawn() > 0))
+                .unwrap();
+            assert_eq!(floor.created(), 1);
+            // The participant's window has the build's sceneries, ready for a space in its environment.
+            let (builder, floor) = counted();
+            parse(&["--desktop", "--name", "Ada"])
+                .unwrap()
+                .run_with(builder, &Headless::new(vec![], |_| true))
+                .unwrap();
+            assert_eq!(floor.created(), 1);
+        });
     }
 
     #[test]

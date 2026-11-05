@@ -31,7 +31,7 @@ winit = "0.30"
 wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
-# The device for offscreen rendering tests.
+# The device for offscreen rendering tests, and a scenery that counts what it draws.
 tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
 tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
 

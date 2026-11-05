@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The example headset draws its placeholder floor for a space bound to the placeholder environment, where Tomori's own build shows the grid.
+//! The example headset draws its placeholder floor for a space bound to the placeholder environment, where Tomori's own build shows the grid, and in the window that `tomori`'s command line opens for its build.
 
 use glam::{Mat4, Vec3};
 use tomori_example_headset::{COLOUR, ENVIRONMENT, builder};
@@ -139,5 +139,21 @@ fn a_space_in_the_placeholder_environment_shows_the_floor() {
         renderer.set_environment(Environment::MINIMAL);
         renderer.update(&gpu.queue, &swarm, None, false);
         assert_ne!(bottom_centre(&gpu, &renderer), floor);
+    });
+}
+
+#[test]
+fn the_builds_window_shows_the_floor_once_e_reaches_it() {
+    use tomori_client_desktop::window::test::{Headless, KeyCode, press, with_gpu};
+    let floor = [srgb(COLOUR[0]), srgb(COLOUR[1]), srgb(COLOUR[2]), 255];
+    with_gpu(FORMAT, |_| {
+        // The window starts on Sky, and E moves to the next environment, the placeholder.
+        let shown = Headless::new(vec![press(KeyCode::KeyE)], move |pixels| {
+            pixels.as_chunks::<4>().0.contains(&floor)
+        });
+        tomori::Command::parse(std::iter::empty(), None, None)
+            .unwrap()
+            .run_with(builder(), &shown)
+            .unwrap();
     });
 }

@@ -17,6 +17,21 @@ cargo run -p tomori-example-server -- --backend placeholder --auth open --no-adv
 cargo run -p tomori-example-headset -- --desktop --server 127.0.0.1:8765
 ```
 
-Its tests draw the floor on the shared test device for a space in the placeholder environment, and run the executable.
+Its tests draw the floor on the shared test device for a space in the placeholder environment, and in the server-less window that `tomori`'s command line opens for its build, and run the executable.
 
-A headset build for the Quest has its own `android_main`, which calls `tomori_example_headset::builder().run_android(app)`. Packaging such a build as its own APK is planned in [#132](https://github.com/ioquatix/tomori/pull/132).
+On the Quest, a headset build has its own `android_main`, which runs its builder, as this one's in `src/lib.rs` does:
+
+```rust
+#[unsafe(no_mangle)]
+fn android_main(app: tomori::AndroidApp) {
+    tomori_example_headset::builder().run_android(app)
+}
+```
+
+The `tomori` library has an `android_main` of its own, which runs Tomori's build, behind its default `app` feature. A build turns it off by depending on `tomori-client-quest` without default features, as this one does, so that the two do not collide:
+
+```toml
+tomori-client-quest = { version = "0.1.0", default-features = false }
+```
+
+Packaging such a build as its own APK is planned in [#132](https://github.com/ioquatix/tomori/pull/132); until then this example is built for the host only.

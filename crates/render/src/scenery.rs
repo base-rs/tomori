@@ -141,6 +141,56 @@ impl Sceneries {
     }
 }
 
+/// A scenery for tests that check that a client draws the sceneries it is given, shared with the clients' tests through the `test-gpu` feature.
+#[cfg(any(test, feature = "test-gpu"))]
+pub mod test {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A scenery that draws nothing, and counts how many renderers created it and how many eyes it was drawn in.
+    #[derive(Clone, Default)]
+    pub struct Counted {
+        created: Arc<AtomicUsize>,
+        drawn: Arc<AtomicUsize>,
+    }
+
+    impl Counted {
+        /// Sceneries with this one alone, for the environment `id`, so that a renderer given any others never creates it.
+        pub fn sceneries(&self, id: &'static str) -> Sceneries {
+            let mut sceneries = Sceneries::empty();
+            let counted = self.clone();
+            sceneries.register(id, move |_| counted.create());
+            sceneries
+        }
+
+        /// This scenery, counted as created once more.
+        pub fn create(&self) -> Box<dyn Scenery> {
+            self.created.fetch_add(1, Ordering::Relaxed);
+            Box::new(self.clone())
+        }
+
+        /// How many times a renderer created it.
+        pub fn created(&self) -> usize {
+            self.created.load(Ordering::Relaxed)
+        }
+
+        /// How many eyes it was drawn in.
+        pub fn drawn(&self) -> usize {
+            self.drawn.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Scenery for Counted {
+        fn prepare(&self, _queue: &wgpu::Queue, _eye: usize, _scene_to_clip: Mat4) {}
+
+        fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {
+            self.drawn.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn set_reveal(&mut self, _reveal: Option<(Vec3, f32)>) {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +217,68 @@ mod tests {
         sceneries.register("minimal", sky);
         assert_eq!(sceneries.environments().len(), 3);
         assert_eq!(Sceneries::default().environments(), Environment::BUILT_IN);
+    }
+
+    #[test]
+    fn a_renderer_creates_each_scenery_it_is_given_and_draws_the_current_environments() {
+        use crate::graphics::Renderer;
+        let counted = test::Counted::default();
+        let floor = Environment::new("floor");
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, queue, .. }| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let mut renderer = Renderer::with_sceneries(
+                &device,
+                &queue,
+                format,
+                8,
+                8,
+                1,
+                &counted.sceneries("floor"),
+            );
+            assert_eq!(counted.created(), 1);
+            assert_eq!(renderer.environments(), [Environment::MINIMAL, floor]);
+            let views: Vec<_> = (0..2)
+                .map(|_| {
+                    device
+                        .create_texture(&wgpu::TextureDescriptor {
+                            label: Some("counted scenery eye"),
+                            size: wgpu::Extent3d {
+                                width: 8,
+                                height: 8,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            view_formats: &[],
+                        })
+                        .create_view(&Default::default())
+                })
+                .collect();
+            let render = |renderer: &Renderer| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    &views,
+                    &[Mat4::IDENTITY; 2],
+                    Mat4::IDENTITY,
+                    &[],
+                );
+            };
+            // The grid has no scenery of its own.
+            render(&renderer);
+            assert_eq!(counted.drawn(), 0);
+            renderer.set_scenery(crate::arrival_motion::Scenery {
+                environment: floor,
+                reveal: Some(crate::arrival_motion::Sphere {
+                    centre: Vec3::ZERO,
+                    radius: 1.0,
+                }),
+            });
+            render(&renderer);
+            assert_eq!(counted.drawn(), 2);
+        });
     }
 }

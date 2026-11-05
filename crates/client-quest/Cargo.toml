@@ -16,6 +16,11 @@ crate-type = ["cdylib", "rlib"]
 name = "tomori"
 path = "src/main.rs"
 
+[features]
+default = ["app"]
+# Tomori's own `android_main`, which runs `Builder::default()` on the Quest. A headset build of another project's turns it off, with `default-features = false`, to write its own that runs its builder; see design/builders.md.
+app = []
+
 [dependencies]
 anyhow = "1"
 ash = "0.38"
@@ -52,8 +57,10 @@ serde_json = "1"
 tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
 # A server on a loopback port, with a scripted backend, for the command's tests.
 tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
-# The device for offscreen rendering tests.
+# The device for offscreen rendering tests, and a scenery that counts what it draws.
 tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
+# A window shown on that device, to run the builder's window modes without a display.
+tomori-client-desktop = { version = "0.1.0", path = "../client-desktop", features = ["testing"] }
 
 # The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See the Tests section of readme.md.
 [[package.metadata.bake.test.coverage.exclude]]

@@ -18,6 +18,13 @@ pub fn builder() -> tomori::Builder {
     tomori::Builder::default().scenery(ENVIRONMENT, floor)
 }
 
+/// This build's headset on the Quest, in place of Tomori's own, which this crate turns off by depending on `tomori-client-quest` without its default `app` feature.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(app: tomori::AndroidApp) {
+    builder().run_android(app)
+}
+
 /// The placeholder floor, for `target`.
 pub fn floor(target: &Target) -> Box<dyn Scenery> {
     Box::new(Floor::new(target))

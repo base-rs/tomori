@@ -85,13 +85,14 @@ impl Participant {
         Self::with_sceneries(gpu, conversation, connection, &Sceneries::default())
     }
 
-    /// As [`Participant::new`], drawing `sceneries`, which should be the environments `conversation` draws.
+    /// As [`Participant::new`], drawing `sceneries`: the conversation draws their environments, and the grid for any other.
     pub fn with_sceneries(
         gpu: Gpu,
         mut conversation: Conversation,
         connection: Connection,
         sceneries: &Sceneries,
     ) -> Self {
+        conversation.set_drawable(sceneries.environments());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,

@@ -1510,6 +1510,12 @@ impl Conversation {
         self.close_menu();
     }
 
+    /// The environments this build has sceneries for, as [`Self::set_drawable`] gave them.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn drawable(&self) -> &[Environment] {
+        &self.drawable
+    }
+
     /// Draw `drawable`, the environments this build has sceneries for, rather than Tomori's own, the grid and Sky.
     pub fn set_drawable(&mut self, drawable: Vec<Environment>) {
         self.drawable = drawable;

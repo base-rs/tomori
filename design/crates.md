@@ -28,11 +28,11 @@ These stay unpublished, with `publish = false`:
 
 | Crate | Why it is not published |
 | --- | --- |
-| `tomori-client-quest` | The headset and desktop application, released as an APK. Downstream headset builds need it as a library first. |
-| `tomori-scene` | The platform-neutral client that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
-| `tomori-render` | The renderers that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
-| `tomori-client-desktop` | The desktop modes that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
-| `tomori-client-spectator` | The spectator, with its `tomori-spectator` executable, split out of `tomori-client-quest`; published with it once the headset has a builder. |
+| `tomori-client-quest` | The headset and desktop application, released as an APK; its library, with the headset's builder, is published in the publishing step planned in #132. |
+| `tomori-scene` | The platform-neutral client that `tomori-client-quest` is being split into; published with it in the publishing step planned in #132. |
+| `tomori-render` | The renderers that `tomori-client-quest` is being split into; published with it in the publishing step planned in #132. |
+| `tomori-client-desktop` | The desktop modes that `tomori-client-quest` is being split into; published with it in the publishing step planned in #132. |
+| `tomori-client-spectator` | The spectator, with its `tomori-spectator` executable, split out of `tomori-client-quest`; published with it in the publishing step planned in #132. |
 | `tomori-example-server` | An example for downstream servers to follow; see `builders.md`. |
 | `tomori-example-headset` | An example for downstream headsets to follow; see `builders.md`. |
 | `tomori-bake` | Development tasks only. |
@@ -43,7 +43,7 @@ A published crate depends only on published crates and on crates.io packages, ne
 
 Other projects need to build their own server and headset with their own environments, data sources and tools, without forking Tomori. That needs Tomori's crates on crates.io under names that cannot collide with other packages in its flat namespace, released at one version so that a downstream project can depend on a matching set. The short folder names keep paths in the repository readable, as Base's own workspaces do. The executable, library and Android names are what people and scripts already use, so packaging must not break them. Proposed in [#73](https://github.com/ioquatix/tomori/issues/73) in November 2026; when to publish for the first time is still the maintainer's decision. The names were found free on crates.io on 2026-11-03; see `docs/naming.md`.
 
-The headset stays unpublished until its library has a builder that other projects can use, which is also planned in #73; until then only the APK is useful. `tomori-environment-sky` is published although its interface will change with the environment interface planned in [#97](https://github.com/ioquatix/tomori/issues/97), because `tomori-render` depends on it for Tomori's own scenery: the maintainer chose that over moving Tomori's Sky registration into an unpublished application package, in November 2026.
+The headset's library has a builder that other projects can use (see `builders.md`), but it and the crates it was split into stay unpublished until the publishing step planned in #132, which settles their interfaces, such as their module paths, first. `tomori-environment-sky` is published although its interface will change with the environment interface planned in [#97](https://github.com/ioquatix/tomori/issues/97), because `tomori-render` depends on it for Tomori's own scenery: the maintainer chose that over moving Tomori's Sky registration into an unpublished application package, in November 2026.
 
 ## Scope
 

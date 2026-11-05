@@ -42,27 +42,65 @@ impl Builder {
         self.sceneries.environments()
     }
 
+    /// A participant's conversation and connection, with the desktop's microphone and speaker, drawing this build's environments.
+    #[cfg(not(target_os = "android"))]
+    fn participant(
+        &self,
+        overrides: crate::Overrides,
+    ) -> (
+        tomori_scene::conversation::Conversation,
+        tomori_scene::connection::Connection,
+    ) {
+        let (mut conversation, connection) = tomori_client_desktop::connection(overrides);
+        conversation.set_drawable(self.environments());
+        (conversation, connection)
+    }
+
     /// Run against the host's active OpenXR runtime, as `tomori --xr` does, with the desktop's microphone and speaker, until the session ends.
     #[cfg(not(target_os = "android"))]
     pub fn run_xr(self, overrides: crate::Overrides) -> anyhow::Result<()> {
-        let (mut conversation, connection) = tomori_client_desktop::connection(overrides);
-        conversation.set_drawable(self.environments());
+        let (conversation, connection) = self.participant(overrides);
         crate::xr::run_desktop(conversation, connection, &self.sceneries)
     }
 
-    /// Take part from a desktop window, as `tomori --desktop` does, until it is closed.
+    /// Take part from a desktop window that `shell` shows, [`crate::Desktop`] or a test's, as `tomori --desktop` does, until it is closed.
     #[cfg(not(target_os = "android"))]
-    pub fn run_desktop(self, overrides: crate::Overrides) -> anyhow::Result<()> {
-        tomori_client_desktop::run_desktop(overrides, self.sceneries)
+    pub fn run_desktop(
+        self,
+        shell: &impl crate::Shell,
+        overrides: crate::Overrides,
+    ) -> anyhow::Result<()> {
+        let (conversation, connection) = self.participant(overrides);
+        tomori_client_desktop::run_desktop(shell, conversation, connection, self.sceneries)
     }
 
-    /// The server-less window, as `tomori` does without a mode, until it is closed.
+    /// The server-less window, which `shell` shows, [`crate::Desktop`] or a test's, as `tomori` does without a mode, until it is closed.
     #[cfg(not(target_os = "android"))]
-    pub fn run_demo(self) -> anyhow::Result<()> {
-        tomori_client_desktop::run_demo(self.sceneries)
+    pub fn run_demo(self, shell: &impl crate::Shell) -> anyhow::Result<()> {
+        tomori_client_desktop::run_demo(shell, self.sceneries)
     }
 
-    /// Run on the headset, until the activity is destroyed; a downstream build's `android_main` calls this.
+    /// Show the headset's panel in the terminal, as `tomori --console` does, naming the environments this build draws, until its input ends.
+    #[cfg(not(target_os = "android"))]
+    pub fn run_console(self, overrides: crate::Overrides) -> anyhow::Result<()> {
+        let (conversation, connection) = self.participant(overrides);
+        tomori_client_desktop::run_console(conversation, connection)
+    }
+
+    /// Run on the headset, until the activity is destroyed, from a build's own `android_main`.
+    ///
+    /// Tomori's own `android_main` runs [`Builder::default`]. A build of another project's depends on this crate without its default `app` feature, so that the library leaves it out, and runs its own builder:
+    ///
+    /// ```toml
+    /// tomori-client-quest = { version = "0.1.0", default-features = false }
+    /// ```
+    ///
+    /// ```ignore
+    /// #[unsafe(no_mangle)]
+    /// fn android_main(app: tomori::AndroidApp) {
+    ///     tomori::Builder::default().scenery("floor", floor).run_android(app)
+    /// }
+    /// ```
     #[cfg(target_os = "android")]
     pub fn run_android(self, app: crate::AndroidApp) {
         crate::run_android(app, &self.sceneries)
@@ -86,5 +124,12 @@ mod tests {
             .register("sky", tomori_render::scenery::sky);
         assert!(builder.sceneries().contains("sky"));
         assert_eq!(builder.environments().len(), 3);
+    }
+
+    #[test]
+    fn a_participant_draws_the_builds_environments() {
+        let builder = Builder::empty().scenery("floor", tomori_render::scenery::sky);
+        let (conversation, _connection) = builder.participant(crate::Overrides::default());
+        assert_eq!(conversation.drawable(), builder.environments());
     }
 }

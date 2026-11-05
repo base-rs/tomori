@@ -3622,6 +3622,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "glam",
+ "tomori-client-desktop",
  "tomori-client-quest",
  "tomori-render",
  "tomori-scene",
