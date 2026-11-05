@@ -7,7 +7,7 @@
 //!
 //! [`OfflineRecognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`OfflineUtterance`]: audio is buffered and resampled to 16 kHz, and when the participant stops the clip is decoded and reported through the utterance's sink as exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. There are no partial events.
 //!
-//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. In a long clip, what Whisper writes for a segment without speech, a bracketed note or a word or two the voice activity detector heard no speech for, is left out. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
+//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. What Whisper writes for a segment without speech, bracketed notes or a word or two the voice activity detector heard no speech for, is left out, so a clip with no speech in it at all is reported as an empty transcript. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
 //!
 //! Once an utterance has ended, its sink is told when it waits behind another utterance, with [`Progress::Waiting`], and when it is transcribed after waiting, or in more than one segment, with [`Progress::Transcribing`] for each segment, so that the participant can tell recognition working from their words still on their way. An utterance that is transcribed at once, in one piece, is told only its outcome.
 //!
@@ -143,16 +143,22 @@ impl Segmenter {
     }
 }
 
-/// Whether `text` is only a note of what Whisper heard instead of speech, such as "[BLANK_AUDIO]" or "(water running)", which it writes for a clip with no words in it.
+/// Whether `text` is only notes of what Whisper heard instead of speech, one or more, such as "[BLANK_AUDIO]", "(water running)" or "[Music] (static)", which it writes for a clip with no words in it.
 fn annotation(text: &str) -> bool {
-    let text = text.trim();
-    let mut characters = text.chars();
-    match (characters.next(), characters.next_back()) {
-        (Some('['), Some(']')) | (Some('('), Some(')')) => {
-            !text[1..text.len() - 1].contains(['[', ']', '(', ')'])
+    let mut rest = text.trim();
+    let mut notes = 0;
+    while let Some(after) = rest.strip_prefix(['[', '(']) {
+        let close = if rest.starts_with('[') { ']' } else { ')' };
+        // A note holds no other brackets, so "(a) and (b)" is words, not notes.
+        match after.find(['[', ']', '(', ')']) {
+            Some(end) if after[end..].starts_with(close) => {
+                rest = after[end + 1..].trim_start();
+                notes += 1;
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    notes > 0 && rest.is_empty()
 }
 
 /// One utterance being buffered for a whole-clip decode.
@@ -354,10 +360,8 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
             entry.hard += 1;
         }
         let text = text.trim();
-        // Whisper writes a note such as "[BLANK_AUDIO]", or a word or two such as "you", for a clip without speech. A long utterance can hold such a segment, where the participant paused for longer than the search for a pause, so in a long utterance a note is left out, and so are a word or two the detector heard no speech for. Anything longer is kept, in case the detector missed quiet speech. An utterance that fits in one segment is reported as it is.
-        let long = entry.samples.len() > super::MAX_SEGMENT;
-        if long
-            && !text.is_empty()
+        // Whisper writes a note such as "[BLANK_AUDIO]", or a word or two such as "you", for a clip without speech: a pause in a long utterance longer than the search for a pause, or a recording with nothing said in it, as when the participant pressed to talk by accident. So a note is left out, and so are a word or two the detector heard no speech for; an utterance left with nothing is reported as empty, which sends nothing. Anything longer is kept, in case the detector missed quiet speech.
+        if !text.is_empty()
             && (annotation(text)
                 || (text.split_whitespace().count() <= 2 && self.segmenter.silent(segment)))
         {
@@ -1384,22 +1388,74 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_short_silent_utterance_is_still_decoded() {
-        let (recorder, calls) = Recorder::new(|_, _| Ok("(static)".to_owned()));
-        let mut offline = OfflineRecognition::with_voice_activity(recorder, Loud);
+    /// The transcript of a short utterance of `audio` that `recognizer` hears as `heard`, with `voice` to hear speech in it, if any, and how many times it was decoded.
+    fn short(
+        heard: &'static str,
+        voice: Option<Box<dyn VoiceActivity>>,
+        audio: &[i16],
+    ) -> (TranscriptEvent, usize) {
+        let (recorder, calls) = Recorder::new(move |_, _| Ok(heard.to_owned()));
+        let mut offline = OfflineRecognition::start(recorder, voice, MAX_UTTERANCE);
         let (sender, receiver) = mpsc::channel();
         let mut handle = offline.begin(RATE, move |event| {
             let _ = sender.send(event);
         });
-        handle.push(&vec![0; RATE as usize * 5]);
+        handle.push(audio);
         handle.end();
-        // As before long utterances were split: one decode, and its transcript as it is.
+        let event = collect(&receiver);
+        let calls = calls.lock().unwrap().len();
+        (event, calls)
+    }
+
+    #[test]
+    fn a_short_utterance_with_no_speech_in_it_is_empty() {
+        log::set_max_level(log::LevelFilter::Trace);
+        let silence = vec![0; RATE as usize * 2];
+        let empty = (TranscriptEvent::Final(String::new()), 1);
+        // A note of noise is left out, with a detector or without one.
+        for heard in [
+            "[BLANK_AUDIO]",
+            " (static) ",
+            "[ Silence ]",
+            "[Music] (static)",
+        ] {
+            assert_eq!(short(heard, None, &silence), empty, "{heard}");
+            assert_eq!(short(heard, Some(Box::new(Loud)), &silence), empty);
+        }
+        // A word or two is left out where the detector hears no speech.
+        for heard in ["you", "Thank you."] {
+            assert_eq!(short(heard, Some(Box::new(Loud)), &silence), empty);
+        }
+    }
+
+    #[test]
+    fn a_short_utterance_keeps_words_that_may_be_speech() {
+        let kept = |text: &str| (TranscriptEvent::Final(text.to_owned()), 1);
+        // Words the detector heard speech for.
         assert_eq!(
-            collect(&receiver),
-            TranscriptEvent::Final("(static)".to_owned())
+            short("Yes.", Some(Box::new(Loud)), &steady(1)),
+            kept("Yes.")
         );
-        assert_eq!(*calls.lock().unwrap(), vec![RATE as usize * 5]);
+        // A word or two without a detector to say there was no speech.
+        assert_eq!(short("Yes.", None, &vec![0; RATE as usize]), kept("Yes."));
+        // Anything longer, in case the detector missed quiet speech.
+        assert_eq!(
+            short(
+                "Something said very quietly.",
+                Some(Box::new(Loud)),
+                &vec![0; RATE as usize]
+            ),
+            kept("Something said very quietly.")
+        );
+        // A note among words.
+        assert_eq!(
+            short(
+                "(laughs) Yes, do it.",
+                Some(Box::new(Loud)),
+                &vec![0; RATE as usize]
+            ),
+            kept("(laughs) Yes, do it.")
+        );
     }
 
     #[test]
@@ -1421,6 +1477,8 @@ mod tests {
         assert!(annotation("[BLANK_AUDIO]") && annotation("(buzzing)"));
         assert!(!annotation("(a) and (b)") && !annotation("[1] is cited") && !annotation("()x"));
         assert!(!annotation("") && !annotation("(") && !annotation("words"));
+        assert!(annotation("[Music] (static)") && annotation("()") && !annotation("(a]"));
+        assert!(!annotation("[BLANK_AUDIO] yes") && !annotation("[a [b]]"));
     }
 
     struct Crashing;
@@ -1568,6 +1626,65 @@ mod tests {
                     // A cut through a word would cost at least a word on each side of it; LibriSpeech spells "dishonoured" and "for ever" in British style, which Whisper does not, so a perfect transcript has 6 errors.
                     assert!(errors * 20 <= reference.len(), "{errors} errors: {text}");
                 }
+            },
+        );
+    }
+
+    /// With Whisper and the Silero detector, as the offline backend runs: what Whisper writes for a recording with nothing said in it is left out, and a short answer the detector hears as speech is kept. Skipped without both models; see [`crate::test_models`].
+    #[test]
+    fn a_silent_recording_is_empty_with_whisper_and_silero() {
+        use crate::{
+            stt::{SileroVad, SileroVadConfig, WhisperConfig, WhisperRecognizer},
+            test_models,
+        };
+
+        let root = test_models::root();
+        let config = WhisperConfig::named(&root, test_models::WHISPER_MODEL);
+        let vad = SileroVadConfig::from_root(&root);
+        test_models::with(
+            "the Whisper and Silero voice activity models",
+            &format!("bash scripts/fetch-asr-model.sh whisper {}", config.name),
+            &[&config.model, &vad.model],
+            || {
+                // Two seconds of silence and of faint noise, as from a press to talk by accident.
+                let silence = vec![0; RATE as usize * 2];
+                let noise: Vec<i16> = (0..RATE as usize * 2)
+                    .map(|index| ((index * 7919 % 401) as i16 - 200) / 4)
+                    .collect();
+                for audio in [silence, noise] {
+                    let mut whisper = WhisperRecognizer::new(&config).unwrap();
+                    let heard = Arc::new(Mutex::new(Vec::new()));
+                    let shared = Arc::clone(&heard);
+                    let (recorder, _) = Recorder::new(move |_, samples| {
+                        whisper
+                            .transcribe(samples)
+                            .inspect(|text| shared.lock().unwrap().push(text.clone()))
+                    });
+                    let vad = SileroVad::new(&vad).unwrap();
+                    let mut offline = OfflineRecognition::with_voice_activity(recorder, vad);
+                    let (sender, receiver) = mpsc::channel();
+                    let mut handle = offline.begin(RATE, move |event| {
+                        let _ = sender.send(event);
+                    });
+                    handle.push(&audio);
+                    handle.end();
+                    let event = collect(&receiver);
+                    eprintln!("Whisper heard {:?}", heard.lock().unwrap());
+                    assert_eq!(event, TranscriptEvent::Final(String::new()));
+                }
+                // A word of speech the detector hears is kept, even as short as "yes": the start of a LibriSpeech clip, which Whisper would transcribe as more.
+                let wave =
+                    sherpa_onnx::Wave::read(config.model.join("test_wavs/0.wav").to_str().unwrap())
+                        .unwrap();
+                let speech: Vec<i16> = wave.samples()[..RATE as usize * 2]
+                    .iter()
+                    .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+                    .collect();
+                let voice: Box<dyn VoiceActivity> = Box::new(SileroVad::new(&vad).unwrap());
+                assert_eq!(
+                    short("Yes.", Some(voice), &speech),
+                    (TranscriptEvent::Final("Yes.".to_owned()), 1)
+                );
             },
         );
     }

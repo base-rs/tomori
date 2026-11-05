@@ -1210,7 +1210,7 @@ fn a_transcript_comes_to_nothing_for_an_utterance_unknown_unheard_or_left_behind
     hub.transcript_finished(utterance, &text);
     assert_eq!(
         failure(&client).as_deref(),
-        Some("Nothing was heard, so nothing was sent.")
+        Some("No speech was heard, so nothing was sent.")
     );
     let (utterance, text) = spoken("Deploy it.");
     client.send(ClientMessage::Leave);

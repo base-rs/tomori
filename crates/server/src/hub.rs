@@ -2785,8 +2785,16 @@ impl Hub {
         let Some(record) = state.utterances.remove(&utterance) else {
             return;
         };
-        record.log_outcome(utterance, "was transcribed");
         let text = text.trim();
+        // Recognition reports an utterance with no speech in it as empty, whatever the backend; see `design/speech.md`.
+        record.log_outcome(
+            utterance,
+            if text.is_empty() {
+                "was found to have no speech in it, so nothing was sent,"
+            } else {
+                "was transcribed"
+            },
+        );
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
         // A repeated finalization of an answer already applied is acknowledged in the same way.
@@ -2821,7 +2829,7 @@ impl Hub {
         {
             Some("The agent session has ended, so nothing was sent.")
         } else if text.is_empty() {
-            Some("Nothing was heard, so nothing was sent.")
+            Some("No speech was heard, so nothing was sent.")
         } else if text.len()
             > if record.answer.is_some() {
                 limits::ANSWER_BYTES
