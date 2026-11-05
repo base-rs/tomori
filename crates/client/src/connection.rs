@@ -1077,13 +1077,18 @@ impl Connection {
         &mut self.feedback
     }
 
-    /// Ask for microphone access once the headset can show the request.
+    /// Ask for microphone access once the client can show the request.
     pub fn request_microphone(&mut self) {
-        match self.voice.request_permission() {
+        match self.microphone_permission() {
             Ok(true) => log::info!("Microphone access is allowed."),
             Ok(false) => log::info!("Asked for microphone access."),
             Err(error) => log::warn!("{error}"),
         }
+    }
+
+    /// Ask for microphone access ahead of the first recording or, once asked, whether it is allowed yet, without waiting: the platform answers the request later, so `Ok(false)` means not yet. `tomori-scene`'s `microphone_request` decides when the headset asks.
+    pub fn microphone_permission(&mut self) -> Result<bool, String> {
+        self.voice.request_permission()
     }
 
     /// Report this participant's head, controllers and hands to the server, so the others in the space can render them. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays them to the other participants. Without a connection, nothing is sent.

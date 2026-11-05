@@ -15,6 +15,7 @@ use crate::{
     hand_menu::{self, Palm},
     hands,
     log_cadence::Cadence,
+    microphone_request::{Answer, MicrophoneRequest},
     pointing::Ray,
     recording::Trackers,
 };
@@ -373,20 +374,13 @@ pub enum SessionState {
     Other,
 }
 
-/// What the session should do after a state change.
+/// What the session should do after a state change: begin, end or leave it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lifecycle {
     Begin,
     End,
     Exit,
     Continue,
-}
-
-/// What to do after a state change: ask for the microphone, once the headset can show the request, and begin, end or leave the session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Session {
-    pub request_microphone: bool,
-    pub lifecycle: Lifecycle,
 }
 
 /// What a headset frame draws and reports.
@@ -410,8 +404,8 @@ pub struct Headset {
     audience_toggle: LiveGrip,
     focused: bool,
     running: bool,
-    /// Ask for the microphone when the session first has focus, where the headset can show the request, instead of on the first recording.
-    microphone_requested: bool,
+    /// Ask for the microphone once the scene has been shown with focus, instead of on the first recording; see [`MicrophoneRequest`].
+    microphone: MicrophoneRequest,
     last_frame: Instant,
 }
 
@@ -429,7 +423,7 @@ impl Headset {
             audience_toggle: LiveGrip::default(),
             focused: false,
             running: false,
-            microphone_requested: false,
+            microphone: MicrophoneRequest::default(),
             last_frame: now,
         }
     }
@@ -449,16 +443,17 @@ impl Headset {
         self.step.blur(conversation);
     }
 
-    /// The session changed to `state` at `now`.
+    /// The session changed to `state` at `now`. The microphone is not asked for here, before the scene has been shown; see [`Self::microphone_due`].
     pub fn session(
         &mut self,
         state: SessionState,
         conversation: &mut Conversation,
         now: Instant,
-    ) -> Session {
+    ) -> Lifecycle {
         // Do not lose a real focus-loss transition if the runtime also queues a refocus in this poll batch.
         if self.focused && state != SessionState::Focused {
             self.blur(conversation);
+            self.microphone.blur();
         }
         self.focused = state == SessionState::Focused;
         let focus = match state {
@@ -470,9 +465,7 @@ impl Headset {
             log::info!("Engagement: {changed:?}, as the session is {state:?}");
             conversation.set_engagement(changed);
         }
-        let request_microphone = self.focused && !self.microphone_requested;
-        self.microphone_requested |= request_microphone;
-        let lifecycle = match state {
+        match state {
             SessionState::Ready => {
                 self.running = true;
                 self.last_frame = now;
@@ -484,11 +477,32 @@ impl Headset {
             }
             SessionState::Exiting | SessionState::LossPending => Lifecycle::Exit,
             _ => Lifecycle::Continue,
-        };
-        Session {
-            request_microphone,
-            lifecycle,
         }
+    }
+
+    /// After each turn of the frame loop at `now`, whether the scene was `presented` in a submitted frame: whether to ask the platform for the microphone now, with [`Self::microphone_answered`] given its answer. It is asked once the scene has been shown with focus for a moment, and then checked again until answered; the frame loop never waits for it. See `design/arrival.md`.
+    pub fn microphone_due(&mut self, presented: bool, now: Instant) -> bool {
+        self.microphone
+            .step(self.focused && self.running, presented, now)
+    }
+
+    /// The platform said at `now` whether the microphone is `allowed`. While the request is unanswered, the panel says so.
+    pub fn microphone_answered(
+        &mut self,
+        allowed: Result<bool, String>,
+        conversation: &mut Conversation,
+        now: Instant,
+    ) {
+        match self.microphone.answered(allowed, now) {
+            Answer::Asked => log::info!("Asked for microphone access"),
+            Answer::Waiting => {}
+            Answer::Allowed => log::info!("Microphone access is allowed"),
+            Answer::Declined => {
+                log::info!("Microphone access was not allowed; the first recording asks again")
+            }
+            Answer::Failed(error) => log::warn!("{error}"),
+        }
+        conversation.microphone_request(self.microphone.waiting());
     }
 
     /// The proximity sensor says whether the headset is worn. Meta's runtime does not always deliver "removed", so the session's state is followed too.
@@ -1035,32 +1049,26 @@ mod tests {
     }
 
     #[test]
-    fn the_session_begins_ends_and_reports_focus_and_asks_for_the_microphone_once() {
+    fn the_session_begins_ends_and_reports_focus() {
         let mut conversation = joined();
         let mut feedback = felt();
         let start = Instant::now();
         let mut headset = Headset::new(&mut conversation, &mut feedback, start);
         assert!(!headset.focused() && !headset.running());
         let ready = headset.session(SessionState::Ready, &mut conversation, start);
-        assert_eq!(
-            ready,
-            Session {
-                request_microphone: false,
-                lifecycle: Lifecycle::Begin
-            }
-        );
+        assert_eq!(ready, Lifecycle::Begin);
         assert!(headset.running());
         let visible = headset.session(SessionState::Visible, &mut conversation, start);
-        assert_eq!(visible.lifecycle, Lifecycle::Continue);
-        let focused = headset.session(SessionState::Focused, &mut conversation, start);
-        assert!(focused.request_microphone && headset.focused());
+        assert_eq!(visible, Lifecycle::Continue);
+        headset.session(SessionState::Focused, &mut conversation, start);
+        assert!(headset.focused());
         assert_eq!(headset.engagement.engagement(), Engagement::Engaged);
         // Taken off and put on again.
         headset.worn(false, &mut conversation);
         assert_eq!(headset.engagement.engagement(), Engagement::Away);
         headset.worn(true, &mut conversation);
         assert_eq!(headset.engagement.engagement(), Engagement::Engaged);
-        // Focus lost while recording cancels it, and the microphone is not asked for again.
+        // Focus lost while recording cancels it.
         headset.buttons(
             &Controls {
                 talk: true,
@@ -1071,37 +1079,112 @@ mod tests {
             start,
         );
         assert!(conversation.recording().is_some());
-        let visible = headset.session(SessionState::Visible, &mut conversation, start);
-        assert!(!visible.request_microphone && !headset.focused());
+        headset.session(SessionState::Visible, &mut conversation, start);
+        assert!(!headset.focused());
         assert!(conversation.recording().is_none());
-        assert!(
-            !headset
-                .session(SessionState::Focused, &mut conversation, start)
-                .request_microphone
-        );
+        headset.session(SessionState::Focused, &mut conversation, start);
         assert_eq!(
-            headset
-                .session(SessionState::Stopping, &mut conversation, start)
-                .lifecycle,
+            headset.session(SessionState::Stopping, &mut conversation, start),
             Lifecycle::End
         );
         assert!(!headset.running());
         for state in [SessionState::Exiting, SessionState::LossPending] {
             assert_eq!(
-                headset.session(state, &mut conversation, start).lifecycle,
+                headset.session(state, &mut conversation, start),
                 Lifecycle::Exit
             );
         }
         assert_eq!(
-            headset
-                .session(SessionState::Other, &mut conversation, start)
-                .lifecycle,
+            headset.session(SessionState::Other, &mut conversation, start),
             Lifecycle::Continue
         );
         // Taken off, the participant is away.
         headset.worn(false, &mut conversation);
         assert_eq!(headset.engagement.engagement(), Engagement::Away);
         headset.worn(false, &mut conversation);
+    }
+
+    #[test]
+    fn the_microphone_is_asked_for_once_the_scene_is_shown_and_followed_without_waiting() {
+        use crate::conversation::MICROPHONE_REQUEST;
+        use crate::microphone_request::{CHECK, RETURNED, SETTLE};
+
+        let mut conversation = joined();
+        let mut feedback = felt();
+        let start = Instant::now();
+        let mut headset = Headset::new(&mut conversation, &mut feedback, start);
+        // Not running, or running without focus, it waits however long.
+        assert!(!headset.microphone_due(true, start));
+        assert!(!headset.microphone_due(true, start + SETTLE * 3));
+        headset.session(SessionState::Ready, &mut conversation, start);
+        headset.session(SessionState::Visible, &mut conversation, start);
+        assert!(!headset.microphone_due(true, start + SETTLE * 4));
+        // Focused, as the launch settles, but nothing shown yet: still not asked.
+        headset.session(SessionState::Focused, &mut conversation, start);
+        assert!(!headset.microphone_due(false, start + SETTLE * 5));
+        // Shown with focus for a moment: asked, and the panel says so.
+        let shown = start + SETTLE * 6;
+        assert!(!headset.microphone_due(true, shown));
+        assert!(headset.microphone_due(true, shown + SETTLE));
+        let asked = shown + SETTLE;
+        headset.microphone_answered(Ok(false), &mut conversation, asked);
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some(MICROPHONE_REQUEST)
+        );
+        // The dialog takes focus, and the session stops and begins again while it is up; frames go on and only check.
+        headset.session(SessionState::Visible, &mut conversation, asked);
+        assert!(headset.microphone_due(true, asked + CHECK));
+        headset.microphone_answered(Ok(false), &mut conversation, asked + CHECK);
+        headset.session(SessionState::Stopping, &mut conversation, asked + CHECK);
+        assert!(headset.microphone_due(false, asked + CHECK * 2));
+        headset.microphone_answered(Ok(false), &mut conversation, asked + CHECK * 2);
+        headset.session(SessionState::Ready, &mut conversation, asked + CHECK * 2);
+        headset.session(SessionState::Focused, &mut conversation, asked + CHECK * 2);
+        // Allowed: the next check sees it, and the panel no longer waits.
+        assert!(headset.microphone_due(true, asked + CHECK * 3));
+        headset.microphone_answered(Ok(true), &mut conversation, asked + CHECK * 3);
+        assert_eq!(conversation.menu_model().notice, None);
+        assert!(!headset.microphone_due(true, asked + CHECK * 10));
+
+        // Denied: once focus has been back a moment, the panel no longer waits, and the first recording asks again.
+        let mut headset = Headset::new(&mut conversation, &mut feedback, start);
+        headset.session(SessionState::Ready, &mut conversation, start);
+        headset.session(SessionState::Focused, &mut conversation, start);
+        headset.microphone_due(true, start);
+        assert!(headset.microphone_due(true, start + SETTLE));
+        headset.microphone_answered(Ok(false), &mut conversation, start + SETTLE);
+        headset.session(SessionState::Visible, &mut conversation, start + SETTLE);
+        let returned = start + SETTLE + CHECK;
+        headset.session(SessionState::Focused, &mut conversation, returned);
+        assert!(headset.microphone_due(true, returned));
+        headset.microphone_answered(Ok(false), &mut conversation, returned);
+        assert!(conversation.menu_model().notice.is_some());
+        assert!(headset.microphone_due(true, returned + RETURNED));
+        headset.microphone_answered(Ok(false), &mut conversation, returned + RETURNED);
+        assert_eq!(conversation.menu_model().notice, None);
+
+        // A platform that cannot be asked is reported once, and the panel does not wait.
+        let mut headset = Headset::new(&mut conversation, &mut feedback, start);
+        headset.session(SessionState::Ready, &mut conversation, start);
+        headset.session(SessionState::Focused, &mut conversation, start);
+        headset.microphone_due(true, start);
+        assert!(headset.microphone_due(true, start + SETTLE));
+        headset.microphone_answered(Err("no activity".into()), &mut conversation, start);
+        assert_eq!(conversation.menu_model().notice, None);
+        assert!(!headset.microphone_due(true, start + SETTLE * 2));
+    }
+
+    #[test]
+    fn the_microphone_request_notice_gives_way_to_another() {
+        let mut conversation = joined();
+        conversation.security_notice("The server's identity changed.");
+        conversation.microphone_request(true);
+        conversation.microphone_request(false);
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("The server's identity changed.")
+        );
     }
 
     #[test]
