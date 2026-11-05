@@ -1,0 +1,25 @@
+[package]
+name = "tomori-example-headset"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "An example of a headset built on tomori-client-quest, drawing a placeholder scenery of its own"
+repository.workspace = true
+license.workspace = true
+# An example for downstream projects to follow, not a crate to depend on.
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+# Without Tomori's own `android_main`, as this build has its own.
+tomori-client-quest = { version = "0.1.0", path = "../../crates/client-quest", default-features = false }
+tomori-render = { version = "0.1.0", path = "../../crates/render" }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+
+[dev-dependencies]
+# The shared test device, a window shown on it, and a conversation joined to a space, to draw the placeholder in.
+tomori-client-desktop = { version = "0.1.0", path = "../../crates/client-desktop", features = ["testing"] }
+tomori-render = { version = "0.1.0", path = "../../crates/render", features = ["test-gpu"] }
+tomori-scene = { version = "0.1.0", path = "../../crates/scene", features = ["testing"] }

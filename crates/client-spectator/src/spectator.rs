@@ -56,8 +56,8 @@ mod tests {
             "controller": null, "attracting": false, "caption": "", "recording_ms": null
         });
         let mut frame: Frame = serde_json::from_value(legacy).unwrap();
-        assert_eq!(frame.environment, crate::environment::Environment::Minimal);
-        frame.environment = crate::environment::Environment::Sky;
+        assert_eq!(frame.environment, crate::environment::Environment::MINIMAL);
+        frame.environment = crate::environment::Environment::SKY;
         let mut encoded = serde_json::to_value(&frame).unwrap();
         assert_eq!(encoded["environment"], "sky");
         let decoded: Frame = serde_json::from_value(encoded.clone()).unwrap();

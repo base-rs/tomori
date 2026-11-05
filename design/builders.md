@@ -1,6 +1,6 @@
 # Builders
 
-This describes how other projects build their own Tomori server, and later their own headset, from Tomori's published crates.
+This describes how other projects build their own Tomori server and headset from Tomori's crates.
 
 ## Requirement
 
@@ -18,7 +18,15 @@ The `tomori-server` executable is the default build of that builder, with only T
 
 An example downstream crate, `tomori-example-server` in `examples/server`, depends on the published crates as another project would, registers a placeholder backend and environment through the builder, and is built and run by the workspace's tests.
 
-The headset half, a builder that registers environments' client halves and sceneries, is planned in #73 and not yet a requirement.
+Another project likewise builds a headset of its own on the `tomori-client-quest` library, whose library is `tomori`, through `tomori::Builder`, which starts with Tomori's own build. What it can register is what Tomori supports today:
+
+- **Sceneries:** what the headset draws for a space bound to an environment, by the environment's identifier: an implementation of `tomori-render`'s `Scenery`, drawn natively in each eye's pass as Sky is, made for the renderer's targets by a function it registers. Registering an identifier already registered replaces that scenery. The Minimal grid is built in, and is what a build shows, naming the environment, for a space bound to one it has no scenery for. Tomori's own build registers Sky.
+
+Environments' client halves will be registered through the same builder once #75 defines them; until then it offers nothing for them, and a scenery is all of an environment that a headset build adds.
+
+`Builder::run_android` runs the headset on the Quest, from a build's own `android_main`: the `tomori` library's own, which runs `Builder::default()`, is its default `app` feature, which a build of another project's turns off by depending on `tomori-client-quest` with `default-features = false`, so that its `android_main` is the only one. `run_xr` runs it on a desktop OpenXR runtime; `run_desktop` and `run_demo` run the desktop windows, through a shell: `tomori::Desktop`, the window system, or a test's, which shows the same contents on the shared test device; and `run_console` the console, which names the build's environments. `tomori::main(builder)` is the `tomori` executable's command line, whose `--xr`, `--desktop`, `--console` and server-less window run the builder's, and whose desktop window's **E** cycles through its sceneries. The `tomori` executable and APK are the default build, `Builder::default()`; their command line and behaviour are those they had before the builder existed. The spectator modes still draw only Tomori's own sceneries, whatever the build. Packaging a build as its own APK is planned in #132; until then the example is built and tested for the host only, not for Android in CI.
+
+An example downstream crate, `tomori-example-headset` in `examples/headset`, registers a placeholder floor for the example server's placeholder environment, and is built and tested by the workspace's tests.
 
 ## Rationale
 
@@ -26,7 +34,7 @@ Other projects, such as a private integration with environments of its own, need
 
 ## Scope
 
-The `tomori-server` library's builder and the registries it fills, the `tomori-server` executable, and the example in `examples/server`.
+The `tomori-server` library's builder and the registries it fills, the `tomori-server` executable, and the example in `examples/server`; the headset's builder, `tomori-render`'s sceneries, the `tomori` executable, and the example in `examples/headset`.
 
 ## Validation
 
@@ -34,5 +42,9 @@ The `tomori-server` library's builder and the registries it fills, the `tomori-s
 - Test against a fake backend that a registered environment's layer reaches the agent as its `tomori-environment` instruction entry, for a space created in it, changed to it or from it, and restored after a restart, including when a hook offers the environments after the kept spaces are listed again (see `environments.md`).
 - Test that the example's executable lists its placeholder backend in `--help`, offers it and the placeholder environment in `Welcome`, and creates a space with both, whose state shows the environment's layer of the instructions.
 - Compare `tomori-server --help`, an unknown argument and `auth --help` between the builder's revision and the one before it, and the startup output with the live server's flags, `--backend opencode --name NAME --speech-root PATH --speech-backend offline --workspace-root PATH` with token authentication and TLS, on a loopback port, without advertising and with an unreachable `--opencode-url`: they must be identical apart from ports, paths, fingerprints and times.
-- Inspect the example: it depends only on published crates and uses only their public interfaces.
+- Inspect the server example: it depends only on published crates and uses only their public interfaces. The headset example uses only public interfaces, but depends on crates that are unpublished until the publishing step planned in #132.
+- Test that the headset builder's default draws the grid and Sky, that a registered scenery is listed after them or replaces one with the same identifier, and that a conversation and renderer given its sceneries draw a space bound to its environment, where Tomori's own build shows the grid and names it.
+- Test that the headset builder's window modes, as `tomori`'s command line runs them through a test's shell, create a registered scenery and draw it once **E** or a space reaches its environment, and that its participant draws the build's environments; and check that each test fails when the builder, the command line or the window passes Tomori's own sceneries instead, or leaves the build's environments out.
+- Test that the headset example draws its floor for a space in the placeholder environment on the shared test device, and in the server-less window that `tomori`'s command line opens for its build once **E** reaches it, and that its executable takes `tomori`'s command line.
+- Link the headset example's library for Android at the Quest's API level: it exports one `android_main`, its own, and with the `tomori` library's `app` feature left on, linking fails with a duplicate `android_main`.
 - Run `cargo publish --workspace --dry-run --locked`.

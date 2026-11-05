@@ -25,25 +25,41 @@ use tomori_scene::{server_choice, test_support};
 
 use connection::Connection;
 use conversation::Conversation;
+use desktop::Demo;
+use desktop_participant::Participant;
+use tomori_render::scenery::Sceneries;
 use tomori_scene::identity::{self, Overrides};
+use window::Shell;
 
-/// Run the server-less window, without an XR runtime or headset.
-pub fn run_demo() -> anyhow::Result<()> {
-    desktop_window::run_demo()
+/// Show the server-less window through `shell`, such as [`desktop_window::Desktop`], without an XR runtime or headset, among `sceneries`, which **E** cycles through, until it is closed.
+pub fn run_demo(shell: &impl Shell, sceneries: Sceneries) -> anyhow::Result<()> {
+    shell.show(Demo::settings(), |gpu| {
+        Ok(Demo::with_sceneries(gpu, &sceneries))
+    })
 }
 
-/// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls.
-pub fn run_desktop(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = connection(overrides);
-    desktop_window::run_participant(conversation, connection)
+/// Take part in a server's spaces as `conversation` and `connection` describe, from a window that `shell`, such as [`desktop_window::Desktop`], shows, as the headset does, with the keyboard and mouse for its controls, drawing the environments `sceneries` has, and the grid for any other, until it is closed.
+pub fn run_desktop(
+    shell: &impl Shell,
+    conversation: Conversation,
+    connection: Connection,
+    sceneries: Sceneries,
+) -> anyhow::Result<()> {
+    shell.show(Participant::settings(), |gpu| {
+        Ok(Participant::with_sceneries(
+            gpu,
+            conversation,
+            connection,
+            &sceneries,
+        ))
+    })
 }
 
 /// The desktop window's keys and what they stand for on the headset.
 pub const DESKTOP_CONTROLS: &str = desktop_participant::CONTROLS;
 
-/// Show the headset's panel in the terminal, to use a server without a headset or a GPU.
-pub fn run_console(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = connection(overrides);
+/// Show the headset's panel in the terminal, to use a server without a headset or a GPU, as `conversation` and `connection` describe.
+pub fn run_console(conversation: Conversation, connection: Connection) -> anyhow::Result<()> {
     console::run(
         conversation,
         connection,
@@ -98,6 +114,49 @@ pub fn connection(overrides: Overrides) -> (Conversation, Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tomori_render::scenery::test::Counted;
+    use tomori_scene::scene::fixtures::{joined, space};
+    use window::test::{Headless, press, with_gpu};
+
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    #[test]
+    fn the_server_less_window_draws_the_sceneries_it_is_given_as_e_cycles_through_them() {
+        with_gpu(FORMAT, |_| {
+            let counted = Counted::default();
+            let e = press(winit::keyboard::KeyCode::KeyE);
+            // It starts on the grid, as there is no Sky, and E moves to the floor.
+            let drawn = counted.clone();
+            run_demo(
+                &Headless::new(vec![e], move |_| drawn.drawn() > 0),
+                counted.sceneries("floor"),
+            )
+            .unwrap();
+            assert_eq!(counted.created(), 1);
+            assert!(counted.drawn() > 0);
+        });
+    }
+
+    #[test]
+    fn a_participant_draws_the_sceneries_it_is_given_for_its_spaces_environment() {
+        with_gpu(FORMAT, |_| {
+            let counted = Counted::default();
+            let (_, connection) = test_support::participant("Ada", None);
+            let mut conversation = joined();
+            conversation.apply(space(|state| state.environment = "floor".into()));
+            // The floor is drawn once it starts to grow out of the space.
+            let drawn = counted.clone();
+            run_desktop(
+                &Headless::new(vec![], move |_| drawn.drawn() > 0),
+                conversation,
+                connection,
+                counted.sceneries("floor"),
+            )
+            .unwrap();
+            assert_eq!(counted.created(), 1);
+            assert!(counted.drawn() > 0);
+        });
+    }
 
     #[test]
     fn the_spectator_and_participants_name_their_audio_differently() {

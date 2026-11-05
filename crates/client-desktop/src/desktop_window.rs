@@ -3,15 +3,9 @@
 
 //! The desktop window's calls into the window system: winit's event loop and window, and the window's Vulkan or Metal surface. It needs a display, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
 //!
-//! Only those calls belong here. Each window event becomes a [`window::Input`] and each frame is drawn through a [`window::Surface`]; what the window does with them is decided by its [`window::Contents`], in covered modules: the server-less window, the participant's, or what [`show`] is given, such as the spectator's. See `design/desktop.md`.
+//! Only those calls belong here. Each window event becomes a [`window::Input`] and each frame is drawn through a [`window::Surface`]; what the window does with them is decided by its [`window::Contents`], in covered modules: the server-less window, the participant's, or what [`show`] is given, such as the spectator's. The desktop's modes open their windows through [`Desktop`], so that their tests can show the same contents through `window::test::Headless` instead. See `design/desktop.md`.
 
-use crate::{
-    connection::Connection,
-    conversation::Conversation,
-    desktop::Demo,
-    desktop_participant::Participant,
-    window::{self, Contents, Flow, Gpu, Input, Settings, Wake},
-};
+use crate::window::{self, Contents, Flow, Gpu, Input, Settings, Shell, Wake};
 use anyhow::{Context, Result};
 use glam::Vec2;
 use std::sync::Arc;
@@ -23,16 +17,17 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// The server-less window, until it is closed; see [`Demo`].
-pub fn run_demo() -> Result<()> {
-    run(Demo::settings(), |gpu| Ok(Demo::new(gpu)))
-}
+/// The window system's windows, as the desktop's modes show them.
+pub struct Desktop;
 
-/// The participant's window, connected as `conversation` and `connection` describe, until it is closed; see [`Participant`].
-pub fn run_participant(conversation: Conversation, connection: Connection) -> Result<()> {
-    run(Participant::settings(), |gpu| {
-        Ok(Participant::new(gpu, conversation, connection))
-    })
+impl Shell for Desktop {
+    fn show<C: Contents>(
+        &self,
+        settings: Settings,
+        open: impl FnOnce(Gpu) -> Result<C>,
+    ) -> Result<()> {
+        run(settings, open)
+    }
 }
 
 /// Open a window as `settings` describe and show what `open` makes of the window's device and `with`, until it is closed or fails, as the spectator's window does.

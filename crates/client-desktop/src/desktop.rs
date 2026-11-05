@@ -12,6 +12,7 @@ use crate::{
 use anyhow::Result;
 use glam::{Mat4, Vec2, Vec3};
 use std::time::Instant;
+use tomori_render::scenery::Sceneries;
 use winit::{
     dpi::LogicalSize,
     event::{MouseButton, MouseScrollDelta},
@@ -51,19 +52,26 @@ impl Demo {
         }
     }
 
-    /// Show the server-less swarm, drawn with `gpu`.
+    /// Show the server-less swarm, drawn with `gpu`, among Tomori's own sceneries.
     pub fn new(gpu: Gpu) -> Self {
+        Self::with_sceneries(gpu, &Sceneries::default())
+    }
+
+    /// As [`Demo::new`], among `sceneries`, which **E** cycles through.
+    pub fn with_sceneries(gpu: Gpu, sceneries: &Sceneries) -> Self {
         let samples = gpu.samples(gpu.format);
-        let mut renderer = Renderer::with_samples(
+        let mut renderer = Renderer::with_sceneries(
             &gpu.device,
             &gpu.queue,
             gpu.format,
             gpu.width,
             gpu.height,
             samples,
+            sceneries,
         );
         // The desktop window has no server, so it is never in a space and chooses its scenery itself.
-        renderer.set_environment(crate::environment::Environment::initial());
+        let initial = crate::environment::Environment::initial(renderer.environments());
+        renderer.set_environment(initial);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,
@@ -183,8 +191,11 @@ impl Contents for Demo {
                 KeyCode::Escape => return Ok(Flow::Exit),
                 KeyCode::KeyR => self.swarm = Swarm::default(),
                 KeyCode::KeyE => {
-                    self.renderer
-                        .set_environment(self.renderer.environment().next());
+                    self.renderer.set_environment(
+                        self.renderer
+                            .environment()
+                            .next(self.renderer.environments()),
+                    );
                     log::info!("Environment: {:?}", self.renderer.environment());
                 }
                 KeyCode::Space => {
@@ -418,7 +429,10 @@ mod tests {
             // E changes the environment.
             let environment = demo.renderer.environment();
             input(&mut demo, &mut surface, key(KeyCode::KeyE));
-            assert_eq!(demo.renderer.environment(), environment.next());
+            assert_eq!(
+                demo.renderer.environment(),
+                environment.next(demo.renderer.environments())
+            );
             // Space pauses, and says so in the title; a paused swarm stays where it is.
             input(&mut demo, &mut surface, key(KeyCode::Space));
             assert!(demo.paused);

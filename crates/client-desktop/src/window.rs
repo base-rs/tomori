@@ -103,6 +103,16 @@ pub trait Surface {
     fn request_redraw(&mut self);
 }
 
+/// What opens a window and shows contents in it: [`crate::desktop_window::Desktop`], the window system, or, in tests, `test::Headless`, the shared test device.
+pub trait Shell {
+    /// Open a window as `settings` describe, and show what `open` makes once the window has a device, until it is closed or fails.
+    fn show<C: Contents>(
+        &self,
+        settings: Settings,
+        open: impl FnOnce(Gpu) -> Result<C>,
+    ) -> Result<()>;
+}
+
 /// What a window shows, driven by its events.
 pub trait Contents {
     /// Handle one input.
@@ -175,6 +185,43 @@ pub mod test {
         }
     }
 
+    impl TestSurface {
+        /// What was drawn into the surface last, as rows of RGBA bytes from the top.
+        pub fn pixels(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
+            let size = self.texture.size();
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("test surface readback"),
+                size: u64::from(size.width * size.height * 4),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                self.texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        // 64 pixels of 4 bytes, as wgpu requires a multiple of 256.
+                        bytes_per_row: Some(size.width * 4),
+                        rows_per_image: Some(size.height),
+                    },
+                },
+                size,
+            );
+            queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("the device finishes the copy");
+            buffer
+                .slice(..)
+                .get_mapped_range()
+                .expect("the copy is mapped")
+                .to_vec()
+        }
+    }
+
     impl Surface for TestSurface {
         fn acquire(&mut self) -> Result<Option<wgpu::TextureView>> {
             anyhow::ensure!(!self.fail, "the test surface is lost");
@@ -199,6 +246,73 @@ pub mod test {
 
         fn request_redraw(&mut self) {
             self.redraws += 1;
+        }
+    }
+
+    /// A [`Shell`] that shows contents on the shared test device, through a [`TestSurface`], so that what a runner shows is tested without a display: it draws them once, then gives them each of `inputs` and draws them again after each, then draws them every few milliseconds until `until` holds of the frame drawn last. Where there is no GPU, nothing is shown.
+    ///
+    /// # Panics
+    ///
+    /// If the contents fail to open, handle an input or draw, or if `until` does not hold within 10 seconds.
+    pub struct Headless {
+        pub inputs: Vec<Input>,
+        pub until: Until,
+    }
+
+    /// Whether a test has seen what it waits for, given the frame drawn last, as [`TestSurface::pixels`] reads it.
+    pub type Until = Box<dyn Fn(&[u8]) -> bool>;
+
+    /// The keys' places, for [`press`].
+    pub use winit::keyboard::KeyCode;
+
+    /// Pressing the key at `code`'s place, once.
+    pub fn press(code: KeyCode) -> Input {
+        Input::Key {
+            code,
+            pressed: true,
+            repeat: false,
+        }
+    }
+
+    impl Headless {
+        /// Give the contents `inputs`, then draw them until `until` holds of the frame drawn last.
+        pub fn new(inputs: Vec<Input>, until: impl Fn(&[u8]) -> bool + 'static) -> Self {
+            Self {
+                inputs,
+                until: Box::new(until),
+            }
+        }
+    }
+
+    impl Shell for Headless {
+        fn show<C: Contents>(
+            &self,
+            _settings: Settings,
+            open: impl FnOnce(Gpu) -> Result<C>,
+        ) -> Result<()> {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            with_gpu(format, |gpu| {
+                let mut surface = TestSurface::new(&gpu.device, format);
+                let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+                let mut contents = open(gpu).expect("the contents open");
+                contents.redraw(&mut surface).expect("the contents draw");
+                for input in &self.inputs {
+                    contents
+                        .input(*input, &mut surface)
+                        .expect("the contents handle the input");
+                    contents.redraw(&mut surface).expect("the contents draw");
+                }
+                let deadline = Instant::now() + std::time::Duration::from_secs(10);
+                while !(self.until)(&surface.pixels(&device, &queue)) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "what the test waits for is not shown within 10 seconds"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    contents.redraw(&mut surface).expect("the contents draw");
+                }
+            });
+            Ok(())
         }
     }
 

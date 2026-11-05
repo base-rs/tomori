@@ -265,7 +265,7 @@ impl Default for Motion {
             heading: None,
             heading_presence: Track::at(0.0),
             heading_anchor: None,
-            environment: Environment::Minimal,
+            environment: Environment::MINIMAL,
             centre: APPROACH,
             reveal: Track::at(0.0),
         }
@@ -420,9 +420,9 @@ impl Motion {
     /// The environment to draw at `now`: the grid, a space's environment, or the space's environment growing out of its object or shrinking back into it.
     pub fn scenery(&self, now: f32) -> Scenery {
         let progress = self.reveal.value(now);
-        if self.environment == Environment::Minimal || progress <= 0.0 {
+        if self.environment == Environment::MINIMAL || progress <= 0.0 {
             Scenery {
-                environment: Environment::Minimal,
+                environment: Environment::MINIMAL,
                 reveal: None,
             }
         } else {
@@ -732,7 +732,7 @@ mod tests {
     }
 
     fn entered(id: &str) -> Scene {
-        Scene::entered(Some(Key::Space(id.into())), Environment::Sky)
+        Scene::entered(Some(Key::Space(id.into())), Environment::SKY)
     }
 
     /// Run frames from `start` until `end`, checking that no object or the environment jumps between frames.
@@ -865,13 +865,13 @@ mod tests {
         assert_eq!(
             motion.scenery(now),
             Scenery {
-                environment: Environment::Sky,
+                environment: Environment::SKY,
                 reveal: None
             }
         );
         now = settle(&mut motion, &lobby(), now);
         assert_matches(&motion.scene(now), &lobby());
-        assert_eq!(motion.scenery(now).environment, Environment::Minimal);
+        assert_eq!(motion.scenery(now).environment, Environment::MINIMAL);
     }
 
     /// Step from `now` towards `target` frame by frame for `duration`, giving each frame's scene.
@@ -1062,11 +1062,11 @@ mod tests {
         assert_eq!(motion.scenery(now + APPROACH_TIME * 0.4).reveal, None);
         assert_eq!(
             motion.scenery(now + APPROACH_TIME * 0.4).environment,
-            Environment::Minimal
+            Environment::MINIMAL
         );
         now += APPROACH_TIME * 0.5;
         let growing = motion.scenery(now + REVEAL * 0.3);
-        assert_eq!(growing.environment, Environment::Sky);
+        assert_eq!(growing.environment, Environment::SKY);
         let sphere = growing.reveal.unwrap();
         assert!(sphere.centre.distance(APPROACH) < 1e-4);
         // Small at first, around the participant past halfway, and whole at the end.
@@ -1083,7 +1083,7 @@ mod tests {
         assert!(shrinking.radius < motion.scenery(now + REVEAL * 0.2).reveal.unwrap().radius);
         assert_eq!(
             motion.scenery(now + REVEAL).environment,
-            Environment::Minimal
+            Environment::MINIMAL
         );
         let returning = motion.scene(now + REVEAL * 0.65);
         assert!(
@@ -1120,22 +1120,22 @@ mod tests {
         assert_eq!(
             motion.scenery(now),
             Scenery {
-                environment: Environment::Sky,
+                environment: Environment::SKY,
                 reveal: None
             }
         );
         // Changed to the grid, the sky goes at once.
-        let grid = Scene::entered(Some(Key::Space("one".into())), Environment::Minimal);
+        let grid = Scene::entered(Some(Key::Space("one".into())), Environment::MINIMAL);
         motion.update(&grid, now);
         assert_eq!(
             motion.scenery(now + FRAME).environment,
-            Environment::Minimal
+            Environment::MINIMAL
         );
         now = settle(&mut motion, &grid, now);
         // Changed back, the sky grows again from the space, whole by the end.
         motion.update(&entered("one"), now);
         let growing = motion.scenery(now + REVEAL * 0.3);
-        assert_eq!(growing.environment, Environment::Sky);
+        assert_eq!(growing.environment, Environment::SKY);
         assert!(growing.reveal.unwrap().centre.distance(APPROACH) < 1e-4);
         assert_eq!(motion.scenery(now + REVEAL).reveal, None);
     }
@@ -1146,7 +1146,7 @@ mod tests {
         let mut now = settle(&mut motion, &joining("one"), 0.0);
         now = settle(&mut motion, &entered("one"), now);
         let whole = Scenery {
-            environment: Environment::Sky,
+            environment: Environment::SKY,
             reveal: None,
         };
         assert_eq!(motion.scenery(now), whole);
@@ -1160,13 +1160,13 @@ mod tests {
     fn a_space_entered_in_the_grid_shows_only_the_grid() {
         let mut motion = Motion::default();
         let now = settle(&mut motion, &joining("one"), 0.0);
-        let target = Scene::entered(Some(Key::Space("one".into())), Environment::Minimal);
+        let target = Scene::entered(Some(Key::Space("one".into())), Environment::MINIMAL);
         for time in [0.0, REVEAL * 0.5, 5.0] {
             motion.update(&target, now + time);
             assert_eq!(
                 motion.scenery(now + time),
                 Scenery {
-                    environment: Environment::Minimal,
+                    environment: Environment::MINIMAL,
                     reveal: None
                 }
             );

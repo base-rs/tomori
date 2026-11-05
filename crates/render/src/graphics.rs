@@ -111,7 +111,10 @@ pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
     reveal: Option<crate::arrival_motion::Sphere>,
-    sky: tomori_environment_sky::Sky,
+    /// The registered sceneries, each drawn while its environment is.
+    sceneries: Vec<(Environment, Box<dyn crate::scenery::Scenery>)>,
+    /// What this renderer can draw: the grid, then each scenery's environment.
+    environments: Vec<Environment>,
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
@@ -154,6 +157,27 @@ impl Renderer {
         width: u32,
         height: u32,
         samples: u32,
+    ) -> Self {
+        Self::with_sceneries(
+            device,
+            queue,
+            format,
+            width,
+            height,
+            samples,
+            &crate::scenery::Sceneries::default(),
+        )
+    }
+
+    /// As [`Renderer::with_samples`], drawing `sceneries` rather than Tomori's own, Sky.
+    pub fn with_sceneries(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        samples: u32,
+        sceneries: &crate::scenery::Sceneries,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("oriented swarm instances"),
@@ -269,11 +293,17 @@ impl Renderer {
         let panels = crate::ui_panel::Pipeline::new(device, format, samples);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
-            environment: Environment::Minimal,
+            environment: Environment::MINIMAL,
             reveal: None,
-            sky: tomori_environment_sky::Sky::with_samples(
-                device, queue, format, width, height, samples,
-            ),
+            sceneries: sceneries.create(&crate::scenery::Target {
+                device,
+                queue,
+                format,
+                width,
+                height,
+                samples,
+            }),
+            environments: sceneries.environments(),
             pipeline,
             vertices,
             instances,
@@ -361,7 +391,22 @@ impl Renderer {
         self.depth = Self::depth_views(device, width, height, self.samples);
         self.multisampled =
             Self::multisampled_views(device, self.format, width, height, self.samples);
-        self.sky.resize(device, width, height);
+        for (_, scenery) in &mut self.sceneries {
+            scenery.resize(device, width, height);
+        }
+    }
+
+    /// The scenery drawn now, if the environment has one.
+    fn scenery(&self) -> Option<&dyn crate::scenery::Scenery> {
+        self.sceneries
+            .iter()
+            .find(|(environment, _)| *environment == self.environment)
+            .map(|(_, scenery)| scenery.as_ref())
+    }
+
+    /// What this renderer can draw: the grid, then each scenery's environment, as the desktop window's E key cycles through them.
+    pub fn environments(&self) -> &[Environment] {
+        &self.environments
     }
 
     #[cfg(any(not(target_os = "android"), test))]
@@ -380,8 +425,10 @@ impl Renderer {
     pub fn set_scenery(&mut self, scenery: crate::arrival_motion::Scenery) {
         self.environment = scenery.environment;
         self.reveal = scenery.reveal;
-        self.sky
-            .set_reveal(scenery.reveal.map(|sphere| (sphere.centre, sphere.radius)));
+        let reveal = scenery.reveal.map(|sphere| (sphere.centre, sphere.radius));
+        for (_, scenery) in &mut self.sceneries {
+            scenery.set_reveal(reveal);
+        }
     }
 
     pub fn update(
@@ -395,7 +442,7 @@ impl Renderer {
         self.workspace.hide();
         self.arrival.hide();
         swarm_instances(swarm, &mut self.scene);
-        if self.environment == Environment::Minimal || self.reveal.is_some() {
+        if self.environment == Environment::MINIMAL || self.reveal.is_some() {
             minimal_floor(&mut self.scene, self.reveal);
         }
         // Keep the coordinator's orientation ring in both environments.
@@ -539,9 +586,9 @@ impl Renderer {
         let multisampled = self.multisampled.as_ref();
         for eye in 0..targets.len() {
             let scene_to_clip = matrices[eye] * scene_to_space;
-            if self.environment == Environment::Sky {
-                self.sky.prepare_eye(queue, eye, scene_to_clip);
-                self.sky.encode_clouds(&mut encoder, eye);
+            if let Some(scenery) = self.scenery() {
+                scenery.prepare(queue, eye, scene_to_clip);
+                scenery.encode(&mut encoder, eye);
             }
             // Separate buffers are important: two writes to one buffer before
             // submission would make both eyes use the right-eye transform.
@@ -587,8 +634,8 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if self.environment == Environment::Sky {
-                self.sky.draw(&mut pass, eye);
+            if let Some(scenery) = self.scenery() {
+                scenery.draw(&mut pass, eye);
             }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bindings[eye], &[]);
@@ -596,8 +643,8 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.instances.slice(..));
             pass.draw(0..self.vertex_count, 0..self.scene.len() as u32);
             self.controllers.draw(&mut pass);
-            if self.environment == Environment::Sky {
-                self.sky.draw_clouds(&mut pass, eye);
+            if let Some(scenery) = self.scenery() {
+                scenery.draw_translucent(&mut pass, eye);
             }
             self.workspace.draw(
                 &mut pass,
@@ -901,23 +948,23 @@ mod tests {
                         })
                         .collect::<Vec<_>>()
                 };
-                renderer.set_environment(Environment::Minimal);
+                renderer.set_environment(Environment::MINIMAL);
                 renderer.update(&queue, &swarm, None, false);
                 let minimal = capture(&renderer, matrices, Mat4::IDENTITY);
-                renderer.set_environment(Environment::Sky);
+                renderer.set_environment(Environment::SKY);
                 renderer.update(&queue, &swarm, None, false);
                 let sky = capture(&renderer, matrices, Mat4::IDENTITY);
                 assert_ne!(sky[0], minimal[0]);
                 assert_ne!(sky[0], sky[1], "scenery must have stereo parallax");
                 // Return to the original preset without touching the simulation.
-                renderer.set_environment(Environment::Minimal);
+                renderer.set_environment(Environment::MINIMAL);
                 renderer.update(&queue, &swarm, None, false);
                 assert_eq!(minimal, capture(&renderer, matrices, Mat4::IDENTITY));
                 assert_eq!(
                     positions,
                     swarm.agents.iter().map(|a| a.position).collect::<Vec<_>>()
                 );
-                renderer.set_environment(Environment::Sky);
+                renderer.set_environment(Environment::SKY);
                 renderer.update(&queue, &swarm, None, false);
                 let anchor = Mat4::from_rotation_translation(
                     glam::Quat::from_rotation_y(0.35),
@@ -965,7 +1012,7 @@ mod tests {
                 let overview = capture(&renderer, [overview; 2], Mat4::IDENTITY);
                 // Growing out of a space's object: Sky inside the sphere, the grid outside it.
                 let reveal = |radius| crate::arrival_motion::Scenery {
-                    environment: Environment::Sky,
+                    environment: Environment::SKY,
                     reveal: Some(crate::arrival_motion::Sphere {
                         centre: glam::Vec3::new(0.0, 1.0, -2.5),
                         radius,
@@ -980,10 +1027,10 @@ mod tests {
                 let growing = revealed(reveal(1.5));
                 let world = revealed(reveal(1000.0));
                 let filled = revealed(crate::arrival_motion::Scenery {
-                    environment: Environment::Sky,
+                    environment: Environment::SKY,
                     reveal: None,
                 });
-                assert_eq!(renderer.environment(), Environment::Sky);
+                assert_eq!(renderer.environment(), Environment::SKY);
                 // Within one step, as in `workspace_graphics`: a few interpolated colours may round differently where only the pipeline differs.
                 let changed = |a: &[u8], b: &[u8]| {
                     a.as_chunks::<4>()
@@ -1777,7 +1824,7 @@ mod tests {
                     WIDTH,
                     HEIGHT,
                 );
-                renderer.set_environment(Environment::Minimal);
+                renderer.set_environment(Environment::MINIMAL);
                 let swarm = Swarm::default();
                 let eye = glam::Vec3::new(0.0, 1.6, 0.0);
                 let matrix = Mat4::perspective_rh(1.4, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
@@ -2065,7 +2112,7 @@ mod tests {
                         .len()
                 };
                 let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
-                for (row, environment) in [Environment::Minimal, Environment::Sky]
+                for (row, environment) in [Environment::MINIMAL, Environment::SKY]
                     .into_iter()
                     .enumerate()
                 {
@@ -2319,7 +2366,7 @@ mod tests {
                             .len()
                     };
                     let mut sheet = image::RgbaImage::new(WIDTH * 4, HEIGHT * 2);
-                    for (row, environment) in [Environment::Minimal, Environment::Sky]
+                    for (row, environment) in [Environment::MINIMAL, Environment::SKY]
                         .into_iter()
                         .enumerate()
                     {

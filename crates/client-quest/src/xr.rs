@@ -25,12 +25,14 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+use tomori_render::scenery::Sceneries;
 
 /// Run against the desktop's active OpenXR runtime, connected as `conversation` and `connection` describe.
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop(
     conversation: crate::conversation::Conversation,
     connection: crate::connection::Connection,
+    sceneries: &Sceneries,
 ) -> Result<()> {
     run(
         &(),
@@ -38,6 +40,7 @@ pub fn run_desktop(
         || false,
         conversation,
         connection,
+        sceneries,
     )
 }
 
@@ -51,6 +54,7 @@ pub fn run(
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
+    sceneries: &Sceneries,
 ) -> Result<()> {
     let entry = unsafe { xr::Entry::load(platform) }
         .context("loading OpenXR (is an OpenXR runtime installed?)")?;
@@ -149,8 +153,15 @@ pub fn run(
         "Drawing {samples}x multisampled; transient attachments save memory: {:?}",
         gpu.adapter.get_info().transient_saves_memory
     );
-    let mut renderer =
-        Renderer::with_samples(&gpu.device, &gpu.queue, format, width, height, samples);
+    let mut renderer = Renderer::with_sceneries(
+        &gpu.device,
+        &gpu.queue,
+        format,
+        width,
+        height,
+        samples,
+        sceneries,
+    );
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
     // What is left of the floating panel in a space: the status pill. See `design/interaction.md`.
