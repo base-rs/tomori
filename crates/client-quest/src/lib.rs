@@ -63,6 +63,7 @@ mod spectator_feed;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
 mod swarm;
+mod system;
 #[cfg(all(test, not(target_os = "android")))]
 mod test_support;
 mod transcript;
