@@ -1,6 +1,6 @@
 # Builders
 
-This describes how other projects build their own Tomori server, and later their own headset, from Tomori's published crates.
+This describes how other projects build their own Tomori server and headset from Tomori's crates.
 
 ## Requirement
 
@@ -18,7 +18,15 @@ The `tomori-server` executable is the default build of that builder, with only T
 
 An example downstream crate, `tomori-example-server` in `examples/server`, depends on the published crates as another project would, registers a placeholder backend and environment through the builder, and is built and run by the workspace's tests.
 
-The headset half, a builder that registers environments' client halves and sceneries, is planned in #73 and not yet a requirement.
+Another project likewise builds a headset of its own on the `tomori-client-quest` library, whose library is `tomori`, through `tomori::Builder`, which starts with Tomori's own build. What it can register is what Tomori supports today:
+
+- **Sceneries:** what the headset draws for a space bound to an environment, by the environment's identifier: an implementation of `tomori-render`'s `Scenery`, drawn natively in each eye's pass as Sky is, made for the renderer's targets by a function it registers. Registering an identifier already registered replaces that scenery. The Minimal grid is built in, and is what a build shows, naming the environment, for a space bound to one it has no scenery for. Tomori's own build registers Sky.
+
+Environments' client halves will be registered through the same builder once #75 defines them; until then it offers nothing for them, and a scenery is all of an environment that a headset build adds.
+
+`Builder::run_android` runs the headset on the Quest, from a build's own `android_main`; `run_xr` runs it on a desktop OpenXR runtime; and `tomori::main(builder)` is the `tomori` executable's command line, whose `--xr`, `--desktop` and server-less window draw the builder's sceneries, and whose desktop window's **E** cycles through them. The `tomori` executable and APK are the default build, `Builder::default()`; their command line and behaviour are those they had before the builder existed. The spectator still draws only Tomori's own sceneries. Packaging a build as its own APK is planned in #132.
+
+An example downstream crate, `tomori-example-headset` in `examples/headset`, registers a placeholder floor for the example server's placeholder environment, and is built and tested by the workspace's tests.
 
 ## Rationale
 
@@ -26,7 +34,7 @@ Other projects, such as a private integration with environments of its own, need
 
 ## Scope
 
-The `tomori-server` library's builder and the registries it fills, the `tomori-server` executable, and the example in `examples/server`.
+The `tomori-server` library's builder and the registries it fills, the `tomori-server` executable, and the example in `examples/server`; the headset's builder, `tomori-render`'s sceneries, the `tomori` executable, and the example in `examples/headset`.
 
 ## Validation
 
@@ -35,4 +43,6 @@ The `tomori-server` library's builder and the registries it fills, the `tomori-s
 - Test that the example's executable lists its placeholder backend in `--help`, offers it and the placeholder environment in `Welcome`, and creates a space with both, whose state shows the environment's layer of the instructions.
 - Compare `tomori-server --help`, an unknown argument and `auth --help` between the builder's revision and the one before it, and the startup output with the live server's flags, `--backend opencode --name NAME --speech-root PATH --speech-backend offline --workspace-root PATH` with token authentication and TLS, on a loopback port, without advertising and with an unreachable `--opencode-url`: they must be identical apart from ports, paths, fingerprints and times.
 - Inspect the example: it depends only on published crates and uses only their public interfaces.
+- Test that the headset builder's default draws the grid and Sky, that a registered scenery is listed after them or replaces one with the same identifier, and that a conversation and renderer given its sceneries draw a space bound to its environment, where Tomori's own build shows the grid and names it.
+- Test that the headset example draws its floor for a space in the placeholder environment on the shared test device, and that its executable takes `tomori`'s command line.
 - Run `cargo publish --workspace --dry-run --locked`.

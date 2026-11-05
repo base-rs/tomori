@@ -25,17 +25,19 @@ use tomori_scene::{server_choice, test_support};
 
 use connection::Connection;
 use conversation::Conversation;
+use tomori_render::scenery::Sceneries;
 use tomori_scene::identity::{self, Overrides};
 
-/// Run the server-less window, without an XR runtime or headset.
-pub fn run_demo() -> anyhow::Result<()> {
-    desktop_window::run_demo()
+/// Run the server-less window, without an XR runtime or headset, among `sceneries`, which **E** cycles through.
+pub fn run_demo(sceneries: Sceneries) -> anyhow::Result<()> {
+    desktop_window::run_demo(sceneries)
 }
 
-/// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls.
-pub fn run_desktop(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = connection(overrides);
-    desktop_window::run_participant(conversation, connection)
+/// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls, drawing the environments `sceneries` has, and the grid for any other.
+pub fn run_desktop(overrides: Overrides, sceneries: Sceneries) -> anyhow::Result<()> {
+    let (mut conversation, connection) = connection(overrides);
+    conversation.set_drawable(sceneries.environments());
+    desktop_window::run_participant(conversation, connection, sceneries)
 }
 
 /// The desktop window's keys and what they stand for on the headset.

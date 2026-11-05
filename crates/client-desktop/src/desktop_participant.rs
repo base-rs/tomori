@@ -14,6 +14,7 @@ use crate::{
 use anyhow::Result;
 use glam::{Mat4, Vec2};
 use std::time::{Duration, Instant};
+use tomori_render::scenery::Sceneries;
 use winit::{dpi::LogicalSize, event::MouseButton, keyboard::KeyCode};
 
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
@@ -79,16 +80,27 @@ impl Participant {
         }
     }
 
-    /// Take part as `conversation` and `connection` describe, drawn with `gpu`.
-    pub fn new(gpu: Gpu, mut conversation: Conversation, connection: Connection) -> Self {
+    /// Take part as `conversation` and `connection` describe, drawn with `gpu`, among Tomori's own sceneries.
+    pub fn new(gpu: Gpu, conversation: Conversation, connection: Connection) -> Self {
+        Self::with_sceneries(gpu, conversation, connection, &Sceneries::default())
+    }
+
+    /// As [`Participant::new`], drawing `sceneries`, which should be the environments `conversation` draws.
+    pub fn with_sceneries(
+        gpu: Gpu,
+        mut conversation: Conversation,
+        connection: Connection,
+        sceneries: &Sceneries,
+    ) -> Self {
         let samples = gpu.samples(gpu.format);
-        let renderer = Renderer::with_samples(
+        let renderer = Renderer::with_sceneries(
             &gpu.device,
             &gpu.queue,
             gpu.format,
             gpu.width,
             gpu.height,
             samples,
+            sceneries,
         );
         let panels = Panels::new(&gpu.device, &renderer);
         log::info!(

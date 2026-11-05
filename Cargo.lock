@@ -3616,6 +3616,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomori-example-headset"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "glam",
+ "tomori-client-quest",
+ "tomori-render",
+ "tomori-scene",
+ "wgpu",
+]
+
+[[package]]
 name = "tomori-example-server"
 version = "0.1.0"
 dependencies = [

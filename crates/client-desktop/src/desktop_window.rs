@@ -15,6 +15,7 @@ use crate::{
 use anyhow::{Context, Result};
 use glam::Vec2;
 use std::sync::Arc;
+use tomori_render::scenery::Sceneries;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -23,15 +24,26 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// The server-less window, until it is closed; see [`Demo`].
-pub fn run_demo() -> Result<()> {
-    run(Demo::settings(), |gpu| Ok(Demo::new(gpu)))
+/// The server-less window, among `sceneries`, until it is closed; see [`Demo`].
+pub fn run_demo(sceneries: Sceneries) -> Result<()> {
+    run(Demo::settings(), |gpu| {
+        Ok(Demo::with_sceneries(gpu, &sceneries))
+    })
 }
 
-/// The participant's window, connected as `conversation` and `connection` describe, until it is closed; see [`Participant`].
-pub fn run_participant(conversation: Conversation, connection: Connection) -> Result<()> {
+/// The participant's window, connected as `conversation` and `connection` describe, drawing `sceneries`, until it is closed; see [`Participant`].
+pub fn run_participant(
+    conversation: Conversation,
+    connection: Connection,
+    sceneries: Sceneries,
+) -> Result<()> {
     run(Participant::settings(), |gpu| {
-        Ok(Participant::new(gpu, conversation, connection))
+        Ok(Participant::with_sceneries(
+            gpu,
+            conversation,
+            connection,
+            &sceneries,
+        ))
     })
 }
 

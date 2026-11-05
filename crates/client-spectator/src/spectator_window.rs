@@ -72,7 +72,8 @@ impl SpectatorWindow {
             render_height,
             samples,
         );
-        renderer.set_environment(crate::environment::Environment::initial());
+        let initial = crate::environment::Environment::initial(renderer.environments());
+        renderer.set_environment(initial);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,

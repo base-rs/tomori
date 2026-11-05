@@ -5,6 +5,7 @@
 mod android;
 #[cfg(target_os = "android")]
 mod android_audio;
+mod builder;
 #[cfg(not(target_os = "android"))]
 mod cli;
 mod vulkan;
@@ -17,13 +18,16 @@ use tomori_render::{controller, graphics, scene_graphics};
 use tomori_scene::identity;
 use tomori_scene::{connection, conversation, feedback, hands, haptics, log_cadence, scene};
 
+/// The Android activity a downstream build's `android_main` is given, at the version Tomori uses.
+#[cfg(target_os = "android")]
+pub use android_activity::AndroidApp;
+pub use builder::Builder;
 #[cfg(not(target_os = "android"))]
 pub use cli::{Command, Mode};
 /// The desktop's modes, from `tomori-client-desktop`.
 #[cfg(not(target_os = "android"))]
 pub use tomori_client_desktop::{
-    DESKTOP_CONTROLS, audio_application_name, pipewire_alsa_properties, run_console,
-    run_demo as run, run_desktop, run_discover,
+    DESKTOP_CONTROLS, audio_application_name, pipewire_alsa_properties, run_console, run_discover,
 };
 /// The spectator's modes, from `tomori-client-spectator`.
 #[cfg(not(target_os = "android"))]
@@ -33,11 +37,20 @@ pub use tomori_client_spectator::{
 };
 pub use tomori_scene::identity::Overrides;
 
-/// Run against the host's active OpenXR runtime instead of a desktop window, with the desktop's microphone and speaker.
+/// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop` and the server-less window draw its sceneries. A downstream build's `main` is `tomori::main(builder)`.
 #[cfg(not(target_os = "android"))]
-pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = tomori_client_desktop::connection(overrides);
-    xr::run_desktop(conversation, connection)
+pub fn main(builder: Builder) -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let command = Command::parse(
+        std::env::args().skip(1),
+        std::env::var("TOMORI_SERVER").ok(),
+        std::env::var("TOMORI_TOKEN").ok(),
+    )?;
+    for (name, value) in command.environment(std::env::var_os("PIPEWIRE_ALSA").is_some()) {
+        // SAFETY: the process has started no other thread yet, so nothing reads the environment concurrently.
+        unsafe { std::env::set_var(name, value) };
+    }
+    command.run_with(builder)
 }
 
 // Bound each input batch so that a continuous input stream cannot prevent the
@@ -148,9 +161,16 @@ impl<'a> AndroidEventPump<'a> {
     }
 }
 
+/// Tomori's own headset, [`Builder::default`].
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-fn android_main(app: android_activity::AndroidApp) {
+fn android_main(app: AndroidApp) {
+    Builder::default().run_android(app)
+}
+
+/// The headset on Android, drawing `sceneries`, until the activity is destroyed; see [`Builder::run_android`].
+#[cfg(target_os = "android")]
+fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
     use std::time::Duration;
 
     android_logger::init_once(
@@ -177,13 +197,15 @@ fn android_main(app: android_activity::AndroidApp) {
         // xr::run owns the connection, so it closes before Destroy is acknowledged.
         Ok(android) => {
             let samples = android_samples(&android);
-            let (conversation, connection) = android_connection(android);
+            let (mut conversation, connection) = android_connection(android);
+            conversation.set_drawable(sceneries.environments());
             xr::run(
                 &platform,
                 samples,
                 || pump.poll(Duration::ZERO),
                 conversation,
                 connection,
+                sceneries,
             )
         }
         Err(error) => Err(error.context("reaching the Android activity")),

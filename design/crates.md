@@ -34,6 +34,7 @@ These stay unpublished, with `publish = false`:
 | `tomori-client-desktop` | The desktop modes that `tomori-client-quest` is being split into; published with it once the headset has a builder. |
 | `tomori-client-spectator` | The spectator, with its `tomori-spectator` executable, split out of `tomori-client-quest`; published with it once the headset has a builder. |
 | `tomori-example-server` | An example for downstream servers to follow; see `builders.md`. |
+| `tomori-example-headset` | An example for downstream headsets to follow; see `builders.md`. |
 | `tomori-bake` | Development tasks only. |
 
 A published crate depends only on published crates and on crates.io packages, never on an unpublished crate, a path outside its folder or a Git repository. Each published crate has a description, license, repository, readme, keywords and categories, and ships `license.md`, linked from the repository root.

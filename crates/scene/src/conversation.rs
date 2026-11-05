@@ -258,6 +258,8 @@ pub struct Conversation {
     sessions: Vec<SessionSummary>,
     /// The environments a space may be bound to, offered on the environment ring when there are several.
     environments: Vec<EnvironmentInfo>,
+    /// The environments this build draws; a space bound to another shows the grid, and says so.
+    drawable: Vec<Environment>,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
@@ -373,6 +375,7 @@ impl Conversation {
             backends: Vec::new(),
             roots: Vec::new(),
             environments: Vec::new(),
+            drawable: Environment::BUILT_IN.to_vec(),
             sessions: Vec::new(),
             menu_backend: None,
             menu_directory: None,
@@ -1507,13 +1510,19 @@ impl Conversation {
         self.close_menu();
     }
 
+    /// Draw `drawable`, the environments this build has sceneries for, rather than Tomori's own, the grid and Sky.
+    pub fn set_drawable(&mut self, drawable: Vec<Environment>) {
+        self.drawable = drawable;
+    }
+
     /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment. See `design/environments.md`.
     pub fn environment(&self) -> Environment {
         match &self.space {
             Some(space) if self.mode == Mode::Space => {
-                Environment::for_space(&space.environment).unwrap_or(Environment::Minimal)
+                Environment::for_space(&space.environment, &self.drawable)
+                    .unwrap_or(Environment::MINIMAL)
             }
-            _ => Environment::Minimal,
+            _ => Environment::MINIMAL,
         }
     }
 
@@ -1522,7 +1531,7 @@ impl Conversation {
     fn missing_environment(&self) -> Option<&str> {
         self.space
             .as_ref()
-            .filter(|space| Environment::for_space(&space.environment).is_none())
+            .filter(|space| Environment::for_space(&space.environment, &self.drawable).is_none())
             .map(|space| space.environment.as_str())
     }
 
@@ -5170,37 +5179,37 @@ mod tests {
     #[test]
     fn arrival_and_the_lobby_use_the_grid_and_a_space_its_environment() {
         let mut conversation = Conversation::new("Ada");
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         conversation.apply(space(|_| {}));
-        assert_eq!(conversation.environment(), Environment::Sky);
+        assert_eq!(conversation.environment(), Environment::SKY);
         // Leaving returns to the grid at once, before the server confirms.
         hold_b(&mut conversation);
         assert_eq!(conversation.mode(), Mode::Lobby);
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         conversation.apply(Event::Message(ServerMessage::Left));
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         // Returning to the servers keeps the grid.
         conversation.apply(space(|_| {}));
-        assert_eq!(conversation.environment(), Environment::Sky);
+        assert_eq!(conversation.environment(), Environment::SKY);
         conversation.apply(Event::Message(ServerMessage::Left));
         conversation.back();
         assert_eq!(conversation.mode(), Mode::Servers);
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
     }
 
     #[test]
     fn a_space_in_an_unknown_environment_shows_the_grid_and_names_it() {
         let mut conversation = joined(|state| state.environment = "observe".into());
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         let text = conversation.text();
         assert!(text.contains("Unknown environment: observe"), "{text}");
         assert_fits(&mut conversation);
         // An older server names none.
         conversation.apply(space(|state| state.environment = String::new()));
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         assert!(
             conversation
                 .text()
@@ -5208,8 +5217,21 @@ mod tests {
         );
         // A known one is drawn, and the notice goes.
         conversation.apply(space(|_| {}));
-        assert_eq!(conversation.environment(), Environment::Sky);
+        assert_eq!(conversation.environment(), Environment::SKY);
         assert!(!conversation.text().contains("environment"));
+    }
+
+    #[test]
+    fn a_build_that_draws_its_own_environment_shows_it() {
+        const OBSERVE: Environment = Environment::new("observe");
+        let mut conversation = joined(|state| state.environment = "observe".into());
+        conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
+        assert_eq!(conversation.environment(), OBSERVE);
+        assert!(!conversation.text().contains("Unknown environment"));
+        // Without Sky, a space in Sky shows the grid and names it.
+        conversation.apply(space(|state| state.environment = "sky".into()));
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
+        assert!(conversation.text().contains("Unknown environment: sky"));
     }
 
     #[test]
@@ -7104,12 +7126,12 @@ mod tests {
             Some("Changing the environment to Grid for everyone.")
         );
         // The scenery changes only when the server says the space has, for everyone alike.
-        assert_eq!(conversation.environment(), Environment::Sky);
+        assert_eq!(conversation.environment(), Environment::SKY);
         conversation.apply(space(|space| {
             space.environment = "minimal".into();
             space.environment_changes = true;
         }));
-        assert_eq!(conversation.environment(), Environment::Minimal);
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
         assert_eq!(
             offered(&conversation).1[1],
             ("minimal".into(), "Grid".into(), true)

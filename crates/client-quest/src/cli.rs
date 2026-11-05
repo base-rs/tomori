@@ -167,12 +167,12 @@ impl Command {
         }
     }
 
-    /// Run the command, until its window or connection closes.
-    pub fn run(self) -> Result<()> {
+    /// Run the command as `builder` builds the headset, until its window or connection closes.
+    pub fn run_with(self, builder: crate::Builder) -> Result<()> {
         match self.mode {
-            Mode::Demo => crate::run(),
-            Mode::Desktop => crate::run_desktop(self.overrides),
-            Mode::Xr => crate::run_xr(self.overrides),
+            Mode::Demo => builder.run_demo(),
+            Mode::Desktop => builder.run_desktop(self.overrides),
+            Mode::Xr => builder.run_xr(self.overrides),
             Mode::Console => crate::run_console(self.overrides),
             Mode::Discover => crate::run_discover(self.overrides.server),
             Mode::Spectator => crate::run_spectator(self.spectator_options()),

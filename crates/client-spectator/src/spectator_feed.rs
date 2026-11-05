@@ -191,7 +191,7 @@ impl Feed {
             scene: Scene::new(),
             swarm: SwarmAnimation::new(),
             sequence: 0,
-            environment: Environment::initial(),
+            environment: Environment::initial(&Environment::BUILT_IN),
             last_poll: Instant::now(),
             last_caption: None,
         }
@@ -389,7 +389,8 @@ impl Feed {
     fn environment(&self) -> Environment {
         match self.conversation.joined_space() {
             Some((space, _)) if !space.environment.is_empty() => {
-                Environment::for_space(&space.environment).unwrap_or(Environment::Minimal)
+                Environment::for_space(&space.environment, &Environment::BUILT_IN)
+                    .unwrap_or(Environment::MINIMAL)
             }
             _ => self.environment,
         }
@@ -570,7 +571,7 @@ mod tests {
     #[test]
     fn frames_show_the_joined_space_s_environment_as_it_changes() {
         let mut feed = feed(SpectatorOptions::default());
-        feed.environment = Environment::Sky;
+        feed.environment = Environment::SKY;
         feed.conversation
             .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
         feed.conversation
@@ -597,11 +598,11 @@ mod tests {
                 .environment
         };
         // An owner's change reaches the spectator as it does everyone in the space.
-        assert_eq!(frame(&mut feed, "minimal"), Environment::Minimal);
-        assert_eq!(frame(&mut feed, "sky"), Environment::Sky);
+        assert_eq!(frame(&mut feed, "minimal"), Environment::MINIMAL);
+        assert_eq!(frame(&mut feed, "sky"), Environment::SKY);
         // One this build cannot draw shows the grid, and a server that names none keeps the spectator's own.
-        assert_eq!(frame(&mut feed, "observe"), Environment::Minimal);
-        assert_eq!(frame(&mut feed, ""), Environment::Sky);
+        assert_eq!(frame(&mut feed, "observe"), Environment::MINIMAL);
+        assert_eq!(frame(&mut feed, ""), Environment::SKY);
     }
 
     #[test]
