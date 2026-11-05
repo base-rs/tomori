@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use base_scheduler::Cancellation;
-use base_scheduler_native::{NativeOptions, NativeScheduler};
+use base_scheduler_native::NativeOptions;
 use tomori_protocol::{AudioFrame, ClientMessage};
 
 use crate::outbox::{FailedUtterance, Membership, Outbox};
@@ -146,7 +146,7 @@ pub struct Client {
 impl Client {
     /// Start connecting in the background. Fails only if the connection thread or its scheduler cannot be created; connection failures are reported as [`ConnectionState::Disconnected`] and retried.
     pub fn connect(options: Options) -> io::Result<Self> {
-        let scheduler = NativeScheduler::with_options(NativeOptions {
+        let scheduler = crate::system::scheduler(NativeOptions {
             workers: 1,
             threads: 2,
             capacity: 64,
@@ -167,20 +167,18 @@ impl Client {
         let (audio_sender, audio): (SyncSender<AudioFrame>, _) =
             mpsc::sync_channel(options.incoming_audio_limit.max(1));
         let thread_shared = shared.clone();
-        let thread = std::thread::Builder::new()
-            .name("tomori-client".into())
-            .spawn(move || {
-                let context = session::Context {
-                    scheduler: &scheduler,
-                    shared: &thread_shared,
-                    options: &options,
-                    audio: &audio_sender,
-                    learned: std::cell::Cell::new(None),
-                };
-                futures_lite::future::block_on(session::run(&context));
-                futures_lite::future::block_on(scheduler.shutdown());
-                thread_shared.events.finish();
-            })?;
+        let thread = crate::system::spawn("tomori-client", move || {
+            let context = session::Context {
+                scheduler: &scheduler,
+                shared: &thread_shared,
+                options: &options,
+                audio: &audio_sender,
+                learned: std::cell::Cell::new(None),
+            };
+            futures_lite::future::block_on(session::run(&context));
+            futures_lite::future::block_on(scheduler.shutdown());
+            thread_shared.events.finish();
+        })?;
         Ok(Self {
             sender: Sender { shared },
             audio: Some(audio),
@@ -245,5 +243,29 @@ impl Drop for Client {
     /// Closes as [`Self::close`] does, waiting briefly for the connection thread.
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system;
+
+    #[test]
+    fn a_client_whose_scheduler_or_thread_cannot_start_says_so() {
+        for what in [system::SCHEDULER, "tomori-client"] {
+            system::refuse(what);
+            let Err(error) = Client::connect(Options::new("127.0.0.1:9", "ada", "Ada")) else {
+                unreachable!("a client started without its {what}");
+            };
+            assert_eq!(
+                error.to_string(),
+                format!("the system refused to start {what}")
+            );
+        }
+        // Once the system starts them again, so does a client.
+        let client = Client::connect(Options::new("127.0.0.1:9", "ada", "Ada")).unwrap();
+        assert!(!client.state().is_connected());
+        client.close();
     }
 }

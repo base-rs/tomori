@@ -81,17 +81,15 @@ async fn resolve_with(address: &str, resolver: fn(&str) -> Resolution) -> Resolu
     }));
     let thread_slot = slot.clone();
     let thread_address = address.to_owned();
-    std::thread::Builder::new()
-        .name("tomori-resolve".into())
-        .spawn(move || {
-            let resolution = resolver(&thread_address);
-            let mut slot = thread_slot.lock().unwrap_or_else(PoisonError::into_inner);
-            slot.resolution = Some(resolution);
-            let waker = slot.waker.clone();
-            drop(slot);
-            waker.wake();
-        })
-        .expect("spawn the resolver thread");
+    crate::system::spawn("tomori-resolve", move || {
+        let resolution = resolver(&thread_address);
+        let mut slot = thread_slot.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.resolution = Some(resolution);
+        let waker = slot.waker.clone();
+        drop(slot);
+        waker.wake();
+    })
+    .map_err(|error| Disconnect::Address(error.to_string()))?;
     std::future::poll_fn(|context| {
         let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
         match slot.resolution.take() {
@@ -199,5 +197,21 @@ mod tests {
         // Literals need no lookup.
         let resolution = futures_lite::future::block_on(resolve_with("[::1]:9", slow));
         assert_eq!(resolution, Ok(vec![v6(9)]));
+    }
+
+    #[test]
+    fn a_lookup_whose_thread_cannot_start_fails_the_attempt() {
+        crate::system::refuse("tomori-resolve");
+        // Reported as the attempt's disconnection, which the client retries, rather than ending the connection thread.
+        let resolution = futures_lite::future::block_on(resolve_with("localhost", resolve));
+        assert_eq!(
+            resolution,
+            Err(Disconnect::Address(
+                "the system refused to start tomori-resolve".into()
+            ))
+        );
+        // The next attempt starts its thread.
+        let resolution = futures_lite::future::block_on(resolve_with("localhost", resolve));
+        assert!(!resolution.unwrap().is_empty());
     }
 }
