@@ -228,7 +228,7 @@ impl Producer {
         })
     }
 
-    fn send(&self, frame: Vec<u8>) -> Result<()> {
+    fn send(&mut self, frame: Vec<u8>) -> Result<()> {
         if frame.len() != FRAME_BYTES {
             bail!("invalid video frame size: {}", frame.len());
         }
@@ -239,7 +239,20 @@ impl Producer {
             .try_send(frame)
         {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()), // Drop rather than block rendering.
-            Err(TrySendError::Disconnected(_)) => bail!("GStreamer video writer disconnected"),
+            Err(TrySendError::Disconnected(_)) => bail!(self.disconnected()),
+        }
+    }
+
+    /// Why the writer could not write: GStreamer stopped reading, or is exiting, which closes its input before it can be waited for. Killing it ends one that only stopped reading, and is ignored by one already exiting, so that waiting gives its own status.
+    fn disconnected(&mut self) -> String {
+        use std::os::unix::process::ExitStatusExt;
+        const SIGKILL: i32 = 9;
+        let _ = self.child.kill();
+        match self.child.wait() {
+            Ok(status) if status.signal() == Some(SIGKILL) => {
+                "GStreamer video writer disconnected".to_owned()
+            }
+            status => stopped(status.map(Some)).expect("a waited-for process has stopped"),
         }
     }
 
@@ -342,6 +355,17 @@ mod tests {
             let error = capture(&mut video, &gpu, 8).unwrap_err();
             assert_eq!(error.to_string(), "GStreamer video writer disconnected");
         });
+    }
+
+    #[test]
+    fn a_writer_disconnected_by_gstreamer_exiting_says_how_it_exited() {
+        let mut producer = producer("true", &[]);
+        producer.child.wait().unwrap();
+        // The writer stops at the first frame it cannot write.
+        producer.send(vec![0; FRAME_BYTES]).unwrap();
+        producer.writer.take().unwrap().join().unwrap();
+        let error = producer.send(vec![0; FRAME_BYTES]).unwrap_err();
+        assert_eq!(error.to_string(), "GStreamer exited with exit status: 0");
     }
 
     #[test]
