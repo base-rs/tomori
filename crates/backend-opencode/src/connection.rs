@@ -404,7 +404,9 @@ impl Events {
     }
 
     fn publish_worker_update(&self, update: PendingWorkerUpdate) -> bool {
-        if self.worker_tx.is_closed() || self.tx.is_closed() {
+        // The worker channel closes only with the ordinary one, when the
+        // registration's events are dropped, which holds both receivers.
+        if self.tx.is_closed() {
             return false;
         }
         let mut pending = self
@@ -412,10 +414,10 @@ impl Events {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.latest = Some(update);
-        matches!(
-            self.worker_tx.try_send(()),
-            Ok(()) | Err(async_channel::TrySendError::Full(()))
-        )
+        // A full channel already notifies of the latest update; a closed one
+        // has nobody left to notify.
+        let _ = self.worker_tx.try_send(());
+        true
     }
 
     /// Worker notifications use a separate one-element channel so a burst
@@ -1416,22 +1418,21 @@ pub type Resolve = Box<dyn FnMut() -> std::result::Result<Resolved, String> + Se
 /// the service cannot be reached or its event stream ends. Blocking: called on
 /// a dedicated thread.
 pub fn run_thread(resolve: Resolve, commands: CommandReceiver) {
-    if let Err(message) = block_on(drive(resolve, commands)) {
-        eprintln!("the opencode connection ended: {message}");
-    }
+    block_on(drive(resolve, commands));
 }
 
-async fn drive(resolve: Resolve, commands: CommandReceiver) -> std::result::Result<(), String> {
+async fn drive(resolve: Resolve, commands: CommandReceiver) {
+    // With these options, starting fails only if the system refuses its
+    // threads or event queue, as spawning any thread can.
     let scheduler = NativeScheduler::with_options(NativeOptions {
         workers: 1,
         threads: 2,
         capacity: 256,
         ..Default::default()
     })
-    .map_err(|error| format!("could not start the connection scheduler: {error}"))?;
+    .expect("start the connection scheduler");
     run(&scheduler, resolve, commands).await;
     block_on(scheduler.shutdown());
-    Ok(())
 }
 
 /// What outlives one connection to the service.
@@ -1518,15 +1519,9 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
                 eprintln!("the opencode event stream {reason}; reconnecting");
                 reported = None;
                 let now = scheduler.now();
-                // A connection that is lost soon after it opens counts as a
-                // failed attempt, so a service that keeps dropping the stream
-                // is not reconnected to, and every session read again, in a
-                // tight loop.
-                if now.saturating_duration_since(started) >= RECONNECT_MAX {
-                    delay = RECONNECT_INITIAL;
-                }
-                attempt_at = now + delay;
-                delay = (delay * 2).min(RECONNECT_MAX);
+                let wait = after_loss(delay, now.saturating_duration_since(started));
+                attempt_at = now + wait;
+                delay = (wait * 2).min(RECONNECT_MAX);
                 announce = true;
             }
         }
@@ -1547,6 +1542,19 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
     // dropped; answer them at once rather than leave them waiting.
     while let Ok(command) = commands.rx.recv().await {
         refuse(command, shutting_down());
+    }
+}
+
+/// The delay before reconnecting after an event stream that was open for
+/// `lasted` was lost, when the next delay was `delay`. A connection that is
+/// lost soon after it opens counts as a failed attempt, so a service that keeps
+/// dropping the stream is not reconnected to, and every session read again, in
+/// a tight loop; one that lasted resets the backoff.
+fn after_loss(delay: Duration, lasted: Duration) -> Duration {
+    if lasted >= RECONNECT_MAX {
+        RECONNECT_INITIAL
+    } else {
+        delay
     }
 }
 
@@ -1579,7 +1587,8 @@ fn refuse(command: Command, error: tomori_backend::Error) {
     }
 }
 
-/// Whether nobody waits for `command`'s reply any more.
+/// Whether nobody waits for `command`'s reply any more, for a command that
+/// waited to be started.
 fn abandoned(command: &Command) -> bool {
     match command {
         Command::Sessions { reply, .. } => reply.is_closed(),
@@ -1593,7 +1602,9 @@ fn abandoned(command: &Command) -> bool {
         | Command::SetMode { reply, .. }
         | Command::Instruction { reply, .. }
         | Command::ForgetInstructions { reply, .. } => reply.is_closed(),
-        Command::Close { .. } | Command::Shutdown => false,
+        Command::Close { .. } | Command::Shutdown => {
+            unreachable!("a close or shutdown is never held or waiting")
+        }
     }
 }
 
@@ -1621,31 +1632,32 @@ fn hold(sessions: &mut Sessions, command: Command) -> bool {
     true
 }
 
-/// Run `future` for at most `timeout` while no connection is open, taking
-/// commands meanwhile as [`hold`] does. `None` once the command channel has
-/// closed.
+/// Run `future`, a step of a connection attempt, for at most `timeout` while
+/// no connection is open, taking commands meanwhile as [`hold`] does. The
+/// attempt ends unreachable if the step fails or takes too long, and shuts
+/// down once the command channel has closed.
 async fn holding<T, S: Timers>(
     future: impl Future<Output = std::result::Result<T, String>>,
     timers: &S,
     commands: &CommandReceiver,
     sessions: &mut Sessions,
     timeout: Duration,
-) -> Option<std::result::Result<T, String>> {
+) -> std::result::Result<T, Outcome> {
     let cancellation = Cancellation::new();
     let deadline = timers.now() + timeout;
     let mut timer = timers.timer();
     let mut future = Fused::new(future);
     loop {
         futures_util::select! {
-            result = &mut future => return Some(result),
+            result = &mut future => return result.map_err(Outcome::Unreachable),
             command = Fused::new(commands.recv()) => match command {
                 Ok(command) => if !hold(sessions, command) {
-                    return None;
+                    return Err(Outcome::Shutdown);
                 },
-                Err(_) => return None,
+                Err(_) => return Err(Outcome::Shutdown),
             },
             due = Fused::new(timers.timer_wait_until(&mut timer, deadline, &cancellation)) => {
-                return Some(Err(match due {
+                return Err(Outcome::Unreachable(match due {
                     Ok(()) => format!("no answer within {timeout:?}"),
                     Err(error) => format!("the connection timer failed: {error}"),
                 }));
@@ -1708,34 +1720,18 @@ where
     <S as Scheduler<'scope>>::Socket: 'static,
 {
     let cancellation = Cancellation::new();
-    let lookup = async {
-        scheduler
-            .address_resolve(
-                Some(resolved.host.trim_matches(['[', ']'])),
-                AddressService::Port(resolved.port),
-                AddressHints::default(),
-                &cancellation,
-            )
-            .await
-            .map_err(|error| format!("resolving {}: {error}", resolved.authority()))?
-            .entries()
-            .next()
-            .map(|entry| entry.address())
-            .ok_or_else(|| "the server's address did not resolve to any endpoint".to_owned())
-    };
+    let lookup = lookup(scheduler, resolved, &cancellation);
     let address = match holding(lookup, scheduler, commands, sessions, CONNECT_TIMEOUT).await {
-        None => return Outcome::Shutdown,
-        Some(Err(reason)) => return Outcome::Unreachable(reason),
-        Some(Ok(address)) => address,
+        Ok(address) => address,
+        Err(outcome) => return outcome,
     };
-    let (client, driver) = match Client::new(
+    // Only options that are not valid are refused, and the defaults are.
+    let (client, driver) = Client::new(
         scheduler,
         Endpoint::new(address),
         base_http_client::Options::default(),
-    ) {
-        Ok(created) => created,
-        Err(error) => return Outcome::Unreachable(format!("creating the HTTP client: {error}")),
-    };
+    )
+    .expect("the default client options are valid");
 
     // The driver must be polled for as long as the client is used, so it runs
     // alongside the connection loop in the same future; finishing either ends
@@ -1762,7 +1758,37 @@ where
         },
     )
     .await;
-    match (outcome, driver_result) {
+    with_driver(outcome, driver_result)
+}
+
+/// The service's first address, resolved by `resolver`.
+async fn lookup<R: AddressResolution>(
+    resolver: &R,
+    resolved: &Resolved,
+    cancellation: &Cancellation,
+) -> std::result::Result<base_scheduler::SocketAddress, String> {
+    resolver
+        .address_resolve(
+            Some(resolved.host.trim_matches(['[', ']'])),
+            AddressService::Port(resolved.port),
+            AddressHints::default(),
+            cancellation,
+        )
+        .await
+        .map_err(|error| format!("resolving {}: {error}", resolved.authority()))?
+        .entries()
+        .next()
+        .map(|entry| entry.address())
+        .ok_or_else(|| "the server's address did not resolve to any endpoint".to_owned())
+}
+
+/// How a connection ended, with why its HTTP driver ended if it failed, when
+/// that may be why the event stream was lost.
+fn with_driver(
+    outcome: Outcome,
+    driver: std::result::Result<(), base_http_client::Error>,
+) -> Outcome {
+    match (outcome, driver) {
         (Outcome::Lost(reason), Err(error)) => {
             Outcome::Lost(format!("{reason} (the HTTP driver ended: {error})"))
         }
@@ -1939,9 +1965,8 @@ async fn connected<S: Timers>(
         Ok(response.body)
     };
     let mut stream = match holding(open, timers, commands, sessions, CONNECT_TIMEOUT).await {
-        None => return Outcome::Shutdown,
-        Some(Err(reason)) => return Outcome::Unreachable(reason),
-        Some(Ok(stream)) => stream,
+        Ok(stream) => stream,
+        Err(outcome) => return outcome,
     };
     if announce {
         eprintln!("connected to OpenCode at {}", resolved.authority());
@@ -1988,19 +2013,20 @@ async fn connected<S: Timers>(
     let mut grace_timer = timers.timer();
 
     let outcome = loop {
-        // Once shutting down, no further command is started, held or not.
-        if commands.is_stopping() {
-            break Outcome::Shutdown;
-        }
         retry_worker_delivery(registrations);
-        match &lost {
-            // A request in flight is not cut short: the loss is noticed once
-            // each has been answered.
-            Some(reason) if requests.is_empty() => break Outcome::Lost(reason.clone()),
-            Some(_) => {}
-            // Commands that waited for this connection are started first, in
-            // order, then the others as they arrive.
-            None => start_commands(
+        // A request in flight is not cut short: the loss is noticed once each
+        // has been answered.
+        if let Some(reason) = &lost
+            && requests.is_empty()
+        {
+            break Outcome::Lost(reason.clone());
+        }
+        // Commands that waited for this connection are started first, in
+        // order, then the others as they arrive. Once shutting down, none is
+        // started, held or not, and the shutdown is seen below as the command
+        // channel is.
+        if lost.is_none() & !commands.is_stopping() {
+            start_commands(
                 &mut waiting,
                 &mut busy,
                 &mut requests,
@@ -2011,7 +2037,7 @@ async fn connected<S: Timers>(
                 resolved,
                 cancellation,
                 timers,
-            ),
+            );
         }
         let reading = lost.is_none();
         let until = grace;
@@ -2077,9 +2103,7 @@ async fn connected<S: Timers>(
                     snapshots.next().await
                 }
             }) => {
-                if let Some(completed) = completed {
-                    finish_snapshot(registrations, completed);
-                }
+                finish_snapshot(registrations, completed.expect("a snapshot was in flight"));
                 start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
                 continue;
             }
@@ -2102,9 +2126,7 @@ async fn connected<S: Timers>(
                     resyncs.next().await
                 }
             }) => {
-                if let Some(completed) = completed {
-                    finish_resync(registrations, completed, timers.now());
-                }
+                finish_resync(registrations, completed.expect("a read was in flight"), timers.now());
                 // A slot is free: start the next waiting session at once.
                 start_resyncs(registrations, &mut resyncs, sequence, client, resolved, cancellation, timers);
                 start_discoveries(registrations, &mut discoveries, client, resolved, cancellation, timers);
@@ -2118,9 +2140,7 @@ async fn connected<S: Timers>(
                     restores.next().await
                 }
             }) => {
-                if let Some(completed) = completed {
-                    finish_restore(registrations, completed);
-                }
+                finish_restore(registrations, completed.expect("a restore was in flight"));
                 start_restores(registrations, &mut restores, client, resolved, cancellation, timers);
                 continue;
             }
@@ -2131,8 +2151,8 @@ async fn connected<S: Timers>(
                     reconciliations.next().await
                 }
             }) => {
-                if let Some(completed) = completed
-                    && let Some(registration) = registrations.get_mut(&completed.id)
+                let completed = completed.expect("a reconciliation was in flight");
+                if let Some(registration) = registrations.get_mut(&completed.id)
                     && Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
                 {
                     registration.reconcile_in_flight = None;
@@ -2657,9 +2677,7 @@ fn start_resyncs<'a, S: Timers>(
         registration.snapshot_in_flight = Some(local.clone());
         registration.snapshot_deletions.clear();
         registration.snapshot_deletions_overflow = false;
-        let Some(resync) = registration.resync.as_mut() else {
-            continue;
-        };
+        let resync = registration.resync.as_mut().expect("listed above");
         resync.modes_changed = false;
         resync.changes.clear();
         resync.changes_overflow = false;
@@ -3805,8 +3823,8 @@ type Request<'a> = Pin<Box<dyn Future<Output = Option<Completion>> + 'a>>;
 type RequestFutures<'a> =
     FuturesUnordered<Pin<Box<dyn Future<Output = (Option<String>, Option<Completion>)> + 'a>>>;
 
-/// Prepare one command. Closing and snapshots are handled at once; for the
-/// others this returns the request for the loop to perform, whose result, if
+/// Prepare one command that waited to be started. A snapshot is handled at
+/// once; for the others this returns the request for the loop to perform, whose result, if
 /// it needs the registrations, the loop applies with [`complete`]. A command
 /// that waited for this connection is dropped if its caller has given up.
 #[allow(clippy::too_many_arguments)]
@@ -3827,10 +3845,9 @@ fn prepare_command<'a, S: Timers>(
         return None;
     }
     let request: Request<'a> = match command {
-        Command::Shutdown => return None,
-        Command::Close { id, identity } => {
-            close_registration(registrations, &id, &identity);
-            return None;
+        // Neither waits to be started: each is taken as it arrives.
+        Command::Shutdown | Command::Close { .. } => {
+            unreachable!("a close or shutdown is never held or waiting")
         }
         Command::Snapshot {
             id,
@@ -4318,6 +4335,32 @@ mod tests {
         assert_eq!(summaries[0].directory, "/tmp");
     }
 
+    /// The first of `events` of `kind`, sent once it arrives.
+    fn first_of(
+        events: &RegistrationEvents,
+        kind: &'static str,
+    ) -> std::sync::mpsc::Receiver<Event> {
+        let events = events.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let found = std::iter::from_fn(|| block_on(events.recv()).ok())
+                .filter_map(QueuedEvent::into_current)
+                .find(|event| self::kind(event) == kind);
+            if let Some(event) = found {
+                let _ = tx.send(event);
+            }
+        });
+        rx
+    }
+
+    /// What kind of event `event` is, as it is serialized.
+    fn kind(event: &Event) -> String {
+        serde_json::to_value(event).unwrap()["type"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     fn registrations() -> HashMap<String, Registration> {
         let mut registrations = HashMap::new();
         insert_registration(
@@ -4459,17 +4502,18 @@ mod tests {
         registration.publish_workers();
         assert!(!registration.workers_dirty);
         assert_eq!(events.len(), 1025);
-        let mut workers = 0;
-        let mut ordinary = 0;
-        while let Ok(event) = events.try_recv() {
-            match event.into_current() {
-                Some(Event::WorkersChanged { workers: list }) if list.is_empty() => workers += 1,
-                Some(Event::Busy) => ordinary += 1,
-                _ => panic!("unexpected event"),
-            }
-        }
-        assert_eq!(workers, 1);
-        assert_eq!(ordinary, 1024);
+        let received: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(QueuedEvent::into_current)
+            .collect();
+        let busy = received
+            .iter()
+            .filter(|event| **event == Event::Busy)
+            .count();
+        assert_eq!(busy, 1024);
+        assert_eq!(received.len(), 1025);
+        assert!(received.contains(&Event::WorkersChanged {
+            workers: Vec::new()
+        }));
     }
 
     #[test]
@@ -4713,13 +4757,11 @@ mod tests {
         let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
         for _ in 0..2 {
             assert!(block_on(session.close()).is_ok());
-            match receiver.rx.try_recv().unwrap() {
-                Command::Close { id, identity } => {
-                    assert_eq!(id, "parent");
-                    assert!(Arc::ptr_eq(&identity, &expected));
-                }
-                _ => panic!("expected close"),
-            }
+            let Command::Close { id, identity } = receiver.rx.try_recv().unwrap() else {
+                unreachable!("expected close");
+            };
+            assert_eq!(id, "parent");
+            assert!(Arc::ptr_eq(&identity, &expected));
         }
         assert!(receiver.rx.try_recv().is_err());
     }
@@ -5321,9 +5363,7 @@ mod tests {
                                 .unwrap();
                             let mut reader = BufReader::new(socket.try_clone().unwrap());
                             let mut line = String::new();
-                            if reader.read_line(&mut line).is_err() {
-                                return;
-                            }
+                            let _ = reader.read_line(&mut line);
                             let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
                             loop {
                                 line.clear();
@@ -5345,14 +5385,13 @@ mod tests {
                                         .unwrap()
                                         .recv_timeout(Duration::from_millis(50))
                                     {
+                                        // A stream nobody reads any more is
+                                        // written to until the service stops.
                                         Ok(event) => {
                                             let data = format!("data: {event}\n\n");
-                                            if write!(socket, "{:x}\r\n{}\r\n", data.len(), data)
-                                                .and_then(|_| socket.flush())
-                                                .is_err()
-                                            {
-                                                break;
-                                            }
+                                            let _ =
+                                                write!(socket, "{:x}\r\n{}\r\n", data.len(), data)
+                                                    .and_then(|_| socket.flush());
                                         }
                                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -5463,7 +5502,7 @@ mod tests {
                                     let id = path.trim_start_matches("/api/session/");
                                     json!({"data":{"id":id,"projectID":"p","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"location":{"directory":"/tmp"},"time":{"created":1,"updated":1,"busy":0,"idle":1}}}).to_string()
                                 } else {
-                                    panic!("unexpected path: {path}");
+                                    unreachable!("unexpected path: {path}");
                                 };
                                 let _ = write!(
                                     socket,
@@ -5474,10 +5513,14 @@ mod tests {
                             }
                         });
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(error) => {
+                        assert_eq!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock,
+                            "accept: {error}"
+                        );
                         std::thread::sleep(Duration::from_millis(5))
                     }
-                    Err(error) => panic!("accept: {error}"),
                 }
             }
         });
@@ -5691,16 +5734,7 @@ mod tests {
         delayed_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("the slow active lookup did not start");
-        let stale_watch = stale_events.clone();
-        let (false_busy_tx, false_busy_wait) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(event) = block_on(stale_watch.recv()) {
-                if matches!(event.into_current(), Some(Event::Busy)) {
-                    let _ = false_busy_tx.send(());
-                    return;
-                }
-            }
-        });
+        let false_busy_wait = first_of(&stale_events, "busy");
         let Err(mpsc::RecvTimeoutError::Timeout) =
             false_busy_wait.recv_timeout(Duration::from_millis(2200))
         else {
@@ -5763,16 +5797,7 @@ mod tests {
         active_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("active lookup did not stall");
-        let busy_events = fast_events.clone();
-        let (busy_tx, busy_wait) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(event) = block_on(busy_events.recv()) {
-                if matches!(event.into_current(), Some(Event::Busy)) {
-                    let _ = busy_tx.send(());
-                    return;
-                }
-            }
-        });
+        let busy_wait = first_of(&fast_events, "busy");
         event_tx
             .send(
                 json!({"type":"session.execution.started","data":{"sessionID":"fast"}}).to_string(),
@@ -5781,16 +5806,7 @@ mod tests {
         busy_wait
             .recv_timeout(Duration::from_secs(2))
             .expect("the busy event was not delivered");
-        let idle_events = fast_events.clone();
-        let (idle_tx, idle_wait) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(event) = block_on(idle_events.recv()) {
-                if matches!(event.into_current(), Some(Event::Idle)) {
-                    let _ = idle_tx.send(());
-                    return;
-                }
-            }
-        });
+        let idle_wait = first_of(&fast_events, "idle");
         idle_wait
             .recv_timeout(Duration::from_secs(4))
             .expect("idle reconciliation did not fall back to the session record");
@@ -5825,23 +5841,13 @@ mod tests {
                     .to_string(),
             )
             .unwrap();
-        let fast_rx = fast_events.clone();
-        let (received_tx, received_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(event) = block_on(fast_rx.recv()) {
-                if let Some(event @ Event::WorkersChanged { .. }) = event.into_current() {
-                    let _ = received_tx.send(Some(event));
-                    return;
-                }
-            }
-            let _ = received_tx.send(None);
-        });
-        let received = received_rx
+        let received = first_of(&fast_events, "workers_changed")
             .recv_timeout(Duration::from_secs(2))
             .expect("the other space was blocked");
-        assert!(
-            matches!(received, Some(Event::WorkersChanged { workers }) if workers.iter().any(|worker| worker.id == "child"))
-        );
+        let Event::WorkersChanged { workers } = received else {
+            unreachable!("expected Event::WorkersChanged {{ .. }}");
+        };
+        assert!(workers.iter().any(|worker| worker.id == "child"));
         let (fast_reply, fast_wait) = async_channel::bounded(1);
         commands
             .tx()
@@ -5870,16 +5876,7 @@ mod tests {
         );
         close("slow", &slow_events);
         assert!(block_on(slow_wait.recv()).unwrap().is_err());
-        let closed_rx = slow_events.clone();
-        let (closed_tx, closed_wait) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(event) = block_on(closed_rx.recv()) {
-                if matches!(event.into_current(), Some(Event::Closed { .. })) {
-                    let _ = closed_tx.send(());
-                    return;
-                }
-            }
-        });
+        let closed_wait = first_of(&slow_events, "closed");
         closed_wait
             .recv_timeout(Duration::from_secs(2))
             .expect("the closed registration was not reported");
@@ -5887,20 +5884,14 @@ mod tests {
         event_tx
             .send(json!({"type":"session.deleted","data":{"sessionID":"child"}}).to_string())
             .unwrap();
-        let (deleted_tx, deleted_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            while let Ok(event) = block_on(fast_events.recv()) {
-                if let Some(Event::WorkersChanged { workers }) = event.into_current() {
-                    let _ = deleted_tx.send(workers);
-                    return;
-                }
+        let deleted = first_of(&fast_events, "workers_changed")
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the deletion was blocked");
+        assert_eq!(
+            deleted,
+            Event::WorkersChanged {
+                workers: Vec::new()
             }
-        });
-        assert!(
-            deleted_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("the deletion was blocked")
-                .is_empty()
         );
         // A later registration of the same ID gets an independent deadline.
         // A stalled body that is not explicitly closed must still time out.
@@ -6073,11 +6064,15 @@ mod tests {
                 let (mut socket, _) = loop {
                     match listener.accept() {
                         Ok(accepted) => break accepted,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(error) => {
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock,
+                                "accept: {error}"
+                            );
                             assert!(std::time::Instant::now() < deadline, "no refresh request");
                             std::thread::sleep(Duration::from_millis(5));
                         }
-                        Err(error) => panic!("accept: {error}"),
                     }
                 };
                 // macOS accepted sockets inherit the listener's nonblocking mode.
@@ -6175,11 +6170,15 @@ mod tests {
                 let (mut socket, _) = loop {
                     match listener.accept() {
                         Ok(accepted) => break accepted,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(error) => {
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock,
+                                "accept: {error}"
+                            );
                             assert!(std::time::Instant::now() < deadline, "no page request");
                             std::thread::sleep(Duration::from_millis(5));
                         }
-                        Err(error) => panic!("accept: {error}"),
                     }
                 };
                 // macOS accepted sockets inherit the listener's nonblocking mode.
@@ -6391,10 +6390,14 @@ mod tests {
                                     );
                                 });
                             }
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            Err(error) => {
+                                assert_eq!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock,
+                                    "accept: {error}"
+                                );
                                 std::thread::sleep(Duration::from_millis(5));
                             }
-                            Err(error) => panic!("accept: {error}"),
                         }
                     }
                 })
@@ -6467,10 +6470,9 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let mut reader = BufReader::new(socket.try_clone().unwrap());
+        // A request that cannot be read names no path, and is not found.
         let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            return;
-        }
+        let _ = reader.read_line(&mut line);
         let mut words = line.split_whitespace();
         let method = words.next().unwrap_or("").to_owned();
         let path = words.next().unwrap_or("").to_owned();
@@ -6481,12 +6483,11 @@ mod tests {
             if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':') {
-                match name.to_ascii_lowercase().as_str() {
-                    "authorization" => authorization = Some(value.trim().to_owned()),
-                    "content-length" => length = value.trim().parse().unwrap_or(0),
-                    _ => {}
-                }
+            let (name, value) = line.split_once(':').unwrap_or_default();
+            match name.to_ascii_lowercase().as_str() {
+                "authorization" => authorization = Some(value.trim().to_owned()),
+                "content-length" => length = value.trim().parse().unwrap_or(0),
+                _ => {}
             }
         }
         let mut body = vec![0; length];
@@ -6599,22 +6600,17 @@ mod tests {
                 )
             } else {
                 let entries = state.instructions.entry(id).or_default();
+                // Entries are only put and removed.
                 match method.as_str() {
                     "PUT" => {
                         let value: Value = serde_json::from_slice(&body).unwrap();
                         entries.insert(key, value["value"].clone());
-                        ("204 No Content", String::new())
                     }
-                    "DELETE" => {
+                    _ => {
                         entries.remove(&key);
-                        ("204 No Content", String::new())
                     }
-                    _ => (
-                        "200 OK",
-                        json!({ "data": entries.iter().map(|(key, value)| json!({"key": key, "value": value})).collect::<Vec<_>>() })
-                            .to_string(),
-                    ),
                 }
+                ("204 No Content", String::new())
             }
         } else if let Some(id) = session {
             let mut state = shared.state.lock().unwrap();
@@ -6725,14 +6721,13 @@ mod tests {
     fn watch(events: &RegistrationEvents) -> std::sync::mpsc::Receiver<Event> {
         let events = events.clone();
         let (tx, rx) = std::sync::mpsc::channel();
+        // Until the events end, or nobody watches them.
         std::thread::spawn(move || {
-            while let Ok(event) = block_on(events.recv()) {
-                if let Some(event) = event.into_current()
-                    && tx.send(event).is_err()
-                {
-                    return;
-                }
-            }
+            while let Ok(event) = block_on(events.recv())
+                && event
+                    .into_current()
+                    .is_none_or(|event| tx.send(event).is_ok())
+            {}
         });
         rx
     }
@@ -6757,15 +6752,13 @@ mod tests {
         let mut seen = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            match events.recv_timeout(remaining) {
-                Ok(event) => {
-                    let found = wanted(&event);
-                    seen.push(event);
-                    if found {
-                        return seen;
-                    }
-                }
-                Err(_) => panic!("{what} did not arrive; saw {seen:?}"),
+            let Ok(event) = events.recv_timeout(remaining) else {
+                unreachable!("{what} did not arrive; saw {seen:?}");
+            };
+            let found = wanted(&event);
+            seen.push(event);
+            if found {
+                return seen;
             }
         }
     }
@@ -6837,7 +6830,7 @@ mod tests {
         assert_eq!(unread_id, "s5");
         first.send(json!({"type":"session.execution.started","data":{"sessionID":"s1"}}));
         until(&open[0].2, "the first busy event", |event| {
-            matches!(event, Event::Busy)
+            *event == Event::Busy
         });
 
         // The service restarts. Every open space is told about the gap; the
@@ -6868,13 +6861,13 @@ mod tests {
                 .is_ok()
         );
         until(&open[3].2, "s4's closure while disconnected", |event| {
-            matches!(event, Event::Closed { reason: None })
+            *event == Event::Closed { reason: None }
         });
 
         // While it is down, creating a session fails, and promptly.
         let started = std::time::Instant::now();
         let Err(refused) = create() else {
-            panic!("a session was created while OpenCode was down");
+            unreachable!("a session was created while OpenCode was down");
         };
         assert_eq!(refused.kind, tomori_backend::ErrorKind::Unavailable);
         assert!(started.elapsed() < Duration::from_secs(3), "{refused:?}");
@@ -6890,29 +6883,23 @@ mod tests {
             state.sessions.remove("s3");
             state.stalled.insert("s2".into());
         });
+        let requests = shared.state.lock().unwrap().event_requests;
         let second = FakeService::start(shared.clone(), "second");
         assert_ne!(second.address, first.address);
         write_service_file(&path, second.address, "second");
 
-        // A new session can be created once OpenCode is back. An attempt still
-        // using the old address may refuse the first request.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let (created, _created_events) = loop {
-            match create() {
-                Ok(created) => break created,
-                Err(error) if std::time::Instant::now() < deadline => {
-                    assert_eq!(error.kind, tomori_backend::ErrorKind::Unavailable);
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(error) => panic!("creating after recovery failed: {error:?}"),
-            }
-        };
+        // A new session can be created once OpenCode is back: once an attempt
+        // has found it, rather than the old address, which would refuse it.
+        wait_for(&shared, "the reconnection", |state| {
+            state.event_requests > requests
+        });
+        let (created, _created_events) = create().unwrap();
         assert_eq!(created, "s6");
 
         // s1 is read again, and the permission raised during the gap reaches
         // its space.
         let seen = until(&open[0].2, "s1's resynchronization", |event| {
-            matches!(event, Event::Resynchronized { .. })
+            kind(event) == "resynchronized"
         });
         let Some(Event::Resynchronized { snapshot }) = seen.last() else {
             unreachable!()
@@ -6940,7 +6927,7 @@ mod tests {
         second.send(json!({"type":"session.execution.started","data":{"sessionID":"s2"}}));
         second.send(json!({"type":"session.execution.started","data":{"sessionID":"s1"}}));
         until(&open[0].2, "s1's live busy event", |event| {
-            matches!(event, Event::Busy)
+            *event == Event::Busy
         });
         assert!(
             open[1].2.recv_timeout(Duration::from_millis(200)).is_err(),
@@ -6950,12 +6937,12 @@ mod tests {
             state.stalled.remove("s2");
         });
         let seen = until(&open[1].2, "s2's held busy event", |event| {
-            matches!(event, Event::Busy)
+            *event == Event::Busy
         });
         // Workers travel on their own lane, so only ordinary events are ordered.
         let ordinary: Vec<_> = seen
             .iter()
-            .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
+            .filter(|event| kind(event) != "workers_changed")
             .collect();
         let [Event::Resynchronized { .. }, Event::Busy] = ordinary.as_slice() else {
             unreachable!("{seen:?}");
@@ -7316,7 +7303,7 @@ mod tests {
         let requests = shared.state.lock().unwrap().event_requests;
         first.stop();
         until(&watched, "the disconnection notice", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
         let held = {
             let session = crate::OpenCodeSession::new(id.clone(), events.clone(), commands.clone());
@@ -7336,7 +7323,7 @@ mod tests {
             .expect("the held entry was never put");
         assert!(result.is_ok(), "{result:?}");
         until(&watched, "the resynchronization", |event| {
-            matches!(event, Event::Resynchronized { .. })
+            kind(event) == "resynchronized"
         });
         block_on(session.set_instruction("tomori", Some("Reply very briefly."))).unwrap();
         assert_eq!(
@@ -7468,7 +7455,7 @@ mod tests {
             .expect("the prompt in flight was never answered");
         assert!(result.is_ok(), "{result:?}");
         until(&watched, "the disconnection notice", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
 
         // OpenCode returns, and its new event stream is slow to answer, so
@@ -7589,7 +7576,7 @@ mod tests {
         let watched = watch(&events);
         first.stop();
         until(&watched, "the disconnection notice", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
         // The restarted service holds the session's record, so the read is in
         // flight but has not yet asked for the messages. The listing it will
@@ -7639,27 +7626,23 @@ mod tests {
         );
         let ordinary: Vec<_> = seen
             .iter()
-            .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
+            .filter(|event| kind(event) != "workers_changed")
             .collect();
         let Some(Event::Resynchronized { snapshot }) = ordinary.first() else {
-            panic!("{seen:?}");
+            unreachable!("{seen:?}");
         };
         let listed = |id: &str| {
             snapshot
                 .messages
                 .iter()
                 .find(|message| message.id == id)
-                .unwrap_or_else(|| panic!("{id} was not listed"))
+                .expect("the message was listed")
         };
         assert!(listed("m").completed);
         assert!(
-            !ordinary.iter().any(|event| matches!(
-                event,
-                Event::MessageStarted { message, .. }
-                    | Event::TextDelta { message, .. }
-                    | Event::MessageCompleted { message }
-                    if message == "m"
-            )),
+            !ordinary
+                .iter()
+                .any(|event| serde_json::to_value(event).unwrap()["message"] == "m"),
             "text the listing had was repeated: {seen:?}"
         );
         assert!(
@@ -7693,7 +7676,7 @@ mod tests {
         });
         second.send(text("p", "session.text.ended", None));
         let seen = until(&watched, "the restored message", |event| {
-            matches!(event, Event::MessageRestored { .. })
+            kind(event) == "message_restored"
         });
         let Some(Event::MessageRestored { message }) = seen.last() else {
             unreachable!()
@@ -7757,10 +7740,10 @@ mod tests {
         assert!(result.is_err());
         assert!(answered - started < Duration::from_millis(500));
         // Later requests fail without waiting.
-        let later = block_on(commands.reply_with(|reply| Command::Sessions {
-            directory: "/tmp".into(),
-            reply,
-        }))
+        let later = block_on(
+            commands
+                .reply_with::<()>(|_| unreachable!("a request is not built once shutting down")),
+        )
         .unwrap_err();
         assert!(later.message.contains("shutting down"), "{later:?}");
         drop(commands);
@@ -7824,10 +7807,14 @@ mod tests {
                             attempts.fetch_add(1, Ordering::AcqRel);
                             drop(socket);
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(error) => {
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock,
+                                "accept: {error}"
+                            );
                             std::thread::sleep(Duration::from_millis(5));
                         }
-                        Err(error) => panic!("accept: {error}"),
                     }
                 }
             })
@@ -8074,7 +8061,7 @@ mod tests {
         first.stop();
         for (id, _, events) in &open {
             until(events, &format!("{id}'s disconnection notice"), |event| {
-                matches!(event, Event::Reconnecting { .. })
+                kind(event) == "reconnecting"
             });
         }
         // The returning service fails s1's first two reads, as one still
@@ -8086,7 +8073,7 @@ mod tests {
         let second = FakeService::start(shared.clone(), "secret");
         *address.lock().unwrap() = second.address;
         until(&open[0].2, "s1's resynchronization", |event| {
-            matches!(event, Event::Resynchronized { .. })
+            kind(event) == "resynchronized"
         });
         until(
             &open[1].2,
@@ -8185,7 +8172,7 @@ mod tests {
         );
         let Some(Event::Resynchronized { snapshot }) = events.try_recv().unwrap().into_current()
         else {
-            panic!("the resynchronization was not first");
+            unreachable!("the resynchronization was not first");
         };
         assert_eq!(snapshot.modes.current.as_deref(), Some("plan"));
         assert_eq!(snapshot.modes.offered.len(), 2);
@@ -8308,7 +8295,7 @@ mod tests {
         while let Ok(event) = events.try_recv() {
             // Workers travel on their own lane.
             if let Some(event) = event.into_current()
-                && !matches!(event, Event::WorkersChanged { .. })
+                && kind(&event) != "workers_changed"
             {
                 delivered.push(event);
             }
@@ -9526,7 +9513,7 @@ mod tests {
 
         service.send(json!({"type":"session.execution.started","data":{"sessionID":other}}));
         until(&other_watch, "the other session's event", |event| {
-            matches!(event, Event::Busy)
+            *event == Event::Busy
         });
         let reading = {
             let commands = commands.clone();
@@ -9798,7 +9785,7 @@ mod tests {
         first.stop();
         // Each session is told at once, while the prompt is still in flight.
         until(&watched, "the disconnection notice", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
         let listing = {
             let commands = commands.clone();
@@ -9819,7 +9806,7 @@ mod tests {
             })
             .unwrap();
         until(&closing_watch, "the closure", |event| {
-            matches!(event, Event::Closed { reason: None })
+            *event == Event::Closed { reason: None }
         });
         // Its command waiting for the next connection fails at once.
         let (result, _) = closing_prompt
@@ -9892,7 +9879,7 @@ mod tests {
         shared.update(|state| state.hold_events = true);
         service.end_streams();
         until(&watched, "the disconnection notice", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
         wait_for(
             &shared,
@@ -9913,7 +9900,7 @@ mod tests {
             .expect("the closed session's held command was not refused");
         assert_eq!(result.unwrap_err().kind, tomori_backend::ErrorKind::Closed);
         until(&watched, "the closure", |event| {
-            matches!(event, Event::Closed { reason: None })
+            *event == Event::Closed { reason: None }
         });
         shared.update(|state| state.hold_events = false);
         drop(commands);
@@ -9946,7 +9933,7 @@ mod tests {
         let second = FakeService::start(shared.clone(), "secret");
         *address.lock().unwrap() = second.address;
         until(&watched, "the disconnection notice", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
         let (result, answered_at) = stalled
             .recv_timeout(IN_FLIGHT_GRACE + Duration::from_secs(2))
@@ -9954,7 +9941,7 @@ mod tests {
         assert!(result.is_err());
         assert!(answered_at.duration_since(lost) >= IN_FLIGHT_GRACE - Duration::from_millis(500));
         until(&watched, "the resynchronization", |event| {
-            matches!(event, Event::Resynchronized { .. })
+            kind(event) == "resynchronized"
         });
         shared.update(|state| state.stalled_prompts.clear());
         let (result, _) = prompt_in_thread(&commands, &id, &events, "after")
@@ -10068,7 +10055,7 @@ mod tests {
         ));
         service.send(json!({"type":"session.execution.started","data":{"sessionID":other}}));
         until(&other_events, "the other session's event", |event| {
-            matches!(event, Event::Busy)
+            *event == Event::Busy
         });
         shared.update(|state| {
             state.stalled_records.remove("attached");
@@ -10091,7 +10078,7 @@ mod tests {
         // Workers travel on their own lane.
         let ordinary: Vec<_> = seen
             .into_iter()
-            .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
+            .filter(|event| kind(event) != "workers_changed")
             .collect();
         assert_eq!(
             ordinary,
@@ -10144,7 +10131,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         service.send_raw(&payload.as_bytes()[split..]);
         let seen = until(&watched, "the split delta", |event| {
-            matches!(event, Event::TextDelta { .. })
+            kind(event) == "text_delta"
         });
         assert_eq!(
             seen.last(),
@@ -10161,10 +10148,10 @@ mod tests {
             service.send_raw(&filler);
         }
         until(&watched, "the loss of the stream", |event| {
-            matches!(event, Event::Reconnecting { .. })
+            kind(event) == "reconnecting"
         });
         until(&watched, "the session read again", |event| {
-            matches!(event, Event::Resynchronized { .. })
+            kind(event) == "resynchronized"
         });
         drop(commands);
         join_within(connection, Duration::from_secs(5));
@@ -10299,7 +10286,7 @@ mod tests {
         };
         let delivered: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(QueuedEvent::into_current)
-            .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
+            .filter(|event| kind(event) != "workers_changed")
             .collect();
         assert_eq!(delivered, [Event::Busy, Event::Idle]);
         // Once read, events are delivered as they arrive.
@@ -10463,7 +10450,7 @@ mod tests {
         let gap = |service: &mut FakeService, change: &dyn Fn(&mut FakeState)| {
             service.stop();
             until(&watched, "the disconnection notice", |event| {
-                matches!(event, Event::Reconnecting { .. })
+                kind(event) == "reconnecting"
             });
             shared.update(change);
             let next = FakeService::start(shared.clone(), "secret");
@@ -10472,23 +10459,20 @@ mod tests {
                 &watched,
                 SNAPSHOT_TIMEOUT * 3,
                 "the resynchronization",
-                |event| matches!(event, Event::Resynchronized { .. }),
+                |event| kind(event) == "resynchronized",
             );
             // Workers travel on their own lane, so may come before or after it.
             while let Ok(event) = watched.recv_timeout(Duration::from_millis(300)) {
                 seen.push(event);
             }
-            let workers: Vec<String> = seen
+            let Some(Event::WorkersChanged { workers }) = seen
                 .iter()
                 .rev()
-                .find_map(|event| match event {
-                    Event::WorkersChanged { workers } => Some(workers),
-                    _ => None,
-                })
-                .expect("the workers read again did not arrive")
-                .iter()
-                .map(|worker| worker.id.clone())
-                .collect();
+                .find(|event| kind(event) == "workers_changed")
+            else {
+                unreachable!("the workers read again did not arrive");
+            };
+            let workers: Vec<String> = workers.iter().map(|worker| worker.id.clone()).collect();
             (next, workers)
         };
         // While the stream is down, c1 is deleted, and c3's record will fail.
@@ -10542,5 +10526,1204 @@ mod tests {
             registration.children.keys().collect::<Vec<_>>(),
             ["changed"]
         );
+    }
+
+    /// A scheduler for a test of its own.
+    fn test_scheduler() -> NativeScheduler {
+        NativeScheduler::with_options(NativeOptions {
+            workers: 1,
+            threads: 2,
+            capacity: 256,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// The timers of `scheduler`, except that its waits and sleeps after the
+    /// first `honoured` end at once, failing if `fail` says so.
+    struct Hurried<'a> {
+        scheduler: &'a NativeScheduler,
+        honoured: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl<'a> Hurried<'a> {
+        fn new(scheduler: &'a NativeScheduler, honoured: usize, fail: bool) -> Self {
+            Self {
+                scheduler,
+                honoured: std::sync::atomic::AtomicUsize::new(honoured),
+                fail,
+            }
+        }
+
+        /// How the next wait ends if it is not honoured, or `None` if it is.
+        fn ended(&self) -> Option<base_scheduler::OperationResult<()>> {
+            // The count only falls, and saturates at none.
+            let honoured = self.honoured.load(Ordering::Acquire);
+            self.honoured
+                .store(honoured.saturating_sub(1), Ordering::Release);
+            match (honoured > 0, self.fail) {
+                (true, _) => None,
+                (false, true) => Some(Err(base_scheduler::OperationError::Io(
+                    std::io::Error::other("the timer broke"),
+                ))),
+                (false, false) => Some(Ok(())),
+            }
+        }
+    }
+
+    impl base_scheduler::Clock for Hurried<'_> {
+        fn now(&self) -> Instant {
+            self.scheduler.now()
+        }
+
+        fn sleep_until(
+            &self,
+            deadline: Instant,
+            cancellation: &Cancellation,
+        ) -> impl Future<Output = base_scheduler::OperationResult<()>> + Send {
+            let ended = self.ended();
+            async move {
+                match ended {
+                    Some(ended) => ended,
+                    None => self.scheduler.sleep_until(deadline, cancellation).await,
+                }
+            }
+        }
+    }
+
+    impl Timers for Hurried<'_> {
+        type Timer = <NativeScheduler as Timers>::Timer;
+
+        fn timer(&self) -> Self::Timer {
+            self.scheduler.timer()
+        }
+
+        fn timer_wait_until(
+            &self,
+            timer: &mut Self::Timer,
+            deadline: Instant,
+            cancellation: &Cancellation,
+        ) -> impl Future<Output = base_scheduler::OperationResult<()>> + Send {
+            let ended = self.ended();
+            async move {
+                match ended {
+                    Some(ended) => ended,
+                    None => {
+                        self.scheduler
+                            .timer_wait_until(timer, deadline, cancellation)
+                            .await
+                    }
+                }
+            }
+        }
+    }
+
+    /// A resolver that finds nothing, or fails.
+    struct Unresolved {
+        fail: bool,
+    }
+
+    impl AddressResolution for Unresolved {
+        type Addresses = Vec<base_scheduler::AddressInfo>;
+
+        fn address_resolve(
+            &self,
+            _name: Option<&str>,
+            _service: AddressService<'_>,
+            _hints: AddressHints,
+            _cancellation: &Cancellation,
+        ) -> impl Future<Output = base_scheduler::OperationResult<Self::Addresses>> + Send {
+            std::future::ready(match self.fail {
+                true => Err(base_scheduler::OperationError::Io(std::io::Error::other(
+                    "no such host",
+                ))),
+                false => Ok(Vec::new()),
+            })
+        }
+    }
+
+    fn local(port: u16) -> Resolved {
+        Resolved {
+            host: "[::1]".into(),
+            port,
+            auth: None,
+        }
+    }
+
+    #[test]
+    fn an_address_that_resolves_to_nothing_or_fails_is_unreachable() {
+        let cancellation = Cancellation::new();
+        let empty = block_on(lookup(
+            &Unresolved { fail: false },
+            &local(1),
+            &cancellation,
+        ));
+        assert_eq!(
+            empty.unwrap_err(),
+            "the server's address did not resolve to any endpoint"
+        );
+        let failed = block_on(lookup(&Unresolved { fail: true }, &local(1), &cancellation));
+        assert_eq!(failed.unwrap_err(), "resolving [::1]:1: no such host");
+    }
+
+    #[test]
+    fn a_lost_stream_says_why_the_http_driver_ended() {
+        let Outcome::Lost(reason) = with_driver(
+            Outcome::Lost("ended".into()),
+            Err(base_http_client::Error::Closed),
+        ) else {
+            unreachable!("expected a lost connection");
+        };
+        assert!(
+            reason.starts_with("ended (the HTTP driver ended: "),
+            "{reason}"
+        );
+        let Outcome::Shutdown =
+            with_driver(Outcome::Shutdown, Err(base_http_client::Error::Closed))
+        else {
+            unreachable!("expected a shutdown");
+        };
+    }
+
+    #[test]
+    fn the_backoff_resets_only_after_a_connection_that_lasted() {
+        let delay = Duration::from_secs(4);
+        assert_eq!(after_loss(delay, Duration::from_secs(1)), delay);
+        assert_eq!(after_loss(delay, RECONNECT_MAX), RECONNECT_INITIAL);
+    }
+
+    #[test]
+    fn a_step_that_takes_too_long_or_whose_timer_fails_makes_the_attempt_unreachable() {
+        let scheduler = test_scheduler();
+        let (_commands, receiver) = Commands::new();
+        let mut sessions = Sessions::default();
+        for (fail, expected) in [
+            (false, "no answer within 5s"),
+            (true, "the connection timer failed: the timer broke"),
+        ] {
+            let timers = Hurried::new(&scheduler, 0, fail);
+            let outcome = block_on(holding(
+                std::future::pending::<std::result::Result<(), String>>(),
+                &timers,
+                &receiver,
+                &mut sessions,
+                CONNECT_TIMEOUT,
+            ));
+            let Err(Outcome::Unreachable(reason)) = outcome else {
+                unreachable!("expected an unreachable attempt");
+            };
+            assert_eq!(reason, expected);
+        }
+        // Without a timer, the backoff ends the connection, as shutting down
+        // does while it waits.
+        let timers = Hurried::new(&scheduler, 0, true);
+        let now = base_scheduler::Clock::now(&timers);
+        let later = now + Duration::from_secs(3600);
+        assert!(!block_on(wait_until_attempt(
+            &timers,
+            &receiver,
+            &mut sessions,
+            later,
+            now
+        )));
+        _commands.shutdown();
+        assert!(!block_on(wait_until_attempt(
+            &scheduler,
+            &receiver,
+            &mut sessions,
+            later,
+            now
+        )));
+        block_on(scheduler.shutdown());
+    }
+
+    #[test]
+    fn a_connection_ends_when_its_reconciliation_timer_fails_or_its_stream_is_refused() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let other = FakeService::start(shared.clone(), "other");
+        // The wait for the stream to open is honoured; the next, for the first
+        // reconciliation, fails.
+        for (port, expected) in [
+            (
+                service.address.port(),
+                "stopped: the state reconciliation timer failed: the timer broke",
+            ),
+            (
+                other.address.port(),
+                "the event stream was refused with status 401",
+            ),
+        ] {
+            let outcome = crate::api::tests::with_client(
+                port,
+                async |client, resolved, cancellation, scheduler| {
+                    let timers = Hurried::new(scheduler, 1, true);
+                    let (_commands, receiver) = Commands::new();
+                    let mut sessions = Sessions::default();
+                    connected(
+                        client,
+                        resolved,
+                        &receiver,
+                        &mut sessions,
+                        cancellation,
+                        &timers,
+                        true,
+                    )
+                    .await
+                },
+            );
+            let (Outcome::Lost(reason) | Outcome::Unreachable(reason)) = outcome else {
+                unreachable!("expected the connection to end");
+            };
+            assert_eq!(reason, expected);
+        }
+    }
+
+    #[test]
+    fn a_service_that_cannot_be_found_refuses_what_waits_for_it() {
+        // An empty host is refused by the resolver itself.
+        let resolvers: [(Resolve, &str); 2] = [
+            (
+                Box::new(|| Err("no service".to_owned())),
+                "OpenCode is not reachable: no service",
+            ),
+            (
+                Box::new(|| {
+                    Ok(Resolved {
+                        host: String::new(),
+                        port: 1,
+                        auth: None,
+                    })
+                }),
+                "OpenCode is not reachable at :1: resolving :1: ",
+            ),
+        ];
+        for (resolve, expected) in resolvers {
+            let (commands, receiver) = Commands::new();
+            let connection = std::thread::spawn(move || run_thread(resolve, receiver));
+            let refused = block_on(commands.reply_with(|reply| Command::Sessions {
+                directory: "/tmp".into(),
+                reply,
+            }))
+            .unwrap_err();
+            assert!(refused.message.starts_with(expected), "{}", refused.message);
+            drop(commands);
+            join_within(connection, Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn commands_after_a_shutdown_or_once_the_connection_ended_are_answered_at_once() {
+        let (commands, receiver) = Commands::new();
+        commands.shutdown();
+        let Ok(Command::Shutdown) = block_on(receiver.recv()) else {
+            unreachable!("expected Ok(Command::Shutdown)");
+        };
+        let (commands, receiver) = Commands::new();
+        drop(receiver);
+        let refused = block_on(commands.reply_with(|reply| Command::Sessions {
+            directory: "/tmp".into(),
+            reply,
+        }))
+        .unwrap_err();
+        assert_eq!(refused.message, "the connection has closed");
+    }
+
+    #[test]
+    fn failures_are_classified_by_status() {
+        for (status, kind) in [
+            (Some(404), tomori_backend::ErrorKind::NotFound),
+            (Some(400), tomori_backend::ErrorKind::Invalid),
+            (Some(500), tomori_backend::ErrorKind::Unavailable),
+            (None, tomori_backend::ErrorKind::Unavailable),
+        ] {
+            let error = map_failure(Failure {
+                status,
+                message: "failed".into(),
+            });
+            assert_eq!((error.kind, error.message.as_str()), (kind, "failed"));
+        }
+    }
+
+    /// The message of an error a command was answered with.
+    type Answer = Box<dyn FnOnce() -> String>;
+
+    /// One of each command that is answered, with how to read its answer.
+    fn answered_commands() -> Vec<(Command, Answer)> {
+        fn answer<T: 'static>(
+            build: impl FnOnce(async_channel::Sender<tomori_backend::Result<T>>) -> Command,
+        ) -> (Command, Answer) {
+            let (reply, replies) = async_channel::bounded::<tomori_backend::Result<T>>(1);
+            let answer = move || {
+                let Ok(Err(error)) = replies.try_recv() else {
+                    unreachable!("expected the command to be refused");
+                };
+                error.message
+            };
+            (build(reply), Box::new(answer))
+        }
+        let identity = Arc::new(AtomicU64::new(0));
+        let id = || "s".to_owned();
+        vec![
+            answer(|reply| Command::Sessions {
+                directory: "/tmp".into(),
+                reply,
+            }),
+            answer(|reply| Command::Create {
+                spec: SessionSpec {
+                    directory: "/tmp".into(),
+                    title: "Title".into(),
+                },
+                reply,
+            }),
+            answer(|reply| Command::Attach {
+                id: id(),
+                directory: "/tmp".into(),
+                reply,
+            }),
+            answer(|reply| Command::Snapshot {
+                id: id(),
+                identity: identity.clone(),
+                reply,
+            }),
+            answer(|reply| Command::Prompt {
+                id: id(),
+                identity: identity.clone(),
+                key: "k".into(),
+                text: "Hello.".into(),
+                reply,
+            }),
+            answer(|reply| Command::Interrupt {
+                id: id(),
+                identity: identity.clone(),
+                reply,
+            }),
+            answer(|reply| Command::Decide {
+                id: id(),
+                identity: identity.clone(),
+                request: "p".into(),
+                decision: "once".into(),
+                reply,
+            }),
+            answer(|reply| Command::Answer {
+                id: id(),
+                identity: identity.clone(),
+                form: "f".into(),
+                answer: Value::Null,
+                reply,
+            }),
+            answer(|reply| Command::SetMode {
+                id: id(),
+                identity: identity.clone(),
+                mode: "plan".into(),
+                reply,
+            }),
+            answer(|reply| Command::Instruction {
+                id: id(),
+                identity: identity.clone(),
+                key: "k".into(),
+                value: None,
+                reply,
+            }),
+            answer(|reply| Command::ForgetInstructions {
+                id: id(),
+                keys: vec!["k".into()],
+                reply,
+            }),
+        ]
+    }
+
+    #[test]
+    fn every_command_is_refused_with_the_error_and_known_abandoned() {
+        for (command, answer) in answered_commands() {
+            refuse(
+                command,
+                tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, "refused"),
+            );
+            assert_eq!(answer(), "refused");
+        }
+        // Closing and shutting down have nobody to answer.
+        refuse(
+            Command::Close {
+                id: "s".into(),
+                identity: Arc::new(AtomicU64::new(0)),
+            },
+            tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, "refused"),
+        );
+        refuse(
+            Command::Shutdown,
+            tomori_backend::Error::new(tomori_backend::ErrorKind::Unavailable, "refused"),
+        );
+        for (command, answer) in answered_commands() {
+            assert!(!abandoned(&command));
+            drop(answer);
+            assert!(abandoned(&command));
+        }
+    }
+
+    fn test_worker(id: &str) -> Worker {
+        Worker {
+            id: id.into(),
+            parent: Some("parent".into()),
+            title: id.into(),
+            state: WorkerState::Unknown,
+        }
+    }
+
+    #[test]
+    fn a_registration_waiting_for_events_ends_when_they_are_lost() {
+        let (events, receiver) = Events::new();
+        let mut waiting = Box::pin(receiver.recv());
+        assert!(block_on(futures_lite::future::poll_once(waiting.as_mut())).is_none());
+        events.mark_ordinary_incomplete();
+        assert!(block_on(waiting).is_err());
+        // Nor are workers published to it.
+        assert!(!events.try_deliver_workers(Vec::new(), None));
+    }
+
+    #[test]
+    fn only_a_known_running_state_is_an_event() {
+        assert!(RunningState::Unknown.event().is_none());
+        let Some(Event::Busy) = RunningState::Running.event() else {
+            unreachable!("expected Some(Event::Busy)");
+        };
+    }
+
+    #[test]
+    fn workers_read_again_are_merged_only_while_observation_is_complete() {
+        let (mut registration, _events) = Registration::new();
+        let mut oversized = test_worker("x");
+        oversized.id = "x".repeat(MAX_WORKER_ID_BYTES + 1);
+        assert!(
+            registration
+                .merge_workers(vec![oversized], &HashMap::new())
+                .is_err()
+        );
+        for index in 0..api::MAX_TRACKED_WORKERS {
+            registration.insert_child(test_worker(&format!("w{index}")));
+        }
+        registration
+            .merge_workers(vec![test_worker("more")], &HashMap::new())
+            .unwrap();
+        assert!(registration.workers_incomplete);
+        assert!(!registration.children.contains_key("more"));
+        // Once incomplete, a listing changes nothing, and it stays incomplete.
+        registration
+            .merge_workers(vec![test_worker("later")], &HashMap::new())
+            .unwrap();
+        registration.mark_workers_incomplete();
+        assert!(!registration.children.contains_key("later"));
+        assert!(registration.workers_incomplete);
+    }
+
+    #[test]
+    fn deletions_beyond_the_limit_during_a_read_are_noted_as_too_many() {
+        let (mut registration, _events) = Registration::new();
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        registration.snapshot_deletions = (0..api::MAX_TRACKED_WORKERS)
+            .map(|index| format!("w{index}"))
+            .collect();
+        registration.remove_worker("w0");
+        assert!(!registration.snapshot_deletions_overflow);
+        registration.remove_worker("another");
+        assert!(registration.snapshot_deletions_overflow);
+    }
+
+    #[test]
+    fn a_snapshot_is_refused_once_workers_are_incomplete_or_too_many() {
+        let (mut registration, _events) = Registration::new();
+        for index in 0..api::MAX_TRACKED_WORKERS {
+            registration.insert_child(test_worker(&format!("w{index}")));
+        }
+        assert!(
+            registration
+                .install_workers(&mut vec![test_worker("more")])
+                .is_err()
+        );
+        registration.workers_incomplete = true;
+        assert!(registration.install_workers(&mut Vec::new()).is_err());
+        assert!(registration.install(&mut Snapshot::default()).is_err());
+    }
+
+    #[test]
+    fn a_state_seen_while_workers_are_discovered_applies_without_a_title() {
+        let (mut registration, _events) = Registration::new();
+        registration
+            .initial_changes
+            .insert("w".into(), (Some(WorkerState::Running), None));
+        let mut workers = vec![test_worker("w")];
+        registration.install_workers(&mut workers).unwrap();
+        assert_eq!(
+            (workers[0].state, workers[0].title.as_str()),
+            (WorkerState::Running, "w")
+        );
+    }
+
+    /// A registration whose events were lost, being read again.
+    fn resyncing() -> (
+        HashMap<String, Registration>,
+        RegistrationEvents,
+        Arc<AtomicU64>,
+    ) {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("s").unwrap();
+        registration.install_workers(&mut Vec::new()).unwrap();
+        registration.resync = Some(Resync::default());
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        let identity = registration.events.worker_epoch.clone();
+        (registrations, events, identity)
+    }
+
+    fn read_again(
+        identity: &Arc<AtomicU64>,
+        result: tomori_backend::Result<Snapshot>,
+        modes: Option<Modes>,
+    ) -> ResyncResult {
+        ResyncResult {
+            id: "s".into(),
+            registration: identity.clone(),
+            result,
+            rest: None,
+            missing: Vec::new(),
+            modes,
+        }
+    }
+
+    #[test]
+    fn a_read_again_fails_when_too_many_workers_changed_or_one_is_oversized() {
+        let (mut registrations, _events, identity) = resyncing();
+        registrations
+            .get_mut("s")
+            .unwrap()
+            .snapshot_deletions_overflow = true;
+        finish_resync(
+            &mut registrations,
+            read_again(&identity, Ok(Snapshot::default()), None),
+            Instant::now(),
+        );
+        assert_eq!(registrations["s"].resync.as_ref().unwrap().failures, 1);
+        let registration = registrations.get_mut("s").unwrap();
+        registration.snapshot_in_flight = Some(Cancellation::new());
+        let mut oversized = test_worker("x");
+        oversized.id = "x".repeat(MAX_WORKER_ID_BYTES + 1);
+        let snapshot = Snapshot {
+            workers: vec![oversized],
+            ..Snapshot::default()
+        };
+        finish_resync(
+            &mut registrations,
+            read_again(&identity, Ok(snapshot), None),
+            Instant::now(),
+        );
+        assert_eq!(registrations["s"].resync.as_ref().unwrap().failures, 2);
+    }
+
+    #[test]
+    fn a_read_again_takes_the_listed_agent_and_the_running_state_held_since() {
+        let (mut registrations, events, identity) = resyncing();
+        let registration = registrations.get_mut("s").unwrap();
+        registration.resync.as_mut().unwrap().hold(1, Event::Idle);
+        let snapshot = Snapshot {
+            busy: Some(true),
+            ..Snapshot::default()
+        };
+        let modes = Modes {
+            offered: vec![tomori_backend::Mode {
+                id: "plan".into(),
+                name: "plan".into(),
+                description: None,
+            }],
+            current: Some("plan".into()),
+        };
+        finish_resync(
+            &mut registrations,
+            read_again(&identity, Ok(snapshot), Some(modes)),
+            Instant::now(),
+        );
+        let registration = &registrations["s"];
+        assert_eq!(registration.modes.current.as_deref(), Some("plan"));
+        let RunningState::Idle = registration.running else {
+            unreachable!("expected RunningState::Idle");
+        };
+        let received: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(QueuedEvent::into_current)
+            .collect();
+        let [
+            Event::WorkersChanged { .. },
+            Event::Resynchronized { snapshot },
+            Event::Idle,
+        ] = received.as_slice()
+        else {
+            unreachable!("expected the workers, the state read again and the idle event");
+        };
+        assert_eq!(snapshot.modes.current.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn a_restore_for_a_closed_registration_is_dropped_and_one_that_overflows_closes_it() {
+        let (mut registrations, events, identity) = resyncing();
+        let restored = |registration: &Arc<AtomicU64>| RestoreResult {
+            id: "s".into(),
+            registration: registration.clone(),
+            messages: vec![tomori_backend::SnapshotMessage {
+                id: "m".into(),
+                role: tomori_backend::Role::Assistant,
+                parts: Vec::new(),
+                completed: true,
+            }],
+            unrecorded: Vec::new(),
+        };
+        finish_restore(&mut registrations, restored(&Arc::new(AtomicU64::new(0))));
+        assert!(registrations.contains_key("s"));
+        let resync = registrations.get_mut("s").unwrap().resync.as_mut().unwrap();
+        for index in 0..MAX_RESYNC_EVENTS {
+            assert!(resync.hold(index as u64, Event::Busy));
+        }
+        finish_restore(&mut registrations, restored(&identity));
+        assert!(!registrations.contains_key("s"));
+        let Some(Event::Closed { reason: Some(_) }) = events.try_recv().unwrap().into_current()
+        else {
+            unreachable!("expected Some(Event::Closed {{ .. }})");
+        };
+    }
+
+    #[test]
+    fn events_that_are_not_for_a_session_or_change_nothing_are_passed_over() {
+        assert!(sse_payload(": keepalive").is_none());
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let registration = registrations.get_mut("s").unwrap();
+        registration.install_workers(&mut Vec::new()).unwrap();
+        registration.modes.current = Some("plan".into());
+        registration.running = RunningState::Running;
+        dispatch_events("not json", &mut registrations);
+        // An agent switch to the current agent and an event for no part of the
+        // session change nothing; an idle session is said to be.
+        for event in [
+            json!({"type":"session.agent.switched","data":{"sessionID":"s","agent":"plan"}}),
+            json!({"type":"session.unknown","data":{"sessionID":"s"}}),
+            json!({"type":"session.idle","data":{"sessionID":"s"}}),
+        ] {
+            dispatch_events(&event.to_string(), &mut registrations);
+        }
+        let Some(Event::Idle) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Idle)");
+        };
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_events_without_what_they_are_about_or_changing_nothing_are_passed_over() {
+        let mut registrations = registrations();
+        let parent = registrations.get_mut("parent").unwrap();
+        parent.install_workers(&mut Vec::new()).unwrap();
+        parent
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        parent.insert_child(test_worker("child"));
+        let before = registrations["parent"].children.clone();
+        for event in [
+            json!({"data":{"sessionID":"child"}}),
+            json!({"type":"session.renamed"}),
+            json!({"type":"session.renamed","data":{}}),
+            json!({"type":"session.created","data":{"sessionID":"parent","parentID":"parent"}}),
+            json!({"type":"session.created","data":{"sessionID":"child","parentID":"child"}}),
+            json!({"type":"session.created","data":{"sessionID":"child","parentID":"parent"}}),
+            json!({"type":"session.renamed","data":{"sessionID":"child","title":"child"}}),
+            json!({"type":"session.execution.interrupted","data":{"sessionID":"child"}}),
+        ] {
+            apply_worker_event(&event, &mut registrations);
+        }
+        let mut stopped = before;
+        stopped.get_mut("child").unwrap().state = WorkerState::Stopped;
+        assert_eq!(registrations["parent"].children, stopped);
+        apply_worker_event(
+            &json!({"type":"session.execution.interrupted","data":{"sessionID":"child"}}),
+            &mut registrations,
+        );
+        assert_eq!(registrations["parent"].children, stopped);
+    }
+
+    #[test]
+    fn worker_changes_during_a_read_again_are_kept_up_to_the_limit() {
+        let (mut registrations, _events, _identity) = resyncing();
+        for (kind, state) in [
+            ("session.execution.failed", WorkerState::Error),
+            ("session.execution.interrupted", WorkerState::Stopped),
+        ] {
+            apply_worker_event(
+                &json!({"type":kind,"data":{"sessionID":"w"}}),
+                &mut registrations,
+            );
+            assert_eq!(
+                registrations["s"].resync.as_ref().unwrap().changes["w"],
+                (Some(state), None)
+            );
+        }
+        let resync = registrations.get_mut("s").unwrap().resync.as_mut().unwrap();
+        resync.changes = (0..api::MAX_TRACKED_WORKERS)
+            .map(|index| (format!("w{index}"), (None, None)))
+            .collect();
+        apply_worker_event(
+            &json!({"type":"session.execution.failed","data":{"sessionID":"another"}}),
+            &mut registrations,
+        );
+        assert!(registrations["s"].resync.as_ref().unwrap().changes_overflow);
+    }
+
+    #[test]
+    fn workers_not_delivered_are_delivered_again_and_an_unknown_registration_ends_quietly() {
+        let (mut registration, events) = Registration::new();
+        registration.workers_ready = true;
+        registration.workers_dirty = true;
+        let mut registrations = HashMap::from([("s".to_owned(), registration)]);
+        retry_worker_delivery(&mut registrations);
+        assert!(!registrations["s"].workers_dirty);
+        let Some(Event::WorkersChanged { .. }) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::WorkersChanged {{ .. }})");
+        };
+        end_registration(&mut registrations, "unknown", None);
+        assert!(registrations.contains_key("s"));
+        assert!(session_summaries(&[json!({"id": 1})]).is_empty());
+    }
+
+    #[test]
+    fn a_session_opencode_is_running_is_busy_and_a_message_without_a_type_is_none() {
+        let parts = api::SnapshotParts {
+            messages: json!({"data": [{"id": "m", "type": 1}, {"id": "n"}]}),
+            permissions: Vec::new(),
+            forms: Vec::new(),
+            children: Vec::new(),
+            busy: Some(false),
+            has_parent: false,
+        };
+        let snapshot = snapshot(
+            parts,
+            "s",
+            Modes::default(),
+            Some(&HashSet::from(["s".to_owned()])),
+        );
+        assert_eq!(snapshot.busy, Some(true));
+        assert!(snapshot.messages.is_empty());
+    }
+
+    /// Perform `command`, as one that waited for a connection, against the
+    /// service on `port`, and apply what it completes.
+    fn perform(port: u16, registrations: &mut HashMap<String, Registration>, command: Command) {
+        crate::api::tests::with_client(port, async |client, resolved, cancellation, scheduler| {
+            let mut snapshots = FuturesUnordered::new();
+            let sequence = Arc::new(AtomicU64::new(0));
+            let request = prepare_command(
+                command,
+                true,
+                registrations,
+                &mut snapshots,
+                &sequence,
+                client,
+                resolved,
+                cancellation,
+                scheduler,
+            );
+            assert!(snapshots.is_empty());
+            if let Some(request) = request
+                && let Some(completion) = request.await
+            {
+                complete(completion, registrations);
+            }
+        });
+    }
+
+    /// The error a command is answered with, once performed against the
+    /// service on `port`.
+    fn refused_by<T: 'static>(
+        port: u16,
+        registrations: &mut HashMap<String, Registration>,
+        build: impl FnOnce(async_channel::Sender<tomori_backend::Result<T>>) -> Command,
+    ) -> tomori_backend::Error {
+        let (reply, replies) = async_channel::bounded(1);
+        perform(port, registrations, build(reply));
+        let Ok(Err(error)) = replies.try_recv() else {
+            unreachable!("expected the command to be refused");
+        };
+        error
+    }
+
+    fn anonymous(method: &str, path: &str) -> (&'static str, String) {
+        match (method, path) {
+            ("POST", "/api/session") => ("200 OK", r#"{"data":{"title":"No id"}}"#.to_owned()),
+            _ => (
+                "200 OK",
+                r#"{"data":{"id":"s","location":{"directory":"/elsewhere"}}}"#.to_owned(),
+            ),
+        }
+    }
+
+    #[test]
+    fn commands_opencode_fails_or_answers_without_what_they_need_are_refused() {
+        let mut registrations = HashMap::new();
+        let unreachable = crate::api::tests::unreachable_port();
+        let anonymous = crate::api::tests::service(anonymous);
+        for port in [unreachable, anonymous] {
+            let error = refused_by(port, &mut registrations, |reply| Command::Create {
+                spec: SessionSpec {
+                    directory: "/tmp".into(),
+                    title: "Title".into(),
+                },
+                reply,
+            });
+            assert_eq!(error.kind, tomori_backend::ErrorKind::Unavailable);
+        }
+        let error = refused_by(anonymous, &mut registrations, |reply| Command::Attach {
+            id: "s".into(),
+            directory: "/tmp".into(),
+            reply,
+        });
+        assert_eq!(error.kind, tomori_backend::ErrorKind::NotFound);
+        // Removing entries stops at the first that fails.
+        let error = refused_by(unreachable, &mut registrations, |reply| {
+            Command::ForgetInstructions {
+                id: "s".into(),
+                keys: vec!["first".into(), "second".into()],
+                reply,
+            }
+        });
+        assert_eq!(error.kind, tomori_backend::ErrorKind::Unavailable);
+        // An entry for a registration that has closed is not set.
+        let error = refused_by(unreachable, &mut registrations, |reply| {
+            Command::Instruction {
+                id: "s".into(),
+                identity: Arc::new(AtomicU64::new(0)),
+                key: "k".into(),
+                value: Some("v".into()),
+                reply,
+            }
+        });
+        assert_eq!(error.kind, tomori_backend::ErrorKind::Closed);
+        assert!(registrations.is_empty());
+    }
+
+    fn agents(method: &str, path: &str) -> (&'static str, String) {
+        match (method, path.split('?').next().unwrap_or_default()) {
+            ("GET", "/api/agent") => ("200 OK", r#"{"data":[{"id":"plan"}]}"#.to_owned()),
+            _ => ("200 OK", "{}".to_owned()),
+        }
+    }
+
+    fn no_agents(_method: &str, _path: &str) -> (&'static str, String) {
+        ("200 OK", r#"{"data":[]}"#.to_owned())
+    }
+
+    #[test]
+    fn a_session_offering_no_agents_lists_them_again_to_switch() {
+        let mut registrations = HashMap::new();
+        let events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let identity = events.identity.clone();
+        let registration = registrations.get_mut("s").unwrap();
+        registration.install_workers(&mut Vec::new()).unwrap();
+        registration
+            .events
+            .snapshot_reply(Snapshot::default())
+            .accept()
+            .unwrap();
+        registration.modes.current = Some("plan".into());
+        // Still none: the agent is not offered.
+        let error = refused_by(
+            crate::api::tests::service(no_agents),
+            &mut registrations,
+            |reply| Command::SetMode {
+                id: "s".into(),
+                identity: identity.clone(),
+                mode: "plan".into(),
+                reply,
+            },
+        );
+        assert_eq!(error.kind, tomori_backend::ErrorKind::Invalid);
+        assert!(registrations["s"].modes.offered.is_empty());
+        let (reply, replies) = async_channel::bounded(1);
+        perform(
+            crate::api::tests::service(agents),
+            &mut registrations,
+            Command::SetMode {
+                id: "s".into(),
+                identity,
+                mode: "plan".into(),
+                reply,
+            },
+        );
+        block_on(replies.recv()).unwrap().unwrap();
+        assert_eq!(registrations["s"].modes.offered.len(), 1);
+        let Some(Event::ModesChanged(modes)) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::ModesChanged(..))");
+        };
+        assert_eq!(modes.current.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn a_session_found_attached_once_its_request_finished_is_refused() {
+        let mut registrations = HashMap::new();
+        let _events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        let (created, creations) = async_channel::bounded(1);
+        complete(
+            Completion::Created {
+                id: "s".into(),
+                directory: "/tmp".into(),
+                modes: Modes::default(),
+                reply: created,
+            },
+            &mut registrations,
+        );
+        assert!(block_on(creations.recv()).unwrap().is_err());
+        let (attached, attachments) = async_channel::bounded(1);
+        complete(
+            Completion::Attached {
+                id: "s".into(),
+                directory: "/tmp".into(),
+                modes: Modes::default(),
+                reply: attached,
+            },
+            &mut registrations,
+        );
+        assert!(block_on(attachments.recv()).unwrap().is_err());
+        // Agents listed for a session that has closed are dropped.
+        complete(
+            Completion::Listed {
+                id: "gone".into(),
+                identity: Arc::new(AtomicU64::new(0)),
+                modes: Modes::default(),
+            },
+            &mut registrations,
+        );
+        assert!(!registrations.contains_key("gone"));
+    }
+
+    #[test]
+    fn a_snapshot_waits_for_a_read_again_or_another_snapshot() {
+        let (mut registrations, _events, identity) = resyncing();
+        let message = |registrations: &mut HashMap<String, Registration>| {
+            refused_by(
+                crate::api::tests::unreachable_port(),
+                registrations,
+                |reply| Command::Snapshot {
+                    id: "s".into(),
+                    identity: identity.clone(),
+                    reply,
+                },
+            )
+            .message
+        };
+        assert!(message(&mut registrations).contains("read again"));
+        registrations.get_mut("s").unwrap().resync = None;
+        assert!(message(&mut registrations).contains("already running"));
+    }
+
+    #[test]
+    fn reads_again_and_restores_start_only_as_many_as_are_allowed() {
+        let mut registrations = HashMap::new();
+        let mut receivers = Vec::new();
+        for index in 0..=MAX_RESYNCS {
+            let id = format!("s{index}");
+            receivers.push(insert_registration(
+                &mut registrations,
+                id.clone(),
+                "/tmp",
+                Modes::default(),
+            ));
+            let registration = registrations.get_mut(&id).unwrap();
+            registration.resync = Some(Resync::default());
+            registration.restore_due.push("m".into());
+        }
+        let port = crate::api::tests::unreachable_port();
+        crate::api::tests::with_client(port, async |client, resolved, cancellation, scheduler| {
+            let sequence = Arc::new(AtomicU64::new(0));
+            let mut resyncs = FuturesUnordered::new();
+            start_resyncs(
+                &mut registrations,
+                &mut resyncs,
+                &sequence,
+                client,
+                resolved,
+                cancellation,
+                scheduler,
+            );
+            assert_eq!(resyncs.len(), MAX_RESYNCS);
+            let mut restores = FuturesUnordered::new();
+            start_restores(
+                &mut registrations,
+                &mut restores,
+                client,
+                resolved,
+                cancellation,
+                scheduler,
+            );
+            assert_eq!(restores.len(), MAX_RESYNCS);
+        });
+    }
+
+    fn messages(_method: &str, _path: &str) -> (&'static str, String) {
+        (
+            "200 OK",
+            json!({"data": [
+                {"id": "written", "type": "assistant", "content": [{"type": "text", "text": "Hello."}]},
+                {"id": "empty", "type": "assistant", "content": [{"type": "text", "text": ""}]},
+                {"id": "tools", "type": "assistant", "content": [{"type": "tool", "id": "t", "name": "bash", "state": {}}]},
+            ], "cursor": {"next": null}})
+            .to_string(),
+        )
+    }
+
+    /// Restore `wanted` messages from the service on `port`, with `timers`
+    /// made from its scheduler.
+    fn restore(
+        port: u16,
+        wanted: &[&str],
+        timers: impl for<'a> FnOnce(&'a NativeScheduler) -> Hurried<'a>,
+    ) -> RestoreResult {
+        let mut registrations = HashMap::new();
+        let _events = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
+        registrations.get_mut("s").unwrap().restore_due =
+            wanted.iter().map(|id| (*id).to_owned()).collect();
+        crate::api::tests::with_client(port, async |client, resolved, cancellation, scheduler| {
+            let timers = timers(scheduler);
+            let mut restores = FuturesUnordered::new();
+            start_restores(
+                &mut registrations,
+                &mut restores,
+                client,
+                resolved,
+                cancellation,
+                &timers,
+            );
+            restores.next().await.unwrap()
+        })
+    }
+
+    #[test]
+    fn a_restore_takes_messages_with_text_and_none_once_the_read_takes_too_long() {
+        let listed = crate::api::tests::service(messages);
+        let restored = restore(listed, &["written", "empty", "tools"], |scheduler| {
+            Hurried::new(scheduler, usize::MAX, true)
+        });
+        let ids: Vec<_> = restored
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, ["written"]);
+        assert_eq!(restored.unrecorded, ["empty", "tools"]);
+        // A service that never answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let restored = restore(port, &["written"], |scheduler| {
+            Hurried::new(scheduler, 0, false)
+        });
+        assert!(restored.messages.is_empty());
+        assert_eq!(restored.unrecorded, ["written"]);
+    }
+
+    #[test]
+    fn reconciliation_lists_agents_for_a_session_offering_none_and_reports_its_running_state() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let address = Arc::new(Mutex::new(service.address));
+        let (commands, connection) = connect_to(&address);
+        let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+            spec: SessionSpec {
+                directory: "/tmp".into(),
+                title: "Reconciled".into(),
+            },
+            reply,
+        }))
+        .unwrap();
+        block_on(commands.reply_with(|reply| Command::Snapshot {
+            id: id.clone(),
+            identity: events.identity.clone(),
+            reply,
+        }))
+        .and_then(SnapshotReply::accept)
+        .unwrap();
+        let watched = watch(&events);
+        // A keepalive is passed over, and an agent switch is the session's
+        // agent though none is offered yet.
+        service.send_raw(b": keepalive\n\n");
+        service
+            .send(json!({"type":"session.agent.switched","data":{"sessionID":id,"agent":"plan"}}));
+        let switched = Event::ModesChanged(Modes {
+            offered: Vec::new(),
+            current: Some("plan".into()),
+        });
+        until(&watched, "the agent switch", |event| *event == switched);
+        // The next reconciliation lists the agents, and finds it running.
+        shared.update(|state| {
+            state.agents = Some(json!([{"id": "plan"}]));
+            state.active.insert(id.clone());
+        });
+        let listed = Event::ModesChanged(Modes {
+            offered: vec![tomori_backend::Mode {
+                id: "plan".into(),
+                name: "plan".into(),
+                description: None,
+            }],
+            current: Some("plan".into()),
+        });
+        until(&watched, "the listed agents", |event| *event == listed);
+        until(&watched, "the running state", |event| *event == Event::Busy);
+        // Once agents are offered, a reconciliation only checks the running state.
+        shared.update(|state| {
+            state.active.clear();
+        });
+        until(&watched, "the idle state", |event| *event == Event::Idle);
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    #[test]
+    fn the_simulated_service_does_not_find_what_it_does_not_simulate() {
+        let service = FakeService::start(Arc::new(FakeShared::default()), "");
+        let mut socket = std::net::TcpStream::connect(service.address).unwrap();
+        write!(socket, "GET /unknown HTTP/1.1\r\nMalformed\r\n\r\n").unwrap();
+        let mut response = String::new();
+        BufReader::new(socket).read_line(&mut response).unwrap();
+        assert_eq!(response, "HTTP/1.1 404 Not Found\r\n");
+    }
+
+    #[test]
+    fn a_backend_that_cannot_reach_opencode_does_not_create_a_session() {
+        use tomori_backend::Backend;
+
+        let port = crate::api::tests::unreachable_port();
+        let backend = crate::OpenCode::new(crate::Config {
+            url: Some(format!("http://127.0.0.1:{port}")),
+        });
+        let refused = block_on(backend.create(SessionSpec {
+            directory: "/tmp".into(),
+            title: "Unreachable".into(),
+        }))
+        .map(drop)
+        .unwrap_err();
+        assert_eq!(refused.kind, tomori_backend::ErrorKind::Unavailable);
+        backend.shutdown();
+    }
+
+    #[test]
+    fn a_session_closed_while_it_waits_for_an_event_says_so() {
+        use tomori_backend::Session;
+
+        let (events, receiver) = Events::new();
+        let (commands, _commands) = Commands::new();
+        let session = crate::session::OpenCodeSession::new("s".into(), receiver, commands);
+        let mut next = Box::pin(session.next_event());
+        assert!(block_on(futures_lite::future::poll_once(next.as_mut())).is_none());
+        block_on(session.close()).unwrap();
+        drop(events);
+        let Err(error) = block_on(next) else {
+            unreachable!("expected the session to have closed");
+        };
+        assert_eq!(error.kind, tomori_backend::ErrorKind::Closed);
     }
 }
