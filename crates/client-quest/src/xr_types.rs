@@ -12,6 +12,7 @@ use crate::{
 use ash::vk;
 use glam::{Vec2, Vec3};
 use openxr as xr;
+use std::time::{Duration, Instant};
 
 pub fn action<T: xr::ActionInput>(state: xr::ActionState<T>) -> Action<T> {
     Action {
@@ -164,10 +165,61 @@ pub fn frame_summary(frames: u64, due: &Due) -> String {
     }
 }
 
+/// How long each step of starting XR took, between which the activity's lifecycle is acknowledged, so that the device's log shows whether a step is long enough for Android's pause to time out during it.
+pub struct StartupSteps {
+    last: Instant,
+    steps: Vec<(&'static str, Duration)>,
+}
+
+impl StartupSteps {
+    /// Timing from when startup `started`.
+    pub fn new(started: Instant) -> Self {
+        Self {
+            last: started,
+            steps: Vec::new(),
+        }
+    }
+
+    /// The step named `step` has just finished.
+    pub fn done(&mut self, step: &'static str) {
+        let now = Instant::now();
+        self.steps.push((step, now.duration_since(self.last)));
+        self.last = now;
+    }
+}
+
+impl std::fmt::Display for StartupSteps {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let steps: Vec<_> = self
+            .steps
+            .iter()
+            .map(|(step, took)| format!("{step} {} ms", took.as_millis()))
+            .collect();
+        write!(formatter, "Started XR: {}", steps.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+
+    #[test]
+    fn startup_steps_say_how_long_each_took() {
+        let started = Instant::now() - Duration::from_secs(1);
+        let mut steps = StartupSteps::new(started);
+        steps.done("instance");
+        steps.done("GPU");
+        let said = steps.to_string();
+        let (first, second) = said
+            .strip_prefix("Started XR: instance ")
+            .and_then(|rest| rest.split_once(" ms, GPU "))
+            .expect(&said);
+        assert!(first.parse::<u128>().unwrap() >= 1000, "{said}");
+        assert!(
+            second.strip_suffix(" ms").unwrap().parse::<u128>().unwrap() < 1000,
+            "{said}"
+        );
+    }
 
     fn posef(x: f32) -> xr::Posef {
         xr::Posef {

@@ -26,6 +26,7 @@ pub mod haptics;
 pub mod interaction;
 pub mod log_cadence;
 mod markdown_lite;
+pub mod microphone_request;
 pub mod panel;
 mod panel_anchor;
 pub mod pill;

@@ -32,6 +32,8 @@ const INSTRUCTIONS_BYTES: usize = 4096;
 
 /// Said when a visitor tries to talk or act in the space they are watching. See `design/security.md`.
 const VISITING: &str = "Visitors can watch and listen, but not talk or act here.";
+/// Shown while the platform's request for the microphone is unanswered. See `design/arrival.md`.
+pub const MICROPHONE_REQUEST: &str = "Waiting for microphone permission...";
 
 /// How long B must be held to leave a space, so that a press meant for something else never leaves. See `design/interaction.md`.
 pub const LEAVE_HOLD: Duration = Duration::from_secs(1);
@@ -234,6 +236,8 @@ pub struct Conversation {
     /// The approval a decision was sent for, so another press cannot send a second one.
     decided: Option<String>,
     notice: Option<String>,
+    /// Whether the platform's request for the microphone is unanswered, which the server list says, since it shows no other notice. See `design/arrival.md`.
+    microphone_waiting: bool,
     /// The space's own instructions to the agent that this owner gave for the next space they create, if any. See `design/spaces.md`.
     next_instructions: Option<String>,
     /// Shown in the lobby after a space you were in or joining has gone, until dismissed with B or another choice.
@@ -362,6 +366,7 @@ impl Conversation {
             option: 0,
             decided: None,
             notice: None,
+            microphone_waiting: false,
             next_instructions: None,
             ended: None,
             step: LobbyStep::Spaces,
@@ -539,6 +544,16 @@ impl Conversation {
         self.error = None;
         self.ended = None;
         self.send(ClientMessage::Join { space });
+    }
+
+    /// Show, while `waiting`, that the platform's request for the microphone is unanswered: on the server list, and in the notice unless something else is already noted; and stop showing it once answered. See `design/arrival.md`.
+    pub fn microphone_request(&mut self, waiting: bool) {
+        self.microphone_waiting = waiting;
+        if waiting {
+            self.notice.get_or_insert_with(|| MICROPHONE_REQUEST.into());
+        } else if self.notice.as_deref() == Some(MICROPHONE_REQUEST) {
+            self.notice = None;
+        }
     }
 
     /// Report a problem the connection found, such as a client that could not start.
@@ -2906,6 +2921,15 @@ impl Conversation {
         self.notice.clone()
     }
 
+    /// The server list's status: an error, then a microphone request still unanswered, then that it is searching. See `design/arrival.md`.
+    fn servers_status(&self) -> &str {
+        match &self.error {
+            Some(error) => error,
+            None if self.microphone_waiting => MICROPHONE_REQUEST,
+            None => "Searching the network...",
+        }
+    }
+
     #[cfg(any(not(target_os = "android"), test))]
     fn servers_text(&self) -> Vec<String> {
         let mut lines = vec![
@@ -2932,9 +2956,7 @@ impl Conversation {
         while lines.len() < ROWS - 2 {
             lines.push(String::new());
         }
-        lines.push(short(
-            self.error.as_deref().unwrap_or("Searching the network..."),
-        ));
+        lines.push(short(self.servers_status()));
         lines.push("A connect | Y search again".into());
         lines
     }
@@ -3142,11 +3164,7 @@ impl Conversation {
             Mode::Space => None,
             Mode::Servers => Some(arrival::View {
                 heading: "Choose a server".into(),
-                status: Some(
-                    self.error
-                        .clone()
-                        .unwrap_or_else(|| "Searching the network...".into()),
-                ),
+                status: Some(self.servers_status().into()),
                 connected: None,
                 items: self
                     .servers
@@ -5424,6 +5442,43 @@ mod tests {
         else {
             unreachable!("[ClientMessage::CreateSpace")
         };
+    }
+
+    #[test]
+    fn the_server_list_and_the_lobby_say_while_the_microphone_request_is_unanswered() {
+        let status =
+            |conversation: &Conversation| conversation.arrival().and_then(|view| view.status);
+        let mut conversation = Conversation::new("Ada");
+        assert_eq!(
+            status(&conversation).as_deref(),
+            Some("Searching the network...")
+        );
+        // On the server list, as after a reinstall, the status says it, in the world and on the panel.
+        conversation.microphone_request(true);
+        assert_eq!(status(&conversation).as_deref(), Some(MICROPHONE_REQUEST));
+        assert!(conversation.text().contains(MICROPHONE_REQUEST));
+        // An error outranks it.
+        conversation.error = Some("No network.".into());
+        assert_eq!(status(&conversation).as_deref(), Some("No network."));
+        assert!(!conversation.text().contains(MICROPHONE_REQUEST));
+        conversation.error = None;
+        // In the lobby, connected, it is the notice; connecting clears that, and the next check notes it again.
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        listed(&mut conversation, vec![summary("a", "Deploy")]);
+        conversation.microphone_request(true);
+        assert_eq!(status(&conversation).as_deref(), Some(MICROPHONE_REQUEST));
+        assert!(conversation.text().contains(MICROPHONE_REQUEST));
+        // Answered, neither says it any more.
+        conversation.microphone_request(false);
+        assert_ne!(status(&conversation).as_deref(), Some(MICROPHONE_REQUEST));
+        let mut conversation = Conversation::new("Ada");
+        conversation.microphone_request(true);
+        conversation.microphone_request(false);
+        assert_eq!(
+            status(&conversation).as_deref(),
+            Some("Searching the network...")
+        );
     }
 
     #[test]

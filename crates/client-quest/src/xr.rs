@@ -56,6 +56,7 @@ pub fn run(
     mut connection: crate::connection::Connection,
     sceneries: &Sceneries,
 ) -> Result<()> {
+    let started = Instant::now();
     let entry = unsafe { xr::Entry::load(platform) }
         .context("loading OpenXR (is an OpenXR runtime installed?)")?;
     let supported = entry.enumerate_extensions()?;
@@ -112,6 +113,12 @@ pub fn run(
         platform,
     )?;
     log::info!("OpenXR runtime: {:?}", instance.properties()?);
+    // Each step of startup can take a while; between them, acknowledge the activity's lifecycle, which NativeActivity waits for on its main thread, so that a pause as the launch settles is acknowledged promptly between steps, though not during one. How long each took is logged below. See `design/arrival.md`.
+    let mut steps = xr_types::StartupSteps::new(started);
+    steps.done("instance");
+    if destroyed() {
+        return Ok(());
+    }
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let views = instance.enumerate_view_configuration_views(system, STEREO)?;
     ensure!(views.len() == 2, "Expected a stereo headset");
@@ -125,6 +132,10 @@ pub fn run(
     // Declaration order matters: all XR session resources are dropped before
     // the wgpu-owned Vulkan device and instance.
     let gpu = Gpu::new(&instance, system)?;
+    steps.done("GPU");
+    if destroyed() {
+        return Ok(());
+    }
     let (session, mut waiter, mut stream) =
         unsafe { instance.create_session::<xr::Vulkan>(system, &gpu.binding) }?;
     let mut input = Input::new(&instance, &session)?;
@@ -147,6 +158,10 @@ pub fn run(
         mip_count: 1,
     })?;
     let images = gpu.import_images(&swapchain, format, width, height)?;
+    steps.done("session");
+    if destroyed() {
+        return Ok(());
+    }
     let samples = crate::graphics::supported_samples(&gpu.adapter, format, samples);
     // Each eye's scene pass resolves its samples into the swapchain image before it ends, so the multisampled colour and depth stay in tile memory where the GPU allows, as transient attachments; see `design/desktop.md`.
     log::info!(
@@ -162,6 +177,11 @@ pub fn run(
         samples,
         sceneries,
     );
+    steps.done("renderer");
+    log::info!("{steps}");
+    if destroyed() {
+        return Ok(());
+    }
     let mut controller_models =
         ControllerModels::new(supported.fb_render_model, &instance, &session);
     // What is left of the floating panel in a space: the status pill. See `design/interaction.md`.
@@ -188,15 +208,12 @@ pub fn run(
                 xr::Event::SessionStateChanged(event) => {
                     let state = event.state();
                     log::info!("XR state: {state:?}");
-                    let change = headset.session(
+                    let lifecycle = headset.session(
                         xr_types::session_state(state),
                         &mut conversation,
                         Instant::now(),
                     );
-                    if change.request_microphone {
-                        connection.request_microphone();
-                    }
-                    match change.lifecycle {
+                    match lifecycle {
                         Lifecycle::Begin => {
                             session.begin(STEREO)?;
                         }
@@ -233,6 +250,7 @@ pub fn run(
         connection.poll(headset.focused() && headset.running(), &mut conversation);
         headset.idle(&mut conversation);
         if !headset.running() {
+            microphone(&mut headset, &mut connection, &mut conversation, false);
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
@@ -246,6 +264,7 @@ pub fn run(
         headset.buttons(&controls, &mut conversation, connection.feedback(), now);
         if !frame.should_render {
             stream.end(frame.predicted_display_time, BLEND, &[])?;
+            microphone(&mut headset, &mut connection, &mut conversation, false);
             continue;
         }
         let (flags, located) =
@@ -260,6 +279,7 @@ pub fn run(
             }
             _ => {
                 stream.end(frame.predicted_display_time, BLEND, &[])?;
+                microphone(&mut headset, &mut connection, &mut conversation, false);
                 continue;
             }
         };
@@ -364,6 +384,7 @@ pub fn run(
         if let Some(due) = frame_log.record(Instant::now()) {
             log::info!("{}", xr_types::frame_summary(frames, &due));
         }
+        microphone(&mut headset, &mut connection, &mut conversation, true);
     }
     if headset.running() && session.request_exit().is_ok() {
         // xrEndSession is legal only after the runtime enters STOPPING.
@@ -380,6 +401,19 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// After a turn of the frame loop, ask for the microphone or check its answer, if it is time; the platform's dialog is answered later, so this never waits for it.
+fn microphone(
+    headset: &mut Headset,
+    connection: &mut crate::connection::Connection,
+    conversation: &mut crate::conversation::Conversation,
+    presented: bool,
+) {
+    if headset.microphone_due(presented, Instant::now()) {
+        let allowed = connection.microphone_permission();
+        headset.microphone_answered(allowed, conversation, Instant::now());
+    }
 }
 
 /// Optional hand-joint tracking. Invalid or inactive joints are hidden, and
