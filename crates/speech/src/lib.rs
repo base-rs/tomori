@@ -22,5 +22,7 @@ pub use base_markdown;
 pub use error::Error;
 pub use speakable::{Block, BlockKind, Speakable, SpeakableOptions};
 pub use stop::Stopper;
-pub use stt::{Recognition, RecognitionStream, StreamingRecognizer, TranscriptEvent, Utterance};
+pub use stt::{
+    Progress, Recognition, RecognitionStream, StreamingRecognizer, TranscriptEvent, Utterance,
+};
 pub use tts::{AudioChunk, Speech, SpeechEvent, Synthesizer};

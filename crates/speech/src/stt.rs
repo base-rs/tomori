@@ -95,6 +95,17 @@ pub enum TranscriptEvent {
     Final(String),
     /// No transcript could be produced; nothing should be sent to the agent.
     Failed(Error),
+    /// What recognition is doing with an utterance that has ended, before its outcome. Only the offline recognizer reports it; see [`OfflineRecognition`].
+    Progress(Progress),
+}
+
+/// What recognition is doing with an utterance that has ended, before its [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// It waits for the recognizer, which is transcribing another utterance first.
+    Waiting,
+    /// Its part `part`, counted from 1, of the `parts` it is transcribed in, is being transcribed.
+    Transcribing { part: usize, parts: usize },
 }
 
 impl TranscriptEvent {
@@ -102,7 +113,7 @@ impl TranscriptEvent {
     #[cfg(test)]
     pub(crate) fn outcome(self) -> Option<Result<String, Error>> {
         match self {
-            Self::Partial(_) => None,
+            Self::Partial(_) | Self::Progress(_) => None,
             Self::Final(text) => Some(Ok(text)),
             Self::Failed(error) => Some(Err(error)),
         }

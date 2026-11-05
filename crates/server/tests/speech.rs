@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use tomori_protocol::{
     AGENT_SOURCE, AudioFrame, ClientMessage, Engagement, Gate, QueueState, REPLAY_SOURCE,
-    ServerMessage, SpeechSetting,
+    ServerMessage, SpeechSetting, TranscriptPart, TranscriptStage,
 };
 use tomori_server::fake::FakeBackend;
-use tomori_server::test_support::{TestClient, TestServer, TextTranscriber, eventually};
+use tomori_server::test_support::{TIMEOUT, TestClient, TestServer, TextTranscriber, eventually};
 use tomori_server::{RecognitionTranscriber, Server};
 use tomori_speech::stt::{RATE, Transcript};
 use tomori_speech::{AudioChunk, Error, RecognitionStream, StreamingRecognizer, Synthesizer};
@@ -274,6 +274,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run", "the"]);
     let partial = ada.wait_for(|message| match message {
@@ -380,7 +381,17 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
     }
     microphone.end().unwrap();
 
+    // The client asks for progress, and reads that its words are being transcribed before their transcript.
+    let mut acknowledged = false;
     let text = receive(&ada, |message| match message {
+        ServerMessage::TranscriptProgress {
+            utterance,
+            stage: TranscriptStage::Transcribing,
+            part: None,
+        } if utterance == "launch-1" => {
+            acknowledged = true;
+            None
+        }
         ServerMessage::Transcript {
             utterance,
             text,
@@ -389,6 +400,7 @@ fn the_client_microphone_sends_push_to_talk_that_is_transcribed_and_queued() {
         ServerMessage::TranscriptFailed { error, .. } => panic!("{error}"),
         _ => None,
     });
+    assert!(acknowledged, "no progress before the transcript");
     assert_eq!(text, "run the tests");
     // Bob heard it too, as push-to-talk audio.
     let heard = bob.next_audio(Duration::from_secs(5)).unwrap();
@@ -476,6 +488,7 @@ fn a_recognizer_failure_fails_the_utterance() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["please", "fail"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -511,6 +524,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["please", "fail", "please", "please"]);
     // Still recording: the failure arrives before any end.
@@ -527,6 +541,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -556,6 +571,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["crash"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -578,6 +594,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -599,6 +616,7 @@ fn an_utterance_that_cannot_start_fails_visibly() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -618,10 +636,12 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "a1".into(),
         answer: None,
+        progress: false,
     });
     bob.send(&ClientMessage::UtteranceBegin {
         utterance: "b1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut bob, &["run", "the"]);
     speak(&mut ada, &["please", "fail"]);
@@ -647,6 +667,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["please", "please"]);
     // Recognition is under way: a partial has arrived.
@@ -665,6 +686,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -699,6 +721,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run"]);
     ada.skip_sequence(2);
@@ -713,6 +736,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u2".into(),
         answer: None,
+        progress: false,
     });
     speak(&mut ada, &["run", "the", "tests"]);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -805,6 +829,7 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u3".into(),
         answer: None,
+        progress: false,
     });
     ada.send_audio(Gate::Agent, vec![0; 320]);
     ada.send(&ClientMessage::UtteranceCancel {
@@ -1067,6 +1092,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     speak_steadily(&mut ada, 65);
     ada.send(&ClientMessage::UtteranceEnd {
@@ -1087,6 +1113,243 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
     );
 }
 
+/// A stage of an utterance's transcription, and the part being transcribed.
+type Progress = (TranscriptStage, Option<TranscriptPart>);
+
+/// What `client` is told of utterance `id` from its end to its outcome: its progress, as `(stage, part)`, then its final transcript, or why it failed, as `Err`.
+fn progress_of(client: &mut TestClient, id: &str) -> (Vec<Progress>, Result<String, String>) {
+    let mut progress = Vec::new();
+    let outcome = client.wait_for(|message| match message {
+        ServerMessage::TranscriptProgress {
+            utterance,
+            stage,
+            part,
+        } if utterance == id => {
+            progress.push((*stage, *part));
+            None
+        }
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == id => Some(Ok(text.clone())),
+        ServerMessage::TranscriptFailed { utterance, error } if utterance == id => {
+            Some(Err(error.clone()))
+        }
+        _ => None,
+    });
+    (progress, outcome)
+}
+
+/// The next progress `client` is told of utterance `id`, or `None` if none comes within [`TIMEOUT`].
+fn next_progress(client: &TestClient, id: &str) -> Option<Progress> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match client.next_message(remaining)? {
+            ServerMessage::TranscriptProgress {
+                utterance,
+                stage,
+                part,
+            } if utterance == id => return Some((stage, part)),
+            _ => {}
+        }
+    }
+}
+
+fn begin(client: &mut TestClient, id: &str, progress: bool) {
+    client.send(&ClientMessage::UtteranceBegin {
+        utterance: id.into(),
+        answer: None,
+        progress,
+    });
+}
+
+fn end(client: &mut TestClient, id: &str) {
+    client.send(&ClientMessage::UtteranceEnd {
+        utterance: id.into(),
+        pointed: None,
+    });
+}
+
+#[test]
+fn an_offline_utterance_is_said_to_be_received_then_each_of_its_parts() {
+    let server = offline_server(FakeBackend::manual(), FakeOfflineRecognizer::default());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Parts");
+    begin(&mut ada, "long", true);
+    speak_steadily(&mut ada, 65);
+    end(&mut ada, "long");
+    let part = |number| Some(TranscriptPart { number, of: 3 });
+    let transcribing = TranscriptStage::Transcribing;
+    assert_eq!(
+        progress_of(&mut ada, "long"),
+        (
+            vec![
+                (transcribing, None),
+                (transcribing, part(1)),
+                (transcribing, part(2)),
+                (transcribing, part(3)),
+            ],
+            Ok("28 seconds. 28 seconds. 9 seconds.".to_owned())
+        )
+    );
+    // One that fits in one part is said to be received, and then transcribed.
+    begin(&mut ada, "short", true);
+    speak_steadily(&mut ada, 3);
+    end(&mut ada, "short");
+    assert_eq!(
+        progress_of(&mut ada, "short"),
+        (vec![(transcribing, None)], Ok("3 seconds.".to_owned()))
+    );
+}
+
+#[test]
+fn an_older_client_is_sent_no_progress() {
+    let server = offline_server(FakeBackend::manual(), FakeOfflineRecognizer::default());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Older");
+    begin(&mut ada, "u1", false);
+    speak_steadily(&mut ada, 65);
+    end(&mut ada, "u1");
+    assert_eq!(
+        progress_of(&mut ada, "u1"),
+        (vec![], Ok("28 seconds. 28 seconds. 9 seconds.".to_owned()))
+    );
+}
+
+/// An offline recognizer that says when it starts each clip, and finishes it when the test lets it, the test drops the gate's sender, or [`TIMEOUT`] passes, answering with its length in seconds.
+struct GatedOfflineRecognizer {
+    started: std::sync::mpsc::Sender<usize>,
+    gate: std::sync::mpsc::Receiver<()>,
+}
+
+impl tomori_speech::stt::OfflineRecognizer for GatedOfflineRecognizer {
+    fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error> {
+        let _ = self.started.send(samples.len());
+        // Held only for a while, so that a test whose expectation fails while a clip is held fails rather than hangs.
+        let _ = self.gate.recv_timeout(TIMEOUT);
+        Ok(format!("{} seconds.", samples.len() / RATE as usize))
+    }
+}
+
+/// A server whose offline recognizer is `recognizer`.
+fn gated_server(recognizer: GatedOfflineRecognizer) -> TestServer {
+    TestServer::with_server(FakeBackend::manual(), move |backends| {
+        Server::new(
+            backends,
+            Arc::new(tomori_server::OfflineTranscriber::new(recognizer, None)),
+        )
+    })
+}
+
+#[test]
+fn an_offline_utterance_ending_behind_another_says_it_waits() {
+    let (started, decoding) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let server = gated_server(GatedOfflineRecognizer { started, gate });
+    // Declared after `server`, so a failed assertion's unwinding drops it first, letting a held clip go on rather than hanging as `server` joins the recognizer's thread.
+    let release = release;
+    let (mut ada, mut bob) = pair(&server);
+    begin(&mut ada, "long", true);
+    speak_steadily(&mut ada, 40);
+    end(&mut ada, "long");
+    decoding
+        .recv_timeout(TIMEOUT)
+        .expect("the first part of Ada's utterance starts to be transcribed");
+    // Bob ends while the first part of Ada's is transcribed, so his words wait for it.
+    begin(&mut bob, "short", true);
+    speak_steadily(&mut bob, 2);
+    end(&mut bob, "short");
+    assert_eq!(
+        next_progress(&bob, "short"),
+        Some((TranscriptStage::Transcribing, None)),
+        "Bob's words are said to be received as their end arrives"
+    );
+    assert_eq!(
+        next_progress(&bob, "short"),
+        Some((TranscriptStage::Waiting, None)),
+        "Bob's words are said to wait behind Ada's"
+    );
+    for _ in 0..3 {
+        release.send(()).unwrap();
+    }
+    let transcribing = TranscriptStage::Transcribing;
+    assert_eq!(
+        progress_of(&mut bob, "short"),
+        (vec![(transcribing, None)], Ok("2 seconds.".to_owned()))
+    );
+    // Ada's waited for Bob's before its second part.
+    let part = |number| Some(TranscriptPart { number, of: 2 });
+    assert_eq!(
+        progress_of(&mut ada, "long"),
+        (
+            vec![
+                (transcribing, None),
+                (transcribing, part(1)),
+                (TranscriptStage::Waiting, None),
+                (transcribing, part(2)),
+            ],
+            Ok("28 seconds. 12 seconds.".to_owned())
+        )
+    );
+}
+
+#[test]
+fn a_participant_who_reconnects_mid_transcription_is_sent_no_progress_for_it() {
+    let (started, decoding) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let server = gated_server(GatedOfflineRecognizer { started, gate });
+    // Declared after `server`, so a failed assertion's unwinding drops it first, letting a held clip go on rather than hanging as `server` joins the recognizer's thread.
+    let release = release;
+    let mut newer = server.connect("ada", "Ada");
+    newer.create_space("Reconnecting");
+    begin(&mut newer, "long", true);
+    speak_steadily(&mut newer, 40);
+    end(&mut newer, "long");
+    assert_eq!(
+        next_progress(&newer, "long"),
+        Some((TranscriptStage::Transcribing, None)),
+        "the client that asked is told its words are received"
+    );
+    decoding
+        .recv_timeout(TIMEOUT)
+        .expect("the first part of the utterance starts to be transcribed");
+    // Ada reconnects, with a client that may be older and would refuse progress, while the words are transcribed. Only the connection that asked is told it.
+    drop(newer);
+    let mut older = server.connect("ada", "Ada");
+    for _ in 0..2 {
+        release.send(()).unwrap();
+    }
+    assert_eq!(
+        progress_of(&mut older, "long"),
+        (vec![], Ok("28 seconds. 12 seconds.".to_owned())),
+        "the reconnected client is told the outcome, but no progress"
+    );
+}
+
+#[test]
+fn a_streaming_utterance_is_said_to_be_received_then_transcribed_at_once() {
+    let server = recognizing_server(FakeBackend::manual());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Streaming");
+    begin(&mut ada, "u1", true);
+    speak(&mut ada, &["run", "the", "tests"]);
+    end(&mut ada, "u1");
+    assert_eq!(
+        progress_of(&mut ada, "u1"),
+        (
+            vec![(TranscriptStage::Transcribing, None)],
+            Ok("run the tests".to_owned())
+        )
+    );
+    // Nothing is said of one that failed before it ended.
+    begin(&mut ada, "u2", true);
+    speak(&mut ada, &["fail"]);
+    let (progress, outcome) = progress_of(&mut ada, "u2");
+    assert!(progress.is_empty() && outcome.is_err(), "{progress:?}");
+}
+
 #[test]
 fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
     let recognizer = FakeOfflineRecognizer::default();
@@ -1096,6 +1359,7 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u1".into(),
         answer: None,
+        progress: false,
     });
     // One second more than the limit; the failure arrives before the utterance ends.
     speak_steadily(
@@ -1526,6 +1790,7 @@ fn without_recognition_an_ended_utterance_fails_and_a_cancelled_one_is_silent() 
         ada.send(&ClientMessage::UtteranceBegin {
             utterance: utterance.into(),
             answer: None,
+            progress: false,
         });
         speak(&mut ada, &["run", "the", "tests"]);
         ada.send(&if ended {

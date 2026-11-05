@@ -56,6 +56,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
     ada.send(&ClientMessage::UtteranceBegin {
         utterance: "u".repeat(10_000),
         answer: None,
+        progress: false,
     });
     let error = ada.error();
     assert!(error.contains("utterance") && error.len() < 100, "{error}");

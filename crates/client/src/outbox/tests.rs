@@ -122,6 +122,7 @@ fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() 
         .send(ClientMessage::UtteranceBegin {
             utterance: "new".into(),
             answer: None,
+            progress: false,
         })
         .unwrap();
     let mut agent = audio(5);
@@ -481,6 +482,7 @@ fn begin(utterance: &str) -> ClientMessage {
     ClientMessage::UtteranceBegin {
         utterance: utterance.into(),
         answer: None,
+        progress: false,
     }
 }
 

@@ -266,6 +266,8 @@ fn run(recognition: &mut Recognition, clip: &Clip) -> (Option<f64>, f64, String)
                 return (first, (time - ended).as_secs_f64(), text);
             }
             TranscriptEvent::Failed(error) => panic!("{} failed: {error}", clip.name),
+            // Only the offline recognizer reports progress.
+            TranscriptEvent::Progress(_) => {}
         }
     }
 }

@@ -95,6 +95,9 @@ impl Reporter {
     fn report(&mut self, event: TranscriptEvent) {
         match event {
             TranscriptEvent::Partial(transcript) => self.sink.partial(&text(&transcript)),
+            TranscriptEvent::Progress(_) => {
+                unreachable!("the streaming recognizer reports no progress")
+            }
             TranscriptEvent::Final(text) => {
                 self.reported = true;
                 self.sink.finish(&text);

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, Weak};
 
-use tomori_protocol::AudioFrame;
+use tomori_protocol::{AudioFrame, TranscriptPart, TranscriptStage};
 
 use crate::hub::Hub;
 
@@ -16,7 +16,7 @@ pub struct UtteranceId(pub u64);
 ///
 /// The server calls these methods in order for each utterance: [`begin`](Self::begin), any number of [`push`](Self::push), then exactly one of [`end`](Self::end) or [`cancel`](Self::cancel). Utterances from different participants interleave. Methods are never called while server locks are held, and must not block on recognition: decode on another thread or task and report through the [`TranscriptSink`] given to `begin`.
 ///
-/// The sink may be called from any thread. After `end`, the implementation reports exactly one [`TranscriptSink::finish`] or [`TranscriptSink::fail`]; nothing is queued for the agent unless `finish` is called with non-empty text. After `cancel`, further reports are ignored.
+/// The sink may be called from any thread. After `end`, the implementation reports exactly one [`TranscriptSink::finish`] or [`TranscriptSink::fail`]; nothing is queued for the agent unless `finish` is called with non-empty text. Before that, it may report [`TranscriptSink::progress`], such as that the utterance waits behind another, or which of its parts is being transcribed; the server has already told the participant, as the end arrived, that it is being transcribed. After `cancel`, further reports are ignored.
 pub trait Transcriber: Send + Sync {
     fn begin(&self, utterance: UtteranceId, sink: TranscriptSink);
 
@@ -67,6 +67,13 @@ impl TranscriptSink {
     pub fn finish(&self, text: &str) {
         if let Some(hub) = self.hub.upgrade() {
             hub.transcript_finished(self.utterance, text);
+        }
+    }
+
+    /// Report what recognition is doing with the utterance after it has ended: `stage`, and the part being transcribed, when it is transcribed in more than one. Shown to the speaker until the outcome.
+    pub fn progress(&self, stage: TranscriptStage, part: Option<TranscriptPart>) {
+        if let Some(hub) = self.hub.upgrade() {
+            hub.transcript_progress(self.utterance, stage, part);
         }
     }
 
@@ -133,6 +140,7 @@ mod tests {
         let sink = TranscriptSink::nowhere(UtteranceId(7));
         assert_eq!(sink.utterance(), UtteranceId(7));
         sink.partial("run");
+        sink.progress(TranscriptStage::Waiting, None);
         sink.finish("run the tests");
         sink.fail("the engine failed");
     }

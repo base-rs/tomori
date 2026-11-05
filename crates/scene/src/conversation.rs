@@ -802,6 +802,8 @@ impl Conversation {
                     *heard = text;
                 }
             }
+            // Not yet shown: the recording card says "Sending…" until the outcome.
+            ServerMessage::TranscriptProgress { .. } => {}
             ServerMessage::TranscriptFailed { utterance, error } => {
                 log::warn!("Utterance {utterance} failed: {error}");
                 if self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str()) {
