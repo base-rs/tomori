@@ -262,7 +262,7 @@ pub struct Model {
     pub muted: bool,
     /// Whether the status pill shows on this headset.
     pub pill: bool,
-    /// The item the ray points at, so that a mode's description shows beneath it.
+    /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
     pub pointed: Option<MenuKey>,
     /// This device's Feedback setting.
     pub feedback: crate::feedback::Settings,
@@ -481,26 +481,49 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         row(&[Part::Kept("Mode: "), Part::Cut(mode)]),
                     );
                 }
-                for (id, name, description, current) in &space.modes {
+                for (id, name, _, current) in &space.modes {
                     let label = if *current {
                         row(&[Part::Kept("* "), Part::Cut(name), Part::Kept(" (now)")])
                     } else {
                         row(&[Part::Kept("  "), Part::Cut(name)])
                     };
-                    let key = MenuKey::Mode(id.clone());
                     // Only a participant switches it; a visitor reads it.
                     if model.role.participates() {
-                        button(&mut items, key.clone(), label);
+                        button(&mut items, MenuKey::Mode(id.clone()), label);
                     } else {
                         text(&mut items, MenuKind::Text, label);
                     }
-                    if model.pointed.as_ref() == Some(&key)
-                        && let Some(description) = description
-                    {
-                        for line in lines(description, WIDTH - 2, DESCRIPTION_ROWS) {
-                            text(&mut items, MenuKind::Text, format!("  {line}"));
-                        }
-                    }
+                }
+                // Beneath the modes, the description of the one pointed at, or else of the current one, in as many rows as the longest takes whichever is shown: the rows never depend on what is pointed at, so that pointing at a mode moves none of them, and the ray stays on the row it points at. See `design/hand-menu.md`.
+                let described = |description: &Option<String>| {
+                    lines(
+                        description.as_deref().unwrap_or_default().trim(),
+                        WIDTH - 2,
+                        DESCRIPTION_ROWS,
+                    )
+                };
+                let room = space
+                    .modes
+                    .iter()
+                    .map(|(_, _, description, _)| described(description).len())
+                    .max()
+                    .unwrap_or(0);
+                let pointed = |id: &String| model.pointed == Some(MenuKey::Mode(id.clone()));
+                let mut description = space
+                    .modes
+                    .iter()
+                    .find(|(id, ..)| pointed(id))
+                    .or_else(|| space.modes.iter().find(|(.., current)| *current))
+                    .map(|(_, _, description, _)| described(description))
+                    .unwrap_or_default();
+                description.resize(room, String::new());
+                for line in description {
+                    let line = if line.is_empty() {
+                        line
+                    } else {
+                        format!("  {line}")
+                    };
+                    text(&mut items, MenuKind::Text, line);
                 }
                 if space.speech != tomori_protocol::SpeechSetting::Unknown {
                     text(&mut items, MenuKind::Heading, "Speech, for everyone".into());
@@ -1481,6 +1504,7 @@ mod tests {
                 "Mode",
                 "* build (now)",
                 "  plan",
+                "  Makes changes.",
                 "Speech, for everyone",
                 "Brief: switch to full",
                 "Environment, for everyone",
@@ -1495,7 +1519,7 @@ mod tests {
             rows.iter()
                 .any(|row| row.key == MenuKey::Mode("plan".into()))
         );
-        // Pointing at a mode shows its description beneath it.
+        // Beneath the modes is the description of the current one, or of the one pointed at, in the same row.
         model.pointed = Some(MenuKey::Mode("plan".into()));
         let shown = texts(&items(Some(Section::Space), &model))
             .iter()
@@ -1503,6 +1527,7 @@ mod tests {
             .collect::<Vec<_>>();
         let plan = shown.iter().position(|text| text == "  plan").unwrap();
         assert_eq!(shown[plan + 1], "  Plans without changing files.");
+        assert_eq!(shown.len(), rows.len());
         let mut menu = HandMenu::default();
         assert_eq!(
             menu.choose(&MenuKey::Mode("plan".into())),
@@ -1749,10 +1774,13 @@ mod tests {
         }
     }
 
-    /// An owner's Space section, whose buttons and rows that are only read alternate, with a mode whose name fills its row.
+    /// An owner's Space section, whose buttons and rows that are only read alternate, with a mode whose name fills its row, and no mode described.
     fn alternating() -> (HandMenu, Model) {
         let mut model = in_space(ConnectionRole::Owner);
         let space = model.space.as_mut().unwrap();
+        for mode in &mut space.modes {
+            mode.2 = None;
+        }
         space
             .modes
             .push(("long".into(), "x".repeat(2 * WIDTH), None, false));
@@ -1761,6 +1789,66 @@ mod tests {
             ..Default::default()
         };
         (menu, model)
+    }
+
+    /// Pointing at any row of any section, a mode most of all, moves no row: what is pointed at changes what the rows say, never where they are, so that the ray stays on the row it points at. The menu grew by the description of a mode pointed at, which raised every row by as many, and the next frame the ray met another.
+    #[test]
+    fn pointing_at_a_row_moves_no_row() {
+        let (_, mut model) = alternating();
+        let space = model.space.as_mut().unwrap();
+        space.modes[0].2 = Some("Makes changes.".into());
+        space.modes[1].2 = Some("Plans without changing files. ".repeat(4));
+        space.environments = vec![
+            ("sky".into(), "Sky".into(), true),
+            ("minimal".into(), "Grid".into(), false),
+        ];
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.05, -0.35),
+            normal: Vec3::Y,
+        };
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let layout = |menu: &HandMenu, model: &Model| {
+            menu.objects(&palm, model, head)
+                .into_iter()
+                .map(|object| (object.key, object.position, object.panel))
+                .collect::<Vec<_>>()
+        };
+        for section in [None, Some(Section::Space), Some(Section::Sound)] {
+            let menu = HandMenu {
+                section,
+                ..Default::default()
+            };
+            model.pointed = None;
+            let still = layout(&menu, &model);
+            for item in items(section, &model) {
+                let key = item.key;
+                model.pointed = Some(key.clone());
+                assert_eq!(layout(&menu, &model), still, "{section:?}: {key:?}");
+            }
+        }
+        // The description shown is the one pointed at, and otherwise the current mode's.
+        model.pointed = Some(MenuKey::Mode("plan".into()));
+        assert!(
+            rows(Some(Section::Space), &model)
+                .contains(&"  Plans without changing files. Plans".to_owned())
+        );
+        model.pointed = Some(MenuKey::Mode("long".into()));
+        let long = rows(Some(Section::Space), &model);
+        assert!(
+            !long
+                .iter()
+                .any(|row| row.contains("Makes") || row.contains("Plans")),
+            "{long:?}"
+        );
+        model.pointed = Some(MenuKey::Speech);
+        assert!(rows(Some(Section::Space), &model).contains(&"  Makes changes.".to_owned()));
+        // With no modes there is no description.
+        model.space.as_mut().unwrap().modes.clear();
+        assert!(
+            !rows(Some(Section::Space), &model)
+                .iter()
+                .any(|row| row.is_empty())
+        );
     }
 
     /// The menu of [`alternating`] held palm up, at chest height, with the head where its panel tilts `tilt` degrees back to face it.
@@ -1993,11 +2081,26 @@ mod tests {
         assert!(people.last().unwrap().ends_with('…'));
         let pointed = items(Some(Section::Space), &model);
         assert!(pointed.iter().any(|row| row.text.ends_with('…')));
+        // Its rows are kept whatever is pointed at, empty beneath the current mode's shorter description.
         model.pointed = None;
-        assert_eq!(
-            pointed.len() - items(Some(Section::Space), &model).len(),
-            DESCRIPTION_ROWS
+        let current = items(Some(Section::Space), &model);
+        assert_eq!(current.len(), pointed.len());
+        let after = |rows: &[Item]| {
+            let last = rows
+                .iter()
+                .rposition(|row| matches!(row.key, MenuKey::Mode(_)))
+                .unwrap();
+            rows[last + 1..last + 1 + DESCRIPTION_ROWS]
+                .iter()
+                .map(|row| row.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            after(&pointed)
+                .iter()
+                .all(|row| row.starts_with("  ") && row.contains("description"))
         );
+        assert_eq!(after(&current), ["  Makes changes.", "", "", ""]);
     }
 
     /// The rows of `section` for `model`, as text.
