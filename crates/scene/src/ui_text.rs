@@ -5,7 +5,7 @@
 //!
 //! Text is given as [`Span`]s, each with a [`Style`]: a colour, whether it is bold, and an optional background. [`wrap`] lays spans out on rows of a given width, at words, breaking a word longer than a row, with a hanging indent for the rows after the first and, for code, a continuation mark where a line is broken rather than cut; [`fit`] keeps at most a number of rows, ending the last with "…" where text is left out, and [`cut`] keeps one row, ending with "…" where it is cut. [`lines`] and [`clip`] do the same for plain text. These are the one rule for every panel, label and menu row.
 //!
-//! Every character drawn is one cell; [`glyph`] finds its bitmap in the `font8x8` tables, and [`shown`] the character that is drawn for it: itself, a close equivalent the tables have, such as the base letter of an accented one, or `?` for one with neither, so that the console shows what the headset draws. Control characters other than line breaks and tabs, combining marks, variation selectors and zero-width spaces and joiners take no cell.
+//! Every character drawn is one cell; [`glyph`] finds its bitmap in the `font8x8` tables, and [`shown`] the character that is drawn for it: itself, a close equivalent the tables have, such as the base letter of an accented one, or `?` for one with neither, so that the console shows what the headset draws. Every kind of line break, such as CRLF, a lone carriage return or a form feed, is one, as a line feed is. Other control characters, combining marks, variation selectors and zero-width spaces and joiners take no cell.
 
 use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
@@ -122,18 +122,15 @@ pub struct Wrap {
     pub continuation: Option<char>,
 }
 
-/// `spans` laid out on rows of at most `width` cells. A newline starts a new row. Words longer than a row are broken across rows.
+/// `spans` laid out on rows of at most `width` cells. A line break of any kind starts a new row. Words longer than a row are broken across rows.
 pub fn wrap(spans: &[Span], width: usize, options: Wrap) -> Vec<Vec<Cell>> {
     let width = width.max(options.indent.max(options.hanging) + 2);
-    let cells: Vec<Cell> = spans
-        .iter()
-        .flat_map(|span| {
-            span.text
-                .chars()
-                .filter(|ch| !invisible(*ch))
-                .map(move |ch| (ch, span.style))
-        })
-        .collect();
+    let cells: Vec<Cell> = visible(
+        spans
+            .iter()
+            .flat_map(|span| span.text.chars().map(move |ch| (ch, span.style))),
+    )
+    .collect();
     let mut rows = Vec::new();
     for line in cells.split(|(ch, _)| *ch == '\n') {
         match options.continuation {
@@ -256,9 +253,12 @@ pub fn fit(rows: &mut Vec<Vec<Cell>>, most: usize, width: usize) {
     }
 }
 
-/// Plain `text` wrapped at words to rows of at most `width` cells, as [`wrap`] lays it out, on at most `rows` rows, as [`fit`] keeps them. As with [`str::lines`], empty text has no rows and a final line break starts none.
+/// Plain `text` wrapped at words to rows of at most `width` cells, as [`wrap`] lays it out, on at most `rows` rows, as [`fit`] keeps them. As with [`str::lines`], empty text has no rows and a final line break, of any kind, starts none.
 pub fn lines(text: &str, width: usize, rows: usize) -> Vec<String> {
-    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix(ends_line))
+        .unwrap_or(text);
     if text.is_empty() {
         return Vec::new();
     }
@@ -287,9 +287,9 @@ pub fn clip(text: &str, width: usize) -> String {
         .collect()
 }
 
-/// The characters drawn for one line of `text`, a cell each: line breaks and tabs as spaces, each other character as [`shown`] draws it, leaving out those that take no cell.
+/// The characters drawn for one line of `text`, a cell each: line breaks, each as one space whatever its kind, and tabs as spaces, each other character as [`shown`] draws it, leaving out those that take no cell.
 pub fn drawn(text: &str) -> impl Iterator<Item = char> + '_ {
-    text.chars().filter(|ch| !invisible(*ch)).map(|ch| {
+    visible(text.chars().map(|ch| (ch, ()))).map(|(ch, ())| {
         if ch == '\n' || ch == '\t' {
             ' '
         } else {
@@ -298,9 +298,33 @@ pub fn drawn(text: &str) -> impl Iterator<Item = char> + '_ {
     })
 }
 
-/// Whether `ch` takes no cell: a control character other than a line break or a tab, such as the carriage return of CRLF text; a combining mark or variation selector, which until text is shaped into graphemes is left out rather than drawn as `?` beside its character; or a zero-width space, joiner or soft hyphen.
+/// `chars` without those that take no cell, with every line break as `\n`: a carriage return, a line feed, or both as CRLF, which is one break, a vertical tab, form feed, next line, or Unicode's line and paragraph separators, as Unicode's line breaking rules (UAX #14) count them.
+fn visible<T>(chars: impl Iterator<Item = (char, T)>) -> impl Iterator<Item = (char, T)> {
+    let mut after_return = false;
+    chars.filter_map(move |(ch, extra)| {
+        if invisible(ch) {
+            return None;
+        }
+        let crlf = after_return && ch == '\n';
+        after_return = ch == '\r';
+        if crlf {
+            return None;
+        }
+        Some((if ends_line(ch) { '\n' } else { ch }, extra))
+    })
+}
+
+/// Whether `ch` ends a line, as [`visible`] counts line breaks.
+fn ends_line(ch: char) -> bool {
+    matches!(
+        ch,
+        '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// Whether `ch` takes no cell: a control character that is not a space or line break, such as an escape; a combining mark or variation selector, which until text is shaped into graphemes is left out rather than drawn as `?` beside its character; or a zero-width space, joiner or soft hyphen.
 fn invisible(ch: char) -> bool {
-    (ch.is_control() && ch != '\n' && ch != '\t')
+    (ch.is_control() && !ch.is_whitespace())
         || matches!(
             ch,
             '\u{ad}'
@@ -363,7 +387,12 @@ pub fn shown(ch: char) -> char {
         '\u{203a}' => '>',
         '\u{2044}' => '/',
         '\u{22ef}' => '…',
-        '\u{00a0}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' => ' ',
+        '\u{00a0}'
+        | '\u{1680}'
+        | '\u{2000}'..='\u{200a}'
+        | '\u{202f}'
+        | '\u{205f}'
+        | '\u{3000}' => ' ',
         ch if lookup(ch).is_some() => ch,
         ch => base_letter(ch).unwrap_or('?'),
     }
@@ -643,6 +672,48 @@ mod tests {
         assert_eq!(cut(&[Span::new("e\u{301}\u{301}x", WHITE)], 2).len(), 2);
         let rows = wrap(&[Span::new("ab\u{301}c\r\nd", WHITE)], 3, Wrap::default());
         assert_eq!(text(&rows), ["abc", "d"]);
+    }
+
+    #[test]
+    fn every_kind_of_line_break_is_one_as_a_line_feed_is() {
+        let drawn = |text: &str| drawn(text).collect::<String>();
+        // CRLF, a lone carriage return, a vertical tab, a form feed, next line, and Unicode's line and paragraph separators.
+        let breaks = [
+            "\n", "\r\n", "\r", "\u{b}", "\u{c}", "\u{85}", "\u{2028}", "\u{2029}",
+        ];
+        for line_break in breaks {
+            let text = format!("50%{line_break}100%");
+            // A row draws each as one space, never joining the words either side of it.
+            assert_eq!(drawn(&text), "50% 100%", "{line_break:?}");
+            assert_eq!(clip(&text, 40), "50% 100%", "{line_break:?}");
+            // Wrapped, each starts a row, and a final one starts none.
+            assert_eq!(lines(&text, 40, 9), ["50%", "100%"], "{line_break:?}");
+            let text = format!("a{line_break}");
+            assert_eq!(lines(&text, 40, 9), ["a"], "{line_break:?}");
+            let rows = wrap(&[Span::new(text, WHITE)], 40, Wrap::default());
+            assert_eq!(rows.len(), 2, "{line_break:?}");
+        }
+        // Two in a row leave a blank row between, CRLF counting once.
+        assert_eq!(lines("a\r\rb", 40, 9), ["a", "", "b"]);
+        assert_eq!(lines("a\r\n\r\nb", 40, 9), ["a", "", "b"]);
+        assert_eq!(lines("a\n\rb", 40, 9), ["a", "", "b"]);
+        // CRLF split between spans is one break.
+        let rows = wrap(
+            &[Span::new("a\r", WHITE), Span::new("\nb", WHITE)],
+            40,
+            Wrap::default(),
+        );
+        assert_eq!(text(&rows), ["a", "b"]);
+        // In code, too, where a carriage return no longer overwrites the line.
+        let code = Wrap {
+            continuation: Some('↵'),
+            ..Default::default()
+        };
+        let rows = wrap(&[Span::new("let a;\rlet b;\u{c}", WHITE)], 40, code);
+        assert_eq!(text(&rows), ["let a;", "let b;", ""]);
+        // Other spaces join nothing either, and are drawn as a space.
+        assert_eq!(drawn("a\u{1680}b"), "a b");
+        assert_eq!(lines("a\u{1680}b", 1, 9), ["a", "b"]);
     }
 
     #[test]

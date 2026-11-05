@@ -1066,6 +1066,45 @@ mod tests {
         assert_eq!(drawn("e\u{301}"), drawn("e"));
     }
 
+    /// The hand menu's widest rows, of as many characters as it holds, fill its panel as they are drawn, their backgrounds ending within it and less than a cell short of its edge.
+    #[test]
+    fn the_hand_menus_widest_rows_fill_its_panel_without_overflowing() {
+        use crate::hand_menu::{HandMenu, MenuKey, Model, PANEL, PIXEL, Palm, Section, WIDTH};
+        let mut menu = HandMenu::default();
+        menu.choose(&MenuKey::Section(Section::PeopleAndSecurity));
+        let model = Model {
+            notice: Some("x".repeat(3 * WIDTH)),
+            ..Default::default()
+        };
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.1, -0.35),
+            normal: Vec3::new(0.3, 0.8, 0.4).normalize(),
+        };
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let objects = menu.objects(&palm, &model, head);
+        let widest: Vec<_> = objects
+            .iter()
+            .filter(|object| object.label.lines[0].chars().count() == WIDTH)
+            .collect();
+        assert_eq!(widest.len(), 3);
+        for object in widest {
+            let scene = Scene {
+                objects: vec![object.clone()],
+                viewer: Some(head),
+                ..Default::default()
+            };
+            let right = Vec3::Y
+                .cross(facing_from(object.label.anchor, Some(head), true))
+                .normalize();
+            let reach = label_mesh(&scene, None)
+                .iter()
+                .map(|vertex| (Vec3::from_array(vertex.position) - object.position).dot(right))
+                .fold(f32::MIN, f32::max);
+            assert!(reach <= PANEL, "{reach}");
+            assert!(reach > PANEL - 9.0 * PIXEL, "{reach}");
+        }
+    }
+
     /// The label's text is solid when seen from where it faces: before its quads were built along the label's up, a label tilted by 45° drew each pixel row about 70% as tall as the rows' spacing, leaving stripes, and its background short of its last row.
     #[test]
     fn a_tilted_label_draws_solid_glyphs_over_its_whole_background() {
