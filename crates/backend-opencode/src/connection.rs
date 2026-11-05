@@ -10739,6 +10739,53 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_a_connection_holds_commands_until_they_end_or_shut_down() {
+        let scheduler = test_scheduler();
+        // Neither the step nor its timer ends.
+        let timers = Hurried::new(&scheduler, usize::MAX, false);
+        for shut_down in [false, true] {
+            let (commands, receiver) = Commands::new();
+            let (reply, _replies) = async_channel::bounded(1);
+            commands
+                .tx()
+                .try_send(Command::Sessions {
+                    directory: "/tmp".into(),
+                    reply,
+                })
+                .unwrap();
+            match shut_down {
+                true => commands.shutdown(),
+                false => drop(commands),
+            }
+            let mut sessions = Sessions::default();
+            let outcome = block_on(holding(
+                std::future::pending::<std::result::Result<(), String>>(),
+                &timers,
+                &receiver,
+                &mut sessions,
+                CONNECT_TIMEOUT,
+            ));
+            let Err(Outcome::Shutdown) = outcome else {
+                unreachable!("expected the attempt to shut down");
+            };
+            // A shutdown is taken before what waits.
+            assert_eq!(sessions.held.len(), usize::from(!shut_down));
+        }
+        // Waiting for the next attempt ends as the commands do.
+        let (commands, receiver) = Commands::new();
+        drop(commands);
+        let now = base_scheduler::Clock::now(&scheduler);
+        assert!(!block_on(wait_until_attempt(
+            &timers,
+            &receiver,
+            &mut Sessions::default(),
+            now + Duration::from_secs(3600),
+            now
+        )));
+        block_on(scheduler.shutdown());
+    }
+
+    #[test]
     fn a_connection_ends_when_its_reconciliation_timer_fails_or_its_stream_is_refused() {
         let shared = Arc::new(FakeShared::default());
         let service = FakeService::start(shared.clone(), "secret");
