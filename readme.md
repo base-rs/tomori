@@ -2,7 +2,7 @@
 
 A conversational spatial workspace for people and agents, currently a native **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**. 128 agents inhabit a moonlit Sky environment or a minimal floor grid. Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest renders the interactive scene and joins conversations through a Tomori server on the PC, which runs the agent sessions.
 
-Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The headset and desktop application is the Rust package `tomori-quest`, whose library and executable are named `tomori`, and the server is `tomori-server`; the other crates are listed under [Crates](#crates). The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
+Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The headset and desktop application is the Rust package `tomori-client-quest`, whose library and executable are named `tomori`, and the server is `tomori-server`; the other crates are listed under [Crates](#crates). The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
 
 - **Right trigger:** outside a space, choose what the right controller's ray points at; a pull that starts away from every object, or any pull inside a space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
@@ -13,7 +13,7 @@ Tomori is the name of both the system and its conversational coordinator; see [d
 Each space is bound to one environment, chosen when it is created and the same for everyone in it; an owner can change it later, for everyone, from the hand menu's **Space** section (see [design/environments.md](design/environments.md)). The server offers **Sky**, the default for a new space: a fixed moonlit night, sparse stars, static cloud banks, a stable platform and an open shrine blockout with warm lanterns. The concrete renderer lives in [`crates/environment-sky`](crates/environment-sky/readme.md), separate from sessions, worker simulation and application input. It also offers **Grid**, the plain floor grid of the **Minimal** environment, which is also the waiting area outside any space.
 
 - **Quest / desktop XR:** choosing a server and a space happens on the grid; joining a space switches to its environment, and leaving returns to the grid. Inside a space, only an owner's change for the whole space switches it. A space whose environment this build doesn't know shows the grid, and its panel names the environment.
-- **Desktop window:** it has no server, so press **E** to switch between Sky and the grid (with `--desktop` and a server, **E** does nothing: the space chooses); or launch with `TOMORI_ENVIRONMENT=minimal cargo run -p tomori-quest` to start on the grid.
+- **Desktop window:** it has no server, so press **E** to switch between Sky and the grid (with `--desktop` and a server, **E** does nothing: the space chooses); or launch with `TOMORI_ENVIRONMENT=minimal cargo run -p tomori-client-quest` to start on the grid.
 - **Spectator:** shows the environment of the space it watches, as everyone in it does, and follows an owner's change to it.
 
 Switching does not reset agents, conversations or worker positions. Sky uses the same scene/recenter transform as the workspace; it does not move the camera. Clouds use a bounded low-resolution volumetric density pass with translucent edges and approximate moonlighting; lanterns have brighter emissive faces and cast warm, occluded illumination onto the nearby static scenery through a build-time lightmap, not runtime point-light shadow maps. The same lightmap adds local ambient occlusion at contacts. The shrine and platform cast/receive softly filtered moon shadows from a cached static shadow map. Agent/status visuals and labels are not shadowed. There is no day/night cycle, scenery collision or new locomotion system.
@@ -21,7 +21,7 @@ Switching does not reset agents, conversations or worker positions. Sky uses the
 The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the on-device frame-time budget still needs measurement. The stereo/switch/recenter regression runs with the other tests (see [Tests](#tests--desktop-openxr)); to save a preview sheet:
 
 ```sh
-TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p tomori-quest \
+TOMORI_SKY_PREVIEW=/tmp/opencode/tomori-sky.png cargo test --locked -p tomori-client-quest \
   sky_environment_renders_stereo_switches_and_preserves_recenter
 ```
 
@@ -135,8 +135,8 @@ The spectator joins the same server and space as the headset and renders a read-
 Both tracked controller grip poses are rendered using the bundled, MIT-licensed WebXR Quest Touch Plus models (see `crates/client-quest/assets/controllers/`). If the Quest runtime exposes `XR_FB_render_model`, the headset attempts to load its models on a background thread and falls back to the bundled meshes if loading fails. The PC spectator currently uses the bundled meshes rather than copying runtime assets. Controller textures are supported for embedded PNG/JPEG and Basis Universal KTX2; button animation is not yet implemented. When `XR_EXT_hand_tracking` is available and hand tracking is enabled on the Quest, tracked hands are shown as a simple joint-and-bone skeleton rather than a skinned hand mesh. Hand gestures do not replace the existing controller bindings. The server relays controller poses and tracked joint positions to the other space participants.
 
 ```sh
-cargo run -p tomori-quest -- discover --server 127.0.0.1:8765
-cargo run -p tomori-quest -- --spectator --server 127.0.0.1:8765 --space SPACE_ID
+cargo run -p tomori-client-quest -- discover --server 127.0.0.1:8765
+cargo run -p tomori-client-quest -- --spectator --server 127.0.0.1:8765 --space SPACE_ID
 ```
 
 The spectator requests a **1920×1080 physical-pixel** content area at startup, with a 1080p minimum and no window decorations, to match a 1080p OBS canvas. Press **Esc** to close it. Resizing larger changes the render resolution. On a 1080-pixel-high display the desktop panel can cover part of the borderless window; the compositor may also constrain sizes on smaller or scaled displays. Check the actual size in the startup log and OBS preview.
@@ -145,7 +145,7 @@ In OBS, add the spectator window as a window/screen capture. The spectator plays
 
 ### Experimental direct PipeWire video (Linux)
 
-Instead of capturing a window, run `cargo run -p tomori-quest -- --spectator-pipewire --server 127.0.0.1:8765 --space SPACE_ID`. It publishes `Tomori-Spectator` (`tomori-spectator`) **without creating a window or display surface**. Press **Ctrl-C** to stop it. For an optional window showing the same direct output, use `cargo run -p tomori-quest -- --spectator-pipewire-preview --server 127.0.0.1:8765 --space SPACE_ID` instead; Escape closes that window and stops its output. Run only one direct-output spectator at a time.
+Instead of capturing a window, run `cargo run -p tomori-client-quest -- --spectator-pipewire --server 127.0.0.1:8765 --space SPACE_ID`. It publishes `Tomori-Spectator` (`tomori-spectator`) **without creating a window or display surface**. Press **Ctrl-C** to stop it. For an optional window showing the same direct output, use `cargo run -p tomori-client-quest -- --spectator-pipewire-preview --server 127.0.0.1:8765 --space SPACE_ID` instead; Escape closes that window and stops its output. Run only one direct-output spectator at a time.
 
 Both modes render to a fixed **1920×1080 RGBA** texture at up to 30 fps. The optional preview window requests 1920×1080; the `--spectator` window-capture fallback still renders at its actual window size. The Quest reports presence through the server. Audio plays through the spectator's desktop output, or the PipeWire output named with `--audio-output NAME` (see `pactl list short sinks`); the PipeWire node carries video only. Any local client with PipeWire access may be able to view it.
 
@@ -231,7 +231,7 @@ You can save machine-local exports in `.android-env` (gitignored). The SDK, NDK,
 ## Desktop window
 
 ```sh
-cargo run -p tomori-quest
+cargo run -p tomori-client-quest
 ```
 
 Runs the same simulation and wgpu renderer in a resizable desktop window; **no headset or OpenXR runtime needed**. Uses Vulkan on Linux (Wayland or X11).
@@ -243,7 +243,7 @@ Runs the same simulation and wgpu renderer in a resizable desktop window; **no h
 That window doesn't connect to a server. To take part in a server's spaces from a desktop window instead, as on the headset, use `--desktop` (see [design/desktop.md](design/desktop.md)):
 
 ```sh
-cargo run -p tomori-quest -- --desktop [--server HOST:PORT] [--name NAME] [--token TOKEN]
+cargo run -p tomori-client-quest -- --desktop [--server HOST:PORT] [--name NAME] [--token TOKEN]
 ```
 
 The mouse points as the right controller does: its left button chooses what it points at, and dragging with the right button looks around. **Enter** is A, **Backspace** is B (hold it for a second to leave a space), hold **Space** to talk to the agent (X), **Tab** is Y, the arrow keys are the left stick, **\[** and **]** the right stick left and right, and **Page Up**/**Page Down** the right stick up and down. **M** opens the hand menu, **K** knocks on the space you watch, **+** and **-** admit or decline the first knock waiting, **P** pairs, **V** mutes spoken replies and **R** replays the latest. `tomori --help` lists them too. Desktop windows draw with 4× multisample anti-aliasing where the GPU supports it.
@@ -251,7 +251,7 @@ The mouse points as the right controller does: its left button chooses what it p
 To use a server without a headset or a GPU, show the headset's panel in the terminal:
 
 ```sh
-cargo run -p tomori-quest -- --console [--server HOST:PORT] [--name NAME]
+cargo run -p tomori-client-quest -- --console [--server HOST:PORT] [--name NAME]
 ```
 
 Type the controller buttons as commands, such as `a`, `b`, `y`, `u` and `d` for the left stick, and `<` `>` for the right stick. A terminal can't tell when a key is released, so `x` starts talking to the agent through the computer's default microphone and `x` again sends it. `--server` (or `TOMORI_SERVER`) and `--name` also apply to `--xr`, where **X** is held as on the headset. On Linux, building the desktop client needs the ALSA development files (`libasound2-dev` or `alsa-lib-devel`) for the microphone.
@@ -262,7 +262,7 @@ Type the controller buttons as commands, such as `a`, `b`, `y`, `u` and `d` for 
 bash scripts/fetch-sherpa-onnx.sh        # once: the speech libraries the server links
 bash scripts/fetch-asr-model.sh whisper tiny.en && bash scripts/fetch-tts-model.sh   # optional: the speech models the speech tests run
 cargo test --workspace                   # simulation, projection, rendering, server and client tests
-cargo run -p tomori-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
+cargo run -p tomori-client-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
 npm test --prefix bridge          # session routing, questions and permissions
 ```
 
@@ -315,7 +315,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
 
-`tomori-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
+`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
 ## Third-Party Components
 

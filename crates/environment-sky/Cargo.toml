@@ -9,7 +9,7 @@ license.workspace = true
 publish = false
 
 [features]
-# `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with `tomori-quest`'s tests. Enabled only by tests.
+# `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with `tomori-client-quest`'s tests. Enabled only by tests.
 test-gpu = ["dep:naga", "dep:pollster"]
 
 [dependencies]

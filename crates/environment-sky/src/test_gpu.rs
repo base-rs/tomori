@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! A device for tests that render offscreen, and WGSL validation for every shader, shared by this crate's tests and `tomori-quest`'s through the `test-gpu` feature.
+//! A device for tests that render offscreen, and WGSL validation for every shader, shared by this crate's tests and `tomori-client-quest`'s through the `test-gpu` feature.
 //!
 //! A real GPU is preferred, and a software adapter such as Mesa's lavapipe is used when there is none, as on CI runners. Where there is no adapter at all, the test is skipped with a message on standard error, unless `TOMORI_REQUIRE_GPU` is set to anything but `0` or the empty string, as CI sets it, so that a missing driver fails the tests rather than silently skipping them.
 //!

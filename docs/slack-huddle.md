@@ -17,7 +17,7 @@ Do not unload or reload `v4l2loopback` while another application is using its ca
 From the repository root, build the client and discover the target space:
 
 ```sh
-cargo build -p tomori-quest --bin tomori
+cargo build -p tomori-client-quest --bin tomori
 ./target/debug/tomori discover --server 127.0.0.1:8765
 ```
 

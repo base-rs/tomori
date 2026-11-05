@@ -4,7 +4,7 @@ This describes the layout of Tomori clients. The headset and desktop application
 
 ## Requirement
 
-Each kind of hardware or output has its own client implementation in a separate workspace crate in `crates/client-<target>`, named `tomori-<target>` as `crates.md` requires, such as `crates/client-quest` (`tomori-quest`) for Meta Quest headsets and `crates/client-spectator` (`tomori-spectator`) for the Linux spectator/OBS output. Clients share a platform-neutral core:
+Each kind of hardware or output has its own client implementation in a separate workspace crate in `crates/client-<target>`, named `tomori-client-<target>` as `crates.md` requires, such as `crates/client-quest` (`tomori-client-quest`) for Meta Quest headsets and `crates/client-spectator` (`tomori-client-spectator`) for the Linux spectator/OBS output. Clients share a platform-neutral core:
 
 - `crates/client` (`tomori-client`): the server connection, reconnection, outgoing audio, per-source jitter buffers, the playback mixer and the player that feeds it received audio for a device callback. It contains no rendering, windowing or device code, and builds for every client target.
 - A shared scene model derived from space state and participant presence, also free of rendering code, so that clients with different renderers present the same scene.

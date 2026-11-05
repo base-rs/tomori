@@ -4,7 +4,7 @@ This describes how Tomori's workspace crates are named, versioned and published.
 
 ## Requirement
 
-Every workspace crate except the private `bake/` package is named `tomori-` followed by its role, such as `tomori-protocol`, and lives in a folder under `crates/` named without the prefix, such as `crates/protocol`. Clients are the exception: their folders are `crates/client-<target>`, as `clients.md` requires, so `tomori-quest` lives in `crates/client-quest`. So are examples of downstream crates, which build on the published crates as another project would (see `builders.md`): each is named `tomori-example-` followed by what it builds, lives in `examples/` named without that prefix, such as `examples/server` for `tomori-example-server`, and is never published. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
+Every workspace crate except the private `bake/` package is named `tomori-` followed by its role, such as `tomori-protocol`, and lives in a folder under `crates/` named without the prefix, such as `crates/protocol`. Clients follow the same rule, with the role `client-<target>`, as `clients.md` requires: `tomori-client-quest` lives in `crates/client-quest`. Examples of downstream crates are the exception: they build on the published crates as another project would (see `builders.md`), and each is named `tomori-example-` followed by what it builds, lives in `examples/` named without that prefix, such as `examples/server` for `tomori-example-server`, and is never published. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
 
 Names visible to people running Tomori do not change with package names: the server executable is `tomori-server`, and its command-line interface is unchanged by packaging; the headset's library and executable are `tomori`, its Android application ID is `io.github.ioquatix.tomori`, and its APK is `tomori.apk`.
 
@@ -27,8 +27,8 @@ These stay unpublished, with `publish = false`:
 
 | Crate | Why it is not published |
 | --- | --- |
-| `tomori-quest` | The headset and desktop application, released as an APK. Downstream headset builds need it as a library first. |
-| `tomori-environment-sky` | Only `tomori-quest` uses it, and its interface will change when environments get a shared interface. |
+| `tomori-client-quest` | The headset and desktop application, released as an APK. Downstream headset builds need it as a library first. |
+| `tomori-environment-sky` | Only `tomori-client-quest` uses it, and its interface will change when environments get a shared interface. |
 | `tomori-example-server` | An example for downstream servers to follow; see `builders.md`. |
 | `tomori-bake` | Development tasks only. |
 
