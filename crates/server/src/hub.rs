@@ -72,13 +72,17 @@ pub const KNOCK_COOLDOWN: Duration = Duration::from_secs(60);
 pub const KNOCKS_PER_SPACE: usize = 8;
 
 /// A visitor's knock on a space, waiting for a participant to answer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct KnockRecord {
     id: String,
     space: String,
     /// The visitor, by hub key.
     participant: String,
     connection: ConnectionId,
+    /// The knocking connection's outbox, told what became of the knock. Told after the connection goes, it hears nothing.
+    outbox: Arc<Outbox>,
+    /// The tokens that admit the visitor, which the server has, or it would not take the knock.
+    tokens: Arc<tomori_security::TokenStore>,
     name: String,
     started: Instant,
 }
@@ -114,6 +118,10 @@ pub enum Confirmation<'a> {
 struct PendingPairing {
     serial: u64,
     connection: ConnectionId,
+    /// The pairing connection's outbox, told how the pairing ended. Told after the connection goes, it hears nothing.
+    outbox: Arc<Outbox>,
+    /// What pairs the device, which the server has, or it would not begin the pairing.
+    setup: PairingSetup,
     /// The device's display name, which names the token it receives.
     name: String,
     commitment: String,
@@ -303,6 +311,18 @@ struct ConnectionRecord {
     liveness: Liveness,
 }
 
+impl ConnectionRecord {
+    /// Tell the connection its role in `space`, or in the lobby, if it changed. Returns the role.
+    fn update_role(&mut self, space: Option<&str>) -> ConnectionRole {
+        let role = self.access.role(space);
+        if self.role != Some(role) {
+            self.role = Some(role);
+            self.outbox.message(ServerMessage::Role { role });
+        }
+        role
+    }
+}
+
 /// Whether the HTTP server is writing a connection's output, shared by the connection body and the keepalive sweep.
 #[derive(Default)]
 pub struct Output {
@@ -376,8 +396,8 @@ struct SpaceRecord {
     commands: async_channel::Sender<SpaceCommand>,
     /// When participants were last told that the space changed. Cells, because telling them only needs shared access to the state.
     touched: Cell<Option<Instant>>,
-    /// A change caused by agent events that participants have not been told about yet; see [`SNAPSHOT_INTERVAL`].
-    deferred: Cell<bool>,
+    /// When participants are due to be told of a change caused by agent events, deferred to the end of the [`SNAPSHOT_INTERVAL`] since they were last told.
+    deferred: Cell<Option<Instant>>,
     /// Once the space has closed, when relative to other spaces, so that the least recently closed are forgotten first.
     closed: Option<u64>,
     /// Closed, but kept as open, and not forgotten, so that it is bound again when the server next starts: closed by shutdown, or not bound again after a restart for a reason that may pass. See `design/spaces.md`.
@@ -398,7 +418,35 @@ struct SpaceRecord {
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
 const ANSWERED: usize = 16;
 
+/// When participants are told of a change to a space caused by an agent event; see [`SNAPSHOT_INTERVAL`].
+enum Pace {
+    Now,
+    /// At the end of the interval, as no snapshot was deferred yet.
+    Deferred,
+    /// At the end of the interval, with the snapshot already deferred.
+    AlreadyDeferred,
+}
+
 impl SpaceRecord {
+    /// When participants are told of a change caused by an agent event at `now`: at once, unless they were told within [`SNAPSHOT_INTERVAL`], in which case it is deferred to the interval's end.
+    fn pace(&self, now: Instant) -> Pace {
+        if self.deferred.get().is_some() {
+            return Pace::AlreadyDeferred;
+        }
+        match self
+            .touched
+            .get()
+            .map(|touched| touched + SNAPSHOT_INTERVAL)
+            .filter(|due| now < *due)
+        {
+            Some(due) => {
+                self.deferred.set(Some(due));
+                Pace::Deferred
+            }
+            None => Pace::Now,
+        }
+    }
+
     /// Note when the space's attention changed level, at `now`.
     fn stamp_attention(&self, now: Instant) {
         let level = self.model.attention();
@@ -530,22 +578,19 @@ impl HubState {
         }
     }
 
-    /// Tell a participant's connection its role if it changed, as they join, are admitted or leave, which they do connected.
-    fn update_role(&mut self, participant: &str) {
-        let record = &self.participants[participant];
-        let space = record.space.as_deref();
-        let connection = record
-            .connection
-            .expect("a participant changes place connected");
-        let connection = self
-            .connections
-            .get_mut(&connection)
-            .expect("a participant's connection is listed until it disconnects");
-        let role = connection.access.role(space);
-        if connection.role != Some(role) {
-            connection.role = Some(role);
-            connection.outbox.message(ServerMessage::Role { role });
-        }
+    /// Tell a participant's connection its role if it changed, as they join, are admitted or leave, which they do connected. Returns the role, or `None` for a participant without a connection, who has no role to be told.
+    fn update_role(&mut self, participant: &str) -> Option<ConnectionRole> {
+        let Self {
+            participants,
+            connections,
+            ..
+        } = self;
+        participants.get(participant).and_then(|record| {
+            record
+                .connection
+                .and_then(|id| connections.get_mut(&id))
+                .map(|connection| connection.update_role(record.space.as_deref()))
+        })
     }
 
     /// The role of a participant's connection where they are now.
@@ -583,7 +628,7 @@ impl HubState {
         if let Some(space) = self.space(id) {
             let now = Instant::now();
             space.touched.set(Some(now));
-            space.deferred.set(false);
+            space.deferred.set(None);
             space.stamp_attention(now);
             // Members are connected, since disconnecting leaves the space.
             for outbox in space
@@ -599,20 +644,15 @@ impl HubState {
 
     /// Tell the space's participants that it changed because of an agent event, at most once per [`SNAPSHOT_INTERVAL`]. A change within the interval is deferred to its end, when the snapshot rendered then carries the latest state; returns true if so.
     fn touch_space_paced(&self, id: &str, now: Instant) -> bool {
-        let space = self.space(id).expect("the space reported the event");
-        if space.deferred.get() {
-            return false;
+        match self.space(id).map(|space| space.pace(now)) {
+            Some(Pace::Now) => {
+                self.touch_space(id);
+                false
+            }
+            Some(Pace::Deferred) => true,
+            // A space that is no longer listed has nobody to tell.
+            Some(Pace::AlreadyDeferred) | None => false,
         }
-        if space
-            .touched
-            .get()
-            .is_some_and(|touched| now < touched + SNAPSHOT_INTERVAL)
-        {
-            space.deferred.set(true);
-            return true;
-        }
-        self.touch_space(id);
-        false
     }
 
     /// Record when spaces closed since this was last called.
@@ -736,15 +776,24 @@ impl HubState {
     }
 
     fn depart(&mut self, participant: &str) {
-        let Some(space) = self
-            .participants
+        let Self {
+            participants,
+            spaces,
+            ..
+        } = self;
+        // Nothing to leave for a participant in the lobby. A space is forgotten only once nobody is in it, so the space they are in is listed; were it not, there would be nothing to leave either.
+        let Some((space, record)) = participants
             .get_mut(participant)
             .and_then(|record| record.space.take())
+            .and_then(|space| {
+                spaces
+                    .iter_mut()
+                    .find(|record| record.model.id == space)
+                    .map(|record| (space, record))
+            })
         else {
             return;
         };
-        // A space is forgotten only once nobody is in it.
-        let record = self.space_mut(&space).expect("an occupied space is listed");
         record.model.participants.retain(|id| id != participant);
         record.model.visitors.retain(|id| id != participant);
         record.speech.left(participant);
@@ -752,21 +801,28 @@ impl HubState {
         self.touch_space(&space);
     }
 
-    fn join(&mut self, participant: &str, space: &str) {
+    /// Put `participant` in `space`, taking them out of the space they were in. Returns false, changing nothing, if the space is no longer listed, such as one forgotten while a participant who was last in it was away, or if the participant has no connection, as one joining always has.
+    fn join(&mut self, participant: &str, space: &str) -> bool {
+        let Some((connection, engagement)) = self
+            .space(space)
+            .and(self.participants.get(participant))
+            .and_then(|record| {
+                record
+                    .connection
+                    .and_then(|id| self.connections.get(&id))
+                    .map(|connection| (connection, record.engagement))
+            })
+        else {
+            return false;
+        };
+        let participates = connection.access.role(Some(space)).participates();
+        let outbox = connection.outbox.clone();
         // Not forgotten until the participant is in the space they join, which might be a closed one.
         self.depart(participant);
-        let participates = self
-            .participants
-            .get(participant)
-            .and_then(|record| record.connection)
-            .is_some_and(|connection| self.role(connection, Some(space)).participates());
-        let engagement = self
-            .participants
-            .get(participant)
-            .and_then(|record| record.engagement);
-        let record = self
-            .space_mut(space)
-            .expect("a space is joined only while it is listed");
+        // Departing forgets neither spaces nor participants, so both are still listed.
+        let Some(record) = self.space_mut(space) else {
+            unreachable!("found above, and departing forgets no space");
+        };
         // Departed above, the participant is in neither list.
         if participates {
             record.model.participants.push(participant.to_owned());
@@ -777,15 +833,12 @@ impl HubState {
         if participates && record.speech.joined(participant, engagement) {
             record.wake();
         }
-        let record = self
-            .participants
-            .get_mut(participant)
-            .expect("the participant departed above");
+        let Some(record) = self.participants.get_mut(participant) else {
+            unreachable!("found above, and departing forgets no participant");
+        };
         record.space = Some(space.to_owned());
         record.last_space = Some(space.to_owned());
-        self.outbox(participant)
-            .expect("a participant joins connected")
-            .clear_audio();
+        outbox.clear_audio();
         self.update_role(participant);
         if participates {
             let knocks = self.knocks_for(space);
@@ -793,6 +846,7 @@ impl HubState {
         }
         self.forget_closed();
         self.touch_space(space);
+        true
     }
 
     /// The knocks waiting on `space`, as its participants see them.
@@ -809,10 +863,13 @@ impl HubState {
 
     /// Tell the participants of `space` the knocks waiting on it.
     fn announce_knocks(&self, space: &str) {
-        // A knock is withdrawn as its visitor leaves the space, which is listed until nobody is in it.
-        let record = self.space(space).expect("a space knocked on is listed");
         let knocks = self.knocks_for(space);
-        for participant in &record.model.participants {
+        // A knock is withdrawn as its visitor leaves the space, which is listed until nobody is in it, so a space knocked on is listed; were it not, it would have nobody to tell.
+        for participant in self
+            .space(space)
+            .into_iter()
+            .flat_map(|record| &record.model.participants)
+        {
             self.send(
                 participant,
                 ServerMessage::Knocks {
@@ -846,14 +903,20 @@ impl HubState {
             .is_some_and(|record| {
                 record.participant.as_deref() == Some(knock.participant.as_str())
             });
-        let Some(identity) = knock.participant.strip_prefix('/').filter(|_| still_here) else {
+        // A connected participant is kept, so one still here is found.
+        let Some((identity, mut record)) = knock
+            .participant
+            .strip_prefix('/')
+            .filter(|_| still_here)
+            .and_then(|identity| {
+                self.participants
+                    .remove(&knock.participant)
+                    .map(|record| (identity, record))
+            })
+        else {
             return false;
         };
         let key = participant_key(Some(&principal), identity);
-        let mut record = self
-            .participants
-            .remove(&knock.participant)
-            .expect("a connected participant is kept");
         // A knock made again since the decision belongs to the old key, which is gone.
         let stale: Vec<String> = self
             .knocks
@@ -906,12 +969,9 @@ impl HubState {
         }) else {
             return false;
         };
-        // Disconnecting withdraws the pairing.
-        self.connections[&pairing.connection]
-            .outbox
-            .message(ServerMessage::PairFailed {
-                error: error.to_owned(),
-            });
+        pairing.outbox.message(ServerMessage::PairFailed {
+            error: error.to_owned(),
+        });
         true
     }
 
@@ -941,10 +1001,17 @@ impl HubState {
         field: &str,
         text: &str,
     ) -> Result<(), String> {
-        let record = self
+        // A member answers in a space that is listed, since one is forgotten only once nobody is in it; were it not, there would be nothing to answer.
+        let (record, outcome) = self
             .space_mut(space)
-            .expect("a member answers in a listed space");
-        match record.model.answer(question, field, text)? {
+            .ok_or("Join a space first.".to_owned())
+            .and_then(|record| {
+                record
+                    .model
+                    .answer(question, field, text)
+                    .map(|outcome| (record, outcome))
+            })?;
+        match outcome {
             AnswerOutcome::Recorded => {}
             AnswerOutcome::Complete(answers) => {
                 let sent = record.commands.try_send(SpaceCommand::Answer {
@@ -965,10 +1032,11 @@ impl HubState {
 
     /// The greeted participant of a connection and their current space.
     fn member(&self, connection: ConnectionId) -> Option<(String, Option<String>)> {
-        let participant = self.connections.get(&connection)?.participant.clone()?;
-        // A connection names a participant who is kept.
-        let space = self.participants[&participant].space.clone();
-        Some((participant, space))
+        let participant = self.connections.get(&connection)?.participant.as_ref()?;
+        // A connection names a participant who is kept; were it not, it would be treated as not yet greeted.
+        self.participants
+            .get(participant)
+            .map(|record| (participant.clone(), record.space.clone()))
     }
 
     /// Close the open utterance of a connection, if any.
@@ -1090,12 +1158,7 @@ impl Hub {
 
     /// Issue a collaborator token for `knock` and admit its visitor on the same connection, if it is still connected. Called outside the lock, since issuing writes the token store.
     fn admit(&self, knock: KnockRecord) {
-        let tokens = self
-            .tokens
-            .read()
-            .expect("never left poisoned")
-            .clone()
-            .expect("knocks are taken only with tokens to admit them");
+        let tokens = knock.tokens.clone();
         let (entry, token) = match tokens.issue(
             &knock.name,
             tomori_security::Grant::Collaborator {
@@ -1181,18 +1244,12 @@ impl Hub {
                 });
             }
             let pairing = state.pairing.take().expect("checked above");
-            // Disconnecting withdraws the pairing, so its connection is listed; told after it goes, it hears nothing.
-            let outbox = state.connections[&pairing.connection].outbox.clone();
+            let outbox = pairing.outbox.clone();
             (pairing, outbox)
         };
         // The token is issued outside the hub's lock, since issuing writes the token store.
-        let setup = self
-            .pairing
-            .read()
-            .expect("never left poisoned")
-            .clone()
-            .expect("a pairing begins only on a server that pairs");
-        let issued = setup
+        let issued = pairing
+            .setup
             .tokens
             .issue(&pairing.name, tomori_security::Grant::Owner)
             .map_err(|error| {
@@ -1250,8 +1307,15 @@ impl Hub {
         self.max_visitors.store(limit, Ordering::Relaxed);
     }
 
+    /// The hub's state, locked. Should a request ever panic while holding it, the next takes it as it was left, logging that, so that one request fails rather than every later one.
     fn lock(&self) -> MutexGuard<'_, HubState> {
-        self.state.lock().expect("hub state is never left poisoned")
+        self.state.lock().unwrap_or_else(|poisoned| {
+            log::error!(
+                "A request failed while holding the hub's state; continuing with the state it left."
+            );
+            self.state.clear_poison();
+            poisoned.into_inner()
+        })
     }
 
     /// How many spaces are listed and participants connected, as advertised; see `design/server.md`.
@@ -1262,14 +1326,14 @@ impl Hub {
     /// Who is where now, for the status page.
     pub fn status(&self) -> Status {
         let state = self.lock();
-        // Members are kept and connected, since disconnecting leaves the space.
+        // Members are kept and connected, since disconnecting leaves the space; one that were not would not be listed.
         let role = |key: &str, space: Option<&str>| {
-            let record = &state.participants[key];
-            let connection = record.connection.expect("members are connected");
-            (
-                record.name.clone(),
-                state.connections[&connection].access.role(space),
-            )
+            state.participants.get(key).and_then(|record| {
+                record
+                    .connection
+                    .and_then(|connection| state.connections.get(&connection))
+                    .map(|connection| (record.name.clone(), connection.access.role(space)))
+            })
         };
         let spaces = state
             .spaces
@@ -1281,7 +1345,7 @@ impl Hub {
                     .model
                     .participants
                     .iter()
-                    .map(|key| role(key, Some(&space.model.id)))
+                    .filter_map(|key| role(key, Some(&space.model.id)))
                     .collect(),
                 visitors: space.model.visitors.len(),
             })
@@ -1295,7 +1359,8 @@ impl Hub {
             .filter_map(|record| {
                 record
                     .connection
-                    .map(|connection| (record, &state.connections[&connection]))
+                    .and_then(|connection| state.connections.get(&connection))
+                    .map(|connection| (record, connection))
             })
             .filter_map(|(record, connection)| {
                 let role = match connection.access.grant {
@@ -1519,12 +1584,9 @@ impl Hub {
                     (knock.participant.clone(), knock.space.clone()),
                     now + KNOCK_COOLDOWN,
                 );
-                // Disconnecting, or connecting again, withdraws the knock.
-                state.connections[&knock.connection]
-                    .outbox
-                    .message(ServerMessage::KnockState {
-                        state: tomori_protocol::KnockState::Expired,
-                    });
+                knock.outbox.message(ServerMessage::KnockState {
+                    state: tomori_protocol::KnockState::Expired,
+                });
                 state.announce_knocks(&knock.space);
             }
         }
@@ -1579,13 +1641,12 @@ impl Hub {
                 state.leave(&participant);
                 state.next_departure += 1;
                 let departure = state.next_departure;
-                let record = state
-                    .participants
-                    .get_mut(&participant)
-                    .expect("a connected participant is kept");
-                record.connection = None;
-                record.departed = Some(Instant::now());
-                record.departure = departure;
+                // A connected participant is kept.
+                state.participants.entry(participant).and_modify(|record| {
+                    record.connection = None;
+                    record.departed = Some(Instant::now());
+                    record.departure = departure;
+                });
                 state.forget_excess_visitors();
             }
             self.recount(&mut state);
@@ -1752,12 +1813,11 @@ impl Hub {
         // A reconnect supersedes the previous connection of the same participant.
         if let Some(previous) = previous.filter(|previous| *previous != connection) {
             state.abandon_utterance(previous, deferred);
-            let old = state
-                .connections
-                .get_mut(&previous)
-                .expect("a participant's connection is listed until it disconnects");
-            old.participant = None;
-            old.outbox.close();
+            // A participant's connection is listed until it disconnects, which also forgets it here.
+            state.connections.entry(previous).and_modify(|old| {
+                old.participant = None;
+                old.outbox.close();
+            });
         }
         let record = state
             .connections
@@ -1791,10 +1851,10 @@ impl Hub {
                 .utterance_limit()
                 .map(|limit| limit.as_secs().min(u64::from(u32::MAX)) as u32),
         });
-        match rejoin.filter(|space| state.space(space).is_some()) {
-            Some(space) => state.join(&participant, &space),
-            None if role == ConnectionRole::Pairing => {}
-            None => outbox.spaces(),
+        // The space they were in, unless it was forgotten meanwhile.
+        let rejoined = rejoin.is_some_and(|space| state.join(&participant, &space));
+        if !rejoined && role != ConnectionRole::Pairing {
+            outbox.spaces();
         }
     }
 
@@ -1955,11 +2015,11 @@ impl Hub {
                 outbox.clear_audio();
                 outbox.message(ServerMessage::Left);
                 state.leave(participant);
+                // A member is kept.
                 state
                     .participants
-                    .get_mut(participant)
-                    .expect("a member is kept")
-                    .last_space = None;
+                    .entry(participant.to_owned())
+                    .and_modify(|record| record.last_space = None);
                 state.update_role(participant);
                 outbox.spaces();
             }
@@ -2032,9 +2092,8 @@ impl Hub {
                 // Already failed and reported: the client sent this before it heard.
                 state
                     .connections
-                    .get_mut(&connection)
-                    .expect("checked by the guard")
-                    .failed = None;
+                    .entry(connection)
+                    .and_modify(|record| record.failed = None);
             }
             ClientMessage::UtteranceEnd { utterance, .. }
             | ClientMessage::UtteranceCancel { utterance }
@@ -2206,10 +2265,10 @@ impl Hub {
                 let failed = |error: &str| ServerMessage::PairFailed {
                     error: error.to_owned(),
                 };
-                if self.pairing.read().expect("never left poisoned").is_none() {
+                let Some(setup) = self.pairing.read().expect("never left poisoned").clone() else {
                     outbox.message(failed("This server does not pair devices."));
                     return;
-                }
+                };
                 if !self.encrypted.load(Ordering::Relaxed) {
                     outbox.message(failed("Pairing needs a connection over TLS."));
                     return;
@@ -2247,6 +2306,8 @@ impl Hub {
                 state.pairing = Some(PendingPairing {
                     serial: state.next_pairing,
                     connection,
+                    outbox: outbox.clone(),
+                    setup,
                     name,
                     commitment: commitment.to_ascii_lowercase(),
                     server,
@@ -2266,18 +2327,20 @@ impl Hub {
                     state.error(participant, "No pairing is waiting for that.");
                     return;
                 };
-                let device = tomori_security::pairing::Nonce::parse(&nonce)
-                    .filter(|device| device.commitment() == pairing.commitment);
-                let setup = self.pairing.read().expect("never left poisoned").clone();
-                let (Some(device), Some(setup)) = (device, setup) else {
+                let Some(device) = tomori_security::pairing::Nonce::parse(&nonce)
+                    .filter(|device| device.commitment() == pairing.commitment)
+                else {
                     state.end_pairing(
                         Some(connection),
                         "The pairing could not be checked; try again.",
                     );
                     return;
                 };
-                let code =
-                    tomori_security::pairing::code(setup.fingerprint, device, pairing.server);
+                let code = tomori_security::pairing::code(
+                    pairing.setup.fingerprint,
+                    device,
+                    pairing.server,
+                );
                 let name = pairing.name.clone();
                 pairing.code = Some(code.clone());
                 outbox.message(ServerMessage::PairWaiting);
@@ -2304,10 +2367,10 @@ impl Hub {
                     );
                     return;
                 }
-                if self.tokens.read().expect("never left poisoned").is_none() {
+                let Some(tokens) = self.tokens.read().expect("never left poisoned").clone() else {
                     state.error(participant, "This server does not admit by knocking.");
                     return;
-                }
+                };
                 if !self.encrypted.load(Ordering::Relaxed) {
                     state.error(participant, "Knocking needs a connection over TLS.");
                     return;
@@ -2349,6 +2412,8 @@ impl Hub {
                     space: space.clone(),
                     participant: participant.to_owned(),
                     connection,
+                    outbox: outbox.clone(),
+                    tokens,
                     name: state.participants[participant].name.clone(),
                     started: now,
                 };
@@ -2386,12 +2451,9 @@ impl Hub {
                         (knock.participant.clone(), space),
                         Instant::now() + KNOCK_COOLDOWN,
                     );
-                    // Disconnecting, or connecting again, withdraws the knock.
-                    state.connections[&knock.connection].outbox.message(
-                        ServerMessage::KnockState {
-                            state: tomori_protocol::KnockState::Declined,
-                        },
-                    );
+                    knock.outbox.message(ServerMessage::KnockState {
+                        state: tomori_protocol::KnockState::Declined,
+                    });
                 }
             }
             ClientMessage::PairCancel => {
@@ -2470,13 +2532,14 @@ impl Hub {
                 if !state.role(connection, space).participates() {
                     return;
                 }
-                let record = state
+                // A member is kept; only a change is applied.
+                let Some(record) = state
                     .participants
                     .get_mut(participant)
-                    .expect("a member is kept");
-                if record.engagement == Some(engagement) {
+                    .filter(|record| record.engagement != Some(engagement))
+                else {
                     return;
-                }
+                };
                 log::debug!("Participant {} is now {engagement:?}.", record.source);
                 record.engagement = Some(engagement);
                 if let Some(space) = space
@@ -2608,16 +2671,15 @@ impl Hub {
                 }
             }
             let source = state.participants[&participant].source;
-            let encoded = Frame::audio(&AudioFrame { source, ..frame })
-                .try_encode()
-                .expect("the relayed frame is the size of the frame received, which was within the limit");
-            let space = state.space(&space).expect("an occupied space is listed");
-            // Members are connected, since disconnecting leaves the space.
-            for outbox in space
-                .model
-                .members()
+            // The relayed frame is the size of the frame received, which was within the limit, and an occupied space is listed. Members are connected, since disconnecting leaves the space. Should any of that change, the frame is not relayed to whom it cannot be.
+            let encoded = Frame::audio(&AudioFrame { source, ..frame }).try_encode();
+            for (outbox, encoded) in state
+                .space(&space)
+                .into_iter()
+                .flat_map(|space| space.model.members())
                 .filter(|other| **other != participant)
                 .filter_map(|other| state.outbox(other))
+                .flat_map(|outbox| encoded.iter().map(move |encoded| (outbox, encoded)))
             {
                 outbox.audio(encoded.clone());
             }
@@ -2692,6 +2754,7 @@ impl Hub {
             .participants
             .get(&record.participant)
             .is_none_or(|participant| participant.space.as_deref() != Some(&record.space))
+            || state.space(&record.space).is_none()
         {
             Some("You left the space before the transcript was ready, so nothing was sent.")
         } else if record.answer.is_none()
@@ -2723,9 +2786,9 @@ impl Hub {
                 text,
             ) {
                 Ok(()) => {
-                    let space = state
-                        .space_mut(&record.space)
-                        .expect("answered in a listed space");
+                    let Some(space) = state.space_mut(&record.space) else {
+                        unreachable!("answering just above found the space listed");
+                    };
                     if space.answered.len() == ANSWERED {
                         space.answered.pop_front();
                     }
@@ -2745,10 +2808,9 @@ impl Hub {
             return;
         }
         let speaker = state.participants[&record.participant].name.clone();
-        // The speaker is still in the space, checked above, so it is listed.
-        let space = state
-            .space_mut(&record.space)
-            .expect("an occupied space is listed");
+        let Some(space) = state.space_mut(&record.space) else {
+            unreachable!("checked listed above");
+        };
         let queued = space.model.enqueue_pointing(
             key,
             record.source,
@@ -2832,7 +2894,7 @@ impl Hub {
             model,
             commands,
             touched: Cell::new(None),
-            deferred: Cell::new(false),
+            deferred: Cell::new(None),
             closed: None,
             kept_open: false,
             attention: Cell::new(None),
@@ -2891,7 +2953,6 @@ impl Hub {
         let order: Vec<String> = kept.iter().map(|space| space.id.clone()).collect();
         // Closed spaces are stamped in the order they closed.
         kept.sort_by_key(|space| space.closed_order);
-        let mut closed = Vec::new();
         {
             let mut state = self.lock();
             for kept in kept {
@@ -2916,14 +2977,15 @@ impl Hub {
                 let takes = self.takes_instructions(&kept.backend);
                 model.set_instructions(kept.instructions, takes);
                 let (commands, receiver) = async_channel::unbounded();
-                match kept.closed {
+                let closed = match kept.closed {
                     Some(reason) => {
                         model.apply(Event::Closed {
                             reason: Some(reason),
                         });
                         // It closed before the restart; whether anyone saw it is not known.
                         model.attend();
-                        closed.push(kept.id.clone());
+                        state.next_closed += 1;
+                        Some(state.next_closed - 1)
                     }
                     None => {
                         model.apply(Event::Reconnecting {
@@ -2936,14 +2998,15 @@ impl Hub {
                             session: kept.session,
                             commands: receiver,
                         });
+                        None
                     }
-                }
+                };
                 state.spaces.push(SpaceRecord {
                     model,
                     commands,
                     touched: Cell::new(None),
-                    deferred: Cell::new(false),
-                    closed: None,
+                    deferred: Cell::new(None),
+                    closed,
                     kept_open: false,
                     attention: Cell::new(None),
                     speech: Retention::default(),
@@ -2951,11 +3014,6 @@ impl Hub {
                     answered: std::collections::VecDeque::new(),
                     instructing: Cell::new(None),
                 });
-            }
-            for id in closed {
-                let order = state.next_closed;
-                state.next_closed += 1;
-                state.space_mut(&id).expect("listed above").closed = Some(order);
             }
             // Listed in the order they were created, as before the restart.
             state.spaces.sort_by_key(|space| {
@@ -3085,14 +3143,7 @@ impl Hub {
         state
             .spaces
             .iter()
-            .filter(|space| space.deferred.get())
-            .map(|space| {
-                space
-                    .touched
-                    .get()
-                    .expect("a snapshot is deferred only after one was sent")
-                    + SNAPSHOT_INTERVAL
-            })
+            .filter_map(|space| space.deferred.get())
             .min()
     }
 
@@ -3107,13 +3158,7 @@ impl Hub {
         let due: Vec<String> = state
             .spaces
             .iter()
-            .filter(|space| {
-                space.deferred.get()
-                    && space
-                        .touched
-                        .get()
-                        .is_none_or(|touched| touched + SNAPSHOT_INTERVAL <= now)
-            })
+            .filter(|space| space.deferred.get().is_some_and(|due| due <= now))
             .map(|space| space.model.id.clone())
             .collect();
         for space in due {
@@ -3358,12 +3403,12 @@ impl Hub {
         {
             match delivery {
                 Delivery::Message(message) => outbox.agent_message(message),
-                // Kept only once it was encoded live, as the same frame from another source.
-                Delivery::Frame(frame) => outbox.agent_audio(
-                    Frame::audio(&frame)
+                // Kept only once it was encoded live, so it encodes again, as the same frame from another source; one that did not would be skipped.
+                Delivery::Frame(frame) => {
+                    let _ = Frame::audio(&frame)
                         .try_encode()
-                        .expect("a kept frame was encoded live"),
-                ),
+                        .map(|encoded| outbox.agent_audio(encoded));
+                }
             }
         }
         Some(next)
@@ -3403,8 +3448,11 @@ impl Hub {
             Outgoing::Message(message) => Some(message),
             Outgoing::Space => {
                 let state = self.lock();
-                let (_, space) = state.member(connection)?;
-                let space = state.space(&space?).expect("an occupied space is listed");
+                // Nothing for a connection not in a space, or, should one be forgotten while occupied, in one that is not listed.
+                let space = state
+                    .member(connection)
+                    .and_then(|(_, space)| space)
+                    .and_then(|space| state.space(&space))?;
                 let participants = state.participants(&space.model);
                 let mut state = space.model.state(
                     participants,
@@ -3465,6 +3513,22 @@ mod tests {
             Vec::new(),
             SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
         )
+    }
+
+    #[test]
+    fn a_request_that_fails_holding_the_state_fails_alone() {
+        let hub = hub();
+        let failing = hub.clone();
+        let failed = std::thread::spawn(move || {
+            let _state = failing.lock();
+            panic!("a request fails holding the hub's state");
+        })
+        .join();
+        assert!(failed.is_err());
+        assert!(hub.state.is_poisoned());
+        // Later requests are served, from the state as it was left.
+        assert_eq!(hub.counts().spaces, 0);
+        assert!(!hub.state.is_poisoned());
     }
 
     #[cfg(feature = "fake")]
@@ -3897,6 +3961,26 @@ mod tests {
         // Closing one more than are kept forgets the oldest.
         assert!(notifies(&hub, || hub.space_ended(&spaces[CLOSED_SPACES], None)));
         assert_eq!(hub.counts(), needing(counts(listed - 1, 0), 0, closed, 0));
+    }
+
+    #[test]
+    fn a_participant_whose_space_was_forgotten_while_away_reconnects_to_the_listing() {
+        let hub = hub();
+        let ada = greet(&hub, "ada");
+        let space = create(&hub, &participant_key(None, "ada"));
+        hub.disconnect(ada);
+        // Her space closes while she is away, and is forgotten as more spaces close than are kept.
+        hub.space_ended(&space, None);
+        for _ in 0..CLOSED_SPACES {
+            let other = create(&hub, "nobody");
+            hub.space_ended(&other, None);
+        }
+        assert!(!hub.has_space(&space));
+        let ada = greet(&hub, "ada");
+        let key = participant_key(None, "ada");
+        assert_eq!(hub.lock().participants[&key].space, None);
+        assert_eq!(hub.render(ada, Outgoing::Space), None);
+        assert_eq!(listing(&hub, ada).len(), CLOSED_SPACES);
     }
 
     #[test]
