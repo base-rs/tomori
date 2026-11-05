@@ -799,7 +799,15 @@ mod tests {
             serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"}),
         )
         .unwrap();
-        assert!(matches!(older, ClientMessage::Hello { names: false, .. }));
+        assert_eq!(
+            older,
+            ClientMessage::Hello {
+                protocol: 2,
+                participant: "p".into(),
+                name: "Ada".into(),
+                names: false,
+            }
+        );
 
         // An older server gives no name, and a newer one gives the name it keeps.
         let welcome: ServerMessage = serde_json::from_value(serde_json::json!({
@@ -835,12 +843,17 @@ mod tests {
             serde_json::from_value::<ClientMessage>(json).unwrap(),
             begin
         );
-        assert!(matches!(
+        assert_eq!(
             serde_json::from_value::<ClientMessage>(
                 serde_json::json!({"type": "utterance_begin", "utterance": "u"})
             )
             .unwrap(),
-            ClientMessage::UtteranceBegin { naming: false, .. }
-        ));
+            ClientMessage::UtteranceBegin {
+                utterance: "u".into(),
+                answer: None,
+                progress: false,
+                naming: false,
+            }
+        );
     }
 }
