@@ -15,12 +15,12 @@ The crates share one version and are released together, so depend on the same ve
 | `tomori-backend` | The backend-neutral interface between the server and coding agents: implement `Backend` and `Session` to drive another agent. |
 | `tomori-backend-opencode` | The backend that drives OpenCode sessions on a running `opencode serve`. |
 | `tomori-speech` | Streaming speech recognition, speakable text selection and synthesis, through prebuilt sherpa-onnx libraries. |
+| `tomori-environment-sky` | The renderer of the Sky environment, a moonlit sky, clouds, a platform and a shrine, drawn with wgpu. Tomori's clients draw it; its interface changes when environments get a shared interface. |
 | `tomori-server` | The server, as the `tomori-server` executable and the library it is built from, whose builder registers backends and environments of another project's own. See its Building a Tomori Server guide. |
 
 ## Unpublished crates
 
 - `tomori-client-quest`, the headset and desktop application, whose library is `tomori`, is released as an Android APK rather than to crates.io.
-- `tomori-environment-sky`, the renderer of the Sky environment, waits for the environment interface that will let other projects register environments.
 
 ## Choosing crates
 

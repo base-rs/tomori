@@ -6,7 +6,9 @@ rust-version.workspace = true
 description = "Tomori's moonlit sky environment renderer"
 repository.workspace = true
 license.workspace = true
-publish = false
+readme = "readme.md"
+keywords = ["tomori", "wgpu", "xr", "sky", "environment"]
+categories = ["rendering", "graphics"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
@@ -16,7 +18,7 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulka
 [dev-dependencies]
 pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
-# The device for offscreen rendering tests and WGSL validation. `tomori-render` depends on this crate, which Cargo allows for a development dependency; it has no version, as this crate is not published.
+# The device for offscreen rendering tests and WGSL validation. `tomori-render` depends on this crate, which Cargo allows for a development dependency. It has no version, so that packaging leaves it out: only the tests use it.
 tomori-render = { path = "../render", features = ["test-gpu"] }
 
 [build-dependencies]
