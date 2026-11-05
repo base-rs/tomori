@@ -626,9 +626,10 @@ impl Session for FakeSession {
         self.inner.log.lock().unwrap().closed = true;
         self.handle.closing.cancel();
         let mut outbound = self.inner.outbound.lock().unwrap();
-        while let Ok(event) = self.handle.receiver.try_recv() {
-            outbound.backlog.push_back(event);
-        }
+        // Whatever was emitted and not yet received waits for the next binding.
+        outbound
+            .backlog
+            .extend(std::iter::from_fn(|| self.handle.receiver.try_recv().ok()));
         outbound.current = None;
         *bound = None;
         if self.inner.closing_failure.load(Ordering::SeqCst) {

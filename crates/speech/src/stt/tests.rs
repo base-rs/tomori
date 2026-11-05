@@ -295,11 +295,13 @@ fn a_cancelled_utterance_never_reports_a_result() {
         TranscriptEvent::Final("run".into())
     );
     // A cancelled utterance may have produced partials, but never a result.
-    while let Ok(event) = cancelled_events.recv_timeout(Duration::from_millis(100)) {
-        let TranscriptEvent::Partial(_) = event else {
-            unreachable!("{event:?}");
-        };
-    }
+    let outcome = std::iter::from_fn(|| {
+        cancelled_events
+            .recv_timeout(Duration::from_millis(100))
+            .ok()
+    })
+    .find_map(TranscriptEvent::outcome);
+    assert_eq!(outcome, None);
 }
 
 #[test]

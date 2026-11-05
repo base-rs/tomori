@@ -10462,9 +10462,9 @@ mod tests {
                 |event| kind(event) == "resynchronized",
             );
             // Workers travel on their own lane, so may come before or after it.
-            while let Ok(event) = watched.recv_timeout(Duration::from_millis(300)) {
-                seen.push(event);
-            }
+            seen.extend(std::iter::from_fn(|| {
+                watched.recv_timeout(Duration::from_millis(300)).ok()
+            }));
             let Some(Event::WorkersChanged { workers }) = seen
                 .iter()
                 .rev()

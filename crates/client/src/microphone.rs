@@ -295,6 +295,7 @@ mod tests {
     #[test]
     fn a_bound_microphone_sends_only_on_its_connection_and_rebinding_drops_the_partial_frame() {
         let (mut microphone, sender) = microphone();
+        assert_eq!(microphone.sample_rate(), 16_000);
         let old = sender.connection_generation();
         microphone.bind_connection(old);
         microphone.set_gate(Gate::Live).unwrap();

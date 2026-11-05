@@ -33,14 +33,29 @@ impl Multicast for () {
     fn set_held(&mut self, _held: bool) {}
 }
 
+/// What a search for servers has found, as [`discovery::Browser`] reports it.
+trait Browsing {
+    /// The next event if one is ready.
+    fn try_recv(&self) -> Result<discovery::Event, discovery::TryRecvError>;
+}
+
+impl Browsing for discovery::Browser {
+    fn try_recv(&self) -> Result<discovery::Event, discovery::TryRecvError> {
+        discovery::Browser::try_recv(self)
+    }
+}
+
+/// Starts a search for servers.
+type BrowseServers = fn() -> Result<Box<dyn Browsing>, Box<dyn std::error::Error>>;
+
 pub struct Connection {
     identity: Identity,
     store: Store,
     multicast: Box<dyn Multicast>,
     client: Option<Client>,
-    browser: Option<discovery::Browser>,
+    browser: Option<Box<dyn Browsing>>,
     /// Starts browsing for servers, as [`discovery::browse`] does.
-    browse_servers: fn() -> Result<discovery::Browser, Box<dyn std::error::Error>>,
+    browse_servers: BrowseServers,
     servers: discovery::Servers,
     /// Whether the server list needs rebuilding.
     changed: bool,
@@ -716,7 +731,11 @@ impl Connection {
             multicast,
             client: None,
             browser: None,
-            browse_servers: || discovery::browse().map_err(Into::into),
+            browse_servers: || {
+                discovery::browse()
+                    .map(|browser| Box::new(browser) as Box<dyn Browsing>)
+                    .map_err(Into::into)
+            },
             servers: discovery::Servers::new(),
             changed: true,
             failed: false,
@@ -3007,6 +3026,46 @@ mod tests {
         conversation.push_action(Action::Send(ClientMessage::ListSpaces));
         connection.poll(true, &mut conversation);
         assert_eq!(conversation.menu_model().notice, None);
+    }
+
+    /// A search that finds only what the test sent it.
+    impl Browsing for std::sync::mpsc::Receiver<discovery::Event> {
+        fn try_recv(&self) -> Result<discovery::Event, discovery::TryRecvError> {
+            std::sync::mpsc::Receiver::try_recv(self)
+        }
+    }
+
+    #[test]
+    fn a_server_the_search_finds_is_listed() {
+        let (mut connection, mut conversation) = feedback_connection();
+        connection.browse_servers = || {
+            let (found, search) = std::sync::mpsc::channel();
+            found
+                .send(discovery::Event::Found(discovery::Server {
+                    instance: "Studio".into(),
+                    name: "Studio".into(),
+                    host: "studio.local.".into(),
+                    addresses: vec!["192.0.2.1:8765".parse().unwrap()],
+                    port: 8765,
+                    protocol: Some(tomori_protocol::PROTOCOL_VERSION),
+                    spaces: None,
+                    participants: None,
+                    waiting: None,
+                    problems: None,
+                    replies: None,
+                    fingerprint: None,
+                }))
+                .unwrap();
+            Ok(Box::new(search))
+        };
+        connection.poll(true, &mut conversation);
+        let names: Vec<_> = connection
+            .servers
+            .compatible()
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect();
+        assert_eq!(names, ["Studio"]);
     }
 
     #[test]

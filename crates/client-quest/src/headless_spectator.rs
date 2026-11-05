@@ -24,9 +24,8 @@ fn publish(mut state: State) -> Result<()> {
     let mut next = Instant::now();
     log::info!("Headless spectator running; Ctrl-C stops the PipeWire source.");
     loop {
-        if let Some(wait) = next.checked_duration_since(Instant::now()) {
-            std::thread::sleep(wait);
-        }
+        // Drawing late, the next frame is due at once.
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
         state.draw()?;
         next = next_frame_time(next, Instant::now(), interval);
     }
