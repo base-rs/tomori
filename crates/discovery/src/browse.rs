@@ -136,6 +136,26 @@ mod tests {
     }
 
     #[test]
+    fn a_server_resolved_over_ipv6_is_found_at_its_address() {
+        let service = mdns_sd::ServiceInfo::new(
+            SERVICE_TYPE,
+            "Studio",
+            "studio.local.",
+            "fd00::1",
+            8765,
+            None::<std::collections::HashMap<String, String>>,
+        )
+        .unwrap()
+        .as_resolved_service();
+        let Some(Event::Incompatible(server)) =
+            translate(ServiceEvent::ServiceResolved(Box::new(service)))
+        else {
+            unreachable!("expected a server without a protocol");
+        };
+        assert_eq!(server.addresses, ["[fd00::1]:8765".parse().unwrap()]);
+    }
+
+    #[test]
     fn browsing_starts_a_querier() {
         drop(browse().expect("the querier starts"));
     }

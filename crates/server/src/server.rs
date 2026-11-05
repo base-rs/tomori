@@ -1773,14 +1773,26 @@ mod tests {
             server.drain_timeout = Duration::ZERO;
         });
         // A response kept alive shows that the connection was accepted and stays open.
+        let healthy = |connection: &mut TcpStream| {
+            write!(
+                connection,
+                "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = Vec::new();
+            let mut buffer = [0; 1024];
+            while !response.ends_with(b"}\n") {
+                let count = connection.read(&mut buffer).unwrap();
+                response.extend_from_slice(&buffer[..count]);
+            }
+        };
         let mut idle = TcpStream::connect(running.address).unwrap();
-        write!(idle, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
-        let mut response = Vec::new();
-        let mut buffer = [0; 1024];
-        while !response.ends_with(b"}\n") {
-            let count = idle.read(&mut buffer).unwrap();
-            response.extend_from_slice(&buffer[..count]);
-        }
+        healthy(&mut idle);
+        // Another is served only once it closes.
+        let mut next = TcpStream::connect(running.address).unwrap();
+        drop(idle);
+        healthy(&mut next);
+        let idle = next;
         running.cancellation.cancel();
         let (result, _) = running
             .finished
