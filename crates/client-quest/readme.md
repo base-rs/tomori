@@ -1,0 +1,48 @@
+# `tomori-client-quest`
+
+[Tomori](https://github.com/ioquatix/tomori)'s headset, for the Meta Quest with OpenXR, and the `tomori` library and executable that run it, its desktop modes and the spectator. The library is also what another project builds a headset of its own on, through `tomori::Builder`, registering sceneries for environments of its own without changing Tomori.
+
+## Usage
+
+Tomori's own headset is an APK, `com.codeotaku.tomori`, which [`scripts/android.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/android.sh) builds from Tomori's repository. On the desktop:
+
+```sh
+cargo install tomori-client-quest
+tomori                                       # the server-less window
+tomori --desktop --server 192.168.1.10:8765  # take part in a server's spaces
+tomori --xr --server 192.168.1.10:8765       # a desktop OpenXR runtime
+```
+
+`tomori --help` lists every mode. A headset of your own registers its sceneries on Tomori's own build:
+
+```rust
+fn builder() -> tomori::Builder {
+    tomori::Builder::default().scenery("observe", my_scenery)
+}
+
+fn main() -> anyhow::Result<()> {
+    tomori::main(builder())
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(app: tomori::AndroidApp) {
+    builder().run_android(app)
+}
+```
+
+Depend on it without default features, which hold Tomori's own `android_main`:
+
+```toml
+tomori-client-quest = { version = "0.1.0", default-features = false }
+```
+
+[Packaging a Headset Build for the Quest](context/android.md) shows how to package it as an APK of its own, with its own application ID, label, icon and assets, and [examples/headset](https://github.com/ioquatix/tomori/tree/main/examples/headset) is a complete example.
+
+Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
+
+## See Also
+
+- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [`tomori-render`](https://crates.io/crates/tomori-render), for the `Scenery` a build draws.
+- [`tomori-server`](https://crates.io/crates/tomori-server), whose builder adds the server's half of an environment.

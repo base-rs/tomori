@@ -19,9 +19,8 @@ future design options, not implemented features.
 
 Read-only checks of the crates.io API on 2026-11-03, each a `GET` of `https://crates.io/api/v1/crates/NAME` with a `User-Agent`, returned HTTP 404 for every name Tomori uses or plans to use: no registered crate was found at the time of checking. A check of `serde` returned 200, confirming the API answered. A search for `tomori` found only `kotomori`, which is unrelated.
 
-- To be published: `tomori-protocol`, `tomori-client`, `tomori-discovery`, `tomori-security`, `tomori-backend`, `tomori-backend-opencode`, `tomori-speech`, `tomori-server` and `tomori-environment-sky`, which a check on 2026-11-05 found still free (HTTP 404, with `serde` returning 200).
-- Kept unpublished for now: `tomori-client-quest`.
-- Planned in [#97](https://github.com/ioquatix/tomori/issues/97): `tomori-environment`, `tomori-scene`, `tomori-render` and `tomori-physics`.
+- To be published: `tomori-protocol`, `tomori-client`, `tomori-discovery`, `tomori-security`, `tomori-backend`, `tomori-backend-opencode`, `tomori-speech`, `tomori-server` and `tomori-environment-sky`, which a check on 2026-11-05 found still free (HTTP 404, with `serde` returning 200); and `tomori-scene`, `tomori-render`, `tomori-client-desktop`, `tomori-client-spectator` and `tomori-client-quest`, which a check later on 2026-11-05 found free too.
+- Planned in [#97](https://github.com/ioquatix/tomori/issues/97): `tomori-environment` and `tomori-physics`.
 - The bare name `tomori`, which no package uses: the headset's library and executable are named `tomori`, but its package is `tomori-client-quest`.
 
 None of these names has been reserved or published. Recheck them before the first publication; this is not a trademark or wider availability check. An earlier check, on 2026-10-28, found `tomori` free too.

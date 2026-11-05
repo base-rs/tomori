@@ -6,8 +6,9 @@ rust-version.workspace = true
 description = "The Tomori spectator: a read-only, participant-following view of a live space, in a window or as a PipeWire video source"
 repository.workspace = true
 license.workspace = true
-# Published once the headset's builder has proved its interfaces; see design/crates.md.
-publish = false
+readme = "readme.md"
+keywords = ["tomori", "spectator", "pipewire", "obs", "agents"]
+categories = ["multimedia::video", "command-line-utilities"]
 
 [[bin]]
 name = "tomori-spectator"

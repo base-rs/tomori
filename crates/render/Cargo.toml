@@ -6,8 +6,9 @@ rust-version.workspace = true
 description = "Tomori's wgpu renderers and shaders, shared by the headset, the desktop window and the spectator"
 repository.workspace = true
 license.workspace = true
-# Published once the headset's builder has proved its interfaces; see design/crates.md.
-publish = false
+readme = "readme.md"
+keywords = ["tomori", "wgpu", "xr", "rendering", "agents"]
+categories = ["rendering", "graphics"]
 
 [features]
 # `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with Sky's and the clients' tests. Enabled only by tests.

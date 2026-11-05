@@ -6,7 +6,9 @@ rust-version.workspace = true
 description = "A conversational spatial workspace for people and agents, built with OpenXR and wgpu"
 repository.workspace = true
 license.workspace = true
-publish = false
+readme = "readme.md"
+keywords = ["tomori", "openxr", "quest", "xr", "agents"]
+categories = ["game-development", "rendering"]
 
 [lib]
 name = "tomori"
