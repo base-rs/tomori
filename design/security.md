@@ -49,7 +49,7 @@ The server says in `Welcome` the name it knows the participant by. A client offe
 
 **Data source credentials.** A token a server is given for a data source, such as the GitHub environment's (see `github.md`), stays on the server: it is used only in the server's own requests to that source, and never sent to a client, put in a space's state or kept spaces, told to the agent or logged.
 
-**Repository text is untrusted.** Anyone can open an issue or pull request on a public repository, so the titles, authors and labels the GitHub environment tells the agent are marked as untrusted repository content, quoted so that they cannot end their context line or forge another, and the environment's layer of the agent's instructions says they are data, never instructions (see `github.md`).
+**Repository text is untrusted.** Anyone can open an issue or pull request on a public repository, so the titles, authors and labels the GitHub environment tells the agent are marked as untrusted repository content, quoted so that they cannot end their quotation or the context block or forge another, and the environment's layer of the agent's instructions says they are data, never instructions (see `github.md`).
 
 ## Rationale
 

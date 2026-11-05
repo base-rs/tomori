@@ -689,6 +689,11 @@ impl HubState {
             .is_some_and(|(space, board)| space.model.environment == board.environment())
     }
 
+    /// The board, if the space `id` shows its cards.
+    fn cards_of(&self, id: &str) -> Option<&crate::cards::Board> {
+        self.board.as_ref().filter(|_| self.shows_cards(id))
+    }
+
     /// Send the cards again to everyone watching them in `space`, or in every space that shows them.
     fn touch_cards(&self, space: Option<&str>) {
         for record in self.spaces.iter().filter(|record| {
@@ -2398,10 +2403,13 @@ impl Hub {
                     });
                 }
                 // What the participant attends to is captured now, as they begin: only identities are taken from the
-                // client, which the space resolves, ignoring those it does not have. An answer goes to the question
-                // presented, and a name to the participant, so either is about nothing attended to.
+                // client, which the space resolves, ignoring those it does not have, cards only on the board of a
+                // space that shows them. An answer goes to the question presented, and a name to the participant, so
+                // either is about nothing attended to.
                 let attention = match state.space(&space) {
-                    Some(record) if answer.is_none() && !naming => record.model.resolve(&attention),
+                    Some(record) if answer.is_none() && !naming => {
+                        record.model.resolve(&attention, state.cards_of(&space))
+                    }
                     _ => Vec::new(),
                 };
                 state.next_utterance += 1;
@@ -2472,8 +2480,13 @@ impl Hub {
                         .filter(|record| {
                             record.attention.is_empty() && record.answer.is_none() && !record.naming
                         })
-                        .and_then(|record| state.space(&record.space))
-                        .map(|space| space.model.resolve(&[resource]))
+                        .and_then(|record| {
+                            state.space(&record.space).map(|space| {
+                                space
+                                    .model
+                                    .resolve(&[resource], state.cards_of(&record.space))
+                            })
+                        })
                 });
                 // Its frames and its end share one ordered stream, so all of its audio has arrived: the participant is told that it is being transcribed, before anything recognition reports.
                 if let Some(record) = state.utterances.get_mut(&open.id) {

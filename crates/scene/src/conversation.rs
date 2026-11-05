@@ -7173,7 +7173,8 @@ mod tests {
                 placement: Some(pose),
             }]
         );
-        let card = |number: u64| tomori_protocol::Resource::card(format!("github://o/r/issues/{number}"));
+        let card =
+            |number: u64| tomori_protocol::Resource::card(format!("github://o/r/issues/{number}"));
         let attending = |conversation: &mut Conversation| {
             conversation.talk(true);
             let actions = conversation.take_actions();

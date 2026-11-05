@@ -634,7 +634,11 @@ fn the_agent_is_told_what_the_cards_are_and_to_change_nothing_unasked() {
     assert!(
         text.contains("open issues and pull requests of the GitHub repository ioquatix/tomori")
     );
-    assert!(text.contains("[Pointing at the card for issue ioquatix/tomori#97"));
+    assert!(
+        text.contains(
+            "Ada: [Pointing at issue #97 (https://github.com/ioquatix/tomori/issues/97, "
+        )
+    );
     assert!(text.contains("gh issue view 97 --repo ioquatix/tomori"));
     assert!(text.contains("nothing is changed on GitHub"));
     // Repository text is marked as written by third parties, and as data rather than instructions.

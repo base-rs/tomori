@@ -1004,7 +1004,10 @@ mod tests {
             utterance.attention.clone()
         };
         let card_pointed = Resource::card("github://o/r/issues/1");
-        assert_eq!(attending(&mut conversation), [card_pointed.clone()]);
+        assert_eq!(
+            attending(&mut conversation),
+            std::slice::from_ref(&card_pointed)
+        );
         // Beyond the worker, the worker is pointed at.
         show(&mut conversation, beyond);
         frame(&mut step, &mut conversation, &senses);

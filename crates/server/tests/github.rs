@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use tomori_protocol::{Card, Cards, ClientMessage, Pointed, Pose, ServerMessage, SpaceState};
+use tomori_protocol::{Card, Cards, ClientMessage, Pose, Resource, ServerMessage, SpaceState};
 use tomori_security::Grant;
 use tomori_server::fake::FAKE_BACKEND_NAME;
 use tomori_server::github::{GitHub, Token};
@@ -299,11 +299,12 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
         placement: None,
     });
 
-    // Pointing at a card while speaking tells the agent which, as the server has it.
-    ada.say_pointing(
+    // Pointing at a card as the words begin tells the agent which, as the server has it, before the words.
+    ada.say_attending(
         "u1",
         "what's this one about?",
-        Some(Pointed::Card { card: ISSUE.into() }),
+        vec![Resource::card(ISSUE)],
+        None,
     );
     let session = server.backend.started()[0].clone();
     let prompt = eventually(|| {
@@ -314,31 +315,30 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
             .map(|prompt| prompt.text.clone())
     });
     assert!(
-        prompt.starts_with(
-            "Ada: what's this one about?\n\n[Pointing at the card for issue o/r#97, https://github.com/o/r/issues/97 (opened "
-        ),
+        prompt
+            .starts_with("Ada: [Pointing at issue #97 (https://github.com/o/r/issues/97, opened "),
         "{prompt}"
     );
     assert!(
         prompt.ends_with(
-            "; untrusted repository content: title \"Physics for cards\", author \"ioquatix\", labels \"enhancement\"]"
+            "; untrusted repository content: title \"Physics for cards\", author \"ioquatix\", labels \"enhancement\")] \
+what's this one about?"
         ),
         "{prompt}"
     );
-    // A card the board does not have, and an oversized one, add nothing.
-    ada.say_pointing(
+    // A card the board does not have, and an oversized one, add nothing, and the words are kept; nor does one named
+    // as the words end, as clients from before attention did.
+    ada.say_attending(
         "u2",
         "and this?",
-        Some(Pointed::Card {
-            card: "github://o/r/issues/1".into(),
-        }),
+        vec![Resource::card("github://o/r/issues/1")],
+        None,
     );
-    ada.say_pointing(
+    ada.say_attending(
         "u3",
         "or this?",
-        Some(Pointed::Card {
-            card: "x".repeat(10_000),
-        }),
+        vec![Resource::card("x".repeat(10_000))],
+        Some(Resource::card("x".repeat(10_000))),
     );
     let prompts = eventually(|| {
         let prompts = session.log().prompts;
@@ -359,7 +359,7 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
         placement: None,
     });
     assert_eq!(dee.error(), "This space shows no cards.");
-    dee.say_pointing("u4", "this?", Some(Pointed::Card { card: ISSUE.into() }));
+    dee.say_attending("u4", "this?", vec![Resource::card(ISSUE)], None);
     let other = eventually(|| server.backend.started().get(1).cloned());
     let prompt = eventually(|| {
         other
