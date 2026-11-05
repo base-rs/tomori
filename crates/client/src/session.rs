@@ -19,12 +19,12 @@ use base_scheduler_native::NativeScheduler;
 use futures_lite::future::{or, zip};
 use tomori_protocol::{
     AudioFrame, CONNECT_PATH, CONTENT_TYPE, ClientMessage, Frame, FrameDecoder, FrameKind,
-    PROTOCOL_VERSION, ServerMessage,
+    Keepalive, PROTOCOL_VERSION, ServerMessage,
 };
 use tomori_security::{Fingerprint, Pinned};
 
 use crate::client::Shared;
-use crate::outbox::Batch;
+use crate::outbox::{Batch, Outbox};
 use crate::resolve::resolve_in_background;
 use crate::{ConnectionState, Disconnect, Event, Options, Transport};
 
@@ -56,6 +56,13 @@ impl Context<'_> {
             Err(Disconnect::Timeout)
         })
         .await
+    }
+
+    /// [`Disconnect::Closed`], once the client closes and `grace` has passed.
+    async fn closed<T>(&self, grace: Duration) -> Result<T, Disconnect> {
+        self.shared.closing.cancelled().await;
+        let _ = self.scheduler.sleep(grace, &Cancellation::never()).await;
+        Err(Disconnect::Closed)
     }
 }
 
@@ -102,10 +109,7 @@ async fn session(context: &Context<'_>, welcomed: &Cell<Option<Instant>>) -> Dis
             context.options.connect_timeout,
             resolve_in_background(&context.options.address),
         ),
-        async {
-            context.shared.closing.cancelled().await;
-            Err(Disconnect::Closed)
-        },
+        context.closed(Duration::ZERO),
     );
     let addresses = match resolution.await {
         Ok(addresses) => addresses,
@@ -225,16 +229,13 @@ async fn attempt(
             welcomed,
             pinned.as_deref(),
         );
-        let reason = or(exchange, async {
-            // Closing lets the exchange deliver queued control messages, but only for so long.
-            context.shared.closing.cancelled().await;
-            let _ = context
-                .scheduler
-                .sleep(context.options.close_timeout, &Cancellation::never())
-                .await;
-            Disconnect::Closed
-        })
+        // Closing lets the exchange deliver queued control messages, but only for so long.
+        let ended: Result<Infallible, Disconnect> = or(
+            async { Err(exchange.await) },
+            context.closed(context.options.close_timeout),
+        )
         .await;
+        let Err(reason) = ended;
         client.begin_close();
         lifetime.cancel();
         reason
@@ -310,19 +311,14 @@ async fn exchange(
         for message in context.shared.outbox.connect() {
             Frame::client(&message).encode_into(&mut bytes);
         }
-        let result: Result<(), Disconnect> = async {
-            output.write(bytes, lifetime).await.map_err(transport)?;
-            while let Batch::Frames(bytes) = context.shared.outbox.next_batch(BATCH_LIMIT).await {
-                output.write(bytes, lifetime).await.map_err(transport)?;
-            }
-            output.finish(lifetime).await.map_err(transport)
+        // A write fails only as the connection does, and its response with it, so the download says why. Writing stops then; otherwise the request body is finished once the client closes, with queued control sent, and the server then ends its response, which `session` bounds by the close timeout.
+        let mut written = output.write(bytes, lifetime).await;
+        while written.is_ok()
+            && let Batch::Frames(bytes) = context.shared.outbox.next_batch(BATCH_LIMIT).await
+        {
+            written = output.write(bytes, lifetime).await;
         }
-        .await;
-        match result {
-            Err(reason) => reason,
-            // Closing, with queued control sent: wait for the server to end its response, which `session` bounds by the close timeout.
-            Ok(()) => std::future::pending().await,
-        }
+        let _ = output.finish(lifetime).await;
     };
 
     let download = async {
@@ -340,9 +336,8 @@ async fn exchange(
                 .within(context.options.connect_timeout, reader.next())
                 .await?;
             let source = welcome(context, first, certificate)?;
-            if context.learned.get().is_none() {
-                context.learned.set(certificate);
-            }
+            // The first certificate seen is the one learned.
+            context.learned.set(context.learned.get().or(certificate));
             welcomed.set(Some(context.scheduler.now()));
             let frames = async {
                 loop {
@@ -350,7 +345,13 @@ async fn exchange(
                     deliver(context, frame, source)?;
                 }
             };
-            or(frames, async { Err(keepalive(context, &received).await) }).await
+            let keepalive = keepalive(
+                context.scheduler,
+                context.options.keepalive,
+                &context.shared.outbox,
+                &received,
+            );
+            or(frames, async { Err(keepalive.await) }).await
         }
         .await;
         match result {
@@ -358,13 +359,29 @@ async fn exchange(
         }
     };
 
-    or(upload, download).await
+    // The response says how the connection ended.
+    alongside(download, upload).await
 }
 
-/// Ping the server whenever nothing has been received for the keepalive interval, and end the connection with [`Disconnect::Timeout`] once nothing has been received for the keepalive timeout. `received` is when data last arrived.
-async fn keepalive(context: &Context<'_>, received: &Cell<Instant>) -> Disconnect {
-    let scheduler = context.scheduler;
-    let keepalive = context.options.keepalive;
+/// `main`, with `background` making progress beside it until it is done.
+async fn alongside<T>(main: impl Future<Output = T>, background: impl Future<Output = ()>) -> T {
+    let mut main = std::pin::pin!(main);
+    let mut background = std::pin::pin!(background);
+    let mut done = false;
+    std::future::poll_fn(|context| {
+        done = done || background.as_mut().poll(context).is_ready();
+        main.as_mut().poll(context)
+    })
+    .await
+}
+
+/// Ping the server, through `outbox`, whenever nothing has been received for the keepalive interval, and end the connection with [`Disconnect::Timeout`] once nothing has been received for the keepalive timeout. `received` is when data last arrived.
+async fn keepalive<S: Timers>(
+    scheduler: &S,
+    keepalive: Keepalive,
+    outbox: &Outbox,
+    received: &Cell<Instant>,
+) -> Disconnect {
     let mut timer = scheduler.timer();
     let mut nonce = 0;
     let mut pinged: Option<Instant> = None;
@@ -389,7 +406,7 @@ async fn keepalive(context: &Context<'_>, received: &Cell<Instant>) -> Disconnec
             return Disconnect::Timeout;
         }
         if now >= ping_at && now >= last + keepalive.interval {
-            context.shared.outbox.ping(nonce);
+            outbox.ping(nonce);
             nonce = nonce.wrapping_add(1);
             pinged = Some(now);
         }
@@ -515,6 +532,51 @@ impl FrameReader<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Timers whose waits fail.
+    struct Broken;
+
+    impl Clock for Broken {
+        fn now(&self) -> Instant {
+            Instant::now()
+        }
+
+        fn sleep_until(
+            &self,
+            _deadline: Instant,
+            _cancellation: &Cancellation,
+        ) -> impl Future<Output = base_scheduler::OperationResult<()>> + Send {
+            std::future::ready(Err(std::io::Error::other("the timer broke").into()))
+        }
+    }
+
+    impl Timers for Broken {
+        type Timer = ();
+
+        fn timer(&self) {}
+
+        fn timer_wait_until(
+            &self,
+            _timer: &mut (),
+            deadline: Instant,
+            cancellation: &Cancellation,
+        ) -> impl Future<Output = base_scheduler::OperationResult<()>> + Send {
+            self.sleep_until(deadline, cancellation)
+        }
+    }
+
+    #[test]
+    fn a_keepalive_whose_timer_fails_ends_the_connection() {
+        let outbox = Outbox::new(1, 1);
+        let received = Cell::new(Broken.now());
+        let reason = futures_lite::future::block_on(keepalive(
+            &Broken,
+            Keepalive::default(),
+            &outbox,
+            &received,
+        ));
+        assert_eq!(reason, Disconnect::Transport("the timer broke".into()));
+    }
 
     #[test]
     fn plain_http_is_tried_only_when_no_certificate_was_presented() {

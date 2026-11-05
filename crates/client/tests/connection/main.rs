@@ -475,6 +475,11 @@ fn reports_how_the_response_ended() {
     assert_eq!(reason, Disconnect::Closed);
     assert!(connected);
 
+    // So does closing the connection, for a response it delimits.
+    let client = Client::connect(options(raw::start_closing(raw::welcome_frame()))).unwrap();
+    wait_connected(&client);
+    assert_eq!(wait_disconnected(&client), Disconnect::Closed);
+
     // Ending part way through a frame is a protocol error.
     let mut body = raw::welcome();
     body.extend(raw::chunk(&[0, 9, 0, 0, 0, b'{']));
@@ -631,4 +636,22 @@ fn congestion_drops_outgoing_audio_and_closing_stays_bounded() {
     client.close();
     let elapsed = started.elapsed();
     assert!(elapsed < Duration::from_secs(3), "closing took {elapsed:?}");
+}
+
+#[test]
+fn a_connection_reset_while_writing_is_a_transport_failure() {
+    let (reset, resets) = std::sync::mpsc::channel();
+    let client = Client::connect(options(raw::start_resetting(raw::welcome(), resets))).unwrap();
+    wait_connected(&client);
+    // Far more than the socket buffers hold, with the peer no longer reading.
+    let deadline = Instant::now() + TIMEOUT;
+    let mut sequence = 0;
+    while client.sender().dropped_audio_frames() == 0 {
+        assert!(Instant::now() < deadline, "the writes never backed up");
+        client.send_audio(audio(sequence)).unwrap();
+        sequence += 1;
+    }
+    reset.send(()).unwrap();
+    let reason = wait_disconnected(&client);
+    assert!(matches!(reason, Disconnect::Transport(_)), "{reason:?}");
 }

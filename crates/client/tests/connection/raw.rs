@@ -27,7 +27,16 @@ pub fn welcome() -> Vec<u8> {
 
 /// A Welcome that limits utterances to `utterance_limit` seconds, if given.
 pub fn welcome_limiting(utterance_limit: Option<u32>) -> Vec<u8> {
-    message(&ServerMessage::Welcome {
+    message(&welcome_message(utterance_limit))
+}
+
+/// A Welcome's frame, outside any chunk.
+pub fn welcome_frame() -> Vec<u8> {
+    Frame::server(&welcome_message(None)).encode()
+}
+
+fn welcome_message(utterance_limit: Option<u32>) -> ServerMessage {
+    ServerMessage::Welcome {
         protocol: tomori_protocol::PROTOCOL_VERSION,
         server: "mini".into(),
         source: 1,
@@ -36,7 +45,7 @@ pub fn welcome_limiting(utterance_limit: Option<u32>) -> Vec<u8> {
         roots: vec![],
         environments: vec![],
         utterance_limit,
-    })
+    }
 }
 
 /// A control frame whose payload is `payload`, which need not be a valid message.
@@ -89,4 +98,47 @@ pub fn start_recording(body: Option<Vec<u8>>) -> (SocketAddr, Receiver<Vec<u8>>)
         }
     });
     (address, received)
+}
+
+/// Accept one connection, read its request head and respond 200 with `body` as a chunked body, then read nothing more. Once `reset` says so, close the connection with what the client sent unread, which resets it.
+pub fn start_resetting(body: Vec<u8>, reset: Receiver<()>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let mut response = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+        response.extend(body);
+        stream.write_all(&response).unwrap();
+        let _ = reset.recv();
+        drop(stream);
+    });
+    address
+}
+
+/// Accept connections forever. For each, read the request head and respond 200 with `body`, delimited by closing the connection, which follows at once.
+pub fn start_closing(body: Vec<u8>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let mut response = b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_vec();
+            response.extend(&body);
+            stream.write_all(&response).unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+        }
+    });
+    address
 }

@@ -60,10 +60,10 @@ pub(crate) fn literal(address: &str) -> Option<SocketAddr> {
 
 type Resolution = Result<Vec<SocketAddr>, Disconnect>;
 
-#[derive(Default)]
+/// Where the helper thread leaves its resolution, and whom to wake for it: no one until the resolution is first waited for.
 struct Slot {
     resolution: Option<Resolution>,
-    waker: Option<Waker>,
+    waker: Waker,
 }
 
 /// [`resolve`] on a helper thread, so that the connection thread can stop waiting, for example when the client closes. A host name lookup blocks in `getaddrinfo`, which cannot be interrupted; an abandoned lookup's thread ends by itself when the lookup returns. IP literals are resolved without a thread.
@@ -75,7 +75,10 @@ async fn resolve_with(address: &str, resolver: fn(&str) -> Resolution) -> Resolu
     if let Some(address) = literal(address) {
         return Ok(vec![address]);
     }
-    let slot = Arc::new(Mutex::new(Slot::default()));
+    let slot = Arc::new(Mutex::new(Slot {
+        resolution: None,
+        waker: Waker::noop().clone(),
+    }));
     let thread_slot = slot.clone();
     let thread_address = address.to_owned();
     std::thread::Builder::new()
@@ -84,19 +87,17 @@ async fn resolve_with(address: &str, resolver: fn(&str) -> Resolution) -> Resolu
             let resolution = resolver(&thread_address);
             let mut slot = thread_slot.lock().unwrap_or_else(PoisonError::into_inner);
             slot.resolution = Some(resolution);
-            let waker = slot.waker.take();
+            let waker = slot.waker.clone();
             drop(slot);
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            waker.wake();
         })
-        .map_err(|error| Disconnect::Address(error.to_string()))?;
+        .expect("spawn the resolver thread");
     std::future::poll_fn(|context| {
         let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
         match slot.resolution.take() {
             Some(resolution) => Poll::Ready(resolution),
             None => {
-                slot.waker = Some(context.waker().clone());
+                slot.waker = context.waker().clone();
                 Poll::Pending
             }
         }
