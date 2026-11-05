@@ -437,7 +437,7 @@ impl Motion {
     }
 
     /// Whether anything is still moving at `now`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn moving(&self, now: f32) -> bool {
         self.entries.iter().any(|entry| now < entry.track.end())
             || self.heading_anchor.is_some_and(|track| now < track.end())

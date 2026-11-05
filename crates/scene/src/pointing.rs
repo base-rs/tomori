@@ -6,6 +6,20 @@
 //! This has no rendering, windowing or XR code, so the headset's controller and the desktop's mouse share it: each turns its device into a [`Ray`] and a trigger value, and draws what [`Pointing`] reports.
 use glam::{Quat, Vec3};
 
+/// How far the ray reaches when it meets nothing.
+pub const RAY_LENGTH: f32 = 3.0;
+/// How far the ray reaches in a space when it meets no worker: far enough to show where it points, but short of the workers, so that an idle ray does not streak through the space. It reaches a worker once it meets one.
+pub const SPACE_RAY_LENGTH: f32 = 1.0;
+
+/// The pointing ray, from the controller to where it ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Beam {
+    pub origin: Vec3,
+    pub end: Vec3,
+    /// Whether it ends on something it points at, which draws it highlighted.
+    pub hit: bool,
+}
+
 /// A pull starts once the trigger passes this, and attracts the swarm when it does not choose.
 const PULL: f32 = 0.2;
 /// A pull that began on a target chooses it once the trigger passes this.
@@ -226,7 +240,7 @@ impl<K: Clone + PartialEq> Pointer<K> {
     }
 
     /// The highlighted target, as of the last update.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn hovered(&self) -> Option<&K> {
         self.hovered.as_ref()
     }

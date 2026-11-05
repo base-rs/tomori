@@ -167,7 +167,7 @@ mod tests {
             assert_eq!(list[0].1, pill);
             // Recording, the pill comes first, then the indicator, moved into the eyes' space.
             let recording = Senses {
-                trackers: crate::recording::Trackers {
+                trackers: tomori_scene::recording::Trackers {
                     view: Some(arrival::HOME - Vec3::Z * 0.5),
                     ..Default::default()
                 },

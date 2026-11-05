@@ -126,6 +126,9 @@ jobs:
       - name: Build the client core on its own
         # Checks the core with only its own features, as design/clients.md requires, rather than those the headset unifies with it. After scripts/android.sh, which creates the directory cargo-apk needs for SHERPA_ONNX_ARCHIVE_DIR.
         run: cargo apk -- build --package tomori-client --target aarch64-linux-android --locked
+      - name: Build the scene on its own
+        # The platform-neutral client, with only its own features, likewise.
+        run: cargo apk -- build --package tomori-scene --target aarch64-linux-android --locked
       - uses: actions/upload-artifact@v7
         with:
           name: tomori-apk

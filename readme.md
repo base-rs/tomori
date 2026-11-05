@@ -291,14 +291,14 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 
 - `crates/client-quest/src/desktop.rs`: the server-less and spectator windows, orbit camera, mouse attraction; `desktop_participant.rs`: the `--desktop` window. `window.rs` is what a window gives its contents, and `desktop_window.rs` the winit and surface calls alone.
 - `crates/client-quest/src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions: the device calls only, with the values read and the choices made in `xr_types.rs`.
-- `crates/client-quest/src/scene.rs`: the frame step the headset and the desktop window share, from plain input; `scene/headset.rs` and `scene/desktop.rs` hold each platform's own logic, and `scene_graphics.rs` draws a frame.
+- `crates/scene/src/scene.rs`: the frame step the headset and the desktop window share, from plain input; `scene/headset.rs` and `scene/desktop.rs` hold each platform's own logic, and `crates/client-quest/src/scene_graphics.rs` draws a frame.
 - `crates/client-quest/src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed two-layer XR swapchain images, one layer per eye.
 - `crates/client-quest/src/graphics.rs`, `crates/client-quest/src/swarm.wgsl`: instanced cube rendering with per-eye depth.
-- `crates/client-quest/src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
+- `crates/scene/src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
 - `bridge/asr.mjs`, `bridge/asr_worker.py`: GPU/CPU Whisper rolling transcription.
-- `crates/client-quest/src/caption.rs`, `crates/client-quest/src/caption.wgsl`: head-relative, stereo text panel.
-- `crates/client-quest/src/conversation.rs`: server list, space list and space panel, driven by server events.
-- `crates/client-quest/src/connection.rs`: the server connection and Bonjour browsing.
+- `crates/scene/src/caption.rs`, `crates/client-quest/src/caption.wgsl`: head-relative, stereo text panel.
+- `crates/scene/src/conversation.rs`: server list, space list and space panel, driven by server events.
+- `crates/scene/src/connection.rs`: the server connection and Bonjour browsing.
 - `bridge/`: official OpenCode V2 client adapter, no longer used by the headset.
 
 The Vulkan device uses the runtime-selected physical GPU and enables the full extension/feature set required by wgpu. Swapchain images remain runtime-owned; wgpu has no permission to destroy them. Each frame waits for submitted GPU work before releasing the XR image, leaving it in `COLOR_ATTACHMENT_OPTIMAL`. This simple conservative synchronization favors correctness over maximum throughput. Tracking loss and non-rendering frames submit no layer; sessions handle ready/stopping/exit events. The scene initially faces the headset; the app uses `LOCAL_FLOOR` when available so the Quest's system Meta-button recenter moves the scene, falling back to `LOCAL` with an approximate 1.6 m floor offset. Reference space changes take effect at the runtime's specified frame time. Recentering doesn't reset the agents, conversation, or interaction state. This is opaque VR, not passthrough; optional tracked-hand skeletons are described above.
@@ -315,7 +315,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
 
-`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
+`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead, and [`tomori-environment-sky`](crates/environment-sky/readme.md) stays private until environments have a shared interface. The application is being split into crates of its own, unpublished until the headset has a builder: `tomori-scene`, in `crates/scene`, is the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
 ## Third-Party Components
 

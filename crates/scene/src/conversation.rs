@@ -439,13 +439,13 @@ impl Conversation {
         self.capture_generation = generation;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
     }
 
     /// Queue `action` as though the conversation had asked for it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn push_action(&mut self, action: Action) {
         self.actions.push(action);
     }
@@ -1764,7 +1764,7 @@ impl Conversation {
     }
 
     /// Whether the right stick up and down selects queued entries now, rather than doing anything else.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn selects_queue(&self) -> bool {
         self.mode == Mode::Space
             && self.role.participates()
@@ -3274,7 +3274,7 @@ impl Conversation {
     }
 
     /// The problem to show: this participant's newest error, else the space's ongoing problem unless dismissed here.
-    pub(crate) fn problem(&self) -> Option<String> {
+    pub fn problem(&self) -> Option<String> {
         self.error.clone().or_else(|| {
             self.space
                 .as_ref()

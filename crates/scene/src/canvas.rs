@@ -1,0 +1,290 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! What a panel shows: a [`Canvas`] of rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up; it is pure, so that layouts are tested without a GPU. The renderer's panels draw it.
+
+use bytemuck::{Pod, Zeroable};
+
+use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Rgba, Row, glyph};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 2],
+    pub color: [f32; 4],
+}
+
+/// A rectangle in font pixels from the canvas's top-left corner, inside its padding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: Rgba,
+}
+
+/// What a panel shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Canvas {
+    /// The width of the text, in cells; rows longer than this are cut.
+    pub columns: usize,
+    pub rows: Vec<Row>,
+    /// The size of a font pixel, in metres.
+    pub pixel: f32,
+    /// Behind everything, usually translucent.
+    pub background: Rgba,
+    /// Font pixels around the text, horizontally and vertically.
+    pub padding: (usize, usize),
+    /// A frame around the panel, a font pixel wide.
+    pub border: Option<Rgba>,
+    /// Shapes drawn over the rows' backgrounds and under the text.
+    pub shapes: Vec<Rect>,
+}
+
+impl Canvas {
+    pub fn new(columns: usize, pixel: f32) -> Self {
+        Self {
+            columns,
+            rows: Vec::new(),
+            pixel,
+            background: [0.008, 0.018, 0.035, 0.85],
+            padding: (6, 4),
+            border: None,
+            shapes: Vec::new(),
+        }
+    }
+
+    /// The panel's size in font pixels.
+    pub fn size_in_pixels(&self) -> (usize, usize) {
+        (
+            self.columns * CELL_WIDTH + 2 * self.padding.0,
+            self.rows.len() * CELL_HEIGHT + 2 * self.padding.1,
+        )
+    }
+
+    /// The panel's width and height in metres.
+    pub fn size(&self) -> (f32, f32) {
+        let (width, height) = self.size_in_pixels();
+        (width as f32 * self.pixel, height as f32 * self.pixel)
+    }
+
+    /// The text, a row per line.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn plain(&self) -> String {
+        self.rows
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The quads that draw the canvas, centred on its origin.
+    pub fn mesh(&self) -> Vec<Vertex> {
+        let mut mesh = Mesh::new(self);
+        let (width, height) = self.size_in_pixels();
+        let (width, height) = (width as f32, height as f32);
+        mesh.quad(0.0, 0.0, width, height, self.background);
+        if let Some(border) = self.border {
+            mesh.quad(0.0, 0.0, width, 1.0, border);
+            mesh.quad(0.0, height - 1.0, width, 1.0, border);
+            mesh.quad(0.0, 0.0, 1.0, height, border);
+            mesh.quad(width - 1.0, 0.0, 1.0, height, border);
+        }
+        let (left, top) = (self.padding.0 as f32, self.padding.1 as f32);
+        let text_width = (self.columns * CELL_WIDTH) as f32;
+        for (index, row) in self.rows.iter().enumerate() {
+            let y = top + (index * CELL_HEIGHT) as f32;
+            if let Some(background) = row.background {
+                mesh.quad(
+                    left - 2.0,
+                    y,
+                    text_width + 4.0,
+                    CELL_HEIGHT as f32,
+                    background,
+                );
+            }
+            // Runs of cells with the same background are one quad.
+            let mut column = 0;
+            let cells = &row.cells[..row.cells.len().min(self.columns)];
+            while column < cells.len() {
+                let background = cells[column].1.background;
+                let start = column;
+                while column < cells.len() && cells[column].1.background == background {
+                    column += 1;
+                }
+                if let Some(background) = background {
+                    mesh.quad(
+                        left + (start * CELL_WIDTH) as f32,
+                        y,
+                        ((column - start) * CELL_WIDTH) as f32,
+                        CELL_HEIGHT as f32,
+                        background,
+                    );
+                }
+            }
+            if let Some(bar) = row.bar {
+                mesh.quad(left + 1.0, y, 3.0, CELL_HEIGHT as f32, bar);
+            }
+            if let Some((fraction, color)) = row.meter {
+                let fraction = fraction.clamp(0.0, 1.0);
+                mesh.quad(
+                    left,
+                    y + CELL_HEIGHT as f32 - 1.5,
+                    text_width * fraction,
+                    1.5,
+                    color,
+                );
+            }
+        }
+        for shape in &self.shapes {
+            mesh.quad(
+                left + shape.x,
+                top + shape.y,
+                shape.width,
+                shape.height,
+                shape.color,
+            );
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            let y = top + (index * CELL_HEIGHT) as f32 + 2.0;
+            for (column, &(ch, style)) in row.cells.iter().take(self.columns).enumerate() {
+                if ch == ' ' {
+                    continue;
+                }
+                let x = left + (column * CELL_WIDTH) as f32;
+                for (line, bits) in glyph(ch).iter().enumerate() {
+                    let mut bits = u16::from(*bits);
+                    if style.bold {
+                        bits |= bits << 1;
+                    }
+                    // Lit pixels in a line are one quad.
+                    let mut pixel = 0;
+                    while pixel < 9 {
+                        if bits & (1 << pixel) == 0 {
+                            pixel += 1;
+                            continue;
+                        }
+                        let start = pixel;
+                        while pixel < 9 && bits & (1 << pixel) != 0 {
+                            pixel += 1;
+                        }
+                        mesh.quad(
+                            x + start as f32,
+                            y + line as f32,
+                            (pixel - start) as f32,
+                            1.0,
+                            style.color,
+                        );
+                    }
+                }
+            }
+        }
+        mesh.vertices
+    }
+}
+
+/// Builds quads in font pixels from the top-left corner, placed in metres about the centre.
+struct Mesh {
+    vertices: Vec<Vertex>,
+    pixel: f32,
+    origin: (f32, f32),
+}
+
+impl Mesh {
+    fn new(canvas: &Canvas) -> Self {
+        let (width, height) = canvas.size_in_pixels();
+        Self {
+            vertices: Vec::new(),
+            pixel: canvas.pixel,
+            origin: (width as f32 / 2.0, height as f32 / 2.0),
+        }
+    }
+
+    fn quad(&mut self, x: f32, y: f32, width: f32, height: f32, color: Rgba) {
+        if width <= 0.0 || height <= 0.0 || color[3] <= 0.0 {
+            return;
+        }
+        let place = |x: f32, y: f32| {
+            [
+                (x - self.origin.0) * self.pixel,
+                (self.origin.1 - y) * self.pixel,
+            ]
+        };
+        let (left, top) = (x, y);
+        let (right, bottom) = (x + width, y + height);
+        for position in [
+            place(left, top),
+            place(right, top),
+            place(left, bottom),
+            place(right, top),
+            place(right, bottom),
+            place(left, bottom),
+        ] {
+            self.vertices.push(Vertex { position, color });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_text::{Span, Style, Wrap, wrap};
+
+    #[test]
+    fn the_mesh_stays_within_the_panel_and_is_centred() {
+        let mut canvas = Canvas::new(10, 0.001);
+        for line in wrap(
+            &[Span::new(
+                "Every row of this text fits within ten columns, wrapped.",
+                Style::bold([1.0; 4]).on([0.2, 0.2, 0.2, 1.0]),
+            )],
+            10,
+            Wrap::default(),
+        ) {
+            canvas
+                .rows
+                .push(Row::new(line).with_bar(Some([0.0, 1.0, 1.0, 1.0])));
+        }
+        canvas.rows[0].meter = Some((0.5, [1.0; 4]));
+        canvas.border = Some([1.0, 0.6, 0.2, 1.0]);
+        let (width, height) = canvas.size();
+        let mesh = canvas.mesh();
+        assert_eq!(mesh.len() % 6, 0);
+        assert!(mesh.iter().all(|vertex| {
+            vertex.position[0].abs() <= width / 2.0 + 1e-5
+                && vertex.position[1].abs() <= height / 2.0 + 1e-5
+        }));
+        // The backing is the first quad, from corner to corner.
+        assert_eq!(mesh[0].position, [-width / 2.0, height / 2.0]);
+        assert_eq!(mesh[4].position, [width / 2.0, -height / 2.0]);
+    }
+
+    #[test]
+    fn lit_pixels_in_a_line_are_merged_and_bold_is_wider() {
+        let mut canvas = Canvas::new(1, 1.0);
+        canvas.background = [0.0; 4];
+        canvas
+            .rows
+            .push(Row::new(vec![('_', Style::plain([1.0; 4]))]));
+        // The underscore is one line of lit pixels: one quad.
+        assert_eq!(canvas.mesh().len(), 6);
+        let quad = canvas.mesh();
+        let plain = quad[1].position[0] - quad[0].position[0];
+        canvas.rows[0].cells[0].1.bold = true;
+        let quad = canvas.mesh();
+        let bold = quad[1].position[0] - quad[0].position[0];
+        assert_eq!(bold, plain + 1.0);
+    }
+
+    #[test]
+    fn transparent_and_empty_parts_draw_nothing() {
+        let mut canvas = Canvas::new(4, 1.0);
+        canvas.background = [0.0; 4];
+        canvas
+            .rows
+            .push(Row::new(vec![(' ', Style::plain([1.0; 4]))]));
+        assert!(canvas.mesh().is_empty());
+        assert_eq!(canvas.plain(), " ");
+    }
+}

@@ -95,7 +95,7 @@ pub fn head_centre(head: Mat4) -> Vec3 {
 }
 
 /// The head's transform, between the eyes, turned `yaw` degrees to the left and `pitch` up about a neck at `neck`, for tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub fn head_turned(neck: Vec3, yaw: f32, pitch: f32) -> Mat4 {
     let rotation =
         Quat::from_rotation_y(yaw.to_radians()) * Quat::from_rotation_x(pitch.to_radians());

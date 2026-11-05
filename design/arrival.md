@@ -49,7 +49,7 @@ The user found the heads-up panel unintuitive for getting connected, and found t
 
 ## Scope
 
-The headset client's flow from launch to joining a space (`crates/client-quest`), including how it presents pairing, knocking and authentication notices, the swarm's arrival behaviour, the lobby and session-listing messages in `crates/protocol`, and the session facts each backend reports for attaching.
+The headset client's flow from launch to joining a space (`crates/scene`, drawn by `crates/client-quest`), including how it presents pairing, knocking and authentication notices, the swarm's arrival behaviour, the lobby and session-listing messages in `crates/protocol`, and the session facts each backend reports for attaching.
 
 ## Validation
 

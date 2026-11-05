@@ -86,7 +86,7 @@ impl State {
             renderer,
             video,
             spectator,
-            swarm: Swarm::new(),
+            swarm: Swarm::default(),
         }
     }
 

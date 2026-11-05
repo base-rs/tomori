@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use glam::{Mat4, Quat, Vec3};
 
+use crate::canvas::{Canvas, Rect};
 use crate::controller::Pose;
-use crate::ui_panel::{Canvas, Rect};
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, cut, wrap};
 
 /// The indicator's width, in cells.

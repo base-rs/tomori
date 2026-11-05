@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Styled text laid out on a grid of monospaced cells, for the local-space panels in `ui_panel`, free of rendering code.
+//! Styled text laid out on a grid of monospaced cells, for the local-space panels' [`Canvas`](crate::canvas::Canvas), free of rendering code.
 //!
 //! Text is given as [`Span`]s, each with a [`Style`]: a colour, whether it is bold, and an optional background. [`wrap`] lays spans out on rows of a given width, at words, with a hanging indent for the rows after the first and, for code, a continuation mark where a line is broken rather than cut. Every character drawn is one cell; [`glyph`] finds its bitmap in the `font8x8` tables, and [`shown`] the character that is drawn for it, `?` for one outside them, so that the console shows what the headset draws.
 

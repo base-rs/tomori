@@ -50,7 +50,7 @@ In November 2026 the user found a panel held by the hand turning against the hea
 
 ## Scope
 
-The headset and desktop client (`crates/client-quest`): showing the hand menu from hand and controller poses, its items, pointing in it, and the wrist cue; the recording indicator and `LIVE` badge on the left controller; and the equivalent for the desktop window and console.
+The headset and desktop client (`crates/scene`, drawn by `crates/client-quest`): showing the hand menu from hand and controller poses, its items, pointing in it, and the wrist cue; the recording indicator and `LIVE` badge on the left controller; and the equivalent for the desktop window and console.
 
 ## Validation
 

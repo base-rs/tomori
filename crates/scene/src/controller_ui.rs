@@ -1,18 +1,18 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! What the panels held by the controllers show and where, shared by the headset's and the desktop window's frame steps: the recording indicator and the `LIVE` badge on the left controller (see `design/hand-menu.md`), the status pill, and the transcript on the right wrist (see `design/wrist-transcript.md`). The panels that draw them are [`crate::scene_graphics::Panels`].
+//! What the panels held by the controllers show and where, shared by the headset's and the desktop window's frame steps: the recording indicator and the `LIVE` badge on the left controller (see `design/hand-menu.md`), the status pill, and the transcript on the right wrist (see `design/wrist-transcript.md`). The panels that draw them are renderer's panels.
 
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Vec2, Vec3};
 
+use crate::canvas::Canvas;
 use crate::conversation::Conversation;
 use crate::hand_menu::{Palm, PalmUp};
 use crate::panel_anchor::PanelAnchor;
 use crate::recording::{self, Anchor, Trackers};
 use crate::transcript::{DETACHED_COLUMNS, WRIST_COLUMNS};
-use crate::ui_panel::Canvas;
 
 /// When a frame is, for the panels that move and animate.
 #[derive(Clone, Copy, Debug)]

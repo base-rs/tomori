@@ -3,24 +3,19 @@
 
 #[cfg(target_os = "android")]
 mod android;
-mod arrival;
+#[cfg(target_os = "android")]
+mod android_audio;
 mod arrival_graphics;
-mod arrival_motion;
-mod caption;
-mod capture;
 #[cfg(not(target_os = "android"))]
 mod child_process;
 #[cfg(not(target_os = "android"))]
 mod cli;
-mod connection;
 #[cfg(not(target_os = "android"))]
 mod console;
 mod controller;
 mod controller_graphics;
-mod controller_ui;
-mod conversation;
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-mod delegation;
+#[cfg(not(target_os = "android"))]
+mod cpal_audio;
 #[cfg(not(target_os = "android"))]
 mod desktop;
 #[cfg(not(target_os = "android"))]
@@ -31,44 +26,22 @@ mod desktop_participant;
 mod desktop_window;
 #[cfg(not(target_os = "android"))]
 mod discover;
-mod environment;
-mod feedback;
 mod graphics;
-mod hand_menu;
-mod hands;
-mod haptics;
 
 #[cfg(not(target_os = "android"))]
 mod headless_spectator;
-mod identity;
-mod interaction;
-mod log_cadence;
-mod markdown_lite;
-mod panel_anchor;
-mod pill;
 #[cfg(not(target_os = "android"))]
 mod pipewire_video;
-mod playback;
-mod pointing;
-mod recording;
-mod scene;
 mod scene_graphics;
-mod server_choice;
-mod spatial_audio;
-mod speakers;
 #[cfg(not(target_os = "android"))]
 mod spectator;
 #[cfg(not(target_os = "android"))]
 mod spectator_feed;
 #[cfg(not(target_os = "android"))]
 mod spectator_view;
-mod swarm;
-mod system;
 #[cfg(all(test, not(target_os = "android")))]
 mod test_support;
-mod transcript;
 mod ui_panel;
-mod ui_text;
 mod vulkan;
 #[cfg(not(target_os = "android"))]
 mod window;
@@ -76,11 +49,20 @@ mod workspace_graphics;
 mod xr;
 mod xr_types;
 
+// The platform-neutral modules, from `tomori-scene`, under the paths this crate's own modules use.
+use tomori_scene::{
+    arrival, arrival_motion, connection, controller_ui, conversation, delegation, environment,
+    feedback, hand_menu, hands, haptics, identity, interaction, log_cadence, scene, server_choice,
+    swarm,
+};
+#[cfg(not(target_os = "android"))]
+use tomori_scene::{caption, capture, playback, pointing, spatial_audio, transcript, ui_text};
+
 #[cfg(not(target_os = "android"))]
 pub use cli::{Command, Mode};
-pub use identity::Overrides;
 #[cfg(not(target_os = "android"))]
 pub use spectator_feed::SpectatorOptions;
+pub use tomori_scene::identity::Overrides;
 
 /// Run the windowed desktop demo without an XR runtime or headset.
 #[cfg(not(target_os = "android"))]
@@ -398,13 +380,13 @@ fn android_connection(
         }
     };
     android.log_audio_effects();
-    let capture = Box::new(capture::Android::new(
+    let capture = Box::new(android_audio::capture::Android::new(
         android.clone(),
         uncancelled,
         canceller,
     ));
     let multicast = Box::new(android::MulticastLock::new(android));
-    let playback = Box::new(playback::Android);
+    let playback = Box::new(android_audio::playback::Android);
     let mut connection = connection::Connection::new(
         identity,
         store,

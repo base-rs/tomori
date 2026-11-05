@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use crate::pointing::Target;
 use crate::pointing::{Ray, Shape};
 use crate::swarm::CENTER;
@@ -419,7 +419,7 @@ impl Scene {
 
     /// The workers that can be pointed at, keyed by identifier, where they stand now: each live worker's anchor, as a
     /// sphere a little larger than its flock. Workers leaving cannot be pointed at. [`Self::point`] tests the same.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn targets(&self) -> Vec<Target<String>> {
         self.workers
             .iter()
@@ -473,7 +473,7 @@ impl Scene {
         &self.cubes
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn snapshot(&self) -> Vec<Cube> {
         self.cubes.clone()
     }
@@ -1090,7 +1090,7 @@ fn stable_hash(id: &str) -> u64 {
 /// All 192 remembered slots have distinct sightlines, not hidden radial layers.
 /// Early slots flank the coordinator; large workspaces require looking around
 /// and up. This is fixed scene-home geometry, never a head-locked overlay.
-pub(crate) fn slot_position(slot: usize) -> Vec3 {
+pub fn slot_position(slot: usize) -> Vec3 {
     // Fill two comfortable front columns and two rows before wrapping around
     // the observer. Slot identity is permanent, independent of membership size.
     let lane = slot % 4 + (slot % 32) / 8 * 4;

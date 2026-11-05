@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The frame step that the headset and the desktop window share: the controller's buttons, arrival, the hand menu, the right wrist's transcript, pointing and choosing, the swarm, the space's workers and the shared panels, from plain input. Each platform's own behaviour is in [`headset`] and [`desktop`], which turn their devices' input into [`Buttons`] and [`Senses`]; the shells in `xr.rs` and `desktop_participant.rs` make only device calls. What a frame draws is [`Frame`], which [`crate::scene_graphics::draw`] applies to the renderer. This is the platform-neutral core that `design/clients.md` asks for, which the `tomori-scene` crate is to hold.
+//! The frame step that the headset and the desktop window share: the controller's buttons, arrival, the hand menu, the right wrist's transcript, pointing and choosing, the swarm, the space's workers and the shared panels, from plain input. Each platform's own behaviour is in [`headset`] and [`desktop`], which turn their devices' input into [`Buttons`] and [`Senses`]; the shells in `xr.rs` and `desktop_participant.rs` make only device calls. What a frame draws is [`Frame`], which the renderer applies. This is the platform-neutral core that `design/clients.md` asks for.
 
 #[cfg(not(target_os = "android"))]
 pub mod desktop;
@@ -12,7 +12,8 @@ use std::time::Instant;
 use glam::{Mat4, Vec2, Vec3};
 
 use crate::{
-    arrival, arrival_graphics, arrival_motion,
+    arrival, arrival_motion,
+    cards::CardNavigation,
     controller::Pose,
     controller_ui::{self, Indicator, Moment, Sheet, Wrist, WristFrame},
     conversation::Conversation,
@@ -25,7 +26,6 @@ use crate::{
     pointing::{Pointer, Ray},
     recording::Trackers,
     swarm::Swarm,
-    workspace_graphics::CardNavigation,
 };
 
 /// How far a stick must move before it counts.
@@ -113,7 +113,7 @@ pub struct Senses {
 pub struct Arrival {
     pub scene: arrival::Scene,
     pub hovered: Option<arrival::Key>,
-    pub ray: Option<arrival_graphics::Beam>,
+    pub ray: Option<crate::pointing::Beam>,
     pub time: f32,
 }
 
@@ -211,7 +211,7 @@ impl Default for Step {
             indicator: Indicator::default(),
             pointer: Pointer::default(),
             hover: feedback::Hover::default(),
-            swarm: Swarm::new(),
+            swarm: Swarm::default(),
             signals: interaction::Signals::default(),
             motion: arrival_motion::Motion::default(),
             arrival_time: 0.0,
@@ -564,17 +564,17 @@ impl Step {
         // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
         let ray = senses.ray.filter(|_| senses.beam);
         let beam = if in_arrival || menu_shown {
-            ray.zip(pointing.endpoint(arrival_graphics::RAY_LENGTH))
-                .map(|(ray, end)| arrival_graphics::Beam {
+            ray.zip(pointing.endpoint(crate::pointing::RAY_LENGTH))
+                .map(|(ray, end)| crate::pointing::Beam {
                     origin: ray.origin,
                     end,
                     hit: pointing.hit.is_some(),
                 })
         } else {
             let hit = self.delegation_scene.hit_point();
-            ray.filter(|_| in_space).map(|ray| arrival_graphics::Beam {
+            ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
                 origin: ray.origin,
-                end: hit.unwrap_or_else(|| ray.at(arrival_graphics::SPACE_RAY_LENGTH)),
+                end: hit.unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
                 hit: hit.is_some(),
             })
         };
@@ -638,8 +638,8 @@ impl Step {
 }
 
 /// Conversations and feedback in the states the frame step's tests need.
-#[cfg(test)]
-pub(crate) mod fixtures {
+#[cfg(any(test, feature = "testing"))]
+pub mod fixtures {
     use crate::{
         conversation::Conversation,
         feedback::{Feedback, Settings},
@@ -1919,10 +1919,7 @@ mod tests {
             .and_then(|arrival| arrival.ray)
             .expect("the beam");
         assert!(!beam.hit);
-        assert_eq!(
-            beam.end,
-            ray.unwrap().at(arrival_graphics::SPACE_RAY_LENGTH)
-        );
+        assert_eq!(beam.end, ray.unwrap().at(crate::pointing::SPACE_RAY_LENGTH));
     }
 
     #[test]
