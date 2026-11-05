@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use tomori_protocol::{Card, Cards, ClientMessage, Pointed, Pose, ServerMessage, SpaceState};
@@ -30,7 +30,10 @@ impl log::Log for Recorder {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        self.0.lock().unwrap().push(format!("{}", record.args()));
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", record.level(), record.args()));
     }
 
     fn flush(&self) {}
@@ -38,14 +41,32 @@ impl log::Log for Recorder {
 
 static LOG: Recorder = Recorder(Mutex::new(Vec::new()));
 
+/// Start recording log records, once for the process.
+fn record() {
+    static RECORDING: Once = Once::new();
+    RECORDING.call_once(|| {
+        log::set_logger(&LOG).unwrap();
+        log::set_max_level(log::LevelFilter::Trace);
+    });
+}
+
 /// A fake GitHub: answers every request with `answer`, counting them.
 struct GitHubService {
     port: u16,
     requests: Arc<AtomicUsize>,
+    repository: &'static str,
 }
 
 impl GitHubService {
     fn start(answer: fn() -> (u16, String)) -> Self {
+        Self::start_with_fields(move || {
+            let (status, body) = answer();
+            (status, String::new(), body)
+        })
+    }
+
+    /// A fake GitHub answering with a status, fields, each ending in CRLF, and a body.
+    fn start_with_fields(answer: impl Fn() -> (u16, String, String) + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests = Arc::new(AtomicUsize::new(0));
@@ -65,20 +86,24 @@ impl GitHubService {
                 }
                 let _ = reader.read_exact(&mut vec![0; length]);
                 counted.fetch_add(1, Ordering::SeqCst);
-                let (status, body) = answer();
+                let (status, fields, body) = answer();
                 let _ = write!(
                     socket,
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{fields}\r\n{body}",
                     body.len()
                 );
             }
         });
-        Self { port, requests }
+        Self {
+            port,
+            requests,
+            repository: "o/r",
+        }
     }
 
     fn github(&self) -> GitHub {
         GitHub::with_api(
-            "o/r".parse().unwrap(),
+            self.repository.parse().unwrap(),
             Token::new(TOKEN).unwrap(),
             &format!("http://127.0.0.1:{}/graphql", self.port),
         )
@@ -174,8 +199,7 @@ fn create(client: &mut TestClient, environment: &str) -> SpaceState {
 
 #[test]
 fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_the_server() {
-    log::set_logger(&LOG).unwrap();
-    log::set_max_level(log::LevelFilter::Trace);
+    record();
     let github = GitHubService::start(repository);
     let state = State::new("cards");
     let server = start(github.github(), &state);
@@ -289,9 +313,16 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
             .first()
             .map(|prompt| prompt.text.clone())
     });
-    assert!(prompt.starts_with("Ada: what's this one about?\n\n[Pointing at the card for issue o/r#97 \"Physics for cards\" (by ioquatix, opened "), "{prompt}");
     assert!(
-        prompt.ends_with(", labels enhancement), https://github.com/o/r/issues/97]"),
+        prompt.starts_with(
+            "Ada: what's this one about?\n\n[Pointing at the card for issue o/r#97, https://github.com/o/r/issues/97 (opened "
+        ),
+        "{prompt}"
+    );
+    assert!(
+        prompt.ends_with(
+            "; untrusted repository content: title \"Physics for cards\", author \"ioquatix\", labels \"enhancement\"]"
+        ),
         "{prompt}"
     );
     // A card the board does not have, and an oversized one, add nothing.
@@ -440,4 +471,61 @@ fn a_failed_read_is_shown_to_watchers_and_tried_again_later() {
             .iter()
             .all(|message| !message.contains(TOKEN))
     );
+}
+
+#[test]
+fn a_used_up_rate_limit_answered_with_200_is_waited_for_and_said_once() {
+    record();
+    // GitHub's GraphQL API answers 200 when the token's primary rate limit is used up, saying so in its body and fields.
+    let mut github = GitHubService::start_with_fields(|| {
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3_600;
+        let body = serde_json::json!({"data": null, "errors": [
+            {"type": "RATE_LIMITED", "message": "API rate limit already exceeded for user ID 1."}
+        ]});
+        (
+            200,
+            format!("X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {reset}\r\n"),
+            body.to_string(),
+        )
+    });
+    github.repository = "o/limited";
+    let state = State::new("limited");
+    let server = start(github.github(), &state);
+    let (_, owner) = server.issue("Ada's Quest", Grant::Owner);
+    let mut ada = server.connect_with_token("ada", "Ada", &owner);
+    create(&mut ada, "github");
+    ada.send(&ClientMessage::WatchCards);
+    let limited = cards(&ada, |cards| {
+        cards
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Could not"))
+    });
+    assert_eq!(
+        limited.status.as_deref(),
+        Some("Could not read o/limited: GitHub is limiting requests.")
+    );
+    assert_eq!(github.requests(), 1);
+    // The server says once, at info rather than as a warning, that it waits about an hour, until the limit resets,
+    // rather than trying again in 30 seconds.
+    let lines: Vec<String> = LOG
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains("o/limited"))
+        .cloned()
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let seconds: u64 = lines[0]
+        .strip_prefix("INFO ")
+        .and_then(|line| line.split_once("read again in "))
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .and_then(|(seconds, _)| seconds.parse().ok())
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!((3_590..=3_630).contains(&seconds), "{seconds}");
 }

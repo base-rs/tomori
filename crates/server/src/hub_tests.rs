@@ -2108,3 +2108,130 @@ fn cards_are_rendered_only_for_a_watcher_in_a_space_that_shows_them() {
     });
     assert_eq!(ada.errors().len(), 1);
 }
+
+/// A hub offering GitHub's cards, with two spaces that show them.
+fn hub_with_cards() -> (Arc<Hub>, async_channel::Receiver<Job>, [String; 2]) {
+    let (hub, jobs) = hub();
+    hub.offer_environment(crate::Environment::new("github", "GitHub"));
+    hub.set_board(crate::cards::Board::new("github", "o/r"));
+    let spaces = ["first", "second"].map(|title| {
+        let (commands, _receiver) = async_channel::unbounded();
+        hub.register_space(
+            &CreateRequest {
+                environment: "github".to_owned(),
+                title: title.to_owned(),
+                ..request("nobody")
+            },
+            format!("session-{title}"),
+            Snapshot::default(),
+            commands,
+        )
+        .unwrap()
+    });
+    (hub, jobs, spaces)
+}
+
+#[test]
+fn watching_cards_ends_with_leaving_their_space() {
+    let (hub, _jobs, [first, second]) = hub_with_cards();
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&first);
+    ada.send(ClientMessage::WatchCards);
+    assert!(matches!(
+        hub.render(ada.connection, Outgoing::Cards),
+        Some(ServerMessage::Cards { cards }) if cards.space == first
+    ));
+    // Moving to another space that shows cards sends none of its cards until they are watched there too.
+    ada.join(&second);
+    assert_eq!(hub.render(ada.connection, Outgoing::Cards), None);
+    ada.send(ClientMessage::WatchCards);
+    assert!(matches!(
+        hub.render(ada.connection, Outgoing::Cards),
+        Some(ServerMessage::Cards { cards }) if cards.space == second
+    ));
+    // Nor does leaving and coming back.
+    ada.send(ClientMessage::Leave);
+    ada.join(&second);
+    assert_eq!(hub.render(ada.connection, Outgoing::Cards), None);
+}
+
+#[test]
+fn a_placement_is_kept_with_its_space_at_once() {
+    let directory =
+        std::env::temp_dir().join(format!("tomori-hub-placements-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    let (hub, _jobs, [first, _]) = hub_with_cards();
+    assert!(hub.restore(store.clone()).is_empty());
+    let card = "github://o/r/issues/1";
+    hub.cards_fetched(
+        Ok(crate::cards::Fetched {
+            cards: vec![crate::cards::FetchedCard {
+                card: tomori_protocol::Card {
+                    id: card.to_owned(),
+                    number: 1,
+                    kind: tomori_protocol::CardKind::Issue,
+                    title: "One".to_owned(),
+                    author: "ada".to_owned(),
+                    labels: Vec::new(),
+                    checks: tomori_protocol::Checks::None,
+                    age: 0,
+                    placement: None,
+                },
+                opened: 0,
+                url: "https://github.com/o/r/issues/1".to_owned(),
+            }],
+            rate: None,
+        }),
+        Instant::now(),
+    );
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&first);
+    let pose = tomori_protocol::Pose {
+        position: [0.5, 1.0, -0.5],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+    };
+    ada.send(ClientMessage::PlaceCard {
+        card: card.to_owned(),
+        placement: Some(pose),
+    });
+    // Written by the time the placement is handled, rather than when something else changes, so that a crash cannot
+    // lose it. Nothing else here keeps the spaces, as the server's sweep would.
+    let placements = |store: &crate::kept::SpaceStore| {
+        store
+            .spaces()
+            .into_iter()
+            .find(|space| space.id == first)
+            .map(|space| space.placements)
+    };
+    assert_eq!(
+        placements(&store).and_then(|placements| placements.get(card).copied()),
+        Some(pose)
+    );
+    // As is taking it back to the inbox.
+    ada.send(ClientMessage::PlaceCard {
+        card: card.to_owned(),
+        placement: None,
+    });
+    assert_eq!(placements(&store), Some(Default::default()));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_visitor_is_never_sent_cards_even_were_it_marked_as_watching() {
+    let (hub, _jobs, [first, _]) = hub_with_cards();
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.join(&first);
+    vic.send(ClientMessage::WatchCards);
+    assert_eq!(
+        vic.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // Were the connection ever left watching, such as from a space it took part in, the role still keeps the cards from it.
+    hub.lock()
+        .connections
+        .get_mut(&vic.connection)
+        .expect("the visitor is connected")
+        .cards = true;
+    assert_eq!(hub.render(vic.connection, Outgoing::Cards), None);
+}

@@ -4006,7 +4006,7 @@ impl Hub {
             }
             Outgoing::Cards => {
                 let state = self.lock();
-                // Nothing for a connection that does not watch them, has left their space, or is in a space that no longer shows them.
+                // Nothing for a connection that does not watch them, has left their space, is in a space that no longer shows them, or only visits it: leaving a space stops watching, and a visitor cannot start, so the role is checked again in case either is ever missed.
                 let watching = state
                     .connections
                     .get(&connection)
@@ -4014,7 +4014,11 @@ impl Hub {
                 let (space, board) = state
                     .member(connection)
                     .and_then(|(_, space)| space)
-                    .filter(|space| watching && state.shows_cards(space))
+                    .filter(|space| {
+                        watching
+                            && state.role(connection, Some(space)).participates()
+                            && state.shows_cards(space)
+                    })
                     .and_then(|space| state.space(&space).zip(state.board.as_ref()))?;
                 let cards = board.cards(
                     &space.model.id,
