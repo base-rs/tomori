@@ -11464,6 +11464,40 @@ mod tests {
         ("200 OK", r#"{"data":[]}"#.to_owned())
     }
 
+    /// A service that creates a session using the plan agent, but fails to list its agents.
+    fn agents_unlisted(method: &str, path: &str) -> (&'static str, String) {
+        match (method, path.split('?').next().unwrap_or_default()) {
+            ("GET", "/api/agent") => ("500 Internal Server Error", "{}".to_owned()),
+            _ => (
+                "200 OK",
+                r#"{"data":{"id":"s","agent":"plan","location":{"directory":"/tmp"}}}"#.to_owned(),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_session_whose_agents_cannot_be_listed_opens_without_offered_modes() {
+        let mut registrations = HashMap::new();
+        let (reply, replies) = async_channel::bounded(1);
+        perform(
+            crate::api::tests::service(agents_unlisted),
+            &mut registrations,
+            Command::Create {
+                spec: SessionSpec {
+                    directory: "/tmp".into(),
+                    title: "Title".into(),
+                },
+                reply,
+            },
+        );
+        let Ok(Ok((id, _events))) = replies.try_recv() else {
+            unreachable!("expected the session to open");
+        };
+        assert_eq!(id, "s");
+        // Reconciliation lists them again.
+        assert!(registrations["s"].modes.offered.is_empty());
+    }
+
     #[test]
     fn a_session_offering_no_agents_lists_them_again_to_switch() {
         let mut registrations = HashMap::new();
