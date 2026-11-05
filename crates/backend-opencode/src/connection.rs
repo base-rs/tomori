@@ -4387,10 +4387,11 @@ mod tests {
         );
         assert!(registrations["parent"].workers_incomplete);
         assert!(!registrations["other"].workers_incomplete);
-        assert!(matches!(
-            parent_events.try_recv().unwrap().into_current(),
-            Some(Event::WorkersUnavailable { .. })
-        ));
+        let Some(Event::WorkersUnavailable { .. }) =
+            parent_events.try_recv().unwrap().into_current()
+        else {
+            unreachable!("expected Some(Event::WorkersUnavailable {{ .. }})");
+        };
     }
 
     #[test]
@@ -4482,10 +4483,9 @@ mod tests {
             message: "could not deliver".into()
         }));
         assert!(snapshot.accept().is_err());
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(async_channel::TryRecvError::Closed)
-        ));
+        let Err(async_channel::TryRecvError::Closed) = receiver.try_recv() else {
+            unreachable!("expected Err(async_channel::TryRecvError::Closed)");
+        };
     }
 
     #[test]
@@ -4527,19 +4527,22 @@ mod tests {
         registration.publish_modes();
         registration.reconcile_running(RunningState::Idle);
         assert!(registration.modes_dirty);
-        assert!(matches!(registration.running, RunningState::Running));
+        let RunningState::Running = registration.running else {
+            unreachable!("expected RunningState::Running");
+        };
         while events.try_recv().is_ok() {}
         registration.publish_modes();
         registration.reconcile_running(RunningState::Idle);
         assert!(!registration.modes_dirty);
-        assert!(matches!(registration.running, RunningState::Idle));
+        let RunningState::Idle = registration.running else {
+            unreachable!("expected RunningState::Idle");
+        };
         assert!(
             matches!(events.try_recv().unwrap().into_current(), Some(Event::ModesChanged(modes)) if modes.current.as_deref() == Some("plan"))
         );
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::Idle)
-        ));
+        let Some(Event::Idle) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Idle)");
+        };
     }
 
     #[test]
@@ -4566,10 +4569,9 @@ mod tests {
             }.to_string();
             dispatch_events(&event, &mut registrations);
             assert!(snapshot.accept().is_err(), "{kind}");
-            assert!(matches!(
-                events.try_recv(),
-                Err(async_channel::TryRecvError::Closed)
-            ));
+            let Err(async_channel::TryRecvError::Closed) = events.try_recv() else {
+                unreachable!("expected Err(async_channel::TryRecvError::Closed)");
+            };
         }
     }
 
@@ -4595,10 +4597,9 @@ mod tests {
         let event =
             json!({"type":"session.execution.started","data":{"sessionID":"parent"}}).to_string();
         dispatch_events(&event, &mut registrations);
-        assert!(matches!(
-            events.try_recv(),
-            Err(async_channel::TryRecvError::Closed)
-        ));
+        let Err(async_channel::TryRecvError::Closed) = events.try_recv() else {
+            unreachable!("expected Err(async_channel::TryRecvError::Closed)");
+        };
     }
 
     #[test]
@@ -4624,10 +4625,9 @@ mod tests {
             .unwrap();
         assert!(later.is_empty());
         assert!(events.try_recv().unwrap().into_current().is_none());
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::Busy)
-        ));
+        let Some(Event::Busy) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Busy)");
+        };
     }
 
     #[test]
@@ -4683,7 +4683,9 @@ mod tests {
         events.deliver(Event::Busy);
         events.advance_workers();
         events.snapshot_reply(Snapshot::default()).accept().unwrap();
-        assert!(matches!(block_on(session.next_event()), Ok(Event::Busy)));
+        let Ok(Event::Busy) = block_on(session.next_event()) else {
+            unreachable!("expected Ok(Event::Busy)");
+        };
     }
 
     #[test]
@@ -4694,10 +4696,9 @@ mod tests {
         let session = crate::session::OpenCodeSession::new("parent".into(), rx, commands);
         assert!(events.deliver(Event::Closed { reason: None }));
         assert!(events.deliver(Event::Busy));
-        assert!(matches!(
-            block_on(session.next_event()),
-            Ok(Event::Closed { .. })
-        ));
+        let Ok(Event::Closed { .. }) = block_on(session.next_event()) else {
+            unreachable!("expected Ok(Event::Closed {{ .. }})");
+        };
         assert!(
             matches!(block_on(session.next_event()), Err(error) if error.kind == tomori_backend::ErrorKind::Closed)
         );
@@ -4781,10 +4782,9 @@ mod tests {
         assert!(
             matches!(events.try_recv().unwrap().into_current(), Some(Event::WorkersChanged { workers }) if workers.is_empty())
         );
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::Busy)
-        ));
+        let Some(Event::Busy) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Busy)");
+        };
         assert!(events.try_recv().is_err());
     }
 
@@ -5069,13 +5069,10 @@ mod tests {
             };
             apply_worker_event(&event, &mut registrations);
             assert!(snapshot.accept().is_err());
-            assert!(
-                matches!(
-                    events.try_recv().unwrap().into_current(),
-                    Some(Event::WorkersUnavailable { .. })
-                ),
-                "{kind}"
-            );
+            let Some(Event::WorkersUnavailable { .. }) = events.try_recv().unwrap().into_current()
+            else {
+                unreachable!("{kind}");
+            };
         }
     }
 
@@ -5262,10 +5259,9 @@ mod tests {
             Modes::default(),
         );
         close_registration(&mut registrations, "first", &first.identity);
-        assert!(matches!(
-            first.try_recv().unwrap().into_current(),
-            Some(Event::Closed { .. })
-        ));
+        let Some(Event::Closed { .. }) = first.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Closed {{ .. }})");
+        };
         assert!(second.try_recv().is_err());
         assert!(registrations.contains_key("second"));
         let replacement =
@@ -5277,10 +5273,9 @@ mod tests {
         close_registration(&mut registrations, "first", &replacement.identity);
         close_registration(&mut registrations, "second", &second.identity);
         assert!(registrations.is_empty());
-        assert!(matches!(
-            second.try_recv().unwrap().into_current(),
-            Some(Event::Closed { .. })
-        ));
+        let Some(Event::Closed { .. }) = second.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Closed {{ .. }})");
+        };
     }
 
     #[test]
@@ -5706,10 +5701,11 @@ mod tests {
                 }
             }
         });
-        assert!(matches!(
-            false_busy_wait.recv_timeout(Duration::from_millis(2200)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
+        let Err(mpsc::RecvTimeoutError::Timeout) =
+            false_busy_wait.recv_timeout(Duration::from_millis(2200))
+        else {
+            unreachable!("expected Err(mpsc::RecvTimeoutError::Timeout)");
+        };
         delay_active.store(false, Ordering::Release);
         close("stale", &stale_events);
         let (fast_reply, fast_wait) = async_channel::bounded(1);
@@ -6054,16 +6050,16 @@ mod tests {
         apply_worker_event(&event, &mut registrations);
         assert!(registrations["parent"].workers_incomplete);
         assert!(!registrations["parent"].children.contains_key("overflow"));
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::WorkersUnavailable { .. })
-        ));
+        let Some(Event::WorkersUnavailable { .. }) = events.try_recv().unwrap().into_current()
+        else {
+            unreachable!("expected Some(Event::WorkersUnavailable {{ .. }})");
+        };
         let deleted = json!({"type":"session.deleted","data":{"sessionID":"worker-1"}});
         apply_worker_event(&deleted, &mut registrations);
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::WorkersUnavailable { .. })
-        ));
+        let Some(Event::WorkersUnavailable { .. }) = events.try_recv().unwrap().into_current()
+        else {
+            unreachable!("expected Some(Event::WorkersUnavailable {{ .. }})");
+        };
     }
 
     #[test]
@@ -6961,13 +6957,9 @@ mod tests {
             .iter()
             .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
             .collect();
-        assert!(
-            matches!(
-                ordinary.as_slice(),
-                [Event::Resynchronized { .. }, Event::Busy]
-            ),
-            "{seen:?}"
-        );
+        let [Event::Resynchronized { .. }, Event::Busy] = ordinary.as_slice() else {
+            unreachable!("{seen:?}");
+        };
 
         // Each run of the service only ever saw its own credentials.
         assert!(
@@ -7904,10 +7896,10 @@ mod tests {
             read.try_recv().unwrap().into_current(),
             Some(Event::Reconnecting { reason }) if reason == DISCONNECTED
         ));
-        assert!(matches!(
-            unread.try_recv().unwrap().into_current(),
-            Some(Event::Closed { reason: Some(_) })
-        ));
+        let Some(Event::Closed { reason: Some(_) }) = unread.try_recv().unwrap().into_current()
+        else {
+            unreachable!("expected Some(Event::Closed {{ reason: Some(_) }})");
+        };
         assert!(!registrations.contains_key("unread"));
         let busy =
             json!({"type":"session.execution.started","data":{"sessionID":"read"}}).to_string();
@@ -7927,10 +7919,9 @@ mod tests {
         let resync = registrations["read"].resync.as_ref().unwrap();
         assert_eq!(resync.events.len(), 2);
         assert_eq!((resync.failures, resync.interruptions), (2, 1));
-        assert!(matches!(
-            read.try_recv().unwrap().into_current(),
-            Some(Event::Reconnecting { .. })
-        ));
+        let Some(Event::Reconnecting { .. }) = read.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Reconnecting {{ .. }})");
+        };
         // A service that keeps dropping the stream before the session can be
         // read closes the space, with the reason, rather than leaving it
         // reconnecting forever.
@@ -8322,10 +8313,9 @@ mod tests {
                 delivered.push(event);
             }
         }
-        assert!(
-            matches!(delivered[0], Event::Resynchronized { .. }),
-            "{delivered:?}"
-        );
+        let Event::Resynchronized { .. } = delivered[0] else {
+            unreachable!("{delivered:?}");
+        };
         // Consecutive deltas were held as one.
         assert_eq!(
             delivered[1..4].to_vec(),
@@ -8436,10 +8426,9 @@ mod tests {
         let identity = events.identity.clone();
         close_registration(&mut registrations, "s", &identity);
         assert!(read.is_cancelled());
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::Closed { reason: None })
-        ));
+        let Some(Event::Closed { reason: None }) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Closed {{ reason: None }})");
+        };
         // A later registration of the same session is not touched by the
         // abandoned read's result.
         let replacement =
@@ -10252,10 +10241,9 @@ mod tests {
         );
         assert!(registrations["s"].opening.events.is_empty());
         assert!(finish_opening(&mut registrations, Snapshot::default()).is_err());
-        assert!(matches!(
-            events.try_recv(),
-            Err(async_channel::TryRecvError::Closed)
-        ));
+        let Err(async_channel::TryRecvError::Closed) = events.try_recv() else {
+            unreachable!("expected Err(async_channel::TryRecvError::Closed)");
+        };
     }
 
     /// Without room for the events held for it, the initial state is refused
@@ -10306,7 +10294,9 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.modes.current.as_deref(), Some("plan"));
         // The turn the snapshot shows running has ended since.
-        assert!(matches!(registrations["s"].running, RunningState::Idle));
+        let RunningState::Idle = registrations["s"].running else {
+            unreachable!("expected RunningState::Idle");
+        };
         let delivered: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(QueuedEvent::into_current)
             .filter(|event| !matches!(event, Event::WorkersChanged { .. }))
@@ -10317,10 +10307,9 @@ mod tests {
             &state_event("session.execution.started"),
             &mut registrations,
         );
-        assert!(matches!(
-            events.try_recv().unwrap().into_current(),
-            Some(Event::Busy)
-        ));
+        let Some(Event::Busy) = events.try_recv().unwrap().into_current() else {
+            unreachable!("expected Some(Event::Busy)");
+        };
     }
 
     /// A session's running state is not reconciled until its initial state
