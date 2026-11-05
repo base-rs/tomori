@@ -466,7 +466,7 @@ impl Step {
         }
         let wrist_shown = self.wrist.state().on_hand();
         let wrist_active = self.wrist.state().active();
-        // What the ray pointed at last frame, so that a mode's description shows beneath it.
+        // What the ray pointed at last frame, so that the description of the mode pointed at shows beneath the modes, in rows that are there whatever is pointed at, so that the rows do not move under the ray.
         let pointed = match &self.highlighted {
             Some(arrival::Key::Menu(key)) => Some(key.clone()),
             _ => None,
@@ -1840,6 +1840,150 @@ mod tests {
             rows.object(&arrival::Key::Menu(MenuKey::Sounds)).is_some(),
             "the Sound section is open"
         );
+    }
+
+    /// Hold the ray on the menu's row `key`, as `menu` shows it, for a second of frames, through which it stays on that row; then pull the trigger, which chooses it, and let go.
+    fn hold_and_choose(
+        step: &mut Step,
+        conversation: &mut Conversation,
+        menu: &Senses,
+        key: hand_menu::MenuKey,
+        now: Instant,
+    ) {
+        let key = arrival::Key::Menu(key);
+        let mut feedback = felt();
+        let frame = step.update(menu, conversation, &mut feedback, now, FRAME);
+        let scene = frame.arrival.expect("the menu").scene;
+        let aiming = Senses {
+            ray: aim_at(target(&scene, &key).shape),
+            ..*menu
+        };
+        for frame in 0..72 {
+            let hovered = step
+                .update(&aiming, conversation, &mut feedback, now, FRAME)
+                .arrival
+                .expect("the menu")
+                .hovered;
+            assert_eq!(hovered.as_ref(), Some(&key), "frame {frame}");
+        }
+        let pull = Senses {
+            trigger: Some(1.0),
+            ..aiming
+        };
+        step.update(&pull, conversation, &mut feedback, now, FRAME);
+        assert_eq!(earcons(&mut feedback), [Earcon::Choose], "{key:?}");
+        step.update(&aiming, conversation, &mut feedback, now, FRAME);
+    }
+
+    #[test]
+    fn a_steady_ray_stays_on_a_menu_row_and_chooses_it() {
+        use crate::hand_menu::{MenuKey, Section};
+        use tomori_client::{ConnectionState, Event};
+        use tomori_protocol::{ClientMessage, EnvironmentInfo, Mode};
+        // An owner, in a space whose agent has three modes, each described, the middle one current, on a server that changes environments.
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![],
+            roots: vec![],
+            environments: [("sky", "Sky"), ("minimal", "Grid")]
+                .map(|(id, label)| EnvironmentInfo {
+                    id: id.into(),
+                    label: label.into(),
+                })
+                .to_vec(),
+            utterance_limit: None,
+        }));
+        conversation.apply(space(|state| {
+            state.modes = [
+                (
+                    "plan",
+                    "Plans without changing files, and says how it would.",
+                ),
+                ("build", "Makes changes."),
+                ("review", "Reviews the changes made so far."),
+            ]
+            .map(|(id, description)| Mode {
+                id: id.into(),
+                name: id.into(),
+                description: Some(description.into()),
+            })
+            .to_vec();
+            state.mode = Some("build".into());
+            state.speech = tomori_protocol::SpeechSetting::Brief;
+            state.environment_changes = true;
+        }));
+        conversation.take_actions();
+        let start = Instant::now();
+        let menu = Senses {
+            left_palm: Some(left_palm_up(0.0)),
+            ..senses()
+        };
+        let mut step = Step::default();
+        step.buttons(
+            &press(|buttons| buttons.y = true),
+            true,
+            &mut conversation,
+            &mut felt(),
+            start,
+        );
+        // The modes above and below the current one, each held for a second, stay highlighted and are chosen; pointing at one shows its description beneath the modes without moving a row.
+        let sent = |conversation: &mut Conversation, message: ClientMessage| {
+            assert_eq!(conversation.take_actions(), [Action::Send(message)]);
+        };
+        for mode in ["plan", "review"] {
+            hold_and_choose(
+                &mut step,
+                &mut conversation,
+                &menu,
+                MenuKey::Mode(mode.into()),
+                start,
+            );
+            sent(
+                &mut conversation,
+                ClientMessage::SetMode { mode: mode.into() },
+            );
+        }
+        // As do the environment the space is not in, and the space's other settings.
+        hold_and_choose(
+            &mut step,
+            &mut conversation,
+            &menu,
+            MenuKey::Environment("minimal".into()),
+            start,
+        );
+        sent(
+            &mut conversation,
+            ClientMessage::SetEnvironment {
+                environment: "minimal".into(),
+            },
+        );
+        hold_and_choose(&mut step, &mut conversation, &menu, MenuKey::Speech, start);
+        sent(
+            &mut conversation,
+            ClientMessage::SetSpeech {
+                speech: tomori_protocol::SpeechSetting::Full,
+            },
+        );
+        // The Sound section's levels, stepped one after another.
+        hold_and_choose(&mut step, &mut conversation, &menu, MenuKey::Back, start);
+        hold_and_choose(
+            &mut step,
+            &mut conversation,
+            &menu,
+            MenuKey::Section(Section::Sound),
+            start,
+        );
+        let feedback = conversation.menu_model().feedback;
+        for key in [MenuKey::Sounds, MenuKey::Sounds, MenuKey::Vibration] {
+            hold_and_choose(&mut step, &mut conversation, &menu, key, start);
+        }
+        let stepped = conversation.menu_model().feedback;
+        assert_eq!(stepped.sounds, feedback.sounds.next().next());
+        assert_eq!(stepped.vibration, feedback.vibration.next());
     }
 
     #[test]
