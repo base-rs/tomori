@@ -9,6 +9,10 @@ license.workspace = true
 # An example for downstream projects to follow, not a crate to depend on.
 publish = false
 
+# A shared library for its APK, and a library for its executable and tests.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
@@ -23,3 +27,99 @@ wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulka
 tomori-client-desktop = { version = "0.1.0", path = "../../crates/client-desktop", features = ["testing"] }
 tomori-render = { version = "0.1.0", path = "../../crates/render", features = ["test-gpu"] }
 tomori-scene = { version = "0.1.0", path = "../../crates/scene", features = ["testing"] }
+
+# Its APK: a copy of `tomori-client-quest`'s manifest, of which only the application ID, the APK's name, the label, the icon and the assets change. See crates/client-quest/context/android.md.
+[package.metadata.android]
+# This build's own application ID, so that it installs beside Tomori's, `com.codeotaku.tomori`, and keeps its own identity and tokens.
+package = "com.example.tomori.headset"
+# target/debug/apk/tomori-example-headset.apk
+apk_name = "tomori-example-headset"
+build_targets = ["aarch64-linux-android"]
+# The Khronos OpenXR loader, which `scripts/android.sh` fetches into this folder's arm64-v8a when it is missing. This example shares Tomori's; a project of its own names a folder of its own.
+runtime_libs = "../../android/libs"
+# This build's own assets, which a build reads through `AndroidApp::asset_manager`, with the licence notices of what `tomori-render` compiles in: the controller models and the Basis Universal transcoder. Here they are links to `crates/render/assets`; a project of its own copies them from the `tomori-render` package it depends on.
+assets = "assets"
+# This build's own Android resources: its launcher icon.
+resources = "res"
+strip = "strip"
+
+[package.metadata.android.sdk]
+min_sdk_version = 29
+target_sdk_version = 32
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vr.headtracking"
+required = true
+version = 1
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vulkan.level"
+required = true
+version = 1
+
+[[package.metadata.android.uses_feature]]
+name = "com.oculus.feature.RENDER_MODEL"
+required = false
+
+[[package.metadata.android.uses_feature]]
+name = "oculus.software.handtracking"
+required = false
+
+[[package.metadata.android.uses_permission]]
+name = "org.khronos.openxr.permission.OPENXR"
+
+[[package.metadata.android.uses_permission]]
+name = "org.khronos.openxr.permission.OPENXR_SYSTEM"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_WIFI_STATE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CHANGE_WIFI_MULTICAST_STATE"
+
+[[package.metadata.android.uses_permission]]
+name = "com.oculus.permission.RENDER_MODEL"
+
+[[package.metadata.android.uses_permission]]
+name = "com.oculus.permission.HAND_TRACKING"
+
+[[package.metadata.android.queries.provider]]
+name = "org.khronos.openxr"
+authorities = "org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"
+
+[[package.metadata.android.queries.intent]]
+actions = ["org.khronos.openxr.OpenXRRuntimeService"]
+
+[[package.metadata.android.queries.intent]]
+actions = ["org.khronos.openxr.OpenXRApiLayerService"]
+
+[package.metadata.android.application]
+label = "Tomori Example"
+icon = "@mipmap/icon"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+extract_native_libs = true
+uses_cleartext_traffic = true
+
+[[package.metadata.android.application.meta_data]]
+name = "com.oculus.supportedDevices"
+value = "quest3|quest3s"
+
+[package.metadata.android.application.activity]
+exported = true
+orientation = "landscape"
+launch_mode = "singleTask"
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|uiMode|density"
+
+[[package.metadata.android.application.activity.meta_data]]
+name = "com.oculus.vr.focusaware"
+value = "true"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER", "com.oculus.intent.category.VR"]

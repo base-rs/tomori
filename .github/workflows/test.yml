@@ -102,7 +102,7 @@ jobs:
           percentage=$(awk -F / '{ if ($2 > 0) printf "%.2f", 100 * $1 / $2; else print "100.00" }' <<< "$counts")
           echo "Source-region coverage: ${percentage}% (${result})." | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # The client core and the headset application for the Quest, as scripts/android.sh builds them.
+  # The client core, the headset application for the Quest and the example headset's, as scripts/android.sh builds them.
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -123,6 +123,9 @@ jobs:
       - name: Build the headset application
         # Fetches the Khronos OpenXR loader, checked against its published SHA-256, and packages it.
         run: bash scripts/android.sh build
+      - name: Build the example headset's application
+        # Another project's headset build, packaged with its own application ID, label, icon and assets, as crates/client-quest/context/android.md describes; and its library, which must export its own android_main, not Tomori's.
+        run: bash scripts/android.sh --package tomori-example-headset build
       - name: Build the client core on its own
         # Checks the core with only its own features, as design/clients.md requires, rather than those the headset unifies with it. After scripts/android.sh, which creates the directory cargo-apk needs for SHERPA_ONNX_ARCHIVE_DIR.
         run: cargo apk -- build --package tomori-client --target aarch64-linux-android --locked
@@ -136,6 +139,12 @@ jobs:
         with:
           name: tomori-apk
           path: target/debug/apk/tomori.apk
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tomori-example-headset-apk
+          path: target/debug/apk/tomori-example-headset.apk
           if-no-files-found: error
           retention-days: 7
 

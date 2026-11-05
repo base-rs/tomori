@@ -1,0 +1,5 @@
+Tomori Example Headset
+
+An asset of this build's own, packaged in its APK beside the licence notices of what tomori-render compiles in, in controllers/ and licenses/. A build reads its assets on the Quest through AndroidApp::asset_manager.
+
+Released under the MIT License. Copyright, 2026, by Samuel Williams.

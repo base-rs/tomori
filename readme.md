@@ -220,13 +220,16 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
 bash scripts/android.sh run
 ```
 
-The script downloads the official Khronos **1.1.65** OpenXR loader AAR from Maven Central, checks its published SHA-256, and packages the arm64 loader in the APK. The Quest APK does not contain a transcription model. `cargo-apk` creates a local debug signing key if needed. Build output: `target/debug/apk/tomori.apk` (package `io.github.ioquatix.tomori`). Launch from **Library → Unknown Sources → Tomori** if not auto-started.
+The script downloads the official Khronos **1.1.65** OpenXR loader AAR from Maven Central, checks its published SHA-256, and packages the arm64 loader in the APK. The Quest APK does not contain a transcription model. `cargo-apk` creates a local debug signing key if needed. Build output: `target/debug/apk/tomori.apk` (package `com.codeotaku.tomori`), which `bash scripts/android.sh path` prints. Builds before November 2026 were `io.github.ioquatix.tomori`, a separate app that keeps its own pairing; see [Naming](docs/naming.md#migrating-to-comcodeotakutomori). Launch from **Library → Unknown Sources → Tomori** if not auto-started.
 
 ```sh
 bash scripts/android.sh devices
 bash scripts/android.sh logs
 bash scripts/android.sh build  # build without deploying
+adb shell am start -n com.codeotaku.tomori/android.app.NativeActivity -e tomori.msaa off  # start it with intent extras
 ```
+
+`--package NAME` builds another headset build than Tomori's own, such as `bash scripts/android.sh --package tomori-example-headset run`, with its own application ID, label, icon and assets; see [Packaging a Headset Build for the Quest](crates/client-quest/context/android.md). The script reads them from `cargo metadata`, so it needs `jq`.
 
 You can save machine-local exports in `.android-env` (gitignored). The SDK, NDK, JDK (`java`/`keytool`), `cargo-apk`, and ADB must be available. Debug builds use optimization level 1; the example is for local sideloading, not store submission. This machine uses isolated tools in the ignored `.tools/` directory, referenced by `.android-env`; system Rust is not modified.
 

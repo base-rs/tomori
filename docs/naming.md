@@ -35,12 +35,28 @@ The public repository uses `ioquatix/tomori`. Technical names now match:
 - Server executable: `tomori-server`, from the package of the same name.
 - Spectator executable: `tomori-spectator`, from the package `tomori-client-spectator` (in `crates/client-spectator`); `tomori --spectator…` runs it too.
 - Desktop crate: `tomori-client-desktop` (in `crates/client-desktop`), which the `tomori` executable's desktop modes run.
-- Android application ID: `io.github.ioquatix.tomori`; label: **Tomori**;
-  APK: `tomori.apk`.
+- Android application ID: `com.codeotaku.tomori`; label: **Tomori**;
+  APK: `tomori.apk`. A headset build of another project's has its own (see `crates/client-quest/context/android.md`); the example's is `com.example.tomori.headset`.
 - Node bridge package: `tomori-opencode-bridge`.
 - Environment variables: `TOMORI_*`.
 - PipeWire video: `tomori-spectator` (**Tomori-Spectator**).
 - PipeWire audio: `tomori-quest-microphone` and `tomori-assistant-voice`.
+
+### Migrating to `com.codeotaku.tomori`
+
+Builds before November 2026 used the Android ID `io.github.ioquatix.tomori`. The
+new ID installs alongside that app rather than updating it, so the new app starts
+without what the old one stored in its private storage: its participant identity,
+the server it last joined, each server's pinned certificate and token, and its
+feedback setting, as well as its granted permissions. Pair it again, with the
+gold key beside the server and the 6-digit code it shows, or with
+`TOMORI_TOKEN=… bash scripts/android.sh run`, and allow the microphone when
+asked. The server sees it as a new participant. Remove the old app only when
+ready:
+
+```sh
+adb uninstall io.github.ioquatix.tomori
+```
 
 ### Migrating from the prototype name
 
