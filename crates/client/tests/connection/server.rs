@@ -151,6 +151,8 @@ impl<B: ReadableBody> Session<B> {
                         }),
                     }),
                     ClientMessage::Leave => self.reply(ServerMessage::Left),
+                    // Renamed, as a visitor is, without keeping the name.
+                    ClientMessage::SetName { name } => self.reply(ServerMessage::Name { name }),
                     ClientMessage::ListSpaces => {
                         self.reply(ServerMessage::Spaces { spaces: Vec::new() })
                     }

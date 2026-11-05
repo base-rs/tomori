@@ -241,6 +241,28 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
 }
 
 #[test]
+fn a_name_the_server_gives_is_suggested_when_reconnecting() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let client = Client::connect(options(server.address)).unwrap();
+    assert_eq!(wait_connected(&client), 1);
+    client
+        .send(ClientMessage::SetName { name: "Vic".into() })
+        .unwrap();
+    wait_for(
+        &client,
+        |event| matches!(event, Event::Message(ServerMessage::Name { name }) if name == "Vic"),
+    );
+    client.send(kick()).unwrap();
+    assert_eq!(wait_disconnected(&client), Disconnect::Closed);
+    assert_eq!(wait_connected(&client), 2);
+    // A server that keeps no name for this participant, as for a visitor, hears it again.
+    assert!(matches!(
+        server.received(2).first(),
+        Some(Received::Message(ClientMessage::Hello { name, .. })) if name == "Vic"
+    ));
+}
+
+#[test]
 fn opted_in_microphone_does_not_resume_while_the_application_is_stalled() {
     let server = MiniServer::start(localhost(), Mode::Normal);
     let mut options = options(server.address);

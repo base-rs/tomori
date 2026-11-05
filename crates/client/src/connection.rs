@@ -233,6 +233,8 @@ pub struct Connection {
     others: Vec<u32>,
     /// Measures how much of the speaker the live microphone hears, when started with it.
     echo_test: Option<EchoTest>,
+    /// The name each server, by its link's key, last called this participant, which a new connection to it suggests in place of the device's for the rest of this run: so that a name it does not keep, such as a visitor's, survives connecting again. Never written down. See `design/security.md`.
+    names: HashMap<String, String>,
 }
 
 /// Speech played again to this participant: a replay they asked for, or a catch-up on joining or returning.
@@ -975,6 +977,7 @@ impl Connection {
             listening_as: None,
             others: Vec::new(),
             echo_test: None,
+            names: HashMap::new(),
         }
     }
 
@@ -1174,6 +1177,10 @@ impl Connection {
                     self.heads.clear();
                 }
                 Event::Message(ServerMessage::Left) => self.heads.clear(),
+                Event::Message(ServerMessage::Name { name }) => {
+                    let link = self.link.as_ref().expect("a client is kept with its link");
+                    self.names.insert(link.key.clone(), name.clone());
+                }
                 _ => {}
             }
             // The spectator renders presence.
@@ -1479,11 +1486,8 @@ impl Connection {
         self.disconnect();
         // The new client has presented no certificate yet.
         link.certificate = None;
-        let mut options = Options::new(
-            link.address.clone(),
-            &self.identity.participant,
-            &self.identity.name,
-        );
+        let name = self.names.get(&link.key).unwrap_or(&self.identity.name);
+        let mut options = Options::new(link.address.clone(), &self.identity.participant, name);
         options.microphone_rearm_on_disconnect = true;
         options.transport = link.transport;
         options.token = link.token.clone();

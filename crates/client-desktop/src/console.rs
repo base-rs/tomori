@@ -303,7 +303,12 @@ fn serve(
         if conversation.knocks() != knocks.as_slice() {
             knocks = conversation.knocks().to_vec();
             for knock in &knocks {
-                say!(out, "{} is knocking: + admits, - declines.", knock.name);
+                say!(
+                    out,
+                    "{}{} is knocking: + admits, - declines.",
+                    knock.name,
+                    tomori_scene::hand_menu::VISITOR
+                );
             }
         }
         let text = conversation.text();
@@ -594,9 +599,16 @@ mod tests {
         conversation.apply(tomori_client::Event::Message(
             tomori_protocol::ServerMessage::Name { name: "Ada".into() },
         ));
-        let (out, _) = session(&mut conversation, &["name  /clear", "name Ada Lovelace "]);
+        let (out, _) = session(
+            &mut conversation,
+            &["name  /clear", "name Ada:", "name Ada  Lovelace "],
+        );
         assert!(
-            out.contains("(A name must not be empty, start with \"/\""),
+            out.contains("(Name not changed: A name must not start with \"/\".)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("(Name not changed: A name must not contain \":\""),
             "{out}"
         );
         assert!(
@@ -640,7 +652,7 @@ mod tests {
         assert!(out.contains("(No knock is waiting.)"));
         knock(&mut conversation, "knock-1", "Grace");
         let (out, _) = session(&mut conversation, &["+ -"]);
-        assert!(out.contains("Grace is knocking: + admits, - declines."));
+        assert!(out.contains("Grace (visitor) is knocking: + admits, - declines."));
         let sent: Vec<_> = conversation.take_actions();
         assert_eq!(
             sent.iter()

@@ -26,5 +26,7 @@ pub use certificate::ServerCertificate;
 pub use fingerprint::{Fingerprint, FingerprintError};
 pub use pin::{Pinned, client_config};
 #[cfg(feature = "issue")]
-pub use store::{Entry, Grant, StoreError, TokenStore, create_private_directory, write_private};
+pub use store::{
+    Entry, Grant, Renamed, StoreError, TokenStore, create_private_directory, write_private,
+};
 pub use token::{TOKEN_PREFIX, generate as generate_token};

@@ -80,6 +80,18 @@ struct State {
     entries: Vec<Entry>,
 }
 
+/// What [`TokenStore::rename`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Renamed {
+    /// The token is called by the new name from now on.
+    Renamed,
+    /// No token has the identifier, as after it was revoked.
+    Missing,
+    /// Another token is called by the name already, so nothing changed.
+    Taken,
+}
+
 /// The tokens a server has issued, kept in a file readable only by the server's user. The `tomori-server auth` commands and the running server share the file: each change is made under an exclusive lock on a lock file beside it, against the file as it is then, and [`reload`](Self::reload) picks up changes made by another process. See `design/security.md`.
 pub struct TokenStore {
     path: PathBuf,
@@ -129,16 +141,28 @@ impl TokenStore {
         Ok(found)
     }
 
-    /// Rename the token with identifier `id`, and so the display name of the principal it identifies, to `name`. Returns false if there is none. The caller checks that the name is one it shows. See `design/security.md`.
-    pub fn rename(&self, id: &str, name: &str) -> Result<bool, StoreError> {
-        let mut found = false;
+    /// Rename the token with identifier `id`, and so the display name of the principal it identifies, to `name`, unless another token's name is `taken`, as the caller compares names, read under the lock so that two renames cannot both take a name. The caller checks that the name is one it shows. See `design/security.md`.
+    pub fn rename(
+        &self,
+        id: &str,
+        name: &str,
+        taken: impl Fn(&str) -> bool,
+    ) -> Result<Renamed, StoreError> {
+        let mut renamed = Renamed::Missing;
         self.change(|entries| {
-            for entry in entries.iter_mut().filter(|entry| entry.id == id) {
-                entry.name = name.to_owned();
-                found = true;
-            }
+            let elsewhere = entries
+                .iter()
+                .any(|entry| entry.id != id && taken(&entry.name));
+            renamed = match entries.iter_mut().find(|entry| entry.id == id) {
+                None => Renamed::Missing,
+                Some(_) if elsewhere => Renamed::Taken,
+                Some(entry) => {
+                    entry.name = name.to_owned();
+                    Renamed::Renamed
+                }
+            };
         })?;
-        Ok(found)
+        Ok(renamed)
     }
 
     /// The issued tokens, oldest first.
@@ -378,8 +402,27 @@ mod tests {
         );
 
         // A rename names the principal from then on, here and, once it reloads, in the server.
-        assert!(command.rename(&entry.id, "Robert").unwrap());
-        assert!(!command.rename("missing", "Nobody").unwrap());
+        let none = |_: &str| false;
+        assert_eq!(
+            command.rename(&entry.id, "Robert", none).unwrap(),
+            Renamed::Renamed
+        );
+        assert_eq!(
+            command.rename("missing", "Nobody", none).unwrap(),
+            Renamed::Missing
+        );
+        // A name another token has is refused, as the caller compares names; the token's own name is not compared.
+        let (other, _) = command.issue("Ada", Grant::Owner).unwrap();
+        let same = |name: &str| name.eq_ignore_ascii_case("ADA");
+        assert_eq!(
+            command.rename(&entry.id, "ADA", same).unwrap(),
+            Renamed::Taken
+        );
+        assert_eq!(
+            command.rename(&other.id, "ADA", same).unwrap(),
+            Renamed::Renamed
+        );
+        assert!(command.revoke(&other.id).unwrap());
         assert!(server.reload().unwrap());
         let renamed = server.entry(&entry.principal().id).unwrap();
         assert_eq!(renamed.name, "Robert");
@@ -488,7 +531,7 @@ mod tests {
             let error = store.revoke(&kept.id).err().unwrap();
             assert_eq!(error.to_string(), message);
             unchanged();
-            let error = store.rename(&kept.id, "lost").err().unwrap();
+            let error = store.rename(&kept.id, "lost", |_| false).err().unwrap();
             assert_eq!(error.to_string(), message);
             unchanged();
         }

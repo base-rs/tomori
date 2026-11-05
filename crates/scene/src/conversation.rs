@@ -60,6 +60,11 @@ enum Pairing {
     Waiting(String, Instant),
 }
 
+/// The problem shown when words that said a new name did not change it, for `reason`.
+fn name_not_changed(reason: &str) -> String {
+    format!("Name not changed: {reason}")
+}
+
 /// How long the device waits for a pairing to be confirmed before it gives up itself: the server's timeout and a margin. A pairing the device gives up on is cancelled, so one choice of the pairing object allows the server one try. See `design/security.md`.
 const PAIRING_PATIENCE: Duration = Duration::from_secs(135);
 
@@ -118,6 +123,8 @@ enum Outcome {
     Named(String),
     /// Not sent, with why, which is also the problem shown.
     Failed(String),
+    /// Words that said a new name did not change it, with why; the problem shown says so, and X says the name again until B cancels. See `design/hand-menu.md`.
+    NameFailed(String),
 }
 
 impl Talk {
@@ -565,6 +572,7 @@ impl Conversation {
                 if let Event::UtteranceFailed(failed) = event
                     && self.talk.as_ref().map(Talk::utterance) == Some(failed.utterance.as_str())
                 {
+                    let naming = self.talk.as_ref().is_some_and(Talk::naming);
                     self.stop_talking();
                     self.talk = None;
                     let error: String = match failed.failure {
@@ -573,7 +581,7 @@ impl Conversation {
                             "Network too slow; your words were not sent.".into()
                         }
                     };
-                    self.failed(error);
+                    self.failed(error, naming);
                 }
             }
         }
@@ -584,14 +592,16 @@ impl Conversation {
             // A pairing belongs to its connection; the server withdraws it.
             self.pairing = None;
             self.stop_live();
+            let naming = self.talk.as_ref().is_some_and(Talk::naming);
             match &self.talk {
                 Some(Talk::Recording { .. }) => {
                     self.stop_talking();
-                    self.failed(LOST.into());
+                    self.failed(LOST.into(), naming);
                 }
-                // The server may still queue it, but its transcript cannot reach us.
+                // The server may still queue it, but its transcript cannot reach us. A name may still be taken, and says so if it is; until then, X says it again.
                 Some(Talk::Sending { .. }) => {
                     self.talk = None;
+                    self.naming = naming && self.renames();
                     self.notice = Some("Connection lost while sending your words.".into());
                 }
                 None => {}
@@ -822,14 +832,17 @@ impl Conversation {
             }
             ServerMessage::TranscriptFailed { utterance, error } => {
                 log::warn!("Utterance {utterance} failed: {error}");
+                let mut naming = false;
                 if self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str()) {
+                    let talk = self.talk.take();
+                    naming = talk.as_ref().is_some_and(Talk::naming);
                     // Cancelling would be refused, since the server has already ended it.
-                    if matches!(self.talk.take(), Some(Talk::Recording { .. })) {
+                    if matches!(talk, Some(Talk::Recording { .. })) {
                         self.actions.push(Action::AbandonUtterance);
                     }
                 }
                 // Also shown for an earlier utterance, whose words were not sent either.
-                self.failed(error);
+                self.failed(error, naming);
             }
             // Agent speech is heard rather than shown: its audio plays through the speaker.
             ServerMessage::Speech { segment, text, .. } => {
@@ -1089,6 +1102,8 @@ impl Conversation {
     fn close_space(&mut self) {
         self.stop_live();
         self.stop_talking();
+        // A new name is said in a space; leaving it stops waiting for one.
+        self.naming = false;
         // Knocks belong to the space.
         self.knocks.clear();
         self.knock = None;
@@ -1233,21 +1248,19 @@ impl Conversation {
 
     /// Change this participant's display name to `name`, as typed on the console, on a server that renames. The server keeps it with their token, or for a visitor while it keeps them. Says what happened in the notice.
     pub fn rename(&mut self, name: &str) {
-        let name = name.trim();
         if self.server_name.is_none()
             || !matches!(self.state, Some(ConnectionState::Connected { .. }))
         {
             self.notice = Some("This server does not change names.".into());
-        } else if tomori_client::identity::name(name).as_deref() != Some(name) {
-            self.notice = Some(format!(
-                "A name must not be empty, start with \"/\" or be longer than {} bytes.",
-                tomori_client::identity::NAME_BYTES
-            ));
-        } else {
-            self.send(ClientMessage::SetName {
-                name: name.to_owned(),
-            });
-            self.notice = Some(format!("Changing your name to {name}."));
+            return;
+        }
+        // Cleaned and checked as the server does, so that what is refused says why at once; the server checks again, and whether someone else has the name.
+        match tomori_protocol::text::display_name(name) {
+            Ok(name) => {
+                self.notice = Some(format!("Changing your name to {name}."));
+                self.send(ClientMessage::SetName { name });
+            }
+            Err(error) => self.notice = Some(format!("Name not changed: {error}")),
         }
     }
 
@@ -2362,6 +2375,13 @@ impl Conversation {
                 if self.space_menu.take().is_some() || self.queue_selected.take().is_some() {
                     return;
                 }
+                // Stop waiting for a new name, and dismiss why the last was not changed.
+                if std::mem::take(&mut self.naming) {
+                    if matches!(self.outcome, Some((Outcome::NameFailed(_), _))) {
+                        self.error = None;
+                    }
+                    return;
+                }
                 if self.error.take().is_some() {
                     return;
                 }
@@ -2593,7 +2613,12 @@ impl Conversation {
 
     /// Abandon a recording without sending it, as when the session loses focus. Words already released are still transcribed.
     pub fn stop_talking(&mut self) {
-        if let Some(Talk::Recording { utterance, .. }) = &self.talk {
+        if let Some(Talk::Recording {
+            utterance, naming, ..
+        }) = &self.talk
+        {
+            // A name not said yet is still to be said: X says it again.
+            self.naming = *naming && self.renames();
             let pending = self.actions.iter().any(
                 |action| matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance),
             );
@@ -2609,6 +2634,7 @@ impl Conversation {
 
     /// The microphone could not record, so the recording is abandoned.
     pub fn microphone_failed(&mut self, error: impl Into<String>) {
+        let naming = self.talk.as_ref().is_some_and(Talk::naming);
         self.stop_live();
         // X may have been released while capture failed, before the queued end
         // was sent. Cancel instead of finalizing an incomplete utterance.
@@ -2638,13 +2664,19 @@ impl Conversation {
         if cancelled {
             self.talk = None;
         }
-        self.failed(error.into());
+        self.failed(error.into(), naming);
     }
 
-    /// Show `error` as the problem, and on the recording indicator, as words that were not sent.
-    fn failed(&mut self, error: String) {
-        self.outcome = Some((Outcome::Failed(error.clone()), Instant::now()));
-        self.error = Some(error);
+    /// Show `error` as the problem, and on the recording indicator, as words that were not sent, or, if they were `naming` the participant, as a name not changed, which X then says again. See `design/hand-menu.md`.
+    fn failed(&mut self, error: String, naming: bool) {
+        if naming {
+            self.naming = self.renames();
+            self.error = Some(name_not_changed(&error));
+            self.outcome = Some((Outcome::NameFailed(error), Instant::now()));
+        } else {
+            self.outcome = Some((Outcome::Failed(error.clone()), Instant::now()));
+            self.error = Some(error);
+        }
     }
 
     /// What the recording indicator on the left controller says at `now`, if anything. See `design/hand-menu.md`.
@@ -2755,6 +2787,13 @@ impl Conversation {
             // Until B dismisses the problem, or another recording starts.
             Some((Outcome::Failed(reason), _)) if self.error.as_ref() == Some(reason) => {
                 Some(Phase::Failed {
+                    reason: reason.clone(),
+                })
+            }
+            Some((Outcome::NameFailed(reason), _))
+                if self.error.as_deref() == Some(name_not_changed(reason).as_str()) =>
+            {
+                Some(Phase::NameFailed {
                     reason: reason.clone(),
                 })
             }
@@ -3711,8 +3750,12 @@ impl Conversation {
             "R-stick choose | A confirm"
         } else if space.approval.is_some() {
             "Sending decision..."
-        } else if self.naming {
-            "Hold X to say your name | hold B leave"
+        } else if self.naming && self.renames() {
+            if matches!(self.outcome, Some((Outcome::NameFailed(_), _))) && !problem.is_empty() {
+                "Hold X to try again | B cancel"
+            } else {
+                "Hold X to say your name | B cancel"
+            }
         } else if self.answerable().is_some() {
             "Hold X to answer | hold B leave"
         } else if self.cancelling.is_some() {
@@ -5809,7 +5852,7 @@ mod tests {
         assert!(
             conversation
                 .text()
-                .ends_with("Hold X to say your name | hold B leave")
+                .ends_with("Hold X to say your name | B cancel")
         );
 
         // X then says the name, which answers no question and is about no worker.
@@ -5887,6 +5930,166 @@ mod tests {
         conversation.connect(Choice::new("Other", "10.0.0.2:8765", Source::Discovered));
         assert_eq!(conversation.display_name(), "Ada");
         assert!(!conversation.menu_model().naming);
+    }
+
+    /// A conversation on a server that renames, in a space, choosing to say a new name.
+    fn naming() -> Conversation {
+        use crate::hand_menu::Choice as MenuChoice;
+        let mut conversation = joined(|_| {});
+        conversation.apply(Event::Message(ServerMessage::Name {
+            name: "Quest 3".into(),
+        }));
+        conversation.choose_menu(MenuChoice::Rename);
+        assert!(conversation.menu_model().naming);
+        conversation
+    }
+
+    /// Press X, which begins words that say a new name, or that are for the agent, as `naming` says; returns the utterance.
+    fn say(conversation: &mut Conversation, naming: bool) -> String {
+        conversation.talk(true);
+        let actions = conversation.take_actions();
+        let [Action::BeginUtterance(begun)] = &actions[..] else {
+            unreachable!("{actions:?}")
+        };
+        assert_eq!(begun.naming, naming, "{actions:?}");
+        begun.id.clone()
+    }
+
+    #[test]
+    fn a_name_not_changed_is_said_again_with_x_until_b_cancels() {
+        use crate::recording::Phase;
+        // Refused, not heard, or failed in transcription, the name is not changed and X says it again.
+        for error in [
+            "That name is taken.",
+            "no speech heard",
+            "The model failed.",
+        ] {
+            let mut conversation = naming();
+            let utterance = say(&mut conversation, true);
+            conversation.talk(false);
+            conversation.take_actions();
+            conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+                utterance,
+                error: error.into(),
+            }));
+            assert!(conversation.menu_model().naming, "{error}");
+            assert_eq!(
+                conversation.error.as_deref(),
+                Some(format!("Name not changed: {error}").as_str())
+            );
+            let text = conversation.text();
+            assert!(text.contains("Name not changed: "), "{text}");
+            assert!(text.ends_with("Hold X to try again | B cancel"), "{text}");
+            assert_eq!(
+                conversation.recording_phase(Instant::now()),
+                Some(Phase::NameFailed {
+                    reason: error.into()
+                })
+            );
+            // B stops waiting for the name and dismisses why, and X then talks to the agent.
+            conversation.back();
+            assert!(!conversation.menu_model().naming);
+            assert!(!conversation.text().contains("Name not changed"));
+            assert_eq!(conversation.recording_phase(Instant::now()), None);
+            say(&mut conversation, false);
+        }
+
+        // Tried again, the name changes, and X talks to the agent after that.
+        let mut conversation = naming();
+        let first = say(&mut conversation, true);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: first,
+            error: "That name is taken.".into(),
+        }));
+        let again = say(&mut conversation, true);
+        // Recording again, the failure is no longer shown on the indicator.
+        let Some(Phase::Naming { .. }) = conversation.recording_phase(Instant::now()) else {
+            unreachable!("Some")
+        };
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance: again,
+            text: "Ada".into(),
+            finished: true,
+        }));
+        assert_eq!(conversation.display_name(), "Ada");
+        assert!(!conversation.menu_model().naming);
+        say(&mut conversation, false);
+
+        // B before saying anything cancels too, leaving a problem shown for B to dismiss next.
+        let mut conversation = naming();
+        conversation.fail("Something else.");
+        conversation.back();
+        assert!(!conversation.menu_model().naming);
+        assert!(conversation.text().contains("Something else."));
+        conversation.back();
+        assert!(!conversation.text().contains("Something else."));
+    }
+
+    #[test]
+    fn a_name_whose_words_are_lost_is_said_again() {
+        use crate::recording::Phase;
+        // Words that could not be sent, or recorded, rename nobody, and X says the name again.
+        let lost: [fn(&mut Conversation, &str); 3] = [
+            |conversation, utterance| {
+                conversation.apply(Event::UtteranceFailed(tomori_client::FailedUtterance {
+                    utterance: utterance.into(),
+                    failure: UtteranceFailure::Congested,
+                }))
+            },
+            |conversation, _| conversation.microphone_failed("The microphone failed."),
+            |conversation, _| {
+                conversation.apply(Event::State(ConnectionState::Disconnected {
+                    reason: tomori_client::Disconnect::Closed,
+                    retry_in: Duration::from_secs(1),
+                }))
+            },
+        ];
+        for lose in lost {
+            let mut conversation = naming();
+            let utterance = say(&mut conversation, true);
+            lose(&mut conversation, &utterance);
+            assert!(conversation.menu_model().naming);
+            let Some(Phase::NameFailed { .. }) = conversation.recording_phase(Instant::now())
+            else {
+                unreachable!("Some")
+            };
+            assert!(conversation.text().contains("Name not changed: "));
+        }
+        // Released and on their way when the connection drops, the words may yet rename, and X says the name again meanwhile.
+        let mut conversation = naming();
+        say(&mut conversation, true);
+        conversation.talk(false);
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: tomori_client::Disconnect::Closed,
+            retry_in: Duration::from_secs(1),
+        }));
+        assert!(conversation.menu_model().naming);
+        // Taken off or out of focus while saying it, nothing is said, and X says it again.
+        let mut conversation = naming();
+        say(&mut conversation, true);
+        conversation.stop_talking();
+        assert!(conversation.menu_model().naming);
+        assert_eq!(conversation.take_actions(), [Action::CancelUtterance]);
+        say(&mut conversation, true);
+    }
+
+    #[test]
+    fn a_new_name_is_said_only_in_the_space_it_was_chosen_in() {
+        // Leaving the space stops waiting for the name.
+        let mut conversation = naming();
+        hold_b(&mut conversation);
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert!(!conversation.menu_model().naming);
+        // Watching as a visitor, who cannot record, nothing offers to say it.
+        let mut conversation = naming();
+        conversation.apply(Event::Message(ServerMessage::Role {
+            role: ConnectionRole::Visitor,
+        }));
+        assert!(!conversation.text().contains("say your name"));
     }
 
     #[test]

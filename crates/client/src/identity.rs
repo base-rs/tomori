@@ -11,8 +11,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// The server's limit on a display name, in bytes.
-pub const NAME_BYTES: usize = 64;
+/// The server's limit on a display name, in bytes; see [`tomori_protocol::text`].
+pub const NAME_BYTES: usize = tomori_protocol::text::NAME_BYTES;
 /// Identities stored before protocol 2, in the file `participant`, were sent to other clients and may be recorded in agent sessions, so they are never reused; see `design/security.md`.
 const PARTICIPANT_FILE: &str = "participant-2";
 const SERVER_FILE: &str = "server";
@@ -109,17 +109,9 @@ impl Identity {
     }
 }
 
-/// A display name the server accepts: not blank, not starting with `/`, and within its length limit.
+/// A display name the server accepts, as [`tomori_protocol::text::suggested_name`] cleans and cuts a device's: on one line, without characters that reorder or hide text, not blank, not starting with `/`, without `:`, `[` or `]`, and within the length limits.
 pub fn name(candidate: &str) -> Option<String> {
-    let name = candidate.trim();
-    if name.is_empty() || name.starts_with('/') {
-        return None;
-    }
-    let mut end = name.len().min(NAME_BYTES);
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    Some(name[..end].trim_end().to_owned())
+    tomori_protocol::text::suggested_name(candidate).ok()
 }
 
 /// Small values kept across restarts, in the app's private storage. Without a directory nothing is kept, and each run is a new participant.
@@ -335,7 +327,10 @@ mod tests {
     fn a_long_name_is_cut_between_characters() {
         let long = format!("a{}", "\u{e9}".repeat(NAME_BYTES));
         let cut = name(&long).unwrap();
-        assert_eq!(cut.len(), NAME_BYTES - 1);
+        assert_eq!(cut, format!("a{}", "\u{e9}".repeat(31)));
+        // Three-byte characters reach the byte limit first.
+        let wide = name(&"\u{9f8d}".repeat(40)).unwrap();
+        assert_eq!(wide.len(), 63);
     }
 
     #[test]
@@ -391,6 +386,10 @@ mod tests {
         assert_eq!(name(""), None);
         assert_eq!(name(" /clear"), None);
         assert_eq!(name("Ada/Bea"), Some("Ada/Bea".into()));
+        // A device's name is cleaned as the server cleans it, and one it would refuse is not suggested.
+        assert_eq!(name("Ada\u{202E}\n Quest"), Some("Ada Quest".into()));
+        assert_eq!(name("Ada: Quest"), None);
+        assert_eq!(name("\u{FEFF}/clear"), None);
     }
 
     #[test]

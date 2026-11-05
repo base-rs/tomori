@@ -172,6 +172,16 @@ impl TestServer {
             .expect("the token store is written")
     }
 
+    /// Rename a token as `tomori-server auth rename` does, from another process's view of the token store, which the server notices when it next reads the store.
+    pub fn rename_elsewhere(&self, id: &str, name: &str) -> bool {
+        let state = self.state.as_ref().expect("the server admits by tokens");
+        tomori_security::TokenStore::open(state)
+            .expect("the token store opens")
+            .rename(id, name, |_| false)
+            .expect("the token store is written")
+            == tomori_security::Renamed::Renamed
+    }
+
     /// Open a connection presenting `token`, say hello and wait for the welcome.
     pub fn connect_with_token(&self, participant: &str, name: &str, token: &str) -> TestClient {
         let mut client = TestClient::open_with(

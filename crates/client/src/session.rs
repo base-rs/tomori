@@ -7,8 +7,8 @@ use std::cell::Cell;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use base_http::body::{BodyFrame, ReadableBody};
@@ -305,7 +305,12 @@ async fn exchange(
         let hello = ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             participant: options.participant.clone(),
-            name: options.name.clone(),
+            name: context
+                .shared
+                .name
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
             // Every client built with this crate reads `Name`, which it hands on as any other message.
             names: true,
         };
@@ -480,6 +485,16 @@ fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disco
                         context.shared.outbox.joined(Some(state.id.clone()))
                     }
                     ServerMessage::Left => context.shared.outbox.joined(None),
+                    // Suggested from now on, as the server calls this participant.
+                    ServerMessage::Name { name } => {
+                        name.clone_into(
+                            &mut context
+                                .shared
+                                .name
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner),
+                        );
+                    }
                     _ => {}
                 }
                 context.shared.events.push(Event::Message(message));

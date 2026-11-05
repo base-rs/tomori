@@ -17,6 +17,9 @@ use crate::panel::{Area, Plane, Rect};
 use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines};
 use tomori_client::feedback::Hand as Side;
 
+/// Shown after a visitor's display name wherever others see it, as on a knock: the name is the one their device suggested or they chose, with no token behind it, so nothing vouches for it. See `design/security.md`.
+pub const VISITOR: &str = " (visitor)";
+
 /// A palm shows what its hand holds once it has faced within this angle of straight up for [`HOLD`], whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up. See `design/hand-menu.md`.
 pub const SHOW_ANGLE: f32 = 45.0 * std::f32::consts::PI / 180.0;
 /// It hides once the palm has turned further than this from straight up, so that it does not flicker at the edge.
@@ -676,6 +679,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         row(&[
                             Part::Kept("Let "),
                             Part::Cut(&knock.name),
+                            Part::Kept(VISITOR),
                             Part::Kept(" in"),
                         ]),
                     );
@@ -685,6 +689,7 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         row(&[
                             Part::Kept("Turn "),
                             Part::Cut(&knock.name),
+                            Part::Kept(VISITOR),
                             Part::Kept(" away"),
                         ]),
                     );
@@ -1305,8 +1310,8 @@ mod tests {
             [
                 "< Back",
                 "Requests",
-                "Let Vic in",
-                "Turn Vic away",
+                "Let Vic (visitor) in",
+                "Turn Vic (visitor) away",
                 "Roles & security",
                 "You: Ada (owner)",
                 "Here: Ada, Bob",
@@ -2206,9 +2211,13 @@ mod tests {
         model.pairing = Some(long.into());
         // The role, "away", "in" and the action words survive.
         let people = rows(Some(Section::PeopleAndSecurity), &model);
-        assert!(cut_between(&people, "Let Bartholomew", " in"), "{people:?}");
+        // A knock's visitor stays marked as one, however long their name.
         assert!(
-            cut_between(&people, "Turn Bartholomew", " away"),
+            cut_between(&people, "Let Bartholomew", " (visitor) in"),
+            "{people:?}"
+        );
+        assert!(
+            cut_between(&people, "Turn Bartholomew", " (visitor) away"),
             "{people:?}"
         );
         assert!(

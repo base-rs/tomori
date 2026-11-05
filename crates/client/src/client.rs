@@ -20,6 +20,8 @@ pub(crate) struct Shared {
     pub events: Events,
     /// Cancelled when the client closes, to interrupt reconnection delays and bound the final connection.
     pub closing: Cancellation,
+    /// The display name each Hello suggests: the one the client was made with, until the server renames this participant, after which the new name, so that a name the server does not keep, such as a visitor's, survives reconnecting. See `design/security.md`.
+    pub name: Mutex<String>,
 }
 
 impl Shared {
@@ -51,6 +53,7 @@ impl Sender {
                 state: Mutex::new(ConnectionState::Connecting { attempt: 1 }),
                 events: Events::new(),
                 closing: Cancellation::new(),
+                name: Mutex::new(String::new()),
             }),
         }
     }
@@ -160,6 +163,7 @@ impl Client {
             state: Mutex::new(ConnectionState::Connecting { attempt: 1 }),
             events: Events::new(),
             closing: Cancellation::new(),
+            name: Mutex::new(options.name.clone()),
         });
         if options.microphone_rearm_on_disconnect {
             shared.outbox.require_microphone_rearm();

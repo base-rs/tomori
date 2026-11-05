@@ -2948,6 +2948,41 @@ mod served {
     }
 
     #[test]
+    fn a_name_the_server_does_not_keep_is_suggested_again_for_the_rest_of_the_run() {
+        let server = Server::start();
+        let mut session = Script::listening();
+        // A visitor, whose name the server keeps only while it keeps them.
+        let mut connection = server.participant(
+            &mut session,
+            None,
+            Talker { samples: vec![] },
+            Store::new(None),
+        );
+        connecting(&mut session);
+        until(&mut connection, &mut session, |_, session| {
+            session.connected()
+        });
+        session.push(Action::Send(ClientMessage::SetName { name: "Vic".into() }));
+        until(&mut connection, &mut session, |_, session| {
+            session.count(|event| {
+                matches!(event, Event::Message(ServerMessage::Name { name }) if name == "Vic")
+            }) > 0
+        });
+        // Leaving the server and choosing it again starts a new client, which suggests the name.
+        session.push(Action::Disconnect);
+        run_for(&mut connection, &mut session, Duration::from_millis(20));
+        connecting(&mut session);
+        until(&mut connection, &mut session, |_, session| {
+            session.count(|event| {
+                matches!(
+                    event,
+                    Event::State(ConnectionState::Connected { name: Some(name), .. }) if name == "Vic"
+                )
+            }) > 0
+        });
+    }
+
+    #[test]
     fn words_said_while_x_is_held_reach_the_space_and_are_cued_as_sent() {
         let server = Server::start();
         let mut session = Script::listening();

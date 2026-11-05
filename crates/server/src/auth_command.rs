@@ -88,7 +88,7 @@ pub fn run(
             let name = name.ok_or_else(|| format!("mint needs --name\n\n{USAGE}"))?;
             let name = crate::limits::name(&name)?;
             let (entry, token) = open()?
-                .issue(name, Grant::Owner)
+                .issue(&name, Grant::Owner)
                 .map_err(|error| format!("Could not issue the token: {error}."))?;
             Ok(format!(
                 "Issued owner token {} for {:?}. It is shown only once:\n\n{token}\n",
@@ -118,13 +118,19 @@ pub fn run(
                 ));
             };
             let name = crate::limits::name(&name)?;
-            if open()?
-                .rename(&id, name)
+            let key = tomori_protocol::text::name_key(&name);
+            let taken = |other: &str| tomori_protocol::text::name_key(other) == key;
+            match open()?
+                .rename(&id, &name, taken)
                 .map_err(|error| format!("Could not rename the token: {error}."))?
             {
-                Ok(format!("Renamed token {id} to {name:?}.\n"))
-            } else {
-                Err(format!("No token has the identifier {id:?}."))
+                tomori_security::Renamed::Renamed => {
+                    Ok(format!("Renamed token {id} to {name:?}.\n"))
+                }
+                tomori_security::Renamed::Taken => Err(format!(
+                    "Another token is called {name:?}, so token {id} was not renamed."
+                )),
+                _ => Err(format!("No token has the identifier {id:?}.")),
             }
         }
         "revoke" => {
@@ -217,6 +223,22 @@ mod tests {
         assert_eq!(
             run_in(&state, &["rename", "missing", "Ada"]).unwrap_err(),
             "No token has the identifier \"missing\"."
+        );
+        // A name is cleaned before it is kept, and one another token has, in any case or hidden among invisible characters, is refused.
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "Ada\u{202E}\n Lovelace"]).unwrap(),
+            format!("Renamed token {} to \"Ada Lovelace\".\n", entry.id)
+        );
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "Ada: hi"]).unwrap_err(),
+            "A name must not contain \":\", \"[\" or \"]\"."
+        );
+        assert_eq!(
+            run_in(&state, &["rename", &entry.id, "b\u{200B}OB"]).unwrap_err(),
+            format!(
+                "Another token is called \"bOB\", so token {} was not renamed.",
+                entry.id
+            )
         );
 
         assert_eq!(

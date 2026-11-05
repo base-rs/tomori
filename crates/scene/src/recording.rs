@@ -78,6 +78,8 @@ pub enum Phase {
     Renaming { heard: String },
     /// The server now calls the participant `name`.
     Named { name: String },
+    /// Words that said a new name did not change it, with why. X says the name again, until B cancels.
+    NameFailed { reason: String },
 }
 
 /// The time against the limit, as "1:42 / 5:00", or alone without a limit.
@@ -299,6 +301,25 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             if !heard.trim().is_empty() {
                 rows.extend(tail(heard, 2, Style::plain(DIM)));
             }
+        }
+        Phase::NameFailed { reason } => {
+            let rows = &mut canvas.rows;
+            let mut lines = wrap(
+                &[
+                    Span::new("Name not changed: ", Style::bold(RED)),
+                    Span::new(reason.as_str(), Style::plain(TEXT)),
+                ],
+                COLUMNS,
+                Wrap::default(),
+            );
+            fit(&mut lines, 3, COLUMNS);
+            rows.extend(lines.into_iter().map(Row::new));
+            rows.push(Row::text(
+                "X tries again, B cancels",
+                Style::plain(DIM),
+                COLUMNS,
+            ));
+            canvas.border = Some(RED);
         }
         Phase::Named { name } => {
             canvas.rows.push(Row::new(cut(
@@ -674,6 +695,17 @@ mod tests {
             text(&canvas(&Phase::Named { name: "Ada".into() }, None, 0.0)),
             "✓ You are Ada"
         );
+        let refused = canvas(
+            &Phase::NameFailed {
+                reason: "That name is taken.".into(),
+            },
+            None,
+            0.0,
+        );
+        assert_eq!(refused.border, Some(RED));
+        let refused = text(&refused);
+        assert!(refused.starts_with("Name not changed: That"), "{refused}");
+        assert!(refused.ends_with("X tries again, B cancels"), "{refused}");
     }
 
     #[test]
@@ -683,6 +715,9 @@ mod tests {
             recording(0, ""),
             recording(299, &"word ".repeat(80)),
             Phase::Failed {
+                reason: "x".repeat(500),
+            },
+            Phase::NameFailed {
                 reason: "x".repeat(500),
             },
             Phase::Naming {
