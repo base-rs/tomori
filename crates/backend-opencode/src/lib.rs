@@ -21,6 +21,7 @@ mod api;
 mod connection;
 mod endpoint;
 mod session;
+mod system;
 mod wire;
 
 pub use session::OpenCodeSession;
@@ -81,12 +82,16 @@ impl OpenCode {
                 let mut resolver = endpoint::Resolver::new(self.config.url.clone());
                 let resolve: connection::Resolve = Box::new(move || resolver.next());
                 let (commands, receiver) = connection::Commands::new();
-                let thread = std::thread::Builder::new()
-                    .name("opencode-connection".to_owned())
-                    .spawn(move || {
-                        connection::run_thread(resolve, receiver);
-                    })
-                    .expect("spawn the opencode connection thread");
+                // Refused for this request only: the next starts it again.
+                let thread = system::spawn("opencode-connection", move || {
+                    connection::run_thread(resolve, receiver);
+                })
+                .map_err(|error| {
+                    Error::new(
+                        ErrorKind::Unavailable,
+                        format!("could not start the connection thread: {error}"),
+                    )
+                })?;
                 let value = Connection {
                     commands: commands.clone(),
                     thread: Some(thread),
@@ -173,5 +178,28 @@ impl Backend for OpenCode {
             })
             .await?;
         Ok(OpenCodeSession::new(id, events, commands))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_thread_that_cannot_start_refuses_one_request_and_starts_for_the_next() {
+        let backend = OpenCode::new(Config {
+            url: Some("http://127.0.0.1:9".into()),
+        });
+        system::refuse("opencode-connection");
+        let Err(error) = backend.connection() else {
+            unreachable!("a connection started without its thread");
+        };
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(
+            error.message,
+            "could not start the connection thread: the system refused to start opencode-connection"
+        );
+        assert!(backend.connection().is_ok());
+        backend.shutdown();
     }
 }
