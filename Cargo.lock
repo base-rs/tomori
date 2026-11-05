@@ -326,9 +326,9 @@ dependencies = [
 
 [[package]]
 name = "bake-cargo"
-version = "0.5.4"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79ff5b8e99d484d51e46ea5e4a76f1e86c8751a7c92e62fa6825ab8858042c4b"
+checksum = "9d986c42597b503e1363a82dff7b221559a34ca3c6e6e2cd5e9f9f35c7e87671"
 dependencies = [
  "bake",
  "bake-license",
@@ -343,9 +343,9 @@ dependencies = [
 
 [[package]]
 name = "bake-license"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b873096492b2786ea7c0dd8ccc588b5919a052a13db753a5098950eb5e5e83e"
+checksum = "118fc96c91c3f21c94b3e1a5504309afacd110551ff1d5af078acf36fb68a2a5"
 dependencies = [
  "bake",
  "base-markdown",
@@ -375,9 +375,9 @@ dependencies = [
 
 [[package]]
 name = "bake-readme"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "480bfb31790775eceb77a07726cfb1fb37e376bafcd68aa807047e3f0af09ffd"
+checksum = "82e26544bb2128682103f31f6949faa50830a3a305b1d3ad56bb9b2ac5ef9213"
 dependencies = [
  "bake",
  "base-markdown",
@@ -517,9 +517,9 @@ dependencies = [
 
 [[package]]
 name = "base-project"
-version = "0.1.2"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fb5d644750e147e078f61ea2e9dd0842f5dc8ade4f9c3866a0ce372fbb22e3"
+checksum = "17105821bc688644e3193269a7e2c005a53f44b16981094e0771f802f8eb1e1e"
 dependencies = [
  "bake",
  "bake-agent-context",
@@ -530,6 +530,7 @@ dependencies = [
  "bake-releases",
  "bake-test",
  "base-design",
+ "base-security",
 ]
 
 [[package]]
@@ -580,6 +581,12 @@ name = "base-scheduler-timers"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "453d9b6ef921f7685717d7a86f344950bcedef1e0063d86ec52e9a68f67d40a3"
+
+[[package]]
+name = "base-security"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cafbfb3e7e5ce421ad36126cde1382cf6e5c994e17ca25701bc8a94fe24650e"
 
 [[package]]
 name = "base64"

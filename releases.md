@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Releases now start with one command, `cargo bake cargo:release:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), which creates the release branch, bumps the version, writes the release notes and the `Release:` trailer, validates the candidate and opens the pull request; `cargo bake cargo:version:*` no longer exists. A crate's first upload is `cargo bake cargo:bootstrap PACKAGE`. This uses Base's `base-project` 0.1.7 and `bake-cargo` 0.7.0.
+
 - When GStreamer exits while the PipeWire spectator is writing a frame to it, the spectator now says how GStreamer exited, as it does between frames, rather than only that its video writer disconnected.
 
 - The headset and desktop application's package is renamed from `tomori-quest` to `tomori-client-quest`, so that each client is named `tomori-client-<target>` after its folder, as the other crates are. Cargo commands name it, such as `cargo run -p tomori-client-quest` and `cargo apk build -p tomori-client-quest --lib`. Its library and executable are still `tomori`, and the Android application ID and `tomori.apk` are unchanged. This is the first step of splitting it into the scene, rendering and per-client crates planned in #132 (#56).
