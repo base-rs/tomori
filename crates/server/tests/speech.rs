@@ -1114,7 +1114,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
 }
 
 /// The message a participant is told for words with no speech in them.
-const NO_SPEECH: &str = "No speech was heard, so nothing was sent.";
+const NO_SPEECH: &str = "no speech heard";
 
 /// Record `seconds` of silence as utterance `id`, as when the participant pressed to talk by accident.
 fn record_silence(client: &mut TestClient, id: &str, seconds: usize) {

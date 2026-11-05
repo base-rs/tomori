@@ -3103,7 +3103,7 @@ mod tests {
         let (mut connection, _conversation) = feedback_connection();
         connection.observe(&message(ServerMessage::TranscriptFailed {
             utterance: "u9".into(),
-            error: "Nothing was heard.".into(),
+            error: "no speech heard".into(),
         }));
         assert!(cues(&mut connection).is_empty());
     }

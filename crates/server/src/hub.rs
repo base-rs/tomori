@@ -2829,7 +2829,7 @@ impl Hub {
         {
             Some("The agent session has ended, so nothing was sent.")
         } else if text.is_empty() {
-            Some("No speech was heard, so nothing was sent.")
+            Some("no speech heard")
         } else if text.len()
             > if record.answer.is_some() {
                 limits::ANSWER_BYTES

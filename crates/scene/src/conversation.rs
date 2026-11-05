@@ -7391,7 +7391,7 @@ mod tests {
         conversation.take_actions();
         conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
             utterance,
-            error: "Nothing was heard.".into(),
+            error: "no speech heard".into(),
         }));
         press(&mut conversation);
         let Some(Phase::Recording { .. }) = conversation.recording_phase(Instant::now()) else {
@@ -7444,19 +7444,19 @@ mod tests {
         conversation.take_actions();
         conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
             utterance,
-            error: "Nothing was heard, so nothing was sent.".into(),
+            error: "no speech heard".into(),
         }));
-        assert!(conversation.text().contains("! 0s Nothing was heard"));
+        assert!(conversation.text().contains("! 0s no speech heard"));
         // Talking again does not wipe it before it is read.
         press(&mut conversation);
         let text = conversation.text();
         assert!(text.contains("MIC AGENT"), "{text}");
-        assert!(text.contains("! 0s Nothing was heard"), "{text}");
+        assert!(text.contains("! 0s no speech heard"), "{text}");
         conversation.talk(false);
         conversation.take_actions();
         // B dismisses it.
         conversation.back();
-        assert!(!conversation.text().contains("Nothing was heard"));
+        assert!(!conversation.text().contains("no speech heard"));
         assert!(conversation.take_actions().is_empty());
     }
 
@@ -7575,18 +7575,18 @@ mod tests {
         let second = press(&mut conversation);
         conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
             utterance: first,
-            error: "Nothing was heard, so nothing was sent.".into(),
+            error: "no speech heard".into(),
         }));
         let text = conversation.text();
         assert!(text.contains("MIC AGENT"), "{text}");
-        assert!(text.contains("Nothing was heard"), "{text}");
+        assert!(text.contains("no speech heard"), "{text}");
         conversation.talk(false);
         let text = conversation.text();
         assert!(text.contains("Sending: "), "{text}");
-        assert!(text.contains("Nothing was heard"), "{text}");
+        assert!(text.contains("no speech heard"), "{text}");
         assert_fits(&mut conversation);
         conversation.apply(transcript(&second, "Run the tests.", true));
-        assert!(conversation.text().contains("Nothing was heard"));
+        assert!(conversation.text().contains("no speech heard"));
     }
 
     #[test]
