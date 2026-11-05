@@ -404,7 +404,13 @@ fn orbit(count: usize) -> Vec<Vec3> {
 
 /// How far a label's background reaches to either side of its anchor, when it is centred.
 fn half_width(label: &Label) -> f32 {
-    let columns = label.lines.iter().map(|line| line.len()).max().unwrap_or(0);
+    // In cells, as the label is drawn, rather than bytes, which would make a label with "é" or "…" wider than it is.
+    let columns = label
+        .lines
+        .iter()
+        .map(|line| crate::ui_text::drawn(line).count())
+        .max()
+        .unwrap_or(0);
     (columns as f32 * 9.0 + 6.0) * label.pixel / 2.0
 }
 
@@ -634,14 +640,9 @@ pub fn hue(id: &str) -> f32 {
     (hash >> 8) as f32 / (1 << 24) as f32
 }
 
-/// `text` as ASCII, on one line of at most `columns` characters.
+/// `text` on one line of at most `columns` characters, as [`crate::ui_text::clip`] cuts it.
 pub fn clip(text: &str, columns: usize) -> String {
-    let ascii = crate::caption::wrapped_lines(&text.replace('\n', " ")).join(" ");
-    if ascii.chars().count() <= columns {
-        ascii
-    } else {
-        format!("{}...", &ascii[..columns.saturating_sub(3)])
-    }
+    crate::ui_text::clip(text, columns)
 }
 
 #[cfg(test)]
@@ -1039,7 +1040,7 @@ mod tests {
                     .label
                     .lines
                     .iter()
-                    .all(|line| line.len() <= LABEL_COLUMNS)
+                    .all(|line| line.chars().count() <= LABEL_COLUMNS)
             );
             let facing = facing(object.label.anchor);
             let towards = (HOME - object.label.anchor).with_y(0.0).normalize();
@@ -1066,11 +1067,12 @@ mod tests {
     }
 
     #[test]
-    fn long_labels_are_clipped_to_ascii() {
+    fn long_labels_are_clipped_to_the_characters_drawn() {
         assert_eq!(clip("short", 10), "short");
-        assert_eq!(clip("a much longer label", 10), "a much ...");
+        assert_eq!(clip("a much longer label", 10), "a much lo…");
         assert_eq!(clip("two\nlines", 20), "two lines");
-        assert!(clip(&"🦀".repeat(40), 10).len() <= 10);
+        assert_eq!(clip(&"🦀".repeat(40), 10).chars().count(), 10);
+        assert_eq!(clip("José’s space", 20), "José's space");
     }
 
     fn summary(id: &str, attention: Option<Attention>, age: Option<u32>) -> SpaceSummary {

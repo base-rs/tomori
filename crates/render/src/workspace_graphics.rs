@@ -5,7 +5,6 @@
 //! This deliberately has no dependency on the head-locked caption renderer.
 use crate::delegation::{State, Station, Workspace};
 use bytemuck::{Pod, Zeroable};
-use font8x8::{BASIC_FONTS, UnicodeFonts};
 use tomori_scene::cards::{COLUMNS, ContentCache, MAX_RESULTS, ROWS, clip, results};
 
 const MAX_LABELS: usize = 128;
@@ -970,11 +969,7 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
     }
     for (row, line) in panel.lines.iter().take(ROWS).enumerate() {
         for (column, ch) in line.chars().take(panel.columns).enumerate() {
-            let glyph = BASIC_FONTS
-                .get(ch)
-                .or_else(|| BASIC_FONTS.get('?'))
-                .unwrap();
-            for (gy, bits) in glyph.iter().enumerate() {
+            for (gy, bits) in crate::ui_text::glyph(ch).iter().enumerate() {
                 let mut gx = 0;
                 while gx < 8 {
                     if bits & (1 << gx) == 0 {

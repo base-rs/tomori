@@ -13,7 +13,7 @@ use tomori_protocol::{TranscriptPart, TranscriptStage};
 
 use crate::canvas::{Canvas, Rect};
 use crate::controller::Pose;
-use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, cut, wrap};
+use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Span, Style, Wrap, cut, fit, wrap};
 
 /// The indicator's width, in cells.
 pub const COLUMNS: usize = 27;
@@ -260,12 +260,7 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
                 COLUMNS,
                 Wrap::default(),
             );
-            if lines.len() > 3 {
-                lines.truncate(3);
-                let last = lines.last_mut().expect("truncated to three");
-                last.truncate(COLUMNS - 1);
-                last.push(('…', Style::plain(TEXT)));
-            }
+            fit(&mut lines, 3, COLUMNS);
             rows.extend(lines.into_iter().map(Row::new));
             rows.push(Row::text("B dismisses", Style::plain(DIM), COLUMNS));
             canvas.border = Some(RED);
