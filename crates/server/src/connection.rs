@@ -398,9 +398,11 @@ mod tests {
             false,
         );
         assert!(read(&mut body).is_err());
-        // The request cannot be read.
-        let mut body = scripted(vec![Err(std::io::Error::other("reset"))], false);
-        assert!(read(&mut body).is_err());
+        // The request cannot be read, at once or after a wait.
+        for waits in [false, true] {
+            let mut body = scripted(vec![Err(std::io::Error::other("reset"))], waits);
+            assert!(read(&mut body).is_err());
+        }
     }
 
     #[test]
