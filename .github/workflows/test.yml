@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  # Formatting, Clippy and the workspace tests on current stable Rust, and the tests on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The main branch ruleset requires test-result below and check from publish.yml. The 100% region-coverage gate runs in coverage.yml and is not yet required; see the Tests section of readme.md.
+  # Formatting, Clippy and the workspace tests on current stable Rust, under the Base 100% source-region coverage gate, and the tests on the minimum supported version, which is the workspace's `rust-version` in Cargo.toml. The main branch ruleset requires test-result below and check from publish.yml. See the Tests section of readme.md.
   test:
     name: test (${{ matrix.rust }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -35,8 +35,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ steps.version.outputs.rust || 'stable' }}
-          # Formatting and Clippy run on stable only: their lints change between versions.
-          components: ${{ matrix.rust == 'stable' && 'clippy, rustfmt' || '' }}
+          # Formatting and Clippy run on stable only, as their lints change between versions, and so does coverage.
+          components: ${{ matrix.rust == 'stable' && 'clippy, llvm-tools-preview, rustfmt' || '' }}
+          # Invalidate caches containing the retired socketry-cargo-bake launcher.
+          cache-shared-key: coverage-bake-launcher-v2
       # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU.
       - name: Install the ALSA development files for the desktop client, and lavapipe
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers
@@ -65,12 +67,40 @@ jobs:
         if: matrix.rust == 'stable'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
+        if: matrix.rust == 'minimum'
         env:
           # Fail the rendering tests, rather than skipping them, if no Vulkan adapter is found.
           TOMORI_REQUIRE_GPU: 1
           # Fail the speech model tests, rather than skipping them, if a model is missing.
           TOMORI_REQUIRE_MODELS: 1
         run: cargo test --workspace --locked
+      - name: Install Bake launcher
+        if: matrix.rust == 'stable'
+        run: cargo install bake --locked
+      - name: Install coverage tool
+        if: matrix.rust == 'stable'
+        run: cargo install cargo-llvm-cov --locked
+      # The coverage task runs the tests itself, after the project's test:before task, which fetches the sherpa-onnx libraries, unchanged since the step above.
+      - name: Run tests and require complete source-region coverage
+        if: matrix.rust == 'stable'
+        shell: bash
+        env:
+          TOMORI_REQUIRE_GPU: 1
+          TOMORI_REQUIRE_MODELS: 1
+        run: cargo bake --locked test:coverage --all-targets true 2>&1 | tee coverage.log
+      # Bake reports a coverage failure as one line holding every uncovered region, often megabytes long, which the Actions log viewer doesn't show. This step extracts the counts, computes the percentage, and writes it to both the log and the job summary.
+      - name: Summarize coverage
+        if: always() && matrix.rust == 'stable'
+        shell: bash
+        run: |
+          result=$(grep -o -E 'region coverage is [0-9]+/[0-9]+ measured source regions[^;]*; [0-9]+ source regions remain uncovered|Region coverage passed: [0-9]+/[0-9]+ measured source regions covered[^)]*\)' coverage.log | head -n 1 || true)
+          if [ -z "$result" ]; then
+            echo "No coverage result found in coverage.log." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          counts=$(grep -o -E '[0-9]+/[0-9]+' <<< "$result" | head -n 1)
+          percentage=$(awk -F / '{ if ($2 > 0) printf "%.2f", 100 * $1 / $2; else print "100.00" }' <<< "$counts")
+          echo "Source-region coverage: ${percentage}% (${result})." | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The client core and the headset application for the Quest, as scripts/android.sh builds them.
   android:
@@ -109,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require successful tests
+      - name: Require successful tests and coverage
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
         run: |
