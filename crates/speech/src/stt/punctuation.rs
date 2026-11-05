@@ -199,30 +199,34 @@ impl CnnBilstmPunctuator {
                 provider: Some("cpu".into()),
                 ..Default::default()
             },
-        })
-        .ok_or_else(|| {
-            Error::Unavailable(format!(
-                "sherpa-onnx could not load the punctuation model in {}",
-                config.model.display()
-            ))
-        })?;
-        Ok(Self { punctuation })
+        });
+        Error::loaded(
+            punctuation,
+            format!("the punctuation model in {}", config.model.display()),
+        )
+        .map(|punctuation| Self { punctuation })
     }
 
     fn add(&self, text: &str) -> Result<String, Error> {
-        self.punctuation
-            .add_punctuation(text)
-            .ok_or_else(|| Error::Engine("the punctuation model returned no result".into()))
+        Error::produced(
+            self.punctuation.add_punctuation(text),
+            "the punctuation model",
+        )
     }
 }
 
 impl Punctuator for CnnBilstmPunctuator {
     fn punctuate(&mut self, text: &str) -> Result<String, Error> {
-        let probed = self.add(&format!("{} {PROBE}", text.trim_end()))?;
-        match without_probe(&probed) {
-            Some(punctuated) => Ok(punctuated.to_owned()),
-            None => self.add(text),
-        }
+        probed(text, |text| self.add(text))
+    }
+}
+
+/// `text` punctuated by `add` with [`PROBE`] after it, so that its last word is punctuated too, and the probe taken off again; or by `add` alone if it does not give the probe back.
+fn probed(text: &str, mut add: impl FnMut(&str) -> Result<String, Error>) -> Result<String, Error> {
+    let probed = add(&format!("{} {PROBE}", text.trim_end()))?;
+    match without_probe(&probed) {
+        Some(punctuated) => Ok(punctuated.to_owned()),
+        None => add(text),
     }
 }
 
@@ -322,18 +326,15 @@ mod tests {
             let _ = sender.send(event);
         });
         utterance.end();
-        loop {
-            match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
-                TranscriptEvent::Partial(_) => {}
-                TranscriptEvent::Final(text) => return text,
-                TranscriptEvent::Failed(error) => panic!("{error}"),
-            }
-        }
+        std::iter::from_fn(|| receiver.recv_timeout(Duration::from_secs(5)).ok())
+            .find_map(TranscriptEvent::outcome)
+            .expect("the utterance ends")
+            .unwrap()
     }
 
     #[test]
     fn punctuates_the_final_transcript() {
-        let (punctuator, _) = fake(|text| Ok(format!("{}?", capitalize(text)?)));
+        let (punctuator, _) = fake(|text| capitalize(text).map(|text| format!("{text}?")));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("can you run the tests"), punctuator));
         assert_eq!(transcribe(&mut recognition), "Can you run the tests?");
@@ -403,7 +404,7 @@ mod tests {
 
     impl Punctuator for Unloaded {
         fn punctuate(&mut self, text: &str) -> Result<String, Error> {
-            Ok(text.to_owned())
+            unreachable!("nothing is punctuated, not {text:?}")
         }
     }
 
@@ -451,30 +452,140 @@ mod tests {
     #[test]
     fn punctuates_with_the_real_model() {
         let config = PunctuationConfig::from_root(&crate::test_models::root());
-        if !crate::test_models::installed(
+        crate::test_models::with(
             "the punctuation model",
             "bash scripts/fetch-asr-model.sh",
             &[&config.model],
-        ) {
-            return;
+            || {
+                let punctuator = CnnBilstmPunctuator::new(&config).unwrap();
+                let mut recognition = Recognition::spawn(Punctuated::new(
+                    Fixed("how are you i am fine thank you"),
+                    punctuator,
+                ));
+                assert_eq!(
+                    transcribe(&mut recognition),
+                    "How are you? I am fine. Thank you."
+                );
+                let punctuator = CnnBilstmPunctuator::new(&config).unwrap();
+                let mut recognition = Recognition::spawn(Punctuated::new(
+                    Fixed("can you explain why the build failed on the linux machine yesterday"),
+                    punctuator,
+                ));
+                assert_eq!(
+                    transcribe(&mut recognition),
+                    "Can you explain why the build failed on the Linux machine yesterday?"
+                );
+            },
+        );
+    }
+
+    /// A recognizer whose streams cannot open.
+    struct Refusing;
+
+    impl StreamingRecognizer for Refusing {
+        fn open(&mut self) -> Result<Box<dyn RecognitionStream>, Error> {
+            Err(Error::Unavailable("the model is missing".into()))
         }
-        let punctuator = CnnBilstmPunctuator::new(&config).unwrap();
-        let mut recognition = Recognition::spawn(Punctuated::new(
-            Fixed("how are you i am fine thank you"),
-            punctuator,
-        ));
+    }
+
+    /// A recognizer whose streams fail as they finish.
+    struct Unfinished;
+
+    impl StreamingRecognizer for Unfinished {
+        fn open(&mut self) -> Result<Box<dyn RecognitionStream>, Error> {
+            Ok(Box::new(UnfinishedStream))
+        }
+    }
+
+    struct UnfinishedStream;
+
+    impl RecognitionStream for UnfinishedStream {
+        fn accept(&mut self, _samples: &[i16]) {}
+
+        fn due(&self) -> bool {
+            false
+        }
+
+        fn decode(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn transcript(&self) -> Transcript {
+            Transcript::default()
+        }
+
+        fn finish(&mut self) -> Result<String, Error> {
+            Err(Error::Engine("the model failed".into()))
+        }
+    }
+
+    #[test]
+    fn a_recognizer_that_cannot_open_or_finish_fails_the_utterance_without_punctuating() {
+        for recognizer in [
+            Box::new(Refusing) as Box<dyn StreamingRecognizer>,
+            Box::new(Unfinished),
+        ] {
+            let (punctuator, calls) = fake(capitalize);
+            let mut recognition = Recognition::spawn(Punctuated::new(recognizer, punctuator));
+            let (sender, receiver) = mpsc::channel();
+            let mut utterance = recognition.begin(1, RATE, move |event| {
+                let _ = sender.send(event);
+            });
+            // Heard as it comes, through the punctuated stream.
+            utterance.push(&[0; 1600]);
+            utterance.end();
+            let outcome = std::iter::from_fn(|| receiver.recv_timeout(Duration::from_secs(5)).ok())
+                .find_map(TranscriptEvent::outcome)
+                .expect("the utterance ends");
+            assert!(outcome.is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+        assert!(UnfinishedStream.decode().is_ok());
+        assert_eq!(UnfinishedStream.transcript(), Transcript::default());
+        assert!(!UnfinishedStream.due());
+        // Asked directly, as the engine asks when an utterance has not ended.
+        let (punctuator, _) = fake(capitalize);
+        let mut stream = Punctuated::new(Fixed("run"), punctuator).open().unwrap();
+        stream.accept(&[0; 160]);
+        assert!(!stream.due());
+    }
+
+    #[test]
+    fn audio_is_heard_through_the_punctuated_stream() {
+        let (punctuator, _) = fake(capitalize);
+        let mut recognition =
+            Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));
+        let (sender, receiver) = mpsc::channel();
+        let mut utterance = recognition.begin(1, RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        utterance.push(&[0; 1600]);
+        utterance.end();
+        let outcome = std::iter::from_fn(|| receiver.recv_timeout(Duration::from_secs(5)).ok())
+            .find_map(TranscriptEvent::outcome)
+            .expect("the utterance ends");
+        // Ended as a sentence.
+        assert_eq!(outcome, Ok("Run the tests.".into()));
+    }
+
+    #[test]
+    fn the_probe_is_taken_off_or_left_out_if_the_model_drops_it() {
         assert_eq!(
-            transcribe(&mut recognition),
-            "How are you? I am fine. Thank you."
+            probed("run the tests", |text| Ok(
+                capitalize(text)?.replace(" i", ". I")
+            )),
+            Ok("Run the tests.".into())
         );
-        let punctuator = CnnBilstmPunctuator::new(&config).unwrap();
-        let mut recognition = Recognition::spawn(Punctuated::new(
-            Fixed("can you explain why the build failed on the linux machine yesterday"),
-            punctuator,
-        ));
+        // A model that drops the probe punctuates the text alone.
+        let mut asked = Vec::new();
         assert_eq!(
-            transcribe(&mut recognition),
-            "Can you explain why the build failed on the Linux machine yesterday?"
+            probed("run the tests", |text| {
+                asked.push(text.to_owned());
+                capitalize(text.trim_end_matches(" i"))
+            }),
+            Ok("Run the tests".into())
         );
+        assert_eq!(asked, ["run the tests i", "run the tests"]);
+        assert!(probed("run", |_| Err(Error::Engine("broken".into()))).is_err());
     }
 }
