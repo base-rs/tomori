@@ -7,13 +7,14 @@
 
 use std::time::{Duration, Instant};
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use tomori_protocol::{AgentInstructions, ConnectionRole, KnockRequest, KnockState};
 
 use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
 use crate::feedback::Hand as Side;
 use crate::hands::Hand;
+use crate::panel::{Area, Plane, Rect};
 use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines};
 
 /// A palm shows what its hand holds once it has faced within this angle of straight up for [`HOLD`], whichever way it leans and wherever the head is, so that any palm-up pose shows it. A palm in the neutral grip faces inwards, 90° from up. See `design/hand-menu.md`.
@@ -28,10 +29,9 @@ const WRIST: usize = 1;
 const INDEX_KNUCKLE: usize = 7;
 const LITTLE_KNUCKLE: usize = 22;
 
-/// How far apart the menu's rows are, how far each reaches to the right to be pointed at, and how large their markers.
+/// How far apart the menu's rows are, and how large their markers.
 pub const ROW: f32 = 0.024;
-pub const ROW_LENGTH: f32 = 0.2;
-const MARKER: f32 = 0.009;
+pub const MARKER: f32 = 0.009;
 /// The size of a font pixel of the menu's labels, in metres.
 pub const PIXEL: f32 = 0.0011;
 /// How far the menu reaches to the right of the middle of its rows' markers, in metres. A row's label starts two markers' widths along, and its background, sized to its text, ends two font pixels past its last cell.
@@ -843,27 +843,25 @@ impl HandMenu {
         }
     }
 
-    /// The menu's rows for `model`, laid out above the wrist of `palm` on a plane facing `head`.
+    /// The menu's rows for `model`, laid out above the wrist of `palm` on a plane facing `head`: each row is drawn within, and pointed at by, its [`row_rect`] in that plane.
     pub fn objects(&self, palm: &Palm, model: &Model, head: Vec3) -> Vec<Object> {
         let rows = items(self.section, model);
         let base = palm.wrist + palm.normal * 0.05;
         // The plane is aimed at the head from the menu's middle, so that the whole of it faces the participant; the middle depends on the aim, so it is refined once.
         let height = 0.04 + ROW * rows.len() as f32;
-        let basis = |normal: Vec3| {
-            let right = Vec3::Y.cross(normal).try_normalize().unwrap_or(Vec3::X);
-            (normal, right, normal.cross(right))
+        let aim = |middle: Vec3| Plane::facing(base, facing_from(middle, Some(head), true));
+        let first = aim(base + Vec3::Y * (height / 2.0));
+        let plane = aim(base + first.up * (height / 2.0));
+        // Its origin is the middle of the first row's marker.
+        let plane = Plane {
+            origin: base + plane.up * height,
+            ..plane
         };
-        let (_, _, up) = basis(facing_from(
-            base + Vec3::Y * (height / 2.0),
-            Some(head),
-            true,
-        ));
-        let (_, right, up) = basis(facing_from(base + up * (height / 2.0), Some(head), true));
-        let top = base + up * height;
         rows.into_iter()
             .enumerate()
             .map(|(index, item)| {
-                let position = top - up * ROW * index as f32;
+                let middle = -ROW * index as f32;
+                let position = plane.at(Vec2::new(0.0, middle));
                 let choosable = matches!(item.kind, MenuKind::Section { .. } | MenuKind::Button);
                 Object {
                     key: Key::Menu(item.key),
@@ -871,7 +869,7 @@ impl HandMenu {
                     position,
                     size: MARKER,
                     label: Label {
-                        anchor: position + right * (MARKER * 2.0) + up * (5.5 * PIXEL),
+                        anchor: plane.at(Vec2::new(MARKER * 2.0, middle + 5.5 * PIXEL)),
                         lines: vec![item.text.clone()],
                         align: Align::Left,
                         pixel: PIXEL,
@@ -883,9 +881,23 @@ impl HandMenu {
                     dim: 0.0,
                     presence: 1.0,
                     choosable,
+                    panel: Some(Area {
+                        plane,
+                        rect: row_rect(index),
+                    }),
                 }
             })
             .collect()
+    }
+}
+
+/// The rectangle of the menu's row `index` in its plane, whose origin is the middle of the first row's marker: from two markers' widths left of the middle of its marker to [`PANEL`] right of it, and a row tall, centred on its marker. The rows tile the panel, sharing their edges without gaps or overlaps. A row's marker and label, highlighted or not, are drawn within it, and it is what points at the row. See `design/hand-menu.md`.
+pub fn row_rect(index: usize) -> Rect {
+    // Each edge from one expression, so that neighbours share it exactly.
+    let edge = |row: usize| ROW / 2.0 - ROW * row as f32;
+    Rect {
+        min: Vec2::new(-2.0 * MARKER, edge(index + 1)),
+        max: Vec2::new(PANEL, edge(index)),
     }
 }
 
@@ -909,6 +921,7 @@ pub fn cue(palm: &Palm) -> Object {
         dim: 0.0,
         presence: 1.0,
         choosable: false,
+        panel: None,
     }
 }
 
@@ -1711,6 +1724,132 @@ mod tests {
         let down = (objects[1].position - objects[0].position).normalize();
         assert!(down.dot(towards).abs() < 0.06, "{down:?} {towards:?}");
         assert!(objects.iter().all(|object| object.label.tilt));
+        // Every row is a rectangle of one panel, whose plane holds its marker and its label's anchor.
+        let plane = objects[0].panel.unwrap().plane;
+        for (index, object) in objects.iter().enumerate() {
+            let area = object.panel.unwrap();
+            assert_eq!(area.plane, plane);
+            assert_eq!(area.rect, row_rect(index));
+            for point in [object.position, object.label.anchor] {
+                assert!((point - plane.origin).dot(plane.normal()).abs() < 1e-5);
+                assert!(area.rect.contains(area.local(point)), "{index}");
+            }
+        }
+    }
+
+    /// The rows tile the panel: each a row tall, from left of its marker to [`PANEL`], sharing its edges with its neighbours.
+    #[test]
+    fn the_rows_rectangles_tile_the_panel() {
+        for index in 0..20 {
+            let rect = row_rect(index);
+            assert!((rect.max.y - rect.min.y - ROW).abs() < 1e-6);
+            assert_eq!(rect.max.x, PANEL);
+            assert!(rect.contains(Vec2::new(0.0, -ROW * index as f32)));
+            assert_eq!(rect.min.y, row_rect(index + 1).max.y);
+        }
+    }
+
+    /// An owner's Space section, whose buttons and rows that are only read alternate, with a mode whose name fills its row.
+    fn alternating() -> (HandMenu, Model) {
+        let mut model = in_space(ConnectionRole::Owner);
+        let space = model.space.as_mut().unwrap();
+        space
+            .modes
+            .push(("long".into(), "x".repeat(2 * WIDTH), None, false));
+        let menu = HandMenu {
+            section: Some(Section::Space),
+            ..Default::default()
+        };
+        (menu, model)
+    }
+
+    /// The menu of [`alternating`] held palm up, at chest height, with the head where its panel tilts `tilt` degrees back to face it.
+    fn tilted_back(tilt: f32) -> Vec<Object> {
+        let (menu, model) = alternating();
+        let palm = Palm {
+            wrist: Vec3::new(-0.15, 1.05, -0.35),
+            normal: Vec3::Y,
+        };
+        // The panel faces the head from its middle, which is half its height up the tilted panel from above the wrist.
+        let half = (0.04 + ROW * items(menu.section, &model).len() as f32) / 2.0;
+        let (sin, cos) = tilt.to_radians().sin_cos();
+        let (normal, up) = (Vec3::new(0.0, sin, cos), Vec3::new(0.0, cos, -sin));
+        let middle = palm.wrist + palm.normal * 0.05 + up * half;
+        let objects = menu.objects(&palm, &model, middle + normal * 0.45);
+        let held = objects[0].panel.unwrap().plane.normal();
+        let measured = held.y.asin().to_degrees();
+        assert!((measured - tilt).abs() < 2.0, "{tilt}: {measured}");
+        objects
+    }
+
+    /// Rays from the head, and from a right hand straight ahead of the panel, below it, above it, beside it, and steeply up from beneath it, at the point `at` of `plane`.
+    fn rays_at(plane: &Plane, head: Vec3, at: Vec2) -> Vec<crate::pointing::Ray> {
+        let point = plane.at(at);
+        let (right, up, normal) = (plane.right, plane.up, plane.normal());
+        [
+            head,
+            point + normal * 0.5,
+            point + normal * 0.35 + right * 0.25 - up * 0.3,
+            point + normal * 0.3 + up * 0.25,
+            point + normal * 0.2 - right * 0.3,
+            point + normal * 0.12 - up * 0.45,
+        ]
+        .into_iter()
+        .map(|origin| crate::pointing::Ray::new(origin, point - origin).unwrap())
+        .collect()
+    }
+
+    /// A ray aimed anywhere at a row meets that row, and none of its neighbours, whichever way the menu tilts and from wherever it is aimed: across the whole of a long row to the panel's right edge, and on either side of the edges between rows. A row that is only read is met by nothing.
+    #[test]
+    fn a_ray_aimed_at_a_row_meets_that_row_at_any_tilt() {
+        for tilt in [0.0, 30.0, 60.0] {
+            let objects = tilted_back(tilt);
+            let scene = crate::arrival::Scene {
+                objects: objects.clone(),
+                ..Default::default()
+            };
+            let targets = scene.targets();
+            let plane = objects[0].panel.unwrap().plane;
+            let (sin, cos) = f32::to_radians(tilt).sin_cos();
+            let head = plane.at(Vec2::new(0.0, -0.2)) + Vec3::new(0.0, sin, cos) * 0.45;
+            // The row of the long mode reaches the panel's right edge.
+            let long = objects
+                .iter()
+                .position(|object| object.key == Key::Menu(MenuKey::Mode("long".into())))
+                .unwrap();
+            assert_eq!(objects[long].label.lines[0].chars().count(), WIDTH);
+            let mut met = 0;
+            for (index, object) in objects.iter().enumerate() {
+                let rect = row_rect(index);
+                let (top, bottom) = (rect.max.y, rect.min.y);
+                let middle = (top + bottom) / 2.0;
+                let inside = [
+                    Vec2::new(0.0, middle),
+                    rect.centre(),
+                    Vec2::new(rect.min.x + 0.001, top - 0.0002),
+                    Vec2::new(PANEL - 0.001, bottom + 0.0002),
+                    Vec2::new(PANEL - 0.001, middle),
+                ];
+                let expected = object.choosable.then(|| object.key.clone());
+                for at in inside {
+                    for ray in rays_at(&plane, head, at) {
+                        let hit = crate::pointing::nearest(&ray, &targets).map(|hit| hit.key);
+                        assert_eq!(hit, expected, "{tilt}° row {index} at {at} from {ray:?}");
+                        met += usize::from(hit.is_some());
+                    }
+                }
+                // Past either end of the row, nothing is met.
+                for at in [
+                    Vec2::new(PANEL + 0.002, middle),
+                    Vec2::new(rect.min.x - 0.002, middle),
+                ] {
+                    for ray in rays_at(&plane, head, at) {
+                        assert_eq!(crate::pointing::nearest(&ray, &targets), None, "{at}");
+                    }
+                }
+            }
+            assert!(met > 100, "{met}");
+        }
     }
 
     #[test]

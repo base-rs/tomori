@@ -27,6 +27,7 @@ pub mod identity;
 pub mod interaction;
 pub mod log_cadence;
 mod markdown_lite;
+pub mod panel;
 mod panel_anchor;
 pub mod pill;
 pub mod playback;

@@ -207,6 +207,8 @@ pub struct Object {
     pub presence: f32,
     /// Whether it can be pointed at; an object on its way out can't.
     pub choosable: bool,
+    /// The row of a flat panel it is, such as the hand menu's: its form and label are drawn in the panel's plane, within the row's rectangle, rather than facing the viewer, and that rectangle is what points at it. See [`crate::panel`].
+    pub panel: Option<crate::panel::Area>,
 }
 
 /// Which step of arrival a scene shows, which decides how a change to it is animated.
@@ -334,7 +336,7 @@ impl Scene {
         }
     }
 
-    /// What can be pointed at: every object that is choosable and at least half appeared, a little larger than it looks. The create object stands straight ahead, so a box fits its plus.
+    /// What can be pointed at: every object that is choosable and at least half appeared, a little larger than it looks. The create object stands straight ahead, so a box fits its plus. A row of a panel, such as the hand menu's, is its rectangle in the panel's plane, which its marker and label are drawn within, so that rows meet without overlapping at any tilt.
     pub fn targets(&self) -> Vec<Target<Key>> {
         self.objects
             .iter()
@@ -343,26 +345,12 @@ impl Scene {
                 let reach = object.size * TARGET_MARGIN;
                 Target {
                     key: object.key.clone(),
-                    shape: match object.kind {
-                        Kind::Create { .. } => Shape::Box {
+                    shape: match (object.panel, object.kind) {
+                        (Some(area), _) => Shape::Panel(area),
+                        (None, Kind::Create { .. }) => Shape::Box {
                             center: object.position,
                             half_extents: Vec3::new(reach, reach, object.size * 0.6),
                         },
-                        // A row of the hand menu is chosen by its marker or its label, which runs to the right of it, and is no taller than a row, so that rows never overlap.
-                        Kind::Menu(_) => {
-                            let right = (object.label.anchor - object.position)
-                                .with_y(0.0)
-                                .normalize_or_zero();
-                            let length = crate::hand_menu::ROW_LENGTH;
-                            Shape::Box {
-                                center: object.position + right * (length / 2.0 - object.size),
-                                half_extents: Vec3::new(
-                                    right.x.abs() * length / 2.0 + 0.01,
-                                    crate::hand_menu::ROW * 0.45,
-                                    right.z.abs() * length / 2.0 + 0.01,
-                                ),
-                            }
-                        }
                         _ => Shape::Sphere {
                             center: object.position,
                             radius: reach,
@@ -498,6 +486,7 @@ fn row_object(item: &Item, position: Vec3, dimmed: bool) -> Object {
         dim: if dimmed { 1.0 } else { 0.0 },
         presence: 1.0,
         choosable: true,
+        panel: None,
     }
 }
 
@@ -522,6 +511,7 @@ fn jump_object(item: &Item, position: Vec3) -> Object {
         dim: 0.0,
         presence: 1.0,
         choosable: true,
+        panel: None,
     }
 }
 
@@ -567,6 +557,7 @@ fn ring_objects(ring: &Ring, centre: Vec3) -> Vec<Object> {
                 dim: 0.0,
                 presence: 1.0,
                 choosable: true,
+                panel: None,
             }
         })
         .collect()
