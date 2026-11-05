@@ -217,4 +217,12 @@ mod tests {
         let Sentence { start, end, .. } = next(text, 0, 20, &[]).unwrap();
         assert_eq!(&text[start..end], "one two three,");
     }
+
+    #[test]
+    fn an_ellipsis_after_a_full_stop_ends_one_sentence() {
+        assert_eq!(
+            sentences("Wait.\u{2026} Then go."),
+            ["Wait.\u{2026}", "Then go."]
+        );
+    }
 }

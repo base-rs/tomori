@@ -118,4 +118,10 @@ mod tests {
         assert!(stopper.wait(Instant::now() + Duration::from_secs(5)));
         thread.join().unwrap();
     }
+
+    #[test]
+    fn a_panic_says_its_message_whether_borrowed_or_owned() {
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned"));
+        assert_eq!(panic_message(&*owned), "owned");
+    }
 }
