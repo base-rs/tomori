@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tomori_client::{
     ConnectionState, Event, UtteranceFailure,
-    connection::{Action, Report, Session},
+    connection::{Action, Report, Session, Utterance},
     feedback,
     server_choice::{self, Choice},
 };
@@ -539,8 +539,11 @@ impl Conversation {
         match event {
             Event::State(state) => self.connection_changed(state),
             Event::Message(message) => self.receive(message),
-            Event::UtteranceFailed(failed) => {
-                if self.talk.as_ref().map(Talk::utterance) == Some(failed.utterance.as_str()) {
+            // Push-to-talk audio for the words being recorded or sent that could not be delivered. Anything else a later client observes is not this conversation's to apply.
+            event => {
+                if let Event::UtteranceFailed(failed) = event
+                    && self.talk.as_ref().map(Talk::utterance) == Some(failed.utterance.as_str())
+                {
                     self.stop_talking();
                     self.talk = None;
                     let error: String = match failed.failure {
@@ -638,8 +641,9 @@ impl Conversation {
                 if self.knock == Some(tomori_protocol::KnockState::Pending) =>
             {
                 self.knock = None;
-                if let Some(certificate) = self.certificate {
-                    self.actions.push(Action::Admitted { token, certificate });
+                // Only over TLS; the connection keeps the token with the certificate it presented.
+                if self.certificate.is_some() {
+                    self.actions.push(Action::Admitted { token });
                 }
                 self.notice = Some("You were let in: you can now take part in this space.".into());
             }
@@ -648,8 +652,8 @@ impl Conversation {
             }
             ServerMessage::Paired { token } => {
                 self.pairing = None;
-                if let Some(certificate) = self.certificate {
-                    self.actions.push(Action::Paired { token, certificate });
+                if self.certificate.is_some() {
+                    self.actions.push(Action::Paired { token });
                     self.notice =
                         Some("Paired: this device is now an owner of this server.".into());
                 }
@@ -1606,6 +1610,10 @@ impl Conversation {
         self.connected = None;
         self.jumping = false;
         self.state = None;
+        // What belonged to the connection goes with it, so that a token the server sends as the participant leaves, in the same frame, is not passed on.
+        self.certificate = None;
+        self.pairing = None;
+        self.knock = None;
         self.spaces.clear();
         self.listed = false;
         self.close_space();
@@ -2212,7 +2220,8 @@ impl Conversation {
                 retry_in.as_secs_f32().ceil()
             )),
             Some(ConnectionState::Closed) => Some("Disconnected.".into()),
-            Some(ConnectionState::Connected { .. }) => None,
+            // Connected, or in a state a later client knows of, which has nothing to say.
+            Some(_) => None,
         };
         let leaving = self
             .leave_hold
@@ -2398,9 +2407,7 @@ impl Conversation {
             });
         let answering = answer.is_some();
         self.actions.push(Action::BeginUtterance(
-            utterance.clone(),
-            self.capture_generation,
-            answer,
+            Utterance::new(utterance.clone(), self.capture_generation).answering(answer),
         ));
         let pointed = self.pointing_at.clone().filter(|id| self.has_worker(id));
         self.talk = Some(Talk::Recording {
@@ -2504,12 +2511,11 @@ impl Conversation {
     /// Abandon a recording without sending it, as when the session loses focus. Words already released are still transcribed.
     pub fn stop_talking(&mut self) {
         if let Some(Talk::Recording { utterance, .. }) = &self.talk {
-            let pending = self
-                .actions
-                .iter()
-                .any(|action| matches!(action, Action::BeginUtterance(id, ..) if id == utterance));
+            let pending = self.actions.iter().any(
+                |action| matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance),
+            );
             self.actions.retain(
-                |action| !matches!(action, Action::BeginUtterance(id, ..) if id == utterance),
+                |action| !matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance),
             );
             if !pending {
                 self.actions.push(Action::CancelUtterance);
@@ -2534,13 +2540,12 @@ impl Conversation {
                 .any(|action| matches!(action, Action::EndUtterance(_)))
         {
             cancelled = true;
-            let pending = self
-                .actions
-                .iter()
-                .any(|action| matches!(action, Action::BeginUtterance(id, ..) if id == utterance));
+            let pending = self.actions.iter().any(
+                |action| matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance),
+            );
             self.actions.retain(|action| {
                 !matches!(action, Action::EndUtterance(_))
-                    && !matches!(action, Action::BeginUtterance(id, ..) if id == utterance)
+                    && !matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance)
             });
             if !pending {
                 self.actions.push(Action::CancelUtterance);
@@ -2752,7 +2757,8 @@ impl Conversation {
                 ));
             }
             Some(ConnectionState::Closed) => return Some("Disconnected.".into()),
-            Some(ConnectionState::Connected { .. }) => {}
+            // Connected, or in a state a later client knows of, which has nothing to say.
+            Some(_) => {}
         }
         self.notice.clone()
     }
@@ -3408,7 +3414,8 @@ impl Conversation {
                 retry_in.as_secs_f32().ceil()
             )),
             Some(ConnectionState::Closed) => Some("Disconnected.".into()),
-            Some(ConnectionState::Connected { .. }) => None,
+            // Connected, or in a state a later client knows of, which has nothing to say.
+            Some(_) => None,
         };
         let leaving = self
             .leave_hold
@@ -3765,6 +3772,10 @@ impl Session for Conversation {
     }
 
     fn report(&mut self, report: Report) {
+        // Reported every frame, and needing nothing more of the match below.
+        if let Report::Replaying(replaying) = report {
+            self.set_replaying(replaying);
+        }
         match report {
             Report::Connecting(choice) => self.connect(choice),
             Report::Feedback(settings) => self.set_feedback(settings),
@@ -3784,7 +3795,8 @@ impl Session for Conversation {
             Report::MicrophoneFailed(error) => self.microphone_failed(error),
             Report::NotSent(error) => self.utterance_not_sent(error),
             Report::SecurityNotice(notice) => self.security_notice(notice),
-            Report::Replaying(replaying) => self.set_replaying(replaying),
+            // Replaying, applied above, and anything a later connection reports that this conversation does not know, which needs nothing of it.
+            _ => {}
         }
     }
 
@@ -4075,14 +4087,13 @@ mod tests {
 
     /// A discovered server advertising that `waiting` of its spaces need input and `replies` have a reply.
     fn advertising(label: &str, address: &str, waiting: u32, replies: u32) -> Choice {
-        Choice {
-            spaces: Some(3),
-            participants: Some(0),
-            waiting: Some(waiting),
-            problems: Some(0),
-            replies: Some(replies),
-            ..Choice::new(label, address, Source::Discovered)
-        }
+        let mut choice = Choice::new(label, address, Source::Discovered);
+        choice.spaces = Some(3);
+        choice.participants = Some(0);
+        choice.waiting = Some(waiting);
+        choice.problems = Some(0);
+        choice.replies = Some(replies);
+        choice
     }
 
     #[test]
@@ -4535,6 +4546,25 @@ mod tests {
     }
 
     #[test]
+    fn a_token_the_server_sends_as_the_participant_leaves_it_is_not_passed_on() {
+        let certificate = tomori_client::Fingerprint::of(b"server certificate");
+        let mut conversation = connected_securely(ConnectionRole::Visitor, certificate);
+        conversation.choose_object(&arrival::Key::Pair);
+        conversation.knock = Some(tomori_protocol::KnockState::Pending);
+        conversation.take_actions();
+        conversation.leave_server();
+        // In the same frame, before the connection closes: the pairing completes, and the knock is answered.
+        conversation.apply(Event::Message(ServerMessage::Paired {
+            token: "tomori_paired".into(),
+        }));
+        conversation.apply(Event::Message(ServerMessage::Admitted {
+            token: "tomori_admitted".into(),
+        }));
+        assert_eq!(conversation.take_actions(), [Action::Disconnect]);
+        assert!(conversation.pairing.is_none() && conversation.notice.is_none());
+    }
+
+    #[test]
     fn a_visitor_pairs_with_a_code_derived_from_the_certificate() {
         use tomori_security::pairing::{Nonce, code, display};
         let certificate = tomori_client::Fingerprint::of(b"server certificate");
@@ -4575,7 +4605,6 @@ mod tests {
             conversation.take_actions(),
             [Action::Paired {
                 token: "tomori_paired".into(),
-                certificate
             }]
         );
         assert!(conversation.status().unwrap().contains("now an owner"));
@@ -4705,7 +4734,6 @@ mod tests {
             conversation.take_actions(),
             [Action::Admitted {
                 token: "tomori_admitted".into(),
-                certificate
             }]
         );
         assert_eq!(conversation.knock_state(), None);
@@ -5581,7 +5609,7 @@ mod tests {
         assert!(
             matches!(
                 &actions[..],
-                [Action::BeginUtterance(_, _, Some(target))]
+                [Action::BeginUtterance(Utterance { answer: Some(target), .. })]
                     if target.question == "question-1" && target.field == "test"
             ),
             "{actions:?}"
@@ -5610,7 +5638,9 @@ mod tests {
             let mut conversation = joined(change);
             assert!(conversation.text().contains("on the PC"));
             conversation.talk(true);
-            let [Action::BeginUtterance(_, _, None)] = &conversation.take_actions()[..] else {
+            let [Action::BeginUtterance(Utterance { answer: None, .. })] =
+                &conversation.take_actions()[..]
+            else {
                 unreachable!("[Action::BeginUtterance")
             };
             assert!(conversation.text().contains("MIC AGENT"));
@@ -6369,10 +6399,10 @@ mod tests {
     fn press(conversation: &mut Conversation) -> String {
         conversation.talk(true);
         let actions = conversation.take_actions();
-        let [Action::BeginUtterance(utterance, ..)] = actions.as_slice() else {
+        let [Action::BeginUtterance(utterance)] = actions.as_slice() else {
             unreachable!("recording begins")
         };
-        utterance.clone()
+        utterance.id.clone()
     }
 
     #[test]
@@ -6768,7 +6798,9 @@ mod tests {
         assert_eq!(conversation.take_actions(), [Action::StartLive(7)]);
         conversation.talk(true);
         conversation.set_capture_generation(9);
-        let Some(Action::BeginUtterance(_, 8, _)) = conversation.next_action() else {
+        let Some(Action::BeginUtterance(Utterance { generation: 8, .. })) =
+            conversation.next_action()
+        else {
             unreachable!("Some")
         };
     }

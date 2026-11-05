@@ -8,7 +8,9 @@ use tomori_protocol::{Attention, PROTOCOL_VERSION};
 /// A server on the PC reached over USB, with `adb reverse tcp:8765 tcp:8765`.
 pub const USB: &str = "127.0.0.1:8765";
 
+/// How a server came to be offered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Source {
     /// Given when the app started, with `--server`, `TOMORI_SERVER` or the `tomori.server` intent extra.
     Override,
@@ -20,13 +22,17 @@ pub enum Source {
     Usb,
 }
 
+/// A server offered for connection, with what it advertises. Made with [`Choice::new`], so that what a server advertises can grow.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Choice {
+    /// The name to show for it.
     pub label: String,
     /// `host:port`, or a host alone for the default port.
     pub address: String,
     /// The DNS-SD instance name of a discovered server, which is what is remembered.
     pub instance: Option<String>,
+    /// How it came to be offered.
     pub source: Source,
     /// Why the server cannot be joined, for listing it greyed.
     pub unavailable: Option<String>,
@@ -45,6 +51,7 @@ pub struct Choice {
 }
 
 impl Choice {
+    /// The server at `address`, shown as `label`, offered as `source` says, advertising nothing.
     pub fn new(label: impl Into<String>, address: impl Into<String>, source: Source) -> Self {
         Self {
             label: label.into(),

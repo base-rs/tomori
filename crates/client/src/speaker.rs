@@ -34,8 +34,7 @@ impl Output {
         }
     }
 
-    /// An output that plays as voice communication in audio `session`.
-    #[cfg(target_os = "android")]
+    /// An output that plays as voice communication in audio `session`, as Android's does for the live microphone.
     pub fn communicating(stream: impl std::any::Any, session: i32) -> Self {
         Self {
             communication: Some(session),
@@ -46,6 +45,7 @@ impl Output {
 
 /// How the speaker plays: as media, or as voice communication in the live microphone's audio session while it is open, so that the platform's echo canceller can work. See `design/spatial-audio.md`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Route {
     /// The live microphone's audio session, to play in as voice communication.
     pub communication: Option<i32>,

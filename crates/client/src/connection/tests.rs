@@ -936,6 +936,29 @@ fn rerouting_an_open_speaker_reopens_it_once() {
     assert_eq!(opened.load(Ordering::Relaxed), 2);
 }
 
+/// Opens every output as voice communication in audio session 42, as Android's speaker does for the live microphone.
+struct Communicating;
+
+impl Playback for Communicating {
+    fn open(
+        &self,
+        _player: Shared,
+        _failed: crate::speaker::Failed,
+        _route: Route,
+    ) -> Result<Output, String> {
+        Ok(Output::communicating((), 42))
+    }
+}
+
+#[test]
+fn a_speaker_playing_as_voice_communication_says_in_which_session() {
+    let mut speaker = Speaker::new(Box::new(Communicating));
+    speaker.player = Some(player());
+    speaker.open();
+    wait(|| speaker.output.as_ref().is_some_and(Speaking::is_open));
+    assert_eq!(speaker.output.as_ref().unwrap().communication(), Some(42));
+}
+
 #[test]
 fn the_speaker_opens_on_its_own_thread_and_closes_when_the_client_goes_away() {
     let mut client = client();
@@ -1209,6 +1232,8 @@ struct Script {
     heard: RefCell<Vec<Earcon>>,
     /// The value this device committed to for a pairing, to reveal when the server sends its own.
     pairing: Option<tomori_security::pairing::Nonce>,
+    /// Leave the server as pairing completes, before the token is kept.
+    leaving: bool,
 }
 
 impl Session for Script {
@@ -1225,17 +1250,17 @@ impl Session for Script {
                 }));
             }
             Event::Message(ServerMessage::Paired { token }) => {
-                let certificate = self.certificate().expect("pairing is over TLS");
+                // As a participant who leaves the server in the frame that pairing completes.
+                if self.leaving {
+                    self.push(Action::Disconnect);
+                }
                 self.push(Action::Paired {
                     token: token.clone(),
-                    certificate,
                 });
             }
             Event::Message(ServerMessage::Admitted { token }) => {
-                let certificate = self.certificate().expect("admission is over TLS");
                 self.push(Action::Admitted {
                     token: token.clone(),
-                    certificate,
                 });
             }
             _ => {}
@@ -1633,7 +1658,7 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     assert_eq!(felt(&mut connection), [Hand::Right, Hand::Right]);
     // Neither recording nor the live microphone starts, felt on the left hand, the voice's.
     for action in [
-        Action::BeginUtterance("u-1".into(), 0, None),
+        Action::BeginUtterance(Utterance::new("u-1", 0)),
         Action::StartLive(0),
     ] {
         session.push(action);
@@ -1646,19 +1671,37 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
         assert!(session.heard().contains(&Earcon::Failed));
         assert!(felt(&mut connection).contains(&Hand::Left));
     }
-    // What never started stops silently, and there is nothing to cancel, abandon or close.
+    // What never started stops silently, and there is nothing to cancel, abandon or close, nothing to search again while the server list is not seen, and no connection to keep a token for.
     for action in [
         Action::StopLive,
         Action::CancelUtterance,
         Action::AbandonUtterance,
         Action::Disconnect,
         Action::SetAgentMuted(true),
+        Action::Rescan,
+        Action::Paired {
+            token: "tomori_owner".into(),
+        },
+        Action::Admitted {
+            token: "tomori_collaborator".into(),
+        },
     ] {
         session.push(action);
     }
     connection.poll(true, &mut session);
     assert!(session.heard().is_empty());
     assert!(felt(&mut connection).is_empty());
+    assert!(
+        session
+            .reports
+            .iter()
+            .all(|report| matches!(report, Report::Tick { .. } | Report::Replaying(false)))
+    );
+    // Words never begun end as X is released, felt, and nothing is sent or reported.
+    session.push(Action::EndUtterance(None));
+    connection.poll(true, &mut session);
+    assert!(session.heard().is_empty());
+    assert_eq!(felt(&mut connection), [Hand::Left]);
     assert!(
         session
             .reports
@@ -2003,7 +2046,9 @@ fn heard(
 /// Record `utterance`, ending it unless `recording`.
 fn record(connection: &mut Connection, session: &mut Script, utterance: &str, recording: bool) {
     let generation = session.generation();
-    session.push(Action::BeginUtterance(utterance.into(), generation, None));
+    session.push(Action::BeginUtterance(Utterance::new(
+        utterance, generation,
+    )));
     if !recording {
         session.push(Action::EndUtterance(None));
     }
@@ -2518,6 +2563,148 @@ fn a_server_that_refuses_even_to_pair_admits_only_tokens() {
     });
 }
 
+/// A session that says only what to do, as a bot without a server list or anything to show might.
+#[derive(Default)]
+struct Quiet {
+    actions: VecDeque<Action>,
+    reports: Vec<Report>,
+}
+
+impl Session for Quiet {
+    fn next_action(&mut self) -> Option<Action> {
+        self.actions.pop_front()
+    }
+
+    fn apply(&mut self, _event: Event) {}
+
+    fn report(&mut self, report: Report) {
+        self.reports.push(report);
+    }
+}
+
+#[test]
+fn a_session_without_a_server_list_never_browses_and_observes_nothing() {
+    let lock = Lock::default();
+    let mut session = Quiet::default();
+    let mut connection = Connection::new(
+        identity(&Store::new(None), None, None),
+        Store::new(None),
+        Box::new(lock.clone()),
+        Box::new(Scripted::default()),
+        Box::new(Nowhere),
+        &mut session,
+    );
+    connection.poll(true, &mut session);
+    assert_eq!(lock.held(), None);
+    assert!(session.reports.iter().any(|report| matches!(
+        report,
+        Report::Tick {
+            browsing: false,
+            ..
+        }
+    )));
+    assert_eq!(connection.feedback().take_earcons().count(), 0);
+}
+
+/// Ada's connection to `peer`, keeping what she learns in `directory`, connected.
+fn keeping_with_peer(peer: &Peer, session: &mut Script, directory: &std::path::Path) -> Connection {
+    let mut connection = kept(
+        session,
+        Store::new(Some(directory.to_owned())),
+        None,
+        None,
+        Scripted::default(),
+        Nowhere,
+    );
+    session.push(Action::Connect(peer.choice()));
+    until(&mut connection, session, |_, session| session.connected());
+    connection
+}
+
+#[test]
+fn a_token_is_ignored_without_a_connection_over_tls_to_keep_it_for() {
+    crate::test_support::log_everything();
+    let peer = Peer::start();
+    let directory = directory("plain-token");
+    let mut session = Script::default();
+    let mut connection = keeping_with_peer(&peer, &mut session, &directory);
+    let credential = || Store::new(Some(directory.clone())).credential(&peer.address);
+    let tokens = || {
+        [
+            Action::Paired {
+                token: "tomori_owner".into(),
+            },
+            Action::Admitted {
+                token: "tomori_collaborator".into(),
+            },
+        ]
+    };
+    // Over plain HTTP the server presented no certificate, so neither token is kept, and the connection stays as it is.
+    session.reports.clear();
+    session.actions.extend(tokens());
+    connection.poll(true, &mut session);
+    assert_eq!(credential(), Default::default());
+    assert!(connection.client.is_some());
+    assert_eq!(peer.ended.load(Ordering::Relaxed), 0);
+    assert!(
+        session
+            .reports
+            .iter()
+            .all(|report| matches!(report, Report::Tick { .. } | Report::Replaying(_)))
+    );
+    // Nor while connecting, before the server has presented anything.
+    session.push(Action::Connect(peer.choice()));
+    session.actions.extend(tokens());
+    connection.poll(true, &mut session);
+    assert!(connection.link.as_ref().unwrap().certificate.is_none());
+    assert_eq!(credential(), Default::default());
+    // Nor once the connection is closed, in the same frame as the session asks.
+    until(&mut connection, &mut session, |_, session| {
+        session.connected()
+    });
+    session.push(Action::Disconnect);
+    session.actions.extend(tokens());
+    connection.poll(true, &mut session);
+    assert!(connection.client.is_none() && connection.link.is_none());
+    assert_eq!(credential(), Default::default());
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn an_admission_over_a_certificate_other_than_the_one_kept_is_ignored() {
+    let peer = Peer::start();
+    let directory = directory("admitted-elsewhere");
+    let mut session = Script::default();
+    let mut connection = keeping_with_peer(&peer, &mut session, &directory);
+    let kept = Fingerprint::of(b"the server kept");
+    connection
+        .store
+        .remember_certificate(&peer.address, &kept.to_string());
+    // As though the connection had presented another certificate, which a client pinned to the one kept never accepts.
+    connection.link.as_mut().unwrap().certificate = Some(Fingerprint::of(b"another server"));
+    let admitted = Action::Admitted {
+        token: "tomori_collaborator".into(),
+    };
+    session.push(admitted.clone());
+    connection.poll(true, &mut session);
+    assert_eq!(connection.store.credential(&peer.address).token, None);
+    // Over the certificate kept, it is kept, and pinned from then on.
+    connection.link.as_mut().unwrap().certificate = Some(kept);
+    session.push(admitted);
+    connection.poll(true, &mut session);
+    assert_eq!(
+        Store::new(Some(directory.clone()))
+            .credential(&peer.address)
+            .token
+            .as_deref(),
+        Some("tomori_collaborator")
+    );
+    let link = connection.link.as_ref().unwrap();
+    assert!(link.pinned && link.token.is_some());
+    assert_eq!(link.transport, Transport::Tls { pin: Some(kept) });
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// Against a server, as a headset takes part in its spaces.
 mod served {
     use super::*;
@@ -2871,19 +3058,110 @@ mod served {
         );
         connecting(&mut session);
         role_becomes(&mut connection, &mut session, ConnectionRole::Pairing);
+        pair(&server, &mut connection, &mut session, |_, session| {
+            session.role() == Some(ConnectionRole::Owner)
+        });
+        let kept = Store::new(Some(directory.clone())).credential(&server.address());
+        assert!(kept.token.is_some());
+        assert_eq!(kept.certificate, Some(server.pin.to_string()));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// Pair as the participant does, the operator confirming the code on the server's console, and wait for `done`.
+    fn pair(
+        server: &Server,
+        connection: &mut Connection,
+        session: &mut Script,
+        done: impl FnMut(&mut Connection, &mut Script) -> bool,
+    ) {
         session.pair();
         let pairing = server.pairing.as_ref().unwrap();
         let mut code = None;
-        until(&mut connection, &mut session, |_, _| {
+        until(connection, session, |_, _| {
             code = pairing.pending().and_then(|pending| pending.code);
             code.is_some()
         });
         let digits: String = code.unwrap().chars().filter(char::is_ascii_digit).collect();
         assert_eq!(pairing.confirm(&digits), Ok("Ada".to_owned()));
-        role_becomes(&mut connection, &mut session, ConnectionRole::Owner);
+        until(connection, session, done);
+    }
+
+    #[test]
+    fn leaving_the_server_as_pairing_completes_keeps_no_token() {
+        let server = Server::with(false, true);
+        let directory = directory("left-pairing");
+        let mut session = Script::default();
+        let mut connection = server.participant(
+            &mut session,
+            None,
+            Scripted::default(),
+            Store::new(Some(directory.clone())),
+        );
+        connecting(&mut session);
+        role_becomes(&mut connection, &mut session, ConnectionRole::Pairing);
+        session.leaving = true;
+        pair(&server, &mut connection, &mut session, |_, session| {
+            session.count(|event| matches!(event, Event::Message(ServerMessage::Paired { .. }))) > 0
+        });
+        // The participant left in the frame the token arrived: it is not kept, and nothing connects again.
+        assert!(connection.client.is_none() && connection.link.is_none());
+        let kept = Store::new(Some(directory.clone())).credential(&server.address());
+        assert_eq!(kept.token, None);
+        assert_eq!(kept.certificate, Some(server.pin.to_string()));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn pairing_with_a_distrusted_server_replaces_its_certificate() {
+        let server = Server::with(true, true);
+        let directory = directory("distrusted-paired");
+        let other = Fingerprint::of(b"another server");
+        Store::new(Some(directory.clone()))
+            .remember_certificate(&server.address(), &other.to_string());
+        let mut session = Script::default();
+        let mut connection = server.participant(
+            &mut session,
+            None,
+            Scripted::default(),
+            Store::new(Some(directory.clone())),
+        );
+        connecting(&mut session);
+        role_becomes(&mut connection, &mut session, ConnectionRole::Visitor);
+        assert_eq!(session.certificate(), Some(server.pin));
+        pair(&server, &mut connection, &mut session, |_, session| {
+            session.role() == Some(ConnectionRole::Owner)
+        });
         let kept = Store::new(Some(directory.clone())).credential(&server.address());
         assert!(kept.token.is_some());
         assert_eq!(kept.certificate, Some(server.pin.to_string()));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_server_that_does_not_present_the_certificate_it_advertises_is_pinned_to_neither() {
+        let server = Server::start();
+        let directory = directory("misadvertised");
+        let mut session = Script::default();
+        let mut connection = kept(
+            &mut session,
+            Store::new(Some(directory.clone())),
+            None,
+            None,
+            Scripted::default(),
+            Nowhere,
+        );
+        let mut choice = Choice::new("Studio", server.address(), Source::Discovered);
+        choice.fingerprint = Some(Fingerprint::of(b"another server").to_string());
+        session.push(Action::Connect(choice));
+        role_becomes(&mut connection, &mut session, ConnectionRole::Visitor);
+        assert_eq!(
+            session.reported(&Report::SecurityNotice(
+                "This server's identity has changed, so this device watches as a visitor and sends it no token.".into()
+            )),
+            1
+        );
+        let kept = Store::new(Some(directory.clone())).credential(&server.address());
+        assert_eq!(kept, Default::default());
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -2949,7 +3227,6 @@ mod served {
         let kept = token();
         session.push(Action::Admitted {
             token: "tomori_another".into(),
-            certificate: server.pin,
         });
         connection.poll(true, &mut session);
         assert_eq!(token(), kept);

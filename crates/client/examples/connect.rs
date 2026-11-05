@@ -239,7 +239,8 @@ fn main() -> std::io::Result<()> {
             Ok(Event::UtteranceFailed(failed)) => {
                 println!("utterance {} failed: {}", failed.utterance, failed.failure)
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            // Anything a later client observes that this console does not know.
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
         while let Some(frame) = client.try_audio() {

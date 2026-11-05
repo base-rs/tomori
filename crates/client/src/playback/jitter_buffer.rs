@@ -16,6 +16,7 @@ const RESTART_LIMIT: u64 = 50;
 
 /// Jitter buffer timing, shared by every source in a [`super::Mixer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JitterOptions {
     /// Audio buffered before a source starts (or restarts after an underrun) playing.
     pub target_latency: Duration,

@@ -7,6 +7,7 @@ use std::f64::consts::TAU;
 
 /// A sound cue. Each marks a moment something changed; see `design/feedback.md` for when each plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Earcon {
     /// A soft click: something was chosen.
     Choose,

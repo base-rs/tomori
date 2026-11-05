@@ -21,8 +21,11 @@ use std::{
 };
 use tomori_protocol::{ClientMessage, Gate, Pose, ServerMessage};
 
-/// What a [`Session`] asks its [`Connection`] to do, in order.
+/// What a [`Session`] asks its [`Connection`] to do, in order. The connection carries out every action in every state: one that needs a connection it does not have fails as [`Report`]s say, or, where nothing failed that the participant should see, is ignored and logged.
+///
+/// More actions may be added; a session that matches on them, as a test of one does, needs a wildcard arm.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Action {
     /// Connect to this server, closing any current connection.
     Connect(Choice),
@@ -30,10 +33,10 @@ pub enum Action {
     Disconnect,
     /// Forget the servers found so far and browse again.
     Rescan,
-    /// Send this message to the server. A session never asks for the messages the client sends itself, such as `Hello`.
+    /// Send this message to the server. A session never asks for the messages the client sends itself, such as `Hello`. Without a connection, it fails with [`Report::Failed`].
     Send(ClientMessage),
-    /// Open the microphone and send what it hears to the agent as this utterance, for the connection generation given (see [`Report::Generation`]), or as the answer to the presented question's field, when given.
-    BeginUtterance(String, u64, Option<tomori_protocol::AnswerTarget>),
+    /// Open the microphone and send what it hears to the agent as this utterance. Without a connection, or for a connection generation that has ended, it fails with [`Report::MicrophoneFailed`].
+    BeginUtterance(Utterance),
     /// Close the microphone and finish the utterance, for the server to transcribe, with what the participant pointed
     /// at while speaking.
     EndUtterance(Option<tomori_protocol::Pointed>),
@@ -41,19 +44,19 @@ pub enum Action {
     CancelUtterance,
     /// Close the microphone and forget the utterance, which the server has already ended.
     AbandonUtterance,
-    /// Open the microphone for other participants, without addressing the agent, for the connection generation given.
+    /// Open the microphone for other participants, without addressing the agent, for the connection generation given (see [`Report::Generation`]). Without a connection, it fails with [`Report::MicrophoneFailed`].
     StartLive(u64),
     /// Close the live microphone.
     StopLive,
-    /// Pairing gave this device an owner token for the server, to keep with the certificate the pairing connection presented, and connect with. See `design/security.md`.
+    /// Pairing gave this device an owner `token` for the server, as [`ServerMessage::Paired`] does: keep it with the certificate this connection presented, and connect with it. Without a connection over TLS, such as once the participant has left the server, the token is ignored. See `design/security.md`.
     Paired {
+        /// The owner token the server issued.
         token: String,
-        certificate: Fingerprint,
     },
-    /// A knock admitted this device to its space as a collaborator: a token to keep for the server with its certificate. The connection is already a collaborator's.
+    /// A knock admitted this device to its space as a collaborator, as [`ServerMessage::Admitted`] does: keep the `token` for the server, with the certificate this connection presented. The connection is already a collaborator's. Without a connection over TLS, or in place of a token already kept, it is ignored.
     Admitted {
+        /// The collaborator token the server issued.
         token: String,
-        certificate: Fingerprint,
     },
     /// Mute or unmute agent speech locally, live or played again.
     SetAgentMuted(bool),
@@ -61,8 +64,40 @@ pub enum Action {
     SetFeedback(feedback::Settings),
 }
 
-/// What a [`Connection`] tells its [`Session`], besides the client's [`Event`]s, in order with them.
+/// An utterance for [`Action::BeginUtterance`] to record: what the microphone hears until [`Action::EndUtterance`], sent to the agent, or as the answer to the presented question's field. Made with [`Utterance::new`], so that what an utterance may say can grow.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Utterance {
+    /// The utterance's identifier, unique on the connection, which the server's transcript of it names.
+    pub id: String,
+    /// The connection generation it is recorded for, as [`Report::Generation`] gave.
+    pub generation: u64,
+    /// The presented question's field it answers, if it answers one, rather than being queued for the agent.
+    pub answer: Option<tomori_protocol::AnswerTarget>,
+}
+
+impl Utterance {
+    /// The utterance `id`, for the agent, recorded for the connection `generation`.
+    pub fn new(id: impl Into<String>, generation: u64) -> Self {
+        Self {
+            id: id.into(),
+            generation,
+            answer: None,
+        }
+    }
+
+    /// The utterance as the answer to the presented question's field `answer`, when given.
+    pub fn answering(mut self, answer: Option<tomori_protocol::AnswerTarget>) -> Self {
+        self.answer = answer;
+        self
+    }
+}
+
+/// What a [`Connection`] tells its [`Session`], besides the client's [`Event`]s, in order with them.
+///
+/// More reports may be added; a session ignores those it does not know, with a wildcard arm.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Report {
     /// Connecting to the server given at startup, as though it had been chosen. Reported by [`Connection::new`].
     Connecting(Choice),
@@ -89,6 +124,8 @@ pub enum Report {
 }
 
 /// The client's side of its conversation with a server, which a [`Connection`] carries out and reports to. `tomori-scene`'s `Conversation` is Tomori's.
+///
+/// The connection handles the security of the connection itself: pinning, tokens, and asking a server that refuses visitors to pair. Pairing and knocking are the session's to carry out, as the participant asks: it sends `PairBegin` with its commitment, answers [`ServerMessage::PairNonce`] with `PairReveal`, and passes on the token of [`ServerMessage::Paired`] as [`Action::Paired`], or that of [`ServerMessage::Admitted`] for its own knock as [`Action::Admitted`]. See `design/security.md`.
 pub trait Session {
     /// The next action to carry out, or `None` when there is none. The connection takes them one at a time, reporting as it goes, so that a report such as [`Report::MicrophoneFailed`] can withdraw the actions queued behind the one that failed.
     fn next_action(&mut self) -> Option<Action>;
@@ -99,15 +136,20 @@ pub trait Session {
     /// What the connection itself has to say.
     fn report(&mut self, report: Report);
 
-    /// Whether the participant is looking at the server list, which is the only time the connection browses for servers.
-    fn is_browsing(&self) -> bool;
+    /// Whether the participant is looking at the server list, which is the only time the connection browses for servers. A session without a server list never browses.
+    fn is_browsing(&self) -> bool {
+        false
+    }
 
-    /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`].
-    fn observe(&self, feedback: &mut feedback::Feedback, now: Instant);
+    /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`]. A session that shows the participant nothing observes nothing.
+    fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
+        let _ = (feedback, now);
+    }
 }
 
 /// The other participants whose voices to place, as [`Connection::listen`] gives them.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Voices<'a> {
     /// The other participants in the space, by number, in order: neither this client's own nor the one it listens as.
     pub others: &'a [u32],
@@ -119,6 +161,7 @@ pub struct Voices<'a> {
 
 /// Permission to receive multicast while browsing.
 pub trait Multicast {
+    /// Hold the permission while `held`, as the connection browses, and release it otherwise.
     fn set_held(&mut self, held: bool);
 }
 
@@ -231,6 +274,8 @@ struct Link {
     distrusted: bool,
     /// Asked to be admitted only to pair, since the server refuses visitors.
     pairing: bool,
+    /// The certificate the server presented to this link's client, over TLS, once it connected: the one a token from pairing or a knock is kept with. A client never accepts another certificate once it has connected.
+    certificate: Option<Fingerprint>,
 }
 
 /// What to do once the client reported why it disconnected.
@@ -252,6 +297,21 @@ fn transport(kept: Option<&str>, advertised: Option<&str>) -> (Transport, bool) 
         (None, Some(pin)) => (Transport::Tls { pin: Some(pin) }, false),
         (None, None) => (Transport::Automatic { pin: None }, false),
     }
+}
+
+/// The link to keep a token from `what`, pairing or a knock, for, with the certificate its connection presented, if there is one. A session may ask after the connection has closed, as when the participant leaves the server in the frame that pairing completes, or before its client has connected over TLS; the token is then ignored.
+fn issued<'a>(link: &'a mut Option<Link>, what: &str) -> Option<(&'a mut Link, Fingerprint)> {
+    let Some(link) = link.as_mut() else {
+        log::debug!("Ignored the token from {what}, as there is no connection to keep it for.");
+        return None;
+    };
+    let Some(certificate) = link.certificate else {
+        log::debug!(
+            "Ignored the token from {what}, as the connection presented no certificate to keep it with."
+        );
+        return None;
+    };
+    Some((link, certificate))
 }
 
 /// A hook that renders the other participants' presence reports.
@@ -907,7 +967,6 @@ impl Connection {
     }
 
     /// Measure, each time the live microphone opens, how much of a probe the speaker plays it hears, and log it: `label` says how the microphone captures. Needs a quiet room. See `design/spatial-audio.md`.
-    #[cfg(any(target_os = "android", test))]
     pub fn set_echo_test(&mut self, label: &'static str, routed: bool) {
         log::info!(
             "Echo test ({label}): each time the live microphone opens, a probe plays a second after the speaker is ready; keep the room quiet and the volume the same between runs"
@@ -972,7 +1031,6 @@ impl Connection {
     }
 
     /// Hear as `participant` does, from their head, as the spectator does for the participant it follows: they are the listener, so their own voice is not placed on a seat.
-    #[cfg(not(target_os = "android"))]
     pub fn listen_as(&mut self, participant: Option<u32>) {
         self.listening_as = participant;
     }
@@ -1039,7 +1097,6 @@ impl Connection {
     }
 
     /// Receive the other participants' presence reports, as a spectator that renders them does. The hook is called for every [`ServerMessage::Presence`], from the render loop's thread.
-    #[cfg(not(target_os = "android"))]
     pub fn watch_presence(&mut self, hook: impl FnMut(&ServerMessage) + Send + 'static) {
         self.presence = Some(Box::new(hook));
     }
@@ -1269,11 +1326,12 @@ impl Connection {
                         pinned,
                         distrusted: false,
                         pairing: false,
+                        certificate: None,
                     };
                     self.open(link, session);
                 }
-                Action::Paired { token, certificate } => self.paired(token, certificate, session),
-                Action::Admitted { token, certificate } => self.admitted(token, certificate),
+                Action::Paired { token } => self.paired(token, session),
+                Action::Admitted { token } => self.admitted(token),
                 Action::Disconnect => self.disconnect(),
                 Action::Rescan => {
                     self.browser = None;
@@ -1298,7 +1356,11 @@ impl Connection {
                         session.report(Report::Failed("Not connected.".into()));
                     }
                 }
-                Action::BeginUtterance(utterance, generation, answer) => {
+                Action::BeginUtterance(Utterance {
+                    id: utterance,
+                    generation,
+                    answer,
+                }) => {
                     // The opening tick plays through the silencing, as X is pressed and before the microphone has opened; see `design/live-audio.md`. A live microphone is already open and would hear it, so then it is only felt.
                     self.feedback.emit_heard(
                         Feedback::RecordingStarts,
@@ -1397,10 +1459,11 @@ impl Connection {
         }
     }
 
-    /// Close the connection without stalling the frame: closing waits briefly for the server.
-    /// Connect as `link` says.
-    fn open(&mut self, link: Link, session: &mut dyn Session) {
+    /// Connect as `link` says, closing the current connection without stalling the frame: closing waits briefly for the server.
+    fn open(&mut self, mut link: Link, session: &mut dyn Session) {
         self.disconnect();
+        // The new client has presented no certificate yet.
+        link.certificate = None;
         let mut options = Options::new(
             link.address.clone(),
             &self.identity.participant,
@@ -1423,9 +1486,10 @@ impl Connection {
         }
     }
 
-    /// Keep what a connection over TLS established: the server's certificate, pinned from then on, and a token given at startup.
+    /// Keep what a connection over TLS established: the server's certificate, pinned from then on, and a token given at startup. The certificate is kept on the link even from a server that is distrusted, for pairing to replace the one kept.
     fn keep(&mut self, certificate: Option<Fingerprint>) {
         let link = self.link.as_mut().expect("a client is kept with its link");
+        link.certificate = certificate;
         let Some(certificate) = certificate.filter(|_| !link.distrusted) else {
             return;
         };
@@ -1496,8 +1560,10 @@ impl Connection {
     }
 
     /// A knock admitted this device: keep its collaborator token for the server, with the certificate the connection presented, to present when it connects again. The connection is already a collaborator's, so it is not reopened.
-    fn admitted(&mut self, token: String, certificate: Fingerprint) {
-        let link = self.link.as_mut().expect("a client is kept with its link");
+    fn admitted(&mut self, token: String) {
+        let Some((link, certificate)) = issued(&mut self.link, "an admission") else {
+            return;
+        };
         // Never from a server whose identity changed, over a certificate other than the one kept, or in place of a token already kept: an admission may not replace what this device trusts.
         let kept = self.store.credential(&link.key).certificate;
         if link.distrusted
@@ -1522,8 +1588,11 @@ impl Connection {
     }
 
     /// Pairing gave this device an owner token: keep it with the certificate the pairing connection presented, which replaces one it distrusted, and connect with both. See `design/security.md`.
-    fn paired(&mut self, token: String, certificate: Fingerprint, session: &mut dyn Session) {
-        let mut link = self.link.take().expect("a client is kept with its link");
+    fn paired(&mut self, token: String, session: &mut dyn Session) {
+        let Some((_, certificate)) = issued(&mut self.link, "pairing") else {
+            return;
+        };
+        let mut link = self.link.take().expect("a link was found");
         self.store
             .remember_certificate(&link.key, &certificate.to_string());
         self.store.remember_token(&link.key, &token);

@@ -69,11 +69,9 @@ impl Command {
         server: Option<String>,
         token: Option<String>,
     ) -> Result<Self> {
-        let mut overrides = Overrides {
-            server,
-            name: None,
-            token,
-        };
+        let mut overrides = Overrides::default();
+        overrides.server = server;
+        overrides.token = token;
         let (mut space, mut follow, mut audio_output, mut mode) = (None, None, None, None);
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
@@ -263,14 +261,11 @@ mod tests {
             Some("env-token".into()),
         )
         .unwrap();
-        assert!(
-            command.overrides
-                == Overrides {
-                    server: Some("env:1".into()),
-                    name: Some("Ada".into()),
-                    token: Some("env-token".into()),
-                }
-        );
+        let mut expected = Overrides::default();
+        expected.server = Some("env:1".into());
+        expected.name = Some("Ada".into());
+        expected.token = Some("env-token".into());
+        assert!(command.overrides == expected);
         let command = parse(&[
             "--spectator",
             "--server",

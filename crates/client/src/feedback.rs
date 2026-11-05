@@ -58,7 +58,6 @@ impl Level {
     }
 
     /// The level named `text`, as the console's `feedback` command takes it.
-    #[cfg(not(target_os = "android"))]
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "full" => Some(Self::Full),
@@ -91,6 +90,7 @@ pub struct Settings {
 
 /// Something that changed, which the participant hears and feels. See `design/feedback.md` for exactly when each happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// The ray entered a new target. Felt very lightly, and silent.
     Hover,
@@ -307,7 +307,6 @@ impl Feedback {
     }
 
     /// Never play cues, as for the spectator. Vibrations are unaffected.
-    #[cfg(not(target_os = "android"))]
     pub fn mute_sounds(&mut self) {
         self.muted = true;
         self.earcons.clear();

@@ -49,6 +49,7 @@ impl Layout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct MixerOptions {
     /// The output device rate.
     pub sample_rate: u32,

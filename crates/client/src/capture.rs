@@ -16,11 +16,13 @@ pub type Active = Box<dyn Fn() -> bool + Send>;
 
 /// Capture in progress, stopped when dropped. Samples already delivered are not lost.
 pub struct Recording {
+    /// The rate the microphone captures at, in samples a second.
     pub sample_rate: u32,
     _stream: Box<dyn std::any::Any>,
 }
 
 impl Recording {
+    /// Capture at `sample_rate` by `stream`, which is kept until the recording is dropped and stops capturing when it is.
     pub fn new(sample_rate: u32, stream: impl std::any::Any) -> Self {
         Self {
             sample_rate,

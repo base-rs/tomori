@@ -10,6 +10,7 @@ use crate::FailedUtterance;
 
 /// Why a connection ended or could not be established.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Disconnect {
     /// The server address could not be resolved.
     Address(String),
@@ -48,6 +49,7 @@ impl std::error::Error for Disconnect {}
 
 /// The client's connection to the server.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectionState {
     /// Opening a connection. `attempt` counts from one and resets after a connection that stayed up for [`crate::Backoff::stable_duration`].
     Connecting { attempt: u32 },
@@ -86,6 +88,7 @@ impl ConnectionState {
 
 /// Something the client observed, delivered in order.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Event {
     State(ConnectionState),
     /// A control message from the server. `Welcome` is reported as [`ConnectionState::Connected`] instead.

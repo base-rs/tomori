@@ -32,6 +32,7 @@ impl Membership {
 
 /// Why a message was not accepted for sending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SendError {
     /// The client has been closed.
     Closed,

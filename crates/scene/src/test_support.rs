@@ -51,15 +51,11 @@ fn presenting(
     token: Option<String>,
 ) -> (Conversation, Connection) {
     let store = Store::new(None);
-    let identity = Identity::new(
-        &store,
-        None,
-        Overrides {
-            server,
-            name: Some(name.to_owned()),
-            token,
-        },
-    );
+    let mut overrides = Overrides::default();
+    overrides.server = server;
+    overrides.name = Some(name.to_owned());
+    overrides.token = token;
+    let identity = Identity::new(&store, None, overrides);
     let mut conversation = Conversation::new(&identity.name);
     let connection = Connection::new(
         identity,

@@ -123,11 +123,9 @@ impl Feed {
         capture: Box<dyn capture::Capture>,
         playback: Box<dyn speaker::Playback>,
     ) -> Self {
-        let overrides = Overrides {
-            server: options.server.clone(),
-            name: None,
-            token: options.token.clone(),
-        };
+        let mut overrides = Overrides::default();
+        overrides.server = options.server.clone();
+        overrides.token = options.token.clone();
         let store = Store::new(None);
         let identity = Identity::new(&store, crate::identity::host_name().as_deref(), overrides);
         let mut conversation = Conversation::new(&identity.name);

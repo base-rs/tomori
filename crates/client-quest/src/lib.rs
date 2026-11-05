@@ -245,11 +245,10 @@ fn android_connection(
             None
         })
     };
-    let overrides = Overrides {
-        server: extra("tomori.server"),
-        name: extra("tomori.name"),
-        token: extra("tomori.token"),
-    };
+    let mut overrides = Overrides::default();
+    overrides.server = extra("tomori.server");
+    overrides.name = extra("tomori.name");
+    overrides.token = extra("tomori.token");
     let device = android.device_name().unwrap_or_else(|error| {
         log::warn!("Cannot read the device name: {error:#}");
         None
