@@ -324,9 +324,10 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
     }
 
     fn decode(&mut self, samples: &[i16]) -> Result<String, Error> {
+        // An utterance is begun only while the recognizer is loaded, and unloading it fails every utterance.
         self.recognizer
             .as_mut()
-            .ok_or_else(|| Error::Stopped(STOPPED_MESSAGE.to_owned()))?
+            .expect("decoded only while loaded")
             .transcribe(samples)
     }
 
@@ -503,9 +504,8 @@ impl Drop for OfflineRecognition {
     /// Waits for the decode thread to finish; in-progress decodes are abandoned and the recognizer is unloaded.
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Stop);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let thread = self.thread.take().expect("joined only here");
+        let _ = thread.join();
     }
 }
 
@@ -521,9 +521,7 @@ pub struct OfflineUtterance {
 impl OfflineUtterance {
     /// Append audio at the utterance's sample rate; it is buffered until the utterance ends.
     pub fn push(&mut self, samples: &[i16]) {
-        if !self.open {
-            return;
-        }
+        // Ending or cancelling takes the utterance, so it is open while audio is pushed.
         let mut resampled = Vec::new();
         self.resampler.process(samples, &mut resampled);
         if resampled.is_empty() {
@@ -604,13 +602,19 @@ mod tests {
 
     #[test]
     fn a_cancelled_utterance_reports_nothing() {
-        let (sender, receiver) = mpsc::channel();
         let mut offline = OfflineRecognition::spawn(Fake("hello".to_owned()));
+        let handle = offline.begin(RATE, |event| unreachable!("reported {event:?}"));
+        handle.cancel();
+        // Reporting it would have disabled recognition.
+        let (sender, receiver) = mpsc::channel();
         let handle = offline.begin(RATE, move |event| {
             let _ = sender.send(event);
         });
-        handle.cancel();
-        assert!(receiver.try_recv().is_err());
+        handle.end();
+        assert_eq!(
+            receiver.recv().unwrap(),
+            TranscriptEvent::Final(String::new())
+        );
     }
 
     #[test]
@@ -640,10 +644,9 @@ mod tests {
         assert!(stopper.wait(std::time::Instant::now() + std::time::Duration::from_secs(5)));
         drop(handle);
         let event = receiver.recv().unwrap();
-        assert!(
-            matches!(&event, TranscriptEvent::Failed(Error::Stopped(_))),
-            "expected Failed(Stopped), got {event:?}"
-        );
+        let TranscriptEvent::Failed(Error::Stopped(_)) = &event else {
+            unreachable!("expected Failed(Stopped), got {event:?}");
+        };
     }
 
     use std::{
@@ -678,7 +681,8 @@ mod tests {
 
     impl OfflineRecognizer for Recorder {
         fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error> {
-            assert!(samples.len() <= MAX_SEGMENT, "{} samples", samples.len());
+            let length = samples.len();
+            assert!(length <= MAX_SEGMENT, "{length} samples");
             let index = {
                 let mut calls = self.calls.lock().unwrap();
                 calls.push(samples.len());
@@ -767,7 +771,7 @@ mod tests {
         handle.push(&audio);
         handle.end();
         let TranscriptEvent::Final(text) = collect(&receiver) else {
-            panic!("expected a transcript");
+            unreachable!("expected a transcript");
         };
         let calls = calls.lock().unwrap().clone();
         assert_eq!(calls.iter().sum::<usize>(), audio.len());
@@ -833,6 +837,7 @@ mod tests {
 
     #[test]
     fn a_panic_in_the_detector_falls_back_to_loudness() {
+        log::set_max_level(log::LevelFilter::Trace);
         let (recorder, calls) = Recorder::new(|_, _| Ok("words".to_owned()));
         let mut offline = OfflineRecognition::with_voice_activity(recorder, Panicking);
         for _ in 0..2 {
@@ -852,7 +857,8 @@ mod tests {
 
     #[test]
     fn an_utterance_longer_than_the_limit_fails_as_it_passes_it() {
-        let (recorder, calls) = Recorder::new(|_, _| Ok("words".to_owned()));
+        log::set_max_level(log::LevelFilter::Trace);
+        let (recorder, calls) = Recorder::new(|_, _| unreachable!("nothing is decoded"));
         let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 2);
         let (sender, receiver) = mpsc::channel();
         let mut handle = offline.begin(RATE, move |event| {
@@ -910,10 +916,8 @@ mod tests {
             Ok("words".to_owned())
         });
         let mut offline = OfflineRecognition::spawn(recorder);
-        let (sender, receiver) = mpsc::channel();
-        let mut handle = offline.begin(RATE, move |event| {
-            let _ = sender.send(event);
-        });
+        // Reporting it would panic on the engine's thread, which disables recognition, as the next utterance would show.
+        let mut handle = offline.begin(RATE, |event| unreachable!("reported {event:?}"));
         handle.push(&steady(70));
         // The engine's commands are applied in order, so cancelling needs the key, which only the handle knows.
         let key = handle.key;
@@ -923,7 +927,12 @@ mod tests {
         commands.send(Command::Cancel { key }).unwrap();
         release.send(()).unwrap();
         drop(release);
-        assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
+        let (sender, receiver) = mpsc::channel();
+        let handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        handle.end();
+        assert_eq!(collect(&receiver), TranscriptEvent::Final(String::new()));
         assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
@@ -1168,20 +1177,18 @@ mod tests {
         });
         handle.push(&steady(40));
         handle.end();
-        assert!(matches!(
-            collect(&receiver),
-            TranscriptEvent::Failed(Error::Stopped(_))
-        ));
+        let TranscriptEvent::Failed(Error::Stopped(_)) = collect(&receiver) else {
+            unreachable!("expected TranscriptEvent::Failed(Error::Stopped(_))");
+        };
         let (sender, receiver) = mpsc::channel();
         let mut handle = offline.begin(RATE, move |event| {
             let _ = sender.send(event);
         });
         handle.push(&steady(1));
         handle.end();
-        assert!(matches!(
-            collect(&receiver),
-            TranscriptEvent::Failed(Error::Stopped(_))
-        ));
+        let TranscriptEvent::Failed(Error::Stopped(_)) = collect(&receiver) else {
+            unreachable!("expected TranscriptEvent::Failed(Error::Stopped(_))");
+        };
     }
 
     /// Transcribes a minute of LibriSpeech, from the clips that come with the Whisper model, with Whisper and the Silero detector, as the offline backend does. Skipped without both models; see [`crate::test_models`].
@@ -1204,82 +1211,87 @@ mod tests {
         let root = test_models::root();
         let config = WhisperConfig::named(&root, test_models::WHISPER_MODEL);
         let vad = SileroVadConfig::from_root(&root);
-        if !test_models::installed(
+        test_models::with(
             "the Whisper and Silero voice activity models",
             &format!("bash scripts/fetch-asr-model.sh whisper {}", config.name),
             &[&config.model, &vad.model],
-        ) {
-            return;
-        }
-        let directory = config.model.join("test_wavs");
-        let transcripts = std::fs::read_to_string(directory.join("trans.txt")).unwrap();
-        let mut audio = Vec::new();
-        let mut reference = Vec::new();
-        // Each clip twice, with a short breath between clips, so the minute has pauses but none long.
-        for _ in 0..2 {
-            for line in transcripts.lines() {
-                let (file, text) = line.split_once(' ').unwrap();
-                let wave = sherpa_onnx::Wave::read(directory.join(file).to_str().unwrap()).unwrap();
-                let samples: Vec<i16> = wave
-                    .samples()
-                    .iter()
-                    .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
-                    .collect();
-                let mut resampled = Vec::new();
-                Resampler::new(wave.sample_rate() as u32, RATE).process(&samples, &mut resampled);
-                audio.extend(resampled);
-                audio.extend(std::iter::repeat_n(0, RATE as usize * 4 / 10));
-                reference.extend(text.split_whitespace().map(str::to_lowercase));
-            }
-        }
-        assert!(audio.len() > 2 * MAX_SEGMENT, "{} samples", audio.len());
+            || {
+                let directory = config.model.join("test_wavs");
+                let transcripts = std::fs::read_to_string(directory.join("trans.txt")).unwrap();
+                let mut audio = Vec::new();
+                let mut reference = Vec::new();
+                // Each clip twice, with a short breath between clips, so the minute has pauses but none long.
+                for _ in 0..2 {
+                    for line in transcripts.lines() {
+                        let (file, text) = line.split_once(' ').unwrap();
+                        let wave = sherpa_onnx::Wave::read(directory.join(file).to_str().unwrap())
+                            .unwrap();
+                        let samples: Vec<i16> = wave
+                            .samples()
+                            .iter()
+                            .map(|sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+                            .collect();
+                        let mut resampled = Vec::new();
+                        Resampler::new(wave.sample_rate() as u32, RATE)
+                            .process(&samples, &mut resampled);
+                        audio.extend(resampled);
+                        audio.extend(std::iter::repeat_n(0, RATE as usize * 4 / 10));
+                        reference.extend(text.split_whitespace().map(str::to_lowercase));
+                    }
+                }
+                let length = audio.len();
+                assert!(length > 2 * MAX_SEGMENT, "{length} samples");
 
-        // With the detector, as the server runs, and by loudness alone, as when its model is not installed.
-        for detector in [true, false] {
-            let whisper = WhisperRecognizer::new(&config).unwrap();
-            let segments = Arc::new(Mutex::new(Vec::new()));
-            let whisper = Whisper(whisper, Arc::clone(&segments));
-            let mut offline = if detector {
-                let vad = SileroVad::new(&vad).unwrap();
-                OfflineRecognition::with_voice_activity(whisper, vad)
-            } else {
-                OfflineRecognition::spawn(whisper)
-            };
-            let (sender, receiver) = mpsc::channel();
-            let mut handle = offline.begin(RATE, move |event| {
-                let _ = sender.send(event);
-            });
-            let started = std::time::Instant::now();
-            handle.push(&audio);
-            handle.end();
-            let text = match receiver.recv_timeout(Duration::from_secs(600)).unwrap() {
-                TranscriptEvent::Final(text) => text,
-                other => panic!("{other:?}"),
-            };
-            let words: Vec<String> = text
-                .to_lowercase()
-                .split(|character: char| !(character.is_alphanumeric() || character == '\''))
-                .filter(|word| !word.is_empty())
-                .map(str::to_owned)
-                .collect();
-            let errors = edit_distance(&reference, &words);
-            let segments: Vec<String> = segments
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|length| format!("{:.2}", *length as f64 / f64::from(RATE)))
-                .collect();
-            eprintln!(
-                "{} {:.1} seconds transcribed in {:.1} seconds, in segments of {} seconds, {errors} word errors in {} words: {text}",
-                if detector { "Silero:" } else { "Loudness:" },
-                audio.len() as f64 / f64::from(RATE),
-                started.elapsed().as_secs_f64(),
-                segments.join(", "),
-                reference.len()
-            );
-            // A cut through a word would cost at least a word on each side of it; LibriSpeech spells "dishonoured" and "for ever" in British style, which Whisper does not, so a perfect transcript has 6 errors.
-            assert!(errors * 20 <= reference.len(), "{errors} errors: {text}");
-        }
+                // With the detector, as the server runs, and by loudness alone, as when its model is not installed.
+                for detector in [true, false] {
+                    let whisper = WhisperRecognizer::new(&config).unwrap();
+                    let segments = Arc::new(Mutex::new(Vec::new()));
+                    let whisper = Whisper(whisper, Arc::clone(&segments));
+                    let mut offline = if detector {
+                        let vad = SileroVad::new(&vad).unwrap();
+                        OfflineRecognition::with_voice_activity(whisper, vad)
+                    } else {
+                        OfflineRecognition::spawn(whisper)
+                    };
+                    let (sender, receiver) = mpsc::channel();
+                    let mut handle = offline.begin(RATE, move |event| {
+                        let _ = sender.send(event);
+                    });
+                    let started = std::time::Instant::now();
+                    handle.push(&audio);
+                    handle.end();
+                    let event = receiver.recv_timeout(Duration::from_secs(600)).unwrap();
+                    let TranscriptEvent::Final(text) = event else {
+                        unreachable!("{event:?}");
+                    };
+                    let words: Vec<String> = text
+                        .to_lowercase()
+                        .split(|character: char| {
+                            !(character.is_alphanumeric() || character == '\'')
+                        })
+                        .filter(|word| !word.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    let errors = edit_distance(&reference, &words);
+                    let segments: Vec<String> = segments
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|length| format!("{:.2}", *length as f64 / f64::from(RATE)))
+                        .collect();
+                    eprintln!(
+                        "{} {:.1} seconds transcribed in {:.1} seconds, in segments of {} seconds, {errors} word errors in {} words: {text}",
+                        if detector { "Silero:" } else { "Loudness:" },
+                        audio.len() as f64 / f64::from(RATE),
+                        started.elapsed().as_secs_f64(),
+                        segments.join(", "),
+                        reference.len()
+                    );
+                    // A cut through a word would cost at least a word on each side of it; LibriSpeech spells "dishonoured" and "for ever" in British style, which Whisper does not, so a perfect transcript has 6 errors.
+                    assert!(errors * 20 <= reference.len(), "{errors} errors: {text}");
+                }
+            },
+        );
     }
 
     /// The number of words inserted, deleted or replaced to turn `reference` into `words`.
@@ -1298,5 +1310,133 @@ mod tests {
             previous = current;
         }
         previous[words.len()]
+    }
+
+    /// A detector that cannot hear.
+    struct Deaf;
+
+    impl VoiceActivity for Deaf {
+        fn speech(&mut self, _samples: &[i16]) -> Result<Vec<Range<usize>>, Error> {
+            Err(Error::Engine("the detector is deaf".into()))
+        }
+    }
+
+    /// A recognizer that panics.
+    struct Broken;
+
+    impl OfflineRecognizer for Broken {
+        fn transcribe(&mut self, _samples: &[i16]) -> Result<String, Error> {
+            panic!("the recognizer broke")
+        }
+    }
+
+    #[test]
+    fn a_detector_that_fails_falls_back_to_loudness_and_a_boxed_recognizer_transcribes() {
+        log::set_max_level(log::LevelFilter::Trace);
+        let mut boxed: Box<dyn OfflineRecognizer> = Box::new(Fake("hello".to_owned()));
+        assert_eq!(boxed.transcribe(&[]).unwrap(), "hello");
+        let (recorder, calls) = Recorder::new(|_, _| Ok("words".to_owned()));
+        let mut offline = OfflineRecognition::with_voice_activity(recorder, Deaf);
+        let (sender, receiver) = mpsc::channel();
+        let mut handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        handle.push(&steady(40));
+        handle.end();
+        assert_eq!(
+            collect(&receiver),
+            TranscriptEvent::Final("words words".to_owned())
+        );
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_recognizer_that_panics_disables_recognition_and_a_report_that_panics_is_survived() {
+        log::set_max_level(log::LevelFilter::Trace);
+        let mut offline = OfflineRecognition::spawn(Broken);
+        let (sender, receiver) = mpsc::channel();
+        let mut handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        handle.push(&[1000; 160]);
+        handle.end();
+        let TranscriptEvent::Failed(Error::Stopped(_)) = collect(&receiver) else {
+            unreachable!("a panic stops recognition");
+        };
+        // Told it has stopped, a sink that panics panics the engine again.
+        let handle = offline.begin(RATE, |_| panic!("the sink broke"));
+        handle.end();
+        let (sender, receiver) = mpsc::channel();
+        let handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        handle.end();
+        let TranscriptEvent::Failed(Error::Stopped(_)) = collect(&receiver) else {
+            unreachable!("recognition stays stopped");
+        };
+    }
+
+    /// An engine of `recognizer`, with what sends it commands.
+    fn engine_of(recognizer: Fake) -> (OfflineEngine<Fake>, Sender<Command>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            OfflineEngine::new(receiver, recognizer, None, MAX_UTTERANCE),
+            sender,
+        )
+    }
+
+    fn begin(sender: &Sender<Command>, key: u64) -> mpsc::Receiver<TranscriptEvent> {
+        let (events, receiver) = mpsc::channel();
+        sender
+            .send(Command::Begin {
+                key,
+                sink: Box::new(move |event| {
+                    let _ = events.send(event);
+                }),
+            })
+            .unwrap();
+        receiver
+    }
+
+    #[test]
+    fn an_engine_whose_commands_end_fails_what_is_open() {
+        // While it waits for the next.
+        let (mut engine, sender) = engine_of(Fake("hello".to_owned()));
+        let events = begin(&sender, 1);
+        assert!(engine.turn());
+        drop(sender);
+        assert!(!engine.turn());
+        let TranscriptEvent::Failed(Error::Stopped(_)) = events.recv().unwrap() else {
+            unreachable!("the open utterance fails");
+        };
+        // While it applies those waiting.
+        let (mut engine, sender) = engine_of(Fake("hello".to_owned()));
+        let events = begin(&sender, 1);
+        sender
+            .send(Command::Audio {
+                key: 1,
+                samples: vec![1000; 160],
+            })
+            .unwrap();
+        drop(sender);
+        assert!(!engine.turn());
+        let TranscriptEvent::Failed(Error::Stopped(_)) = events.recv().unwrap() else {
+            unreachable!("the open utterance fails");
+        };
+    }
+
+    #[test]
+    fn audio_at_another_rate_is_resampled_and_too_little_to_resample_is_kept() {
+        let mut offline = OfflineRecognition::spawn(Fake("hello".to_owned()));
+        let mut handle = offline.begin(RATE, drop::<TranscriptEvent>);
+        handle.push_frame(&AudioFrame {
+            gate: tomori_protocol::Gate::Agent,
+            source: 0,
+            sequence: 0,
+            timestamp: 0,
+            sample_rate: 48_000,
+            samples: vec![0; 1],
+        });
+        handle.cancel();
     }
 }
