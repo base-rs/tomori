@@ -1688,6 +1688,16 @@ mod tests {
             .with_workspace_roots(WorkspaceRoots::none())
     }
 
+    // Small builders called only from other crates are inlined there, where their coverage is not counted as theirs, so each is also called in this crate's tests.
+    #[test]
+    fn the_participant_retention_given_is_kept() {
+        let retention = Duration::from_secs(7);
+        assert_eq!(
+            server().with_participant_retention(retention).retention,
+            retention
+        );
+    }
+
     #[test]
     fn the_test_scheduler_passes_through_what_it_does_not_break() {
         let scheduler = Faulty::new();

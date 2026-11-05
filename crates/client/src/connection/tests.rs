@@ -159,6 +159,15 @@ fn utterance(voice: &Voice) -> Option<String> {
         .and_then(|microphone| microphone.utterance().map(str::to_owned))
 }
 
+// Also built here, as well as by the scene: a builder this small is inlined into other crates, where its coverage is not counted as its own.
+#[test]
+fn an_utterance_is_for_the_agent_unless_it_answers_or_names() {
+    let utterance = Utterance::new("u-1", 3);
+    assert!(utterance.answer.is_none() && !utterance.naming);
+    let naming = Utterance::new("u-1", 3).naming();
+    assert!(naming.naming && naming.answer.is_none() && naming.generation == 3);
+}
+
 #[test]
 fn closing_a_recording_waits_for_its_thread_without_deadlock() {
     let client = client();

@@ -557,6 +557,16 @@ fn read_chunk(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    // Called only from the integration tests otherwise, where it is inlined and its coverage is not counted as its own.
+    #[test]
+    fn skipping_sequence_numbers_moves_the_next_one_on() {
+        let server = TestServer::start();
+        let mut client = server.connect("ada", "Ada");
+        let sequence = client.sequence;
+        client.skip_sequence(3);
+        assert_eq!(client.sequence, sequence + 3);
+    }
+
     #[test]
     fn eventually_checks_again_until_there_is_a_value() {
         let mut checks = 0;
