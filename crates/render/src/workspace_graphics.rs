@@ -6,27 +6,31 @@
 use crate::delegation::{State, Station, Workspace};
 use bytemuck::{Pod, Zeroable};
 use tomori_scene::cards::{COLUMNS, ContentCache, MAX_RESULTS, ROWS, clip, results};
+use tomori_text::atlas::SOLID;
 
 const MAX_LABELS: usize = 128;
 // A focused card keeps all content readable and makes content paging independent
 // of the size of neighboring cards.
 pub const CARDS_PER_PAGE: usize = 1;
-// Horizontal glyph runs need at most four quads per bitmap row. Hard cap is
-// enforced as well, including backgrounds, even for hostile input.
-// Every supported 160-character title + status, card and notice, even at
-// four runs per bitmap row. GPU storage grows on demand, never eagerly to this.
-const MAX_VERTICES: usize = 4_500_000;
+// A glyph is one quad from the atlas. Hard cap is enforced as well, including
+// backgrounds, even for hostile input: every supported 160-character title +
+// status, card and notice, about 140,000 vertices with 128 signs, and room for
+// the buffer to double past that. GPU storage grows on demand, never eagerly to this.
+const MAX_VERTICES: usize = 1 << 19;
 const INITIAL_VERTICES: usize = 16_384;
 const WHITE: [f32; 3] = [0.91, 0.96, 1.0];
 const MUTED: [f32; 3] = [0.48, 0.72, 0.85];
-const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
     position: [f32; 3],
     color: [f32; 4],
+    /// Where in the glyph atlas, in its pixels: a glyph's tile, or the solid block for everything else.
+    uv: [f32; 2],
+    weight: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,7 +67,7 @@ struct PanelRange {
     center: glam::Vec3,
     vertices: std::ops::Range<u32>,
     // Background strips, post and edge accent only: text shares this shallow
-    // surface, with millimetre offsets. Never compare thousands of glyph runs.
+    // surface, with millimetre offsets. Never compare thousands of glyph quads.
     surface: Vec<[glam::Vec3; 3]>,
 }
 
@@ -370,12 +374,13 @@ impl WorkspaceGraphics {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world workspace layout"),
-            bind_group_layouts: &[Some(camera_layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(glyphs.layout())],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -422,7 +427,7 @@ impl WorkspaceGraphics {
             cache: None,
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bounded workspace glyph runs"),
+            label: Some("bounded workspace quads"),
             size: (INITIAL_VERTICES * size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -490,7 +495,7 @@ impl WorkspaceGraphics {
                     .next_power_of_two()
                     .min(MAX_VERTICES);
                 self.vertices = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("grown bounded workspace glyph runs"),
+                    label: Some("grown bounded workspace quads"),
                     size: (self.vertex_capacity * size_of::<Vertex>()) as u64,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -514,6 +519,7 @@ impl WorkspaceGraphics {
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         camera: &wgpu::BindGroup,
+        glyphs: &wgpu::BindGroup,
         scene_to_clip: glam::Mat4,
     ) {
         if self.count == 0 {
@@ -521,6 +527,7 @@ impl WorkspaceGraphics {
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera, &[]);
+        pass.set_bind_group(1, glyphs, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         // Blending is order dependent. Preserve each panel's background-first
         // mesh order, but draw whole panels back-to-front for this eye. The
@@ -812,20 +819,34 @@ fn short_ref(text: &str) -> String {
 }
 
 fn quad(mesh: &mut Vec<Vertex>, x: f32, y: f32, z: f32, width: f32, height: f32, color: [f32; 4]) {
+    textured(
+        mesh,
+        [x, y, z, width, height],
+        color,
+        [SOLID[0], SOLID[1], 0.0, 0.0],
+        0.0,
+    );
+}
+
+/// A quad from its top-left corner `x`, `y`, `z`, `width` across and `height` down, drawn from `tile` of the glyph atlas.
+fn textured(mesh: &mut Vec<Vertex>, rect: [f32; 5], color: [f32; 4], tile: [f32; 4], weight: f32) {
+    let [x, y, z, width, height] = rect;
     if mesh.len() + 6 > MAX_VERTICES {
         return;
     }
     for [u, v] in [
         [0.0, 0.0],
         [1.0, 0.0],
-        [1.0, -1.0],
+        [1.0, 1.0],
         [0.0, 0.0],
-        [1.0, -1.0],
-        [0.0, -1.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
     ] {
         mesh.push(Vertex {
-            position: [x + u * width, y + v * height, z],
+            position: [x + u * width, y - v * height, z],
             color,
+            uv: [tile[0] + u * tile[2], tile[1] + v * tile[3]],
+            weight,
         });
     }
 }
@@ -850,6 +871,8 @@ fn stroke(mesh: &mut Vec<Vertex>, a: [f32; 2], b: [f32; 2], width: f32, color: [
     mesh.extend(points.map(|[x, y]| Vertex {
         position: [x, y, 0.001],
         color,
+        uv: SOLID,
+        weight: 0.0,
     }));
 }
 
@@ -968,35 +991,32 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
         }
     }
     for (row, line) in panel.lines.iter().take(ROWS).enumerate() {
-        for (column, ch) in line.chars().take(panel.columns).enumerate() {
-            for (gy, bits) in crate::ui_text::glyph(ch).iter().enumerate() {
-                let mut gx = 0;
-                while gx < 8 {
-                    if bits & (1 << gx) == 0 {
-                        gx += 1;
-                        continue;
-                    }
-                    let start = gx;
-                    while gx < 8 && bits & (1 << gx) != 0 {
-                        gx += 1;
-                    }
-                    quad(
-                        mesh,
-                        x + (column * 9 + start) as f32 * p,
-                        y - (row * 11 + gy) as f32 * p,
-                        z,
-                        (gx - start) as f32 * p,
-                        p,
-                        color(if row == 0 {
-                            panel.accent
-                        } else if row < 4 && panel.columns == COLUMNS {
-                            MUTED
-                        } else {
-                            WHITE
-                        }),
-                    );
-                }
-            }
+        let color = color(if row == 0 {
+            panel.accent
+        } else if row < 4 && panel.columns == COLUMNS {
+            MUTED
+        } else {
+            WHITE
+        });
+        let cells: Vec<(char, ())> = crate::ui_text::drawn(line)
+            .take(panel.columns)
+            .map(|ch| (ch, ()))
+            .collect();
+        let top = (row * 11) as f32;
+        for (glyph, ()) in crate::ui_text::quads(&cells, 0.0, top, 11.0, |()| false) {
+            textured(
+                mesh,
+                [
+                    x + glyph.x * p,
+                    y - glyph.y * p,
+                    z,
+                    glyph.width * p,
+                    glyph.height * p,
+                ],
+                color,
+                glyph.tile,
+                glyph.weight,
+            );
         }
     }
     for vertex in &mut mesh[start..] {
@@ -1344,7 +1364,7 @@ mod tests {
         let maximum_characters = MAX_LABELS * (160 + 9) + CARDS_PER_PAGE * ROWS * COLUMNS + 3 * 56;
         // Per sign: 24 background strips, post, accent, up to 4 symbol strokes.
         let maximum_vertices =
-            maximum_characters * 8 * 4 * 6 + MAX_LABELS * 30 * 6 + (CARDS_PER_PAGE + 1) * 2 * 6;
+            maximum_characters * 6 + MAX_LABELS * 30 * 6 + (CARDS_PER_PAGE + 1) * 2 * 6;
         assert!(maximum_vertices <= MAX_VERTICES);
     }
 
@@ -1870,17 +1890,19 @@ mod tests {
                 });
                 let view = texture.create_view(&Default::default());
                 let depth_view = depth.create_view(&Default::default());
+                let glyphs = crate::glyphs::Glyphs::new(&device);
                 let mut graphics = WorkspaceGraphics::new(
                     &device,
                     wgpu::TextureFormat::Rgba8Unorm,
                     &camera_layout,
+                    &glyphs,
                     1,
                 );
                 // A depth-writing opaque body in front of part of the sign.
                 let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("synthetic body layout"),
-                    bind_group_layouts: &[Some(&camera_layout)],
+                    bind_group_layouts: &[Some(&camera_layout), Some(glyphs.layout())],
                     immediate_size: 0,
                 });
                 let body_pipeline =
@@ -1960,6 +1982,8 @@ mod tests {
                                      body: bool,
                                      sorted: bool| {
                     queue.write_buffer(&camera, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
+                    glyphs.sync(&device, &queue);
+                    let glyph_binding = glyphs.binding();
                     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: None,
                         size: 512 * 512 * 4,
@@ -2001,15 +2025,17 @@ mod tests {
                         if body {
                             pass.set_pipeline(&body_pipeline);
                             pass.set_bind_group(0, &binding, &[]);
+                            pass.set_bind_group(1, &glyph_binding, &[]);
                             pass.set_vertex_buffer(0, body_buffer.slice(..));
                             pass.draw(0..6, 0..1);
                         }
                         if sorted {
-                            graphics.draw(&mut pass, &binding, matrix);
+                            graphics.draw(&mut pass, &binding, &glyph_binding, matrix);
                         } else {
                             // Reproduce the old single blended draw in the test only.
                             pass.set_pipeline(&graphics.pipeline);
                             pass.set_bind_group(0, &binding, &[]);
+                            pass.set_bind_group(1, &glyph_binding, &[]);
                             pass.set_vertex_buffer(0, graphics.vertices.slice(..));
                             pass.draw(0..graphics.count, 0..1);
                         }
@@ -2459,6 +2485,8 @@ mod tests {
             Vertex {
                 position: [0.0; 3],
                 color: [0.0; 4],
+                uv: [0.0; 2],
+                weight: 0.0,
             },
         );
         quad(&mut mesh, 0.0, 0.0, 0.0, 1.0, 1.0, [1.0; 4]);

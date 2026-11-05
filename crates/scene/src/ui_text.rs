@@ -5,16 +5,19 @@
 //!
 //! Text is given as [`Span`]s, each with a [`Style`]: a colour, whether it is bold, and an optional background. [`wrap`] lays spans out on rows of a given width, at words, breaking a word longer than a row, with a hanging indent for the rows after the first and, for code, a continuation mark where a line is broken rather than cut; [`fit`] keeps at most a number of rows, ending the last with "…" where text is left out, and [`cut`] keeps one row, ending with "…" where it is cut. [`lines`] and [`clip`] do the same for plain text. These are the one rule for every panel, label and menu row.
 //!
-//! Every character drawn is one cell; [`glyph`] finds its bitmap in the `font8x8` tables, and [`shown`] the character that is drawn for it: itself, a close equivalent the tables have, such as the base letter of an accented one, or `?` for one with neither, so that the console shows what the headset draws. Every kind of line break, such as CRLF, a lone carriage return or a form feed, is one, as a line feed is. Other control characters, combining marks, variation selectors and zero-width spaces and joiners take no cell.
+//! Each grapheme drawn takes a cell, or two for a wide one, such as a CJK ideograph or a full-width form, whose second cell holds [`WIDE`], so that a row's cells are its columns. A grapheme is drawn as the one character its letter and marks compose to, leaving out marks that do not compose; [`shown`] is the character drawn for it, which is itself where a bundled font has it, its base letter where only that is, or `?`, so that the console shows what the headset draws. Every kind of line break, such as CRLF, a lone carriage return or a form feed, is one, as a line feed is. Other control characters, variation selectors and zero-width spaces and joiners take no cell. Lines break at spaces and, between CJK characters, wherever Unicode's line breaking rules (UAX #14) allow, so never before closing punctuation such as "。".
+//!
+//! [`glyph`] places a cell's glyph from `tomori-text`'s atlas, for the renderers, which draw it from the atlas's signed distance fields.
 
-use font8x8::{
-    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
-};
+use tomori_text::atlas;
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthChar;
 
 /// A colour with alpha, in linear 0 to 1.
 pub type Rgba = [f32; 4];
 
-/// The cell a glyph is drawn in, in font pixels: 8 × 8 glyphs, a column apart and with room between rows.
+/// The cell a glyph is drawn in, in font pixels: a glyph's cap height is about 8, with room between rows.
 pub const CELL_WIDTH: usize = 9;
 pub const CELL_HEIGHT: usize = 12;
 
@@ -22,7 +25,7 @@ pub const CELL_HEIGHT: usize = 12;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
     pub color: Rgba,
-    /// Drawn twice, a font pixel apart, since the font has one weight.
+    /// Drawn with its edges moved outwards, since the font has one weight.
     pub bold: bool,
     pub background: Option<Rgba>,
 }
@@ -71,6 +74,9 @@ impl Span {
 /// One character in a cell, with its style.
 pub type Cell = (char, Style);
 
+/// The second cell of a wide character, which draws nothing. It is a noncharacter, which text never draws, as [`shown`] makes it `?`.
+pub const WIDE: char = '\u{fdd0}';
+
 /// One row of a panel.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Row {
@@ -96,10 +102,10 @@ impl Row {
         Self::new(cut(&[Span::new(text, style)], width))
     }
 
-    /// The characters shown, as the console prints them.
+    /// The characters shown, as the console prints them, where a wide one takes two columns.
     #[cfg(any(not(target_os = "android"), test))]
     pub fn plain(&self) -> String {
-        self.cells.iter().map(|(ch, _)| *ch).collect()
+        plain(&self.cells)
     }
 
     pub fn with_bar(self, bar: Option<Rgba>) -> Self {
@@ -122,17 +128,14 @@ pub struct Wrap {
     pub continuation: Option<char>,
 }
 
+const WHITE: Style = Style::plain([1.0; 4]);
+
 /// `spans` laid out on rows of at most `width` cells. A line break of any kind starts a new row. Words longer than a row are broken across rows.
 pub fn wrap(spans: &[Span], width: usize, options: Wrap) -> Vec<Vec<Cell>> {
     let width = width.max(options.indent.max(options.hanging) + 2);
-    let cells: Vec<Cell> = visible(
-        spans
-            .iter()
-            .flat_map(|span| span.text.chars().map(move |ch| (ch, span.style))),
-    )
-    .collect();
+    let graphemes = graphemes(spans.iter().map(|span| (span.text.as_str(), span.style)));
     let mut rows = Vec::new();
-    for line in cells.split(|(ch, _)| *ch == '\n') {
+    for line in graphemes.split(|(ch, _)| *ch == '\n') {
         match options.continuation {
             Some(mark) => wrap_code(line, width, options, mark, &mut rows),
             None => wrap_words(line, width, options, &mut rows),
@@ -157,7 +160,7 @@ fn blank(count: usize, style: Style) -> impl Iterator<Item = Cell> {
 fn wrap_code(line: &[Cell], width: usize, options: Wrap, mark: char, rows: &mut Vec<Vec<Cell>>) {
     let line: Vec<Cell> = line
         .iter()
-        .map(|&(ch, style)| (if ch == '\t' { ' ' } else { shown(ch) }, style))
+        .map(|&(ch, style)| (if ch == '\t' { ' ' } else { ch }, style))
         .collect();
     let mut rest = line.as_slice();
     let mut first = true;
@@ -168,27 +171,36 @@ fn wrap_code(line: &[Cell], width: usize, options: Wrap, mark: char, rows: &mut 
             options.hanging
         };
         let room = width - indent;
-        let style = rest
-            .first()
-            .map_or(Style::plain([1.0; 4]), |(_, style)| *style);
+        let style = rest.first().map_or(WHITE, |(_, style)| *style);
         let mut row: Vec<Cell> = blank(indent, style).collect();
-        if rest.len() <= room {
-            row.extend_from_slice(rest);
+        if span(rest) <= room {
+            extend(&mut row, rest);
             rows.push(row);
             return;
         }
-        row.extend_from_slice(&rest[..room - 1]);
-        row.push((mark, rest[room - 1].1));
+        // As many as fit beside the mark. The rest is wider than the room, so some never fit.
+        let mut taken = 0;
+        let mut used = 0;
+        while used + columns(rest[taken].0) < room {
+            used += columns(rest[taken].0);
+            taken += 1;
+        }
+        if taken == 0 {
+            // A wide character with no room beside it for the mark fills the row alone.
+            extend(&mut row, &rest[..1]);
+            rest = &rest[1..];
+        } else {
+            extend(&mut row, &rest[..taken]);
+            row.push((mark, rest[taken].1));
+            rest = &rest[taken..];
+        }
         rows.push(row);
-        rest = &rest[room - 1..];
         first = false;
     }
 }
 
 fn wrap_words(line: &[Cell], width: usize, options: Wrap, rows: &mut Vec<Vec<Cell>>) {
-    let style = line
-        .first()
-        .map_or(Style::plain([1.0; 4]), |(_, style)| *style);
+    let style = line.first().map_or(WHITE, |(_, style)| *style);
     let mut row: Vec<Cell> = blank(options.indent, style).collect();
     let mut indent = options.indent;
     let mut words = line
@@ -200,42 +212,106 @@ fn wrap_words(line: &[Cell], width: usize, options: Wrap, rows: &mut Vec<Vec<Cel
         return;
     }
     for word in words {
-        let word: Vec<Cell> = word.iter().map(|&(ch, style)| (shown(ch), style)).collect();
-        let used = row.len() - indent;
-        if used > 0 && row.len() + 1 + word.len() > width {
-            rows.push(std::mem::take(&mut row));
-            indent = options.hanging;
-            row.extend(blank(indent, style));
-        }
-        if row.len() > indent {
-            // The space takes the background of the word before it, so a run of code stays one tinted block.
-            let before = row.last().map_or(style, |(_, style)| *style);
-            let after = word[0].1;
-            let space = if before.background == after.background {
-                before
-            } else {
-                Style {
-                    background: None,
-                    ..before
-                }
-            };
-            row.push((' ', space));
-        }
-        for cell in word {
-            if row.len() == width {
+        for (index, piece) in pieces(word).into_iter().enumerate() {
+            // A word's first piece follows a space; the rest of it follows on directly.
+            let spaced = index == 0;
+            let used = row.len() - indent;
+            if used > 0 && row.len() + usize::from(spaced) + span(piece) > width {
                 rows.push(std::mem::take(&mut row));
                 indent = options.hanging;
                 row.extend(blank(indent, style));
             }
-            row.push(cell);
+            if spaced && row.len() > indent {
+                // The space takes the background of the word before it, so a run of code stays one tinted block.
+                let before = row.last().map_or(style, |(_, style)| *style);
+                let after = piece[0].1;
+                let space = if before.background == after.background {
+                    before
+                } else {
+                    Style {
+                        background: None,
+                        ..before
+                    }
+                };
+                row.push((' ', space));
+            }
+            for &cell in piece {
+                if row.len() + columns(cell.0) > width {
+                    rows.push(std::mem::take(&mut row));
+                    indent = options.hanging;
+                    row.extend(blank(indent, style));
+                }
+                extend(&mut row, &[cell]);
+            }
         }
     }
     rows.push(row);
 }
 
+/// `word` in the pieces a line may break between: where UAX #14 allows a break beside a wide character, as between CJK characters, which have no spaces between words, but never before closing punctuation or after opening punctuation. Elsewhere, as after a hyphen, a word is broken only where it is longer than a row.
+fn pieces(word: &[Cell]) -> Vec<&[Cell]> {
+    if !word.iter().any(|(ch, _)| columns(*ch) > 1) {
+        return vec![word];
+    }
+    let text: String = word.iter().map(|(ch, _)| *ch).collect();
+    let offsets: Vec<usize> = text.char_indices().map(|(offset, _)| offset).collect();
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for (offset, _) in unicode_linebreak::linebreaks(&text) {
+        // Never at the start, and the end is not a break within the word.
+        let index = offsets.partition_point(|at| *at < offset);
+        if index == word.len() {
+            continue;
+        }
+        if columns(word[index - 1].0) > 1 || columns(word[index].0) > 1 {
+            pieces.push(&word[start..index]);
+            start = index;
+        }
+    }
+    pieces.push(&word[start..]);
+    pieces
+}
+
 /// Whether a line may break at `ch`: at a space, but not a non-breaking one, which joins the words either side of it and is drawn as a space.
 fn breaks(ch: char) -> bool {
     ch.is_whitespace() && !matches!(ch, '\u{a0}' | '\u{2007}' | '\u{202f}')
+}
+
+/// The cells `ch` takes as drawn: two for a wide character, and one otherwise.
+fn columns(ch: char) -> usize {
+    if shown(ch).width() == Some(2) { 2 } else { 1 }
+}
+
+/// The cells `cells` take as drawn.
+fn span(cells: &[Cell]) -> usize {
+    cells.iter().map(|(ch, _)| columns(*ch)).sum()
+}
+
+/// Append `cells` to `row` as drawn: each as [`shown`] draws it, a wide one followed by [`WIDE`].
+fn extend<T: Copy>(row: &mut Vec<(char, T)>, cells: &[(char, T)]) {
+    for &(ch, extra) in cells {
+        let ch = shown(ch);
+        row.push((ch, extra));
+        if columns(ch) > 1 {
+            row.push((WIDE, extra));
+        }
+    }
+}
+
+/// `cells` cut to at most `count`, without leaving half a wide character.
+fn truncate(cells: &mut Vec<Cell>, count: usize) {
+    // The first cell is never the second half of a wide character, so `count` is above 0 when it is.
+    let half = cells.get(count).is_some_and(|(ch, _)| *ch == WIDE);
+    cells.truncate(count - usize::from(half));
+}
+
+/// The characters of `cells`, as the console prints them, without [`WIDE`].
+pub fn plain(cells: &[Cell]) -> String {
+    cells
+        .iter()
+        .map(|(ch, _)| *ch)
+        .filter(|ch| *ch != WIDE)
+        .collect()
 }
 
 /// At most `most` of `rows`, the last ending with "…" where any are left out: after its text if it is shorter than `width`, or in place of its last cell.
@@ -245,10 +321,8 @@ pub fn fit(rows: &mut Vec<Vec<Cell>>, most: usize, width: usize) {
     }
     rows.truncate(most);
     if let Some(last) = rows.last_mut() {
-        let style = last
-            .last()
-            .map_or(Style::plain([1.0; 4]), |(_, style)| *style);
-        last.truncate(width.saturating_sub(1));
+        let style = last.last().map_or(WHITE, |(_, style)| *style);
+        truncate(last, width.saturating_sub(1));
         last.push(('…', style));
     }
 }
@@ -262,16 +336,9 @@ pub fn lines(text: &str, width: usize, rows: usize) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
-    let mut wrapped = wrap(
-        &[Span::new(text, Style::plain([1.0; 4]))],
-        width,
-        Wrap::default(),
-    );
+    let mut wrapped = wrap(&[Span::new(text, WHITE)], width, Wrap::default());
     fit(&mut wrapped, rows, width);
-    wrapped
-        .iter()
-        .map(|row| row.iter().map(|(ch, _)| *ch).collect())
-        .collect()
+    wrapped.iter().map(|row| plain(row)).collect()
 }
 
 /// Plain `text` on one row of at most `width` cells, with its runs of spaces and line breaks made one space, ending with "…" where cut, as [`cut`] does.
@@ -281,40 +348,51 @@ pub fn clip(text: &str, width: usize) -> String {
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    cut(&[Span::new(line, Style::plain([1.0; 4]))], width)
+    plain(&cut(&[Span::new(line, WHITE)], width))
+}
+
+/// The cells drawn for one line of `text`: line breaks, each as one space whatever its kind, and tabs as spaces, each other grapheme as [`shown`] draws it, a wide one followed by [`WIDE`], leaving out those that take no cell.
+pub fn drawn(text: &str) -> impl Iterator<Item = char> + use<> {
+    let mut cells = Vec::new();
+    extend(&mut cells, &spaced(graphemes([(text, ())])));
+    cells.into_iter().map(|(ch, ())| ch)
+}
+
+/// `graphemes` with line breaks and tabs as spaces.
+fn spaced<T: Copy>(graphemes: Vec<(char, T)>) -> Vec<(char, T)> {
+    graphemes
         .into_iter()
-        .map(|(ch, _)| ch)
+        .map(|(ch, extra)| (if matches!(ch, '\n' | '\t') { ' ' } else { ch }, extra))
         .collect()
 }
 
-/// The characters drawn for one line of `text`, a cell each: line breaks, each as one space whatever its kind, and tabs as spaces, each other character as [`shown`] draws it, leaving out those that take no cell.
-pub fn drawn(text: &str) -> impl Iterator<Item = char> + '_ {
-    visible(text.chars().map(|ch| (ch, ()))).map(|(ch, ())| {
-        if ch == '\n' || ch == '\t' {
-            ' '
-        } else {
-            shown(ch)
-        }
-    })
+/// The character each grapheme of `pieces` is drawn as, with its piece's `extra`, such as a style: a line feed for a line break of any kind, as Unicode's line breaking rules (UAX #14) count them, including CRLF split between pieces; otherwise its letter with the marks that compose with it, leaving out those that take no cell.
+fn graphemes<'a, T: Copy>(pieces: impl IntoIterator<Item = (&'a str, T)>) -> Vec<(char, T)> {
+    let mut text = String::new();
+    let mut starts = Vec::new();
+    for (piece, extra) in pieces {
+        starts.push((text.len(), extra));
+        text.push_str(piece);
+    }
+    text.grapheme_indices(true)
+        .filter_map(|(offset, grapheme)| {
+            // The piece the grapheme starts in: the last to start at or before it, as an empty piece starts where the next does.
+            let extra = starts[starts.partition_point(|(start, _)| *start <= offset) - 1].1;
+            composed(grapheme).map(|ch| (ch, extra))
+        })
+        .collect()
 }
 
-/// `chars` without those that take no cell, with every line break as `\n`: a carriage return, a line feed, or both as CRLF, which is one break, a vertical tab, form feed, next line, or Unicode's line and paragraph separators, as Unicode's line breaking rules (UAX #14) count them.
-fn visible<T>(chars: impl Iterator<Item = (char, T)>) -> impl Iterator<Item = (char, T)> {
-    let mut after_return = false;
-    chars.filter_map(move |(ch, extra)| {
-        if invisible(ch) {
-            return None;
-        }
-        let crlf = after_return && ch == '\n';
-        after_return = ch == '\r';
-        if crlf {
-            return None;
-        }
-        Some((if ends_line(ch) { '\n' } else { ch }, extra))
-    })
+/// The one character `grapheme` is drawn as: a line feed for a line break; the composition of its letter with its marks, without those that do not compose; or `None` for one that takes no cell, such as a control character, a zero-width joiner or a mark with no letter.
+fn composed(grapheme: &str) -> Option<char> {
+    if grapheme.chars().any(ends_line) {
+        return Some('\n');
+    }
+    let first = grapheme.chars().filter(|ch| !invisible(*ch)).nfc().next()?;
+    (!is_combining_mark(first)).then_some(first)
 }
 
-/// Whether `ch` ends a line, as [`visible`] counts line breaks.
+/// Whether `ch` ends a line, as [`graphemes`] counts line breaks.
 fn ends_line(ch: char) -> bool {
     matches!(
         ch,
@@ -322,20 +400,15 @@ fn ends_line(ch: char) -> bool {
     )
 }
 
-/// Whether `ch` takes no cell: a control character that is not a space or line break, such as an escape; a combining mark or variation selector, which until text is shaped into graphemes is left out rather than drawn as `?` beside its character; or a zero-width space, joiner or soft hyphen.
+/// Whether `ch` takes no cell: a control character that is not a space or line break, such as an escape; a variation selector; or a zero-width space, joiner or soft hyphen.
 fn invisible(ch: char) -> bool {
     (ch.is_control() && !ch.is_whitespace())
         || matches!(
             ch,
             '\u{ad}'
-                | '\u{300}'..='\u{36f}'
-                | '\u{1ab0}'..='\u{1aff}'
-                | '\u{1dc0}'..='\u{1dff}'
                 | '\u{200b}'..='\u{200f}'
                 | '\u{2060}'..='\u{2064}'
-                | '\u{20d0}'..='\u{20ff}'
                 | '\u{fe00}'..='\u{fe0f}'
-                | '\u{fe20}'..='\u{fe2f}'
                 | '\u{feff}'
                 | '\u{e0100}'..='\u{e01ef}'
         )
@@ -343,15 +416,16 @@ fn invisible(ch: char) -> bool {
 
 /// `spans` on one row of at most `width` cells, ending with "…" where cut.
 pub fn cut(spans: &[Span], width: usize) -> Vec<Cell> {
-    let mut cells: Vec<Cell> = spans
-        .iter()
-        .flat_map(|span| drawn(&span.text).map(move |ch| (ch, span.style)))
-        .collect();
+    let mut cells = Vec::new();
+    extend(
+        &mut cells,
+        &spaced(graphemes(
+            spans.iter().map(|span| (span.text.as_str(), span.style)),
+        )),
+    );
     if cells.len() > width {
-        cells.truncate(width.saturating_sub(1));
-        let style = cells
-            .last()
-            .map_or(Style::plain([1.0; 4]), |(_, style)| *style);
+        truncate(&mut cells, width.saturating_sub(1));
+        let style = cells.last().map_or(WHITE, |(_, style)| *style);
         if width > 0 {
             cells.push(('…', style));
         }
@@ -359,122 +433,133 @@ pub fn cut(spans: &[Span], width: usize) -> Vec<Cell> {
     cells
 }
 
-/// Glyphs the `font8x8` tables lack, as 8 rows of 8 pixels, the lowest bit leftmost.
-const EXTRA: [(char, [u8; 8]); 14] = [
-    ('•', [0x00, 0x00, 0x18, 0x3C, 0x3C, 0x18, 0x00, 0x00]),
-    ('✓', [0x00, 0xC0, 0x60, 0x31, 0x1B, 0x0E, 0x04, 0x00]),
-    ('●', [0x00, 0x3C, 0x7E, 0x7E, 0x7E, 0x7E, 0x3C, 0x00]),
-    ('○', [0x00, 0x3C, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00]),
-    ('◐', [0x00, 0x3C, 0x4E, 0x4E, 0x4E, 0x4E, 0x3C, 0x00]),
-    ('↵', [0x00, 0x40, 0x40, 0x40, 0x42, 0x7F, 0x02, 0x00]),
-    ('→', [0x00, 0x10, 0x20, 0x7F, 0x20, 0x10, 0x00, 0x00]),
-    ('←', [0x00, 0x04, 0x02, 0x7F, 0x02, 0x04, 0x00, 0x00]),
-    ('↑', [0x08, 0x1C, 0x2A, 0x08, 0x08, 0x08, 0x08, 0x00]),
-    ('↓', [0x08, 0x08, 0x08, 0x08, 0x2A, 0x1C, 0x08, 0x00]),
-    ('▾', [0x00, 0x00, 0x7F, 0x3E, 0x1C, 0x08, 0x00, 0x00]),
-    ('…', [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x00]),
-    ('✕', [0x00, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00]),
-    ('▸', [0x00, 0x04, 0x0C, 0x1C, 0x0C, 0x04, 0x00, 0x00]),
-];
-
-/// The character drawn for `ch`: itself where a table has it; a close equivalent for typographic quotes, dashes, ellipses and spaces, and the base letter of an accented Latin letter the tables lack; and `?` otherwise, such as for Cyrillic, Japanese (#103) or emoji, which need a glyph atlas.
+/// The character drawn for `ch`: itself where a bundled font has it; a space for a space of any width; its base letter where a font has only that, such as for an accented letter outside the fonts; and `?` otherwise, such as for emoji, Hangul or kanji outside JIS X 0208.
 pub fn shown(ch: char) -> char {
     match ch {
-        '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{2032}' => '\'',
-        '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' | '\u{2033}' => '"',
-        '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
-        '\u{2039}' => '<',
-        '\u{203a}' => '>',
-        '\u{2044}' => '/',
-        '\u{22ef}' => '…',
         '\u{00a0}'
         | '\u{1680}'
         | '\u{2000}'..='\u{200a}'
         | '\u{202f}'
         | '\u{205f}'
         | '\u{3000}' => ' ',
-        ch if lookup(ch).is_some() => ch,
-        ch => base_letter(ch).unwrap_or('?'),
+        ch if tomori_text::fonts::covers(ch) => ch,
+        ch => ch
+            .nfd()
+            .next()
+            .filter(|base| tomori_text::fonts::covers(*base))
+            .unwrap_or('?'),
     }
 }
 
-/// The base letters of Latin Extended-A, U+0100 to U+017F, in order, `?` for a ligature.
-const EXTENDED_A: &str = "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGgGgGgHhHhIiIiIiIiIi??JjKkkLlLlLlLlLlNnNnNnnNnOoOoOo??RrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
-/// The base letters of Pinyin's tone marks, U+01CD to U+01DC.
-const PINYIN: &str = "AaIiOoUuUuUuUuUu";
-/// The base letters of Vietnamese's, U+1EA0 to U+1EF9.
-const VIETNAMESE: &str =
-    "AaAaAaAaAaAaAaAaAaAaAaAaEeEeEeEeEeEeEeEeIiIiOoOoOoOoOoOoOoOoOoOoOoOoUuUuUuUuUuUuUuYyYyYyYy";
-
-/// The ASCII letter `ch` is accented from, for the Latin letters the tables lack: those of Latin Extended-A, such as Polish, Czech and Turkish use, Romanian's commas below, and Pinyin's and Vietnamese's tone marks.
-fn base_letter(ch: char) -> Option<char> {
-    let from = |table: &str, first: u32| {
-        table
-            .chars()
-            .nth((ch as u32 - first) as usize)
-            .filter(|base| *base != '?')
-    };
-    match ch {
-        '\u{100}'..='\u{17f}' => from(EXTENDED_A, 0x100),
-        '\u{1cd}'..='\u{1dc}' => from(PINYIN, 0x1cd),
-        '\u{1ea0}'..='\u{1ef9}' => from(VIETNAMESE, 0x1ea0),
-        '\u{180}' => Some('b'),
-        '\u{1a0}' => Some('O'),
-        '\u{1a1}' => Some('o'),
-        '\u{1af}' => Some('U'),
-        '\u{1b0}' => Some('u'),
-        '\u{218}' => Some('S'),
-        '\u{219}' => Some('s'),
-        '\u{21a}' => Some('T'),
-        '\u{21b}' => Some('t'),
-        _ => None,
-    }
+/// A glyph's quad: where, in font pixels with y down, and its tile in the atlas, with how much bolder to draw it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quad {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// In atlas pixels: left, top, width, height.
+    pub tile: [f32; 4],
+    /// Added to the edge the shader draws, in the field's units.
+    pub weight: f32,
 }
 
-fn lookup(ch: char) -> Option<[u8; 8]> {
-    if ch.is_ascii() {
-        return BASIC_FONTS.get(ch);
+/// Font pixels per em of a cell's glyph, which gives capitals about 8 of a row's 12, as the bitmap font had.
+const EM: f32 = 11.0;
+/// Of a wide character's, which fills more of its row.
+const WIDE_EM: f32 = 12.0;
+/// How much bolder bold is on each side, in ems.
+const BOLD: f32 = 0.04;
+/// How far above and below the baseline Noto Sans Mono's box drawing and blocks reach, in ems, which a row is filled between.
+const BOX_TOP: f32 = 0.979;
+const BOX_BOTTOM: f32 = -0.246;
+
+/// The glyph drawn for `ch` in `cells` cells from `x`, on a row `row` font pixels tall whose top is at `top`: centred in its cells on a baseline three quarters of the way down, a wide one a little lower to centre it, and smaller where it is wider than its cells; box drawing and blocks stretched to fill their cells, so that lines join. `None` for one with no glyph, such as a space.
+pub fn glyph(ch: char, cells: usize, x: f32, top: f32, row: f32, bold: bool) -> Option<Quad> {
+    let glyph = atlas::glyph(ch)?;
+    let room = (cells * CELL_WIDTH) as f32;
+    let [left, up, width, height] = glyph.bounds;
+    let weight = if bold { glyph.weight(BOLD) } else { 0.0 };
+    if ('\u{2500}'..='\u{259f}').contains(&ch) {
+        // From the glyph's advance and the line box drawing reaches onto the cells.
+        let across = room / glyph.advance;
+        let down = row / (BOX_TOP - BOX_BOTTOM);
+        return Some(Quad {
+            x: x + left * across,
+            y: top + (BOX_TOP - up) * down,
+            width: width * across,
+            height: height * down,
+            tile: glyph.tile,
+            weight,
+        });
     }
-    LATIN_FONTS
-        .get(ch)
-        .or_else(|| BOX_FONTS.get(ch))
-        .or_else(|| BLOCK_FONTS.get(ch))
-        .or_else(|| GREEK_FONTS.get(ch))
-        .or_else(|| MISC_FONTS.get(ch))
-        .or_else(|| {
-            EXTRA
-                .iter()
-                .find(|(extra, _)| *extra == ch)
-                .map(|(_, bits)| *bits)
+    let wide = cells > 1;
+    let scale = (if wide { WIDE_EM } else { EM }).min(room / glyph.advance);
+    let baseline = top + row * 0.75 + if wide { 0.1 * scale } else { 0.0 };
+    let pen = x + (room - glyph.advance * scale) / 2.0;
+    Some(Quad {
+        x: pen + left * scale,
+        y: baseline - up * scale,
+        width: width * scale,
+        height: height * scale,
+        tile: glyph.tile,
+        weight,
+    })
+}
+
+/// The glyphs of a row of `cells` whose first cell is at `x`, on a row `row` font pixels tall whose top is at `top`, each with its cell's `extra`, such as its style, drawn bold where `bold` says so.
+pub fn quads<T: Copy>(
+    cells: &[(char, T)],
+    x: f32,
+    top: f32,
+    row: f32,
+    bold: impl Fn(T) -> bool,
+) -> impl Iterator<Item = (Quad, T)> {
+    placed(cells).filter_map(move |(column, ch, cells, extra)| {
+        let left = x + (column * CELL_WIDTH) as f32;
+        glyph(ch, cells, left, top, row, bold(extra)).map(|quad| (quad, extra))
+    })
+}
+
+/// The cells of a row that draw something, each with its column and how many cells it takes: every character but spaces and the second cells of wide ones.
+pub fn placed<T: Copy>(cells: &[(char, T)]) -> impl Iterator<Item = (usize, char, usize, T)> + '_ {
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, (ch, _))| *ch != ' ' && *ch != WIDE)
+        .map(|(column, &(ch, extra))| {
+            let wide = cells.get(column + 1).is_some_and(|(next, _)| *next == WIDE);
+            (column, ch, 1 + usize::from(wide), extra)
         })
-}
-
-/// The bitmap drawn for `ch`, as [`shown`] chooses it.
-pub fn glyph(ch: char) -> [u8; 8] {
-    lookup(shown(ch)).unwrap_or([0; 8])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn text(rows: &[Vec<Cell>]) -> Vec<String> {
+        rows.iter().map(|row| plain(row)).collect()
+    }
+
+    fn drawn(text: &str) -> String {
+        super::drawn(text).filter(|ch| *ch != WIDE).collect()
+    }
+
+    const CODE: Wrap = Wrap {
+        indent: 0,
+        hanging: 0,
+        continuation: Some('↵'),
+    };
+
     #[test]
-    fn typographic_characters_tabs_and_line_breaks_are_drawn_plainly() {
-        assert_eq!(shown('\u{201c}'), '"');
-        assert_eq!(shown('\u{2014}'), '-');
+    fn typographic_characters_are_drawn_as_themselves_and_tabs_and_line_breaks_as_spaces() {
+        assert_eq!(shown('\u{201c}'), '\u{201c}');
+        assert_eq!(shown('\u{2014}'), '\u{2014}');
         assert_eq!(shown('\u{a0}'), ' ');
-        let style = Style::plain([1.0; 4]);
-        let cells = cut(&[Span::new("a\tb\nc", style)], 10);
-        assert_eq!(cells.iter().map(|(ch, _)| *ch).collect::<String>(), "a b c");
-        assert!(cut(&[Span::new("abc", style)], 0).is_empty());
-        let code = wrap(
-            &[Span::new("\tx", style)],
-            10,
-            Wrap {
-                continuation: Some('↵'),
-                ..Default::default()
-            },
-        );
+        let cells = cut(&[Span::new("a\tb\nc", WHITE)], 10);
+        assert_eq!(plain(&cells), "a b c");
+        assert!(cut(&[Span::new("abc", WHITE)], 0).is_empty());
+        let code = wrap(&[Span::new("\tx", WHITE)], 10, CODE);
         assert_eq!(code[0][0].0, ' ');
     }
 
@@ -482,11 +567,10 @@ mod tests {
     fn a_space_between_code_and_text_takes_no_background() {
         let code = Style {
             background: Some([0.1; 4]),
-            ..Style::plain([1.0; 4])
+            ..WHITE
         };
-        let plain = Style::plain([1.0; 4]);
         let rows = wrap(
-            &[Span::new("code", code), Span::new(" text", plain)],
+            &[Span::new("code", code), Span::new(" text", WHITE)],
             20,
             Wrap::default(),
         );
@@ -500,14 +584,6 @@ mod tests {
                 }
             )
         );
-    }
-
-    const WHITE: Style = Style::plain([1.0; 4]);
-
-    fn text(rows: &[Vec<Cell>]) -> Vec<String> {
-        rows.iter()
-            .map(|row| row.iter().map(|(ch, _)| *ch).collect())
-            .collect()
     }
 
     #[test]
@@ -525,6 +601,8 @@ mod tests {
         // A word longer than a row is broken across rows, and a blank line kept.
         let rows = wrap(&[Span::new("abcdefghij\n\nok", WHITE)], 4, Wrap::default());
         assert_eq!(text(&rows), ["abcd", "efgh", "ij", "", "ok"]);
+        // A hyphen is not a place to break, so words keep together as before.
+        assert_eq!(lines("a well-known", 10, 9), ["a", "well-known"]);
     }
 
     #[test]
@@ -544,30 +622,31 @@ mod tests {
     #[test]
     fn code_keeps_its_spaces_and_marks_where_it_is_broken() {
         let code = WHITE.on([0.2, 0.2, 0.2, 1.0]);
-        let rows = wrap(
-            &[Span::new("let  x = 1234567890;", code)],
-            10,
-            Wrap {
-                continuation: Some('↵'),
-                ..Default::default()
-            },
-        );
+        let rows = wrap(&[Span::new("let  x = 1234567890;", code)], 10, CODE);
         assert_eq!(text(&rows), ["let  x = ↵", "123456789↵", "0;"]);
         assert!(rows.iter().all(|row| row.len() <= 10));
+        // A wide character is never split by the mark: it moves to the next row, and one with no room beside the mark fills a row alone.
+        let rows = wrap(&[Span::new("let 名前 = 1;", code)], 6, CODE);
+        assert_eq!(text(&rows), ["let ↵", "名前 ↵", "= 1;"]);
+        assert!(rows.iter().all(|row| row.len() <= 6));
+        let rows = wrap(&[Span::new("日本", code)], 2, CODE);
+        assert_eq!(text(&rows), ["日", "本"]);
     }
 
     #[test]
-    fn glyphs_come_from_the_wider_tables_and_fall_back_to_a_question_mark() {
+    fn every_character_tomori_draws_has_a_glyph_and_the_rest_are_a_question_mark() {
         for ch in [
-            'a', 'é', '│', '█', 'λ', '•', '✓', '↵', '→', '…', '▸', '○', '◐', '●', '✕', '▾',
+            'a', 'é', 'Ł', 'Œ', 'ễ', '│', '█', 'λ', 'Ж', '•', '✓', '↵', '→', '…', '⋯', '▸', '○',
+            '◐', '●', '✕', '▾', '“', '—', 'こ', '語', '。',
         ] {
             assert_eq!(shown(ch), ch, "{ch}");
-            assert_ne!(glyph(ch), [0; 8], "{ch}");
+            assert!(atlas::glyph(ch).is_some(), "{ch}");
         }
-        assert_eq!(shown('🎤'), '?');
-        assert_eq!(shown('’'), '\'');
-        assert_eq!(shown('—'), '-');
-        assert_eq!(glyph('🎤'), glyph('?'));
+        // An accented letter no font has is drawn as its base letter.
+        assert_eq!(shown('ἀ'), 'α');
+        for ch in ['🎤', '한', '𠮷', WIDE] {
+            assert_eq!(shown(ch), '?', "{ch}");
+        }
     }
 
     #[test]
@@ -590,16 +669,26 @@ mod tests {
         assert_eq!(lines("one two three four", 9, 1), ["one two…"]);
         assert_eq!(lines("abcdefghijkl", 4, 2), ["abcd", "efg…"]);
         assert!(lines("one two", 9, 0).is_empty());
-        for text in ["", "x", &"word ".repeat(50), &"x".repeat(100), "a\n\n\n\nb"] {
+        for text in [
+            "",
+            "x",
+            &"word ".repeat(50),
+            &"x".repeat(100),
+            "a\n\n\n\nb",
+            &"日本語の文章。".repeat(20),
+        ] {
             for width in [2, 3, 7, 40] {
+                let rows = wrap(&[Span::new(text, WHITE)], width, Wrap::default());
+                assert!(rows.iter().all(|row| row.len() <= width), "{rows:?}");
                 let rows = lines(text, width, 3);
                 assert!(rows.len() <= 3);
-                assert!(
-                    rows.iter().all(|row| row.chars().count() <= width),
-                    "{rows:?}"
-                );
+                assert!(rows.iter().all(|row| drawn_width(row) <= width), "{rows:?}");
             }
         }
+    }
+
+    fn drawn_width(text: &str) -> usize {
+        super::drawn(text).count()
     }
 
     #[test]
@@ -612,6 +701,7 @@ mod tests {
         assert_eq!(clip("anything", 0), "");
         // A row is counted in cells, so a cut never splits a character.
         assert_eq!(clip(&"é".repeat(10), 4), "ééé…");
+        assert_eq!(clip("e\u{301}".repeat(10).as_str(), 4), "ééé…");
     }
 
     #[test]
@@ -629,54 +719,82 @@ mod tests {
         let mut rows = vec![Vec::new(), Vec::new()];
         fit(&mut rows, 1, 4);
         assert_eq!(rows, [vec![('…', WHITE)]]);
+        // Half a wide character is never left before the mark.
+        let mut rows = wrap(&[Span::new("日本語の文章", red)], 6, Wrap::default());
+        assert_eq!(text(&rows), ["日本語", "の文章"]);
+        fit(&mut rows, 1, 6);
+        assert_eq!(text(&rows), ["日本…"]);
+        assert_eq!(rows[0].len(), 5);
     }
 
     #[test]
-    fn accented_letters_quotes_dashes_and_ellipses_draw_as_their_nearest() {
-        // Latin-1 letters are in the tables, and drawn as themselves.
-        for ch in ['é', 'ñ', 'ü', 'ø', 'ß', 'Å', '«', '»'] {
-            assert_eq!(shown(ch), ch, "{ch}");
+    fn accented_letters_and_typographic_punctuation_are_drawn_as_they_are() {
+        // Every letter here is in the bundled fonts, so none needs a stand-in.
+        for text in [
+            "Łódź Dvořák Ştefan Ţară Erdoğan Đorđe",
+            "Nguyễn Thị Hương",
+            "Lǚ ƀ Ơ ơ Ư ư Ș ș Ț ț ſ",
+            "Œuvre ĳ",
+            "„quoted‟ ‚single‛ 5′ 6″ ‹a› ½⁄2",
+            "a‐b‑c‒d–e—f―g−h",
+            "wait… ⋯",
+        ] {
+            assert_eq!(drawn(text), text);
         }
-        // Others are drawn as their base letter.
-        let drawn = |text: &str| drawn(text).collect::<String>();
-        assert_eq!(
-            drawn("Łódź Dvořák Ştefan Ţară Erdoğan Đorđe"),
-            "Lódz Dvorák Stefan Tara Erdogan Dorde"
-        );
-        assert_eq!(drawn("Nguyễn Thị Hương"), "Nguyen Thi Huong");
-        assert_eq!(drawn("Lǚ ƀ Ơ ơ Ư ư Ș ș Ț ț ſ"), "Lu b O o U u S s T t s");
-        // A ligature has no base letter.
-        assert_eq!(drawn("Œuvre ĳ"), "?uvre ?");
-        // Typographic punctuation is drawn as its ASCII equivalent, and an ellipsis as itself.
-        assert_eq!(
-            drawn("„quoted‟ ‚single‛ 5′ 6″ ‹a› ½⁄2"),
-            "\"quoted\" 'single' 5' 6\" <a> ½/2"
-        );
-        assert_eq!(drawn("a‐b‑c‒d–e—f―g−h"), "a-b-c-d-e-f-g-h");
-        assert_eq!(drawn("wait… ⋯"), "wait… …");
+        // Spaces of other widths are drawn as a space.
         assert_eq!(drawn("a\u{2009}b\u{3000}c"), "a b c");
-        // What needs a glyph atlas, such as Cyrillic, Japanese (#103) and emoji, is still `?`.
-        assert_eq!(drawn("Жこ🎤"), "???");
+        // Cyrillic and Japanese are drawn; emoji, which no font has, are still `?`.
+        assert_eq!(drawn("Жこ🎤"), "Жこ?");
     }
 
     #[test]
-    fn characters_that_take_no_cell_are_left_out() {
-        let drawn = |text: &str| drawn(text).collect::<String>();
-        // A carriage return, an escape, a combining mark, a variation selector, zero-width joiners and spaces, a soft hyphen and a byte order mark.
+    fn a_grapheme_is_one_character_and_characters_that_take_no_cell_are_left_out() {
+        // A carriage return, an escape, a variation selector, zero-width joiners and spaces, a soft hyphen and a byte order mark.
         assert_eq!(drawn("a\r\nb"), "a b");
         assert_eq!(drawn("\u{1b}[31mred"), "[31mred");
-        assert_eq!(drawn("e\u{301}"), "e");
         assert_eq!(drawn("✓\u{fe0f}"), "✓");
-        assert_eq!(drawn("葛\u{e0100}"), "?");
+        assert_eq!(drawn("葛\u{e0100}"), "葛");
         assert_eq!(drawn("a\u{200b}b\u{200d}c\u{ad}d\u{feff}"), "abcd");
+        // A letter and its marks compose to one character, in one cell, and a mark that does not compose is left out.
+        assert_eq!(drawn("e\u{301}"), "é");
+        assert_eq!(drawn("e\u{323}\u{302}"), "ệ");
+        assert_eq!(drawn("x\u{301}"), "x");
+        assert_eq!(drawn("\u{301}x"), "x");
+        // An emoji with a skin tone or joined into a family is one grapheme, drawn `?`.
+        assert_eq!(drawn("👍🏽 👨\u{200d}👩\u{200d}👧"), "? ?");
         assert_eq!(cut(&[Span::new("e\u{301}\u{301}x", WHITE)], 2).len(), 2);
         let rows = wrap(&[Span::new("ab\u{301}c\r\nd", WHITE)], 3, Wrap::default());
         assert_eq!(text(&rows), ["abc", "d"]);
     }
 
     #[test]
+    fn cjk_takes_two_cells_and_breaks_between_characters_but_not_before_closing_punctuation() {
+        // Each character takes two cells, the second holding the mark that keeps cells as columns.
+        let cells: Vec<char> = super::drawn("a日b").collect();
+        assert_eq!(cells, ['a', '日', WIDE, 'b']);
+        let row = Row::text("日本", WHITE, 10);
+        assert_eq!(row.cells.len(), 4);
+        assert_eq!(row.plain(), "日本");
+        // Without spaces, lines break between characters; never before "。", which takes the character before it to the next row.
+        assert_eq!(
+            lines("日本語のテキストです。", 10, 9),
+            ["日本語のテ", "キストで", "す。"]
+        );
+        // Nor after opening punctuation.
+        assert_eq!(lines("あい「うえ」", 6, 9), ["あい", "「う", "え」"]);
+        // Latin words still break only at spaces, and a word beside a CJK character may break from it.
+        assert_eq!(lines("Tomoriは日本語", 7, 9), ["Tomori", "は日本", "語"]);
+        assert_eq!(lines("hello world 日本", 7, 9), ["hello", "world", "日本"]);
+        // Within a word with CJK in it, a break UAX #14 allows away from it, as after a hyphen, is still not taken.
+        assert_eq!(lines("x-y日本", 5, 9), ["x-y日", "本"]);
+        // A cut never splits a wide character.
+        assert_eq!(plain(&cut(&[Span::new("日本語", WHITE)], 5)), "日本…");
+        assert_eq!(plain(&cut(&[Span::new("日本語", WHITE)], 4)), "日…");
+        assert_eq!(cut(&[Span::new("日本語", WHITE)], 4).len(), 3);
+    }
+
+    #[test]
     fn every_kind_of_line_break_is_one_as_a_line_feed_is() {
-        let drawn = |text: &str| drawn(text).collect::<String>();
         // CRLF, a lone carriage return, a vertical tab, a form feed, next line, and Unicode's line and paragraph separators.
         let breaks = [
             "\n", "\r\n", "\r", "\u{b}", "\u{c}", "\u{85}", "\u{2028}", "\u{2029}",
@@ -697,19 +815,19 @@ mod tests {
         assert_eq!(lines("a\r\rb", 40, 9), ["a", "", "b"]);
         assert_eq!(lines("a\r\n\r\nb", 40, 9), ["a", "", "b"]);
         assert_eq!(lines("a\n\rb", 40, 9), ["a", "", "b"]);
-        // CRLF split between spans is one break.
+        // CRLF split between spans is one break, and an empty span between them changes nothing.
         let rows = wrap(
-            &[Span::new("a\r", WHITE), Span::new("\nb", WHITE)],
+            &[
+                Span::new("a\r", WHITE),
+                Span::new("", WHITE),
+                Span::new("\nb", WHITE),
+            ],
             40,
             Wrap::default(),
         );
         assert_eq!(text(&rows), ["a", "b"]);
         // In code, too, where a carriage return no longer overwrites the line.
-        let code = Wrap {
-            continuation: Some('↵'),
-            ..Default::default()
-        };
-        let rows = wrap(&[Span::new("let a;\rlet b;\u{c}", WHITE)], 40, code);
+        let rows = wrap(&[Span::new("let a;\rlet b;\u{c}", WHITE)], 40, CODE);
         assert_eq!(text(&rows), ["let a;", "let b;", ""]);
         // Other spaces join nothing either, and are drawn as a space.
         assert_eq!(drawn("a\u{1680}b"), "a b");
@@ -730,5 +848,63 @@ mod tests {
             "Fix the p…"
         );
         assert_eq!(Row::text("short", WHITE, 10).plain(), "short");
+    }
+
+    #[test]
+    fn glyphs_sit_in_their_cells_on_one_baseline() {
+        let inside = |quad: Quad, x: f32, width: f32| {
+            // The tile reaches past the outline by the field's spread, under a font pixel at this size.
+            let margin = atlas::SPREAD / 32.0 * EM;
+            quad.x >= x - margin && quad.x + quad.width <= x + width + margin
+        };
+        let a = glyph('a', 1, 9.0, 0.0, 12.0, false).unwrap();
+        assert!(inside(a, 9.0, 9.0), "{a:?}");
+        assert_eq!(a.weight, 0.0);
+        // Its baseline is three quarters down the row: "a" is under the x-height above it, "p" reaches below it.
+        let p = glyph('p', 1, 0.0, 0.0, 12.0, false).unwrap();
+        assert!(p.y + p.height > a.y + a.height);
+        let capital = glyph('H', 1, 0.0, 0.0, 12.0, false).unwrap();
+        assert!(capital.y < a.y);
+        // Bold moves the edge out.
+        assert!(glyph('a', 1, 0.0, 0.0, 12.0, true).unwrap().weight > 0.0);
+        // A wide character is centred across its two cells, and fills more of them.
+        let wide = glyph('語', 2, 0.0, 0.0, 12.0, false).unwrap();
+        assert!(inside(wide, 0.0, 18.0), "{wide:?}");
+        assert!(((wide.x + wide.width / 2.0) - 9.0).abs() < 1.0, "{wide:?}");
+        assert!(wide.width > a.width);
+        // A symbol wider than its cell is made smaller to fit it.
+        let check = glyph('✓', 1, 0.0, 0.0, 12.0, false).unwrap();
+        assert!(inside(check, 0.0, 9.0), "{check:?}");
+        // Box drawing is stretched across its cell and down its row, so that lines join.
+        let line = glyph('─', 1, 0.0, 0.0, 12.0, false).unwrap();
+        assert!(line.x < 0.0 && line.x + line.width > 9.0, "{line:?}");
+        let bar = glyph('│', 1, 0.0, 0.0, 11.0, false).unwrap();
+        assert!(bar.y < 0.0 && bar.y + bar.height > 11.0, "{bar:?}");
+        // The block's outline, inside the field's margin, is the row exactly.
+        let block = glyph('█', 1, 0.0, 0.0, 11.0, false).unwrap();
+        let margin = atlas::SPREAD / 32.0 * 11.0 / (BOX_TOP - BOX_BOTTOM);
+        assert!((block.y + margin).abs() < 0.5, "{block:?}");
+        assert!(
+            (block.y + block.height - margin - 11.0).abs() < 0.5,
+            "{block:?}"
+        );
+        // A space has no glyph.
+        assert_eq!(glyph(' ', 1, 0.0, 0.0, 12.0, false), None);
+    }
+
+    #[test]
+    fn placed_cells_skip_spaces_and_the_second_halves_of_wide_characters() {
+        let cells: Vec<(char, ())> = super::drawn("a 日b").map(|ch| (ch, ())).collect();
+        let placed: Vec<_> = placed(&cells).collect();
+        assert_eq!(placed, [(0, 'a', 1, ()), (2, '日', 2, ()), (4, 'b', 1, ())]);
+        // Their quads are where `glyph` puts them, from the row's first cell.
+        let quads: Vec<_> = quads(&cells, 1.0, 2.0, 12.0, |()| false)
+            .map(|(quad, ())| quad)
+            .collect();
+        assert_eq!(quads.len(), 3);
+        assert_eq!(
+            quads[1],
+            glyph('日', 2, 1.0 + 18.0, 2.0, 12.0, false).unwrap()
+        );
     }
 }

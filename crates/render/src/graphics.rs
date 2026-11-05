@@ -134,6 +134,7 @@ pub struct Renderer {
     workspace: crate::workspace_graphics::WorkspaceGraphics,
     arrival: crate::arrival_graphics::ArrivalLabels,
     panels: crate::ui_panel::Pipeline,
+    glyphs: crate::glyphs::Glyphs,
 }
 
 impl Renderer {
@@ -282,15 +283,22 @@ impl Renderer {
         let depth = Self::depth_views(device, width, height, samples);
         let multisampled = Self::multisampled_views(device, format, width, height, samples);
         let controllers = Controllers::new(device, queue, format, &camera_layout, samples);
+        let glyphs = crate::glyphs::Glyphs::new(device);
         let workspace = crate::workspace_graphics::WorkspaceGraphics::new(
             device,
             format,
             &camera_layout,
+            &glyphs,
             samples,
         );
-        let arrival =
-            crate::arrival_graphics::ArrivalLabels::new(device, format, &camera_layout, samples);
-        let panels = crate::ui_panel::Pipeline::new(device, format, samples);
+        let arrival = crate::arrival_graphics::ArrivalLabels::new(
+            device,
+            format,
+            &camera_layout,
+            &glyphs,
+            samples,
+        );
+        let panels = crate::ui_panel::Pipeline::new(device, format, &glyphs, samples);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
@@ -320,6 +328,7 @@ impl Renderer {
             workspace,
             arrival,
             panels,
+            glyphs,
         }
     }
 
@@ -580,6 +589,9 @@ impl Renderer {
     ) -> wgpu::SubmissionIndex {
         assert_eq!(targets.len(), matrices.len());
         assert!((1..=2).contains(&targets.len()));
+        // The glyphs that this frame's meshes were built with, which may be new.
+        self.glyphs.sync(device, queue);
+        let glyphs = self.glyphs.binding();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("swarm frame"),
         });
@@ -649,12 +661,14 @@ impl Renderer {
             self.workspace.draw(
                 &mut pass,
                 &self.camera_bindings[eye],
+                &glyphs,
                 matrices[eye] * scene_to_space,
             );
-            self.arrival.draw(&mut pass, &self.camera_bindings[eye]);
+            self.arrival
+                .draw(&mut pass, &self.camera_bindings[eye], &glyphs);
             // Panels are translucent, so they are drawn last, against the depth of everything else.
             if !panels.is_empty() {
-                self.panels.set(&mut pass);
+                self.panels.set(&mut pass, &glyphs);
                 for (panel, _) in panels {
                     panel.draw(&mut pass, eye);
                 }

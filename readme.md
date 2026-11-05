@@ -320,6 +320,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-environment-sky`](crates/environment-sky/readme.md): the Sky environment's renderer, which Tomori's clients draw.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
+- [`tomori-text`](crates/text/readme.md): the bundled fonts and the signed-distance-field glyph atlas that text is drawn from.
 - [`tomori-scene`](crates/scene/readme.md): the platform-neutral client, with the frame step, the conversation, and the panels' layout, free of rendering, windowing and device code.
 - [`tomori-render`](crates/render/readme.md): the wgpu renderers and shaders that the headset, the desktop window and the spectator share, and the `Scenery` that draws an environment.
 - [`tomori-client-desktop`](crates/client-desktop/readme.md): the desktop modes.
@@ -333,6 +334,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 Original project code is released under the MIT License; see [license.md](license.md). Third-party components retain their own licenses:
 
 - Bundled controller assets: [MIT](crates/render/assets/controllers/LICENSE.md).
+- Bundled fonts, subsets of Noto Sans Mono, Noto Sans Symbols 2, Noto Sans Math and Noto Sans JP: [SIL Open Font License 1.1](crates/text/assets/fonts/readme.md), also in [crates/render/assets/licenses/fonts-LICENSE.txt](crates/render/assets/licenses/fonts-LICENSE.txt) for the APK.
 - Basis Universal notices and test fixtures: [Apache-2.0](crates/render/assets/licenses/basisu-LICENSE.txt), with fixture provenance in [crates/render/tests/fixtures/README.md](crates/render/tests/fixtures/README.md).
 - The optional OBS plugin compatibility patch follows the upstream plugin's GPL-2.0-or-later licensing; its packaging metadata is under `packaging/`.
 - Speech models and native dependencies are downloaded separately, not bundled in this repository. Their licensing requirements are noted in the relevant setup sections above.
@@ -343,7 +345,7 @@ Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or
 
 No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
 
-1. `tomori-protocol`, `tomori-security`, `tomori-backend` and `tomori-environment-sky`;
+1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment-sky` and `tomori-text`;
 2. `tomori-discovery`, `tomori-speech` and `tomori-backend-opencode`;
 3. `tomori-client`;
 4. `tomori-server`;

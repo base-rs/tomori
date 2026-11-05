@@ -1,17 +1,22 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! What a panel shows: a [`Canvas`] of rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up; it is pure, so that layouts are tested without a GPU. The renderer's panels draw it.
+//! What a panel shows: a [`Canvas`] of rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up: a quad per glyph, drawn from its tile in `tomori-text`'s atlas, and filled quads, drawn from the atlas's solid block, so that one pipeline draws both. It needs no GPU, so that layouts are tested without one. The renderer's panels draw it.
 
 use bytemuck::{Pod, Zeroable};
+use tomori_text::atlas::SOLID;
 
-use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Rgba, Row, glyph};
+use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Quad, Rgba, Row, quads};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 2],
     pub color: [f32; 4],
+    /// Where in the glyph atlas, in its pixels.
+    pub uv: [f32; 2],
+    /// How much bolder, in the atlas's distance field's units.
+    pub weight: f32,
 }
 
 /// A rectangle in font pixels from the canvas's top-left corner, inside its padding.
@@ -147,37 +152,10 @@ impl Canvas {
             );
         }
         for (index, row) in self.rows.iter().enumerate() {
-            let y = top + (index * CELL_HEIGHT) as f32 + 2.0;
-            for (column, &(ch, style)) in row.cells.iter().take(self.columns).enumerate() {
-                if ch == ' ' {
-                    continue;
-                }
-                let x = left + (column * CELL_WIDTH) as f32;
-                for (line, bits) in glyph(ch).iter().enumerate() {
-                    let mut bits = u16::from(*bits);
-                    if style.bold {
-                        bits |= bits << 1;
-                    }
-                    // Lit pixels in a line are one quad.
-                    let mut pixel = 0;
-                    while pixel < 9 {
-                        if bits & (1 << pixel) == 0 {
-                            pixel += 1;
-                            continue;
-                        }
-                        let start = pixel;
-                        while pixel < 9 && bits & (1 << pixel) != 0 {
-                            pixel += 1;
-                        }
-                        mesh.quad(
-                            x + start as f32,
-                            y + line as f32,
-                            (pixel - start) as f32,
-                            1.0,
-                            style.color,
-                        );
-                    }
-                }
+            let y = top + (index * CELL_HEIGHT) as f32;
+            let cells = &row.cells[..row.cells.len().min(self.columns)];
+            for (quad, style) in quads(cells, left, y, CELL_HEIGHT as f32, |style| style.bold) {
+                mesh.glyph(quad, style.color);
             }
         }
         mesh.vertices
@@ -201,8 +179,31 @@ impl Mesh {
         }
     }
 
+    /// A filled quad.
     fn quad(&mut self, x: f32, y: f32, width: f32, height: f32, color: Rgba) {
-        if width <= 0.0 || height <= 0.0 || color[3] <= 0.0 {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        self.textured(
+            Quad {
+                x,
+                y,
+                width,
+                height,
+                tile: [SOLID[0], SOLID[1], 0.0, 0.0],
+                weight: 0.0,
+            },
+            color,
+        );
+    }
+
+    /// A glyph's quad, drawn from its tile.
+    fn glyph(&mut self, quad: Quad, color: Rgba) {
+        self.textured(quad, color);
+    }
+
+    fn textured(&mut self, quad: Quad, color: Rgba) {
+        if color[3] <= 0.0 {
             return;
         }
         let place = |x: f32, y: f32| {
@@ -211,17 +212,23 @@ impl Mesh {
                 (self.origin.1 - y) * self.pixel,
             ]
         };
-        let (left, top) = (x, y);
-        let (right, bottom) = (x + width, y + height);
-        for position in [
-            place(left, top),
-            place(right, top),
-            place(left, bottom),
-            place(right, top),
-            place(right, bottom),
-            place(left, bottom),
+        let [u, v, tile_width, tile_height] = quad.tile;
+        let (left, top) = (quad.x, quad.y);
+        let (right, bottom) = (quad.x + quad.width, quad.y + quad.height);
+        for (x, y, across, down) in [
+            (left, top, 0.0, 0.0),
+            (right, top, 1.0, 0.0),
+            (left, bottom, 0.0, 1.0),
+            (right, top, 1.0, 0.0),
+            (right, bottom, 1.0, 1.0),
+            (left, bottom, 0.0, 1.0),
         ] {
-            self.vertices.push(Vertex { position, color });
+            self.vertices.push(Vertex {
+                position: place(x, y),
+                color,
+                uv: [u + across * tile_width, v + down * tile_height],
+                weight: quad.weight,
+            });
         }
     }
 }
@@ -261,20 +268,29 @@ mod tests {
     }
 
     #[test]
-    fn lit_pixels_in_a_line_are_merged_and_bold_is_wider() {
-        let mut canvas = Canvas::new(1, 1.0);
+    fn a_glyph_is_one_quad_from_its_tile_and_bold_is_weightier() {
+        let mut canvas = Canvas::new(3, 1.0);
         canvas.background = [0.0; 4];
         canvas
             .rows
-            .push(Row::new(vec![('_', Style::plain([1.0; 4]))]));
-        // The underscore is one line of lit pixels: one quad.
-        assert_eq!(canvas.mesh().len(), 6);
-        let quad = canvas.mesh();
-        let plain = quad[1].position[0] - quad[0].position[0];
+            .push(Row::text("a日", Style::plain([1.0; 4]), 3));
+        let mesh = canvas.mesh();
+        // One quad each, the wide one twice as far across, both drawn from their tiles rather than the solid block.
+        assert_eq!(mesh.len(), 12);
+        let width = |quad: &[Vertex]| quad[1].position[0] - quad[0].position[0];
+        assert!(width(&mesh[6..]) > width(&mesh[..6]));
+        assert!(mesh.iter().all(|vertex| vertex.uv != SOLID));
+        assert!(mesh.iter().all(|vertex| vertex.weight == 0.0));
+        // Its tile's corners map to the quad's.
+        let tile = tomori_text::atlas::glyph('a').unwrap().tile;
+        assert_eq!(mesh[0].uv, [tile[0], tile[1]]);
+        assert_eq!(mesh[4].uv, [tile[0] + tile[2], tile[1] + tile[3]]);
         canvas.rows[0].cells[0].1.bold = true;
-        let quad = canvas.mesh();
-        let bold = quad[1].position[0] - quad[0].position[0];
-        assert_eq!(bold, plain + 1.0);
+        assert!(canvas.mesh()[0].weight > 0.0);
+        // Filled quads are drawn from the solid block.
+        canvas.background = [0.1, 0.1, 0.1, 1.0];
+        let mesh = canvas.mesh();
+        assert!(mesh[..6].iter().all(|vertex| vertex.uv == SOLID));
     }
 
     #[test]

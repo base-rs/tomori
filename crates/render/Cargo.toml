@@ -26,6 +26,7 @@ tomori-client = { version = "0.1.0", path = "../client" }
 tomori-environment-sky = { version = "0.1.0", path = "../environment-sky" }
 tomori-protocol = { version = "0.1.0", path = "../protocol" }
 tomori-scene = { version = "0.1.0", path = "../scene" }
+tomori-text = { version = "0.1.0", path = "../text" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 # The WGSL front end wgpu uses, at its version, to validate shaders in tests.
 naga = { version = "30.0.1", features = ["wgsl-in"], optional = true }

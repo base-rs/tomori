@@ -8,6 +8,7 @@
 pub mod arrival_graphics;
 pub mod controller;
 pub mod controller_graphics;
+pub mod glyphs;
 pub mod graphics;
 pub mod scene_graphics;
 pub mod scenery;
@@ -29,3 +30,16 @@ use tomori_scene::{
 pub const CONTROLLER_LICENSE: &str = include_str!("../assets/controllers/LICENSE.md");
 /// The licence of the Basis Universal transcoder, which decodes the controllers' KTX2 textures in [`controller`].
 pub const BASISU_LICENSE: &str = include_str!("../assets/licenses/basisu-LICENSE.txt");
+/// The licences of the fonts that text is drawn with, which `tomori-text` bundles, also in `assets/licenses/fonts-LICENSE.txt` for an APK's assets.
+pub const FONT_LICENSES: &str = tomori_text::fonts::LICENSES;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_font_licences_in_the_assets_are_the_bundled_fonts_own() {
+        assert_eq!(
+            include_str!("../assets/licenses/fonts-LICENSE.txt"),
+            super::FONT_LICENSES
+        );
+    }
+}

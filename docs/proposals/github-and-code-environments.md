@@ -84,7 +84,7 @@ From `origin/main` at `064c4e2`.
 - **Panels.** `ui_panel` draws local-space panels of styled monospaced text (`ui_text`) with depth testing, used by the right wrist's transcript. They are the nearest thing to a code panel today.
 - **Safety rules.** `design/interaction.md` says nothing is decided by reflex: choices take **A**, a cancellation waits 3 seconds during which **A** undoes it, and a new request ignores **A** for 0.6 seconds. Write-back to GitHub should follow the same rules.
 - **Roles.** Owners and collaborators are participants; visitors only watch (`design/security.md`).
-- **Rendering** is wgpu with 4× MSAA where the GPU supports it (`graphics::SAMPLES`), and text is `font8x8` bitmaps drawn as one quad per run of lit pixels.
+- **Rendering** is wgpu with 4× MSAA where the GPU supports it (`graphics::SAMPLES`), and text, when this was written, was `font8x8` bitmaps drawn as one quad per run of lit pixels. It is now drawn from a signed-distance-field glyph atlas of bundled Noto fonts, a quad per glyph, with Japanese taking two cells (`design/text.md`).
 
 ## The GitHub environment
 
@@ -197,6 +197,8 @@ A code panel needs crisp, small, mostly ASCII text, many characters at once, and
 
 **Proposal (#146):** fix 1 to 4 now, independently; they are small. Then one text system in `tomori-render`, as #77 already plans: a multi-channel signed-distance-field glyph atlas generated from a font with wide coverage (a monospaced font for code, a proportional one for UI), shaped runs with grapheme clusters and double-width cells, tab stops, control characters stripped, and one wrapper with consistent rules for every panel and label. Japanese (#103) needs a CJK font and line breaking without spaces; the atlas should grow on demand rather than hold every glyph.
 
+Since then, #169 fixed 1 to 4, and the glyph atlas (`design/text.md`) fixed 6 to 11, apart from tab stops (5): graphemes take one cell, CJK two, a non-breaking space joins words, and a glyph is one antialiased quad. Its atlas is single-channel rather than multi-channel, and lives in `tomori-text`, below `tomori-render`, so that `tomori-scene` can lay text out with it.
+
 ## Experiments
 
 Each is small, answers one question on the headset, and can be abandoned. They are ordered by value and feasibility.
@@ -224,7 +226,7 @@ Each is small, answers one question on the headset, and can be abandoned. They a
 ### 2. Code panel and "explain this" (#151)
 
 - **Hypothesis:** pointing at code and asking is faster and more precise than describing it, and the agent's answers are better grounded.
-- **Build:** one tool, `show_code`; one read-only, highlighted panel; line-range selection by sweeping the ray; the selection and pointing captured at the start of speech, as worker pointing already is, and delivered as a bounded context block. `font8x8` is enough for ASCII Rust at first, which tests legibility before the atlas.
+- **Build:** one tool, `show_code`; one read-only, highlighted panel; line-range selection by sweeping the ray; the selection and pointing captured at the start of speech, as worker pointing already is, and delivered as a bounded context block. The glyph atlas (`design/text.md`) draws code's symbols and any Unicode its fonts cover, a quad per glyph.
 - **Evaluate:** ask ten "explain this" and "why is it like this?" questions about Tomori's own code. Count how often the agent addresses the right span, and compare with asking the same by description alone. Note which panel sizes and distances are legible.
 - **Depends on:** #81 (capture and context), #82 (the tool and its transport, shared with #100), #147 (the panel), and #146 for anything beyond ASCII.
 - **Effort:** medium.

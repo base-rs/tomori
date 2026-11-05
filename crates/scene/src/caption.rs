@@ -16,13 +16,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typographic_quotes_and_dashes_are_drawn_plainly() {
+    fn typographic_quotes_dashes_accents_and_japanese_are_drawn_as_they_are() {
         assert_eq!(
             wrapped_lines("\u{201c}Yes\u{201d} \u{2013} it\u{2019}s done \u{1f600}"),
-            ["\"Yes\" - it's done ?"]
+            ["\u{201c}Yes\u{201d} \u{2013} it\u{2019}s done ?"]
         );
-        // Accented letters are drawn as the headset draws them, rather than as `?`.
-        assert_eq!(wrapped_lines("José Łódź"), ["José Lódz"]);
+        assert_eq!(
+            wrapped_lines("José Łódź こんにちは"),
+            ["José Łódź こんにちは"]
+        );
     }
 
     #[test]
@@ -32,10 +34,15 @@ mod tests {
             "VOICE\nReady.\n\nHello world!".to_owned(),
             "a".repeat(900),
             "Curly ‘quotes’ and emoji 🎤".repeat(100),
+            "日本語の文章です。".repeat(100),
         ] {
             let lines = crate::ui_text::lines(&text, COLUMNS, ROWS);
             assert!(lines.len() <= ROWS);
-            assert!(lines.iter().all(|line| line.chars().count() <= COLUMNS));
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| crate::ui_text::drawn(line).count() <= COLUMNS)
+            );
         }
         assert_eq!(wrapped_lines("hello\n\nworld"), ["hello", "", "world"]);
         assert_eq!(wrapped_lines("hello\r\nworld\n"), ["hello", "world"]);

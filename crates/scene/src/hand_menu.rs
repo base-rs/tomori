@@ -14,7 +14,7 @@ use crate::arrival::{Align, Key, Kind, Label, Object, facing_from};
 use crate::controller;
 use crate::hands::Hand;
 use crate::panel::{Area, Plane, Rect};
-use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines};
+use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines, plain};
 use tomori_client::feedback::Hand as Side;
 
 /// Shown after a visitor's display name wherever others see it, as on a knock: the name is the one their device suggested or they chose, with no token behind it, so nothing vouches for it. See `design/security.md`.
@@ -787,13 +787,10 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
     }
     // Every row is drawn as the transcript draws it, and fits the menu's width, which the rows above leave room for.
     for item in &mut items {
-        item.text = cut(
+        item.text = plain(&cut(
             &[Span::new(item.text.as_str(), Style::plain([1.0; 4]))],
             WIDTH,
-        )
-        .into_iter()
-        .map(|(ch, _)| ch)
-        .collect();
+        ));
     }
     items
 }
@@ -2107,16 +2104,30 @@ mod tests {
             Some(Section::PeopleAndSecurity),
             Some(Section::Sound),
         ];
-        for section in sections {
-            let rows = items(section, &model);
-            for row in &rows {
-                assert!(
-                    row.text.chars().count() <= WIDTH,
-                    "{section:?}: {}",
-                    row.text
-                );
+        // Japanese takes two cells a character, and every row still fits, counted in cells.
+        let mut japanese = model.clone();
+        japanese.name = "山田太郎".repeat(5);
+        japanese.participants = vec!["佐藤花子".repeat(6); 2];
+        let space = japanese.space.as_mut().unwrap();
+        space.title = "日本語の会話のスペース。".repeat(8);
+        space.modes[1].2 = Some("説明文です。".repeat(30));
+        for model in [&model, &japanese] {
+            for section in sections {
+                let rows = items(section, model);
+                for row in &rows {
+                    assert!(
+                        drawn(&row.text).count() <= WIDTH,
+                        "{section:?}: {}",
+                        row.text
+                    );
+                }
             }
         }
+        assert!(
+            texts(&items(Some(Section::Space), &japanese))
+                .iter()
+                .any(|row| row.contains("日本語の会話"))
+        );
         // The top level marks a title cut at two rows; the Space section goes on with the rest of it.
         let top = items(None, &model);
         assert_eq!(top[1].text.chars().last(), Some('…'));
@@ -2126,7 +2137,7 @@ mod tests {
             .map(|text| text.to_string())
             .collect::<Vec<_>>();
         assert!(!space[1].ends_with('…'));
-        assert!(space.iter().any(|row| row.contains("Lódz")), "{space:?}");
+        assert!(space.iter().any(|row| row.contains("Łódź")), "{space:?}");
         // A word longer than a row is broken across rows rather than dropped.
         let layer = texts(&items(Some(Section::Layer(Layer::Tomori)), &model))
             .iter()

@@ -3,14 +3,14 @@
 
 //! Panels of styled text in their own local space, drawn in the scene pass with depth testing and alpha blending, so that a hand or controller in front of one covers it.
 //!
-//! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up; it is pure, so that layouts are tested without a GPU. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame.
+//! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up, its glyphs drawn from the [`Glyphs`](crate::glyphs::Glyphs) atlas and its filled quads from the atlas's solid block; it needs no GPU, so that layouts are tested without one. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame.
 
 use glam::Mat4;
 
 pub use tomori_scene::canvas::{Canvas, Vertex};
 
-const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32];
 
 /// The pipeline every panel is drawn with, in the scene pass: depth tested against the scene without writing depth, and alpha blended, so that panels are translucent and a nearer hand covers them.
 pub struct Pipeline {
@@ -19,7 +19,12 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        glyphs: &crate::glyphs::Glyphs,
+        samples: u32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("ui_panel.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("panel transform layout"),
@@ -36,7 +41,7 @@ impl Pipeline {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("panel pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(glyphs.layout())],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -83,8 +88,10 @@ impl Pipeline {
         Self { pipeline, layout }
     }
 
-    pub fn set(&self, pass: &mut wgpu::RenderPass<'_>) {
+    /// Draw panels from here on with this pipeline and the glyph atlas `glyphs`, from [`Glyphs::binding`](crate::glyphs::Glyphs::binding).
+    pub fn set(&self, pass: &mut wgpu::RenderPass<'_>, glyphs: &wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(1, glyphs, &[]);
     }
 }
 
@@ -186,7 +193,8 @@ mod tests {
         crate::test_support::log_everything();
         crate::test_gpu::with(|gpu| {
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-            let pipeline = Pipeline::new(&gpu.device, format, 1);
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
             let mut panel = Panel::new(&gpu.device, &pipeline, 12);
             let mut canvas = Canvas::new(8, 0.001);
             let mut row = Row::new(vec![('#', Style::plain([1.0; 4])); 8]);
@@ -254,7 +262,8 @@ mod tests {
                     }),
                     ..Default::default()
                 });
-                pipeline.set(&mut pass);
+                glyphs.sync(&gpu.device, &gpu.queue);
+                pipeline.set(&mut pass, &glyphs.binding());
                 panel.draw(&mut pass, 0);
             }
             gpu.queue.submit([encoder.finish()]);

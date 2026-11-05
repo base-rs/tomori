@@ -4,7 +4,6 @@
 //! The result cards' pages and their navigation with the right stick: a card's content is wrapped and paged here, once, so that navigation and the renderer use the same pages.
 
 use crate::delegation::{Kind, Presentation, Workspace};
-use font8x8::{BASIC_FONTS, UnicodeFonts};
 
 /// The most result cards shown.
 pub const MAX_RESULTS: usize = 64;
@@ -135,8 +134,8 @@ fn step(current: usize, count: usize, forward: bool) -> usize {
     }
 }
 
-/// Character-based truncation is safe for every UTF-8 boundary. Unsupported
-/// glyphs become '?' in the bitmap mesh, never a byte-indexing panic.
+/// Character-based truncation is safe for every UTF-8 boundary. Characters no
+/// bundled font has are drawn as '?', never a byte-indexing panic.
 pub fn clip(text: &str, columns: usize) -> String {
     let mut chars = text.chars().filter(|c| !c.is_control());
     let mut out: String = chars.by_ref().take(columns).collect();
@@ -147,7 +146,7 @@ pub fn clip(text: &str, columns: usize) -> String {
     out
 }
 
-/// The bitmap font only supports basic glyphs. Show other Unicode scalars and
+/// Cards lay out ASCII, a byte to a column. Show other Unicode scalars and
 /// control characters as explicit code-point escapes rather than losing them.
 pub fn wrap(text: &str) -> Vec<String> {
     let mut lines = Vec::new();
@@ -161,7 +160,7 @@ pub fn wrap(text: &str) -> Vec<String> {
             just_wrapped = false;
             continue;
         }
-        let token = if ch.is_control() || BASIC_FONTS.get(ch).is_none() {
+        let token = if ch.is_control() || !ch.is_ascii() {
             format!("\\u{{{:X}}}", ch as u32)
         } else {
             ch.to_string()

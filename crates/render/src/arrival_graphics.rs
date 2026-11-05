@@ -15,6 +15,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Quat, Vec3};
 use std::f32::consts::{FRAC_PI_4, TAU};
 use tomori_protocol::{Activity, Attention};
+use tomori_text::atlas::SOLID;
 
 /// The most cubes arrival adds to the scene.
 pub const MAX_CUBES: usize = 2048;
@@ -364,10 +365,13 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
 pub struct Vertex {
     position: [f32; 3],
     color: [f32; 4],
+    /// Where in the glyph atlas, in its pixels: a glyph's tile, or the solid block for a background.
+    uv: [f32; 2],
+    weight: f32,
 }
 
-const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32];
 
 /// A label and how to draw it.
 struct Styled<'a> {
@@ -381,7 +385,7 @@ struct Styled<'a> {
     alpha: f32,
 }
 
-/// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is. Every quad lies in the label's plane, so that a label tilted to face the viewer draws its glyphs' rows touching and its background behind all of them.
+/// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is. Every quad lies in the label's plane, so that a label tilted to face the viewer draws its glyphs whole and its background behind all of them.
 fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
     let label = styled.label;
     let p = label.pixel;
@@ -414,25 +418,29 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
         return;
     }
     let rgba = |rgb: [f32; 3], a: f32| [rgb[0], rgb[1], rgb[2], a * alpha];
-    let mut quad = |x: f32, y: f32, w: f32, h: f32, z: f32, color: [f32; 4]| {
-        if mesh.len() + 6 > MAX_VERTICES {
-            return;
-        }
-        let corner = origin + right * x - up * y + normal * z;
-        for [u, v] in [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ] {
-            mesh.push(Vertex {
-                position: (corner + right * (u * w) - up * (v * h)).to_array(),
-                color,
-            });
-        }
-    };
+    // A quad `x` and `y` along and down from the origin and `z` towards the viewer, in metres, drawn from `tile` of the glyph atlas.
+    let mut quad =
+        |x: f32, y: f32, w: f32, h: f32, z: f32, color: [f32; 4], tile: [f32; 4], weight: f32| {
+            if mesh.len() + 6 > MAX_VERTICES {
+                return;
+            }
+            let corner = origin + right * x - up * y + normal * z;
+            for [u, v] in [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ] {
+                mesh.push(Vertex {
+                    position: (corner + right * (u * w) - up * (v * h)).to_array(),
+                    color,
+                    uv: [tile[0] + u * tile[2], tile[1] + v * tile[3]],
+                    weight,
+                });
+            }
+        };
     let (background, opacity) = if styled.hovered {
         (HOVER_BACKGROUND, 0.9)
     } else {
@@ -445,6 +453,8 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
         height + 4.0 * p,
         0.0,
         rgba(background, opacity),
+        [SOLID[0], SOLID[1], 0.0, 0.0],
+        0.0,
     );
     for (row, line) in label.lines.iter().enumerate() {
         let color = rgba(
@@ -455,28 +465,19 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
             },
             1.0,
         );
-        for (column, ch) in crate::ui_text::drawn(line).enumerate() {
-            for (gy, bits) in crate::ui_text::glyph(ch).iter().enumerate() {
-                let mut gx = 0;
-                while gx < 8 {
-                    if bits & (1 << gx) == 0 {
-                        gx += 1;
-                        continue;
-                    }
-                    let start = gx;
-                    while gx < 8 && bits & (1 << gx) != 0 {
-                        gx += 1;
-                    }
-                    quad(
-                        (column * 9 + start) as f32 * p,
-                        (row * 11 + gy) as f32 * p,
-                        (gx - start) as f32 * p,
-                        p,
-                        0.002,
-                        color,
-                    );
-                }
-            }
+        let cells: Vec<(char, ())> = crate::ui_text::drawn(line).map(|ch| (ch, ())).collect();
+        let top = (row * 11) as f32;
+        for (glyph, ()) in crate::ui_text::quads(&cells, 0.0, top, 11.0, |()| false) {
+            quad(
+                glyph.x * p,
+                glyph.y * p,
+                glyph.width * p,
+                glyph.height * p,
+                0.002,
+                color,
+                glyph.tile,
+                glyph.weight,
+            );
         }
     }
 }
@@ -543,12 +544,13 @@ impl ArrivalLabels {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
+        glyphs: &crate::glyphs::Glyphs,
         samples: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("workspace.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("arrival labels layout"),
-            bind_group_layouts: &[Some(camera_layout)],
+            bind_group_layouts: &[Some(camera_layout), Some(glyphs.layout())],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -606,7 +608,7 @@ impl ArrivalLabels {
 
     fn buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("arrival label glyph runs"),
+            label: Some("arrival label quads"),
             size: (capacity * size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -644,12 +646,19 @@ impl ArrivalLabels {
         self.count = self.length;
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, camera: &wgpu::BindGroup) {
+    /// Draw for the eye `camera` binds, from the glyph atlas `glyphs` binds.
+    pub fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        camera: &wgpu::BindGroup,
+        glyphs: &wgpu::BindGroup,
+    ) {
         if self.count == 0 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera, &[]);
+        pass.set_bind_group(1, glyphs, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.count, 0..1);
     }
@@ -1032,7 +1041,7 @@ mod tests {
         assert!(cubes(&frame).is_empty());
     }
 
-    /// Where the viewer is, and a label below and in front of them, tilted 45° back to face them, as the hand menu's are: a row of solid block glyphs, which the basic table lacks.
+    /// Where the viewer is, and a label below and in front of them, tilted 45° back to face them, as the hand menu's are: a row of solid block glyphs, which fill their row.
     fn tilted() -> (Vec3, Scene) {
         let eye = Vec3::new(0.0, 1.6, 0.0);
         let anchor = eye + Vec3::new(0.0, -1.0, -1.0).normalize() * 0.6;
@@ -1075,19 +1084,23 @@ mod tests {
             let depth = (Vec3::from_array(vertex.position) - label.anchor).dot(normal);
             assert!(depth.abs() < 0.003, "{depth}");
         }
-        // A block is one run per pixel row, eight to a glyph, with the background's quad.
-        assert_eq!(mesh.len(), 6 * (1 + 4 * 8));
-        // Accented letters come from the wider tables, and a ligature they lack draws as `?`.
+        // A glyph is one quad from the atlas, with the background's quad.
+        assert_eq!(mesh.len(), 6 * (1 + 4));
+        // Accented letters, ligatures and Japanese are drawn as themselves, and what no font has as `?`.
         let drawn = |text: &str| {
             let mut scene = scene.clone();
             scene.objects[0].label.lines = vec![text.into()];
             label_mesh(&scene, None)
         };
         assert_ne!(drawn("José"), drawn("Jos?"));
-        assert_eq!(drawn("Ł"), drawn("L"));
-        assert_eq!(drawn("\u{153}"), drawn("?"));
-        // A combining mark takes no cell.
-        assert_eq!(drawn("e\u{301}"), drawn("e"));
+        assert_ne!(drawn("Ł"), drawn("L"));
+        assert_ne!(drawn("\u{153}"), drawn("?"));
+        assert_eq!(drawn("🎤"), drawn("?"));
+        // A letter and its combining mark are one character.
+        assert_eq!(drawn("e\u{301}"), drawn("é"));
+        // A wide character takes two cells, so its label is wider.
+        let width = |mesh: &[Vertex]| mesh[1].position[0] - mesh[0].position[0];
+        assert!(width(&drawn("日")) > width(&drawn("a")));
     }
 
     /// The hand menu's widest rows, of as many characters as it holds, fill its panel as they are drawn, their backgrounds ending within it and less than a cell short of its edge.
@@ -1288,26 +1301,25 @@ mod tests {
                 let row = ((0.5 - y * 0.5) * SIZE as f32) as u32;
                 (column, row)
             };
-            // Down the middle of the first glyph, every screen pixel is lit.
+            // Down the middle of the first glyph, which fills its row, every screen pixel is lit.
             let gaps: Vec<f32> = (0..64)
-                .map(|step| 0.25 + 7.5 * step as f32 / 63.0)
+                .map(|step| 0.25 + 10.5 * step as f32 / 63.0)
                 .filter(|y| {
                     let (column, row) = at(on_label(&scene, 4.0, *y));
                     image.get_pixel(column, row)[0] < 180
                 })
                 .collect();
             assert!(gaps.is_empty(), "the glyph has gaps at font rows {gaps:?}");
-            // Below the glyph, to the bottom of its row, the background covers what is behind it.
-            for y in [9.5, 11.5] {
-                let (column, row) = at(on_label(&scene, 4.0, y));
-                let covered = image.get_pixel(column, row).0[..3]
-                    .iter()
-                    .zip(&bare.get_pixel(column, row).0[..3])
-                    .map(|(a, b)| u32::from(a.abs_diff(*b)))
-                    .sum::<u32>();
-                assert!(image.get_pixel(column, row)[0] < 180, "{y}: lit");
-                assert!(covered > 6, "{y}: no background");
-            }
+            // Below the row, the background covers what is behind it.
+            let y = 11.5;
+            let (column, row) = at(on_label(&scene, 4.0, y));
+            let covered = image.get_pixel(column, row).0[..3]
+                .iter()
+                .zip(&bare.get_pixel(column, row).0[..3])
+                .map(|(a, b)| u32::from(a.abs_diff(*b)))
+                .sum::<u32>();
+            assert!(image.get_pixel(column, row)[0] < 180, "{y}: lit");
+            assert!(covered > 6, "{y}: no background");
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             assert!(pollster::block_on(scope.pop()).is_none());
         });
