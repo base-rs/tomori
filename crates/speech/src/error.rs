@@ -18,6 +18,20 @@ pub enum Error {
     TooLong(usize),
 }
 
+impl Error {
+    /// What sherpa-onnx loaded, or that it could not load `what`.
+    pub(crate) fn loaded<T>(made: Option<T>, what: String) -> Result<T, Self> {
+        made.ok_or(Self::Unavailable(format!(
+            "sherpa-onnx could not load {what}"
+        )))
+    }
+
+    /// What `engine` produced, or that it returned no result.
+    pub(crate) fn produced<T>(result: Option<T>, engine: &str) -> Result<T, Self> {
+        result.ok_or(Self::Engine(format!("{engine} returned no result")))
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

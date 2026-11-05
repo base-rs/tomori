@@ -98,13 +98,11 @@ pub struct WhisperRecognizer {
 impl WhisperRecognizer {
     /// Load the model.
     pub fn new(config: &WhisperConfig) -> Result<Self, Error> {
-        let recognizer = OfflineRecognizer::create(&config.sherpa()?).ok_or_else(|| {
-            Error::Unavailable(format!(
-                "sherpa-onnx could not load the Whisper model in {}",
-                config.model.display()
-            ))
-        })?;
-        Ok(Self { recognizer })
+        Error::loaded(
+            OfflineRecognizer::create(&config.sherpa()?),
+            format!("the Whisper model in {}", config.model.display()),
+        )
+        .map(|recognizer| Self { recognizer })
     }
 
     /// Transcribe `audio`, 16 kHz mono and at most 30 seconds long.
@@ -119,10 +117,7 @@ impl WhisperRecognizer {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(RATE as i32, &samples);
         self.recognizer.decode(&stream);
-        let result = stream
-            .get_result()
-            .ok_or_else(|| Error::Engine("Whisper returned no result".into()))?;
-        Ok(result.text.trim().to_owned())
+        Error::produced(stream.get_result(), "Whisper").map(|result| result.text.trim().to_owned())
     }
 }
 
@@ -168,18 +163,17 @@ mod tests {
         use crate::test_models;
 
         let config = WhisperConfig::named(&test_models::root(), test_models::WHISPER_MODEL);
-        if !test_models::installed(
+        test_models::with(
             "the Whisper model",
             &format!("bash scripts/fetch-asr-model.sh whisper {}", config.name),
             &[&config.model],
-        ) {
-            return;
-        }
-        let mut whisper = WhisperRecognizer::new(&config).unwrap();
-        assert!(whisper.transcribe(&vec![0; RATE as usize]).is_ok());
-        assert!(matches!(
-            whisper.transcribe(&vec![0; RATE as usize * 31]),
-            Err(Error::Engine(_))
-        ));
+            || {
+                let mut whisper = WhisperRecognizer::new(&config).unwrap();
+                assert!(whisper.transcribe(&vec![0; RATE as usize]).is_ok());
+                let Err(Error::Engine(_)) = whisper.transcribe(&vec![0; RATE as usize * 31]) else {
+                    unreachable!("expected Err(Error::Engine(_))");
+                };
+            },
+        );
     }
 }

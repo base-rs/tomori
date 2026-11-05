@@ -56,8 +56,10 @@ impl TransducerConfig {
 
     /// The model file whose name starts with `part`, preferring a quantized one.
     fn file(&self, part: &str) -> Option<String> {
+        // Read once its tokens were found, the directory is there.
         let mut candidates: Vec<PathBuf> = std::fs::read_dir(&self.model)
-            .ok()?
+            .into_iter()
+            .flatten()
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| {
@@ -113,13 +115,14 @@ impl TransducerRecognizer {
     /// Load the model. This takes a few seconds, so it is done once, when the server starts.
     pub fn new(config: &TransducerConfig) -> Result<Self, Error> {
         let sherpa = config.sherpa()?;
-        let recognizer = OnlineRecognizer::create(&sherpa).ok_or_else(|| {
-            Error::Unavailable(format!(
-                "sherpa-onnx could not load the streaming recognition model in {}",
+        Error::loaded(
+            OnlineRecognizer::create(&sherpa),
+            format!(
+                "the streaming recognition model in {}",
                 config.model.display()
-            ))
-        })?;
-        Ok(Self {
+            ),
+        )
+        .map(|recognizer| Self {
             recognizer: Arc::new(recognizer),
         })
     }
@@ -150,12 +153,11 @@ impl TransducerStream {
         while self.recognizer.is_ready(&self.stream) {
             self.recognizer.decode(&self.stream);
         }
-        let result = self
-            .recognizer
-            .get_result(&self.stream)
-            .ok_or_else(|| Error::Engine("the streaming recognizer returned no result".into()))?;
-        self.text = result.text.trim().to_owned();
-        Ok(())
+        Error::produced(
+            self.recognizer.get_result(&self.stream),
+            "the streaming recognizer",
+        )
+        .map(|result| self.text = result.text.trim().to_owned())
     }
 }
 
@@ -184,8 +186,7 @@ impl RecognitionStream for TransducerStream {
         self.stream
             .accept_waveform(RATE as i32, &vec![0.0; TAIL_PADDING]);
         self.stream.input_finished();
-        self.decode_ready()?;
-        Ok(self.text.clone())
+        self.decode_ready().map(|()| self.text.clone())
     }
 }
 
@@ -251,57 +252,103 @@ mod tests {
         let root = test_models::root();
         let voice = KokoroConfig::from_root(&root);
         let config = TransducerConfig::from_root(&root);
-        if !test_models::installed(
+        test_models::with(
             "the Kokoro and streaming recognition models",
             "bash scripts/fetch-asr-model.sh and bash scripts/fetch-tts-model.sh",
             &[&voice.model, &config.model],
-        ) {
-            return;
-        }
-        let mut kokoro = KokoroSynthesizer::new(&voice).unwrap();
-        let mut audio = Vec::new();
-        let mut rate = 0;
-        kokoro
-            .synthesize(
-                "The quick brown fox jumps over the lazy dog. Then it runs back home.",
-                &mut |chunk| {
-                    rate = chunk.sample_rate;
-                    audio.extend(chunk.samples);
-                },
-            )
-            .unwrap();
+            || {
+                let mut kokoro = KokoroSynthesizer::new(&voice).unwrap();
+                let mut audio = Vec::new();
+                let mut rate = 0;
+                kokoro
+                    .synthesize(
+                        "The quick brown fox jumps over the lazy dog. Then it runs back home.",
+                        &mut |chunk| {
+                            rate = chunk.sample_rate;
+                            audio.extend(chunk.samples);
+                        },
+                    )
+                    .unwrap();
 
-        let recognizer = TransducerRecognizer::new(&config).unwrap();
-        let mut recognition = Recognition::spawn(recognizer);
-        let (sender, events) = mpsc::channel();
-        let mut utterance = recognition.begin(1, rate, move |event| {
-            let _ = sender.send(event);
-        });
-        // 100 ms frames in real time, as the headset sends them.
-        let start = Instant::now();
-        let mut partials = 0;
-        for (index, frame) in audio.chunks(rate as usize / 10).enumerate() {
-            utterance.push(frame);
-            while let Ok(event) = events.try_recv() {
-                match event {
-                    TranscriptEvent::Partial(_) => partials += 1,
-                    other => panic!("unexpected {other:?} before the utterance ended"),
+                let recognizer = TransducerRecognizer::new(&config).unwrap();
+                let mut recognition = Recognition::spawn(recognizer);
+                let (sender, events) = mpsc::channel();
+                let mut utterance = recognition.begin(1, rate, move |event| {
+                    let _ = sender.send(event);
+                });
+                // 100 ms frames in real time, as the headset sends them.
+                let start = Instant::now();
+                let mut partials = 0;
+                for (index, frame) in audio.chunks(rate as usize / 10).enumerate() {
+                    utterance.push(frame);
+                    while let Ok(event) = events.try_recv() {
+                        let TranscriptEvent::Partial(_) = event else {
+                            unreachable!("unexpected {event:?} before the utterance ended");
+                        };
+                        partials += 1;
+                    }
+                    let due = start + Duration::from_millis(100 * (index as u64 + 1));
+                    std::thread::sleep(due.saturating_duration_since(Instant::now()));
                 }
+                // Partial results arrive while the participant is still speaking.
+                assert!(partials > 0, "no partial result before the utterance ended");
+                utterance.end();
+                // Partial results may still arrive before the final one.
+                let text = std::iter::from_fn(|| events.recv_timeout(Duration::from_secs(60)).ok())
+                    .find_map(TranscriptEvent::outcome)
+                    .expect("the utterance ends")
+                    .unwrap()
+                    .to_lowercase();
+                assert!(text.contains("quick brown fox"), "{text}");
+                assert!(text.contains("back home"), "{text}");
+            },
+        );
+    }
+
+    /// A model directory of its own, with `files`, removed when dropped.
+    struct Model(std::path::PathBuf);
+
+    impl Model {
+        fn with(name: &str, files: &[&str]) -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("tomori-transducer-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            for file in files {
+                std::fs::write(directory.join(file), "").unwrap();
             }
-            let due = start + Duration::from_millis(100 * (index as u64 + 1));
-            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            Self(directory)
         }
-        // Partial results arrive while the participant is still speaking.
-        assert!(partials > 0, "no partial result before the utterance ended");
-        utterance.end();
-        let text = loop {
-            match events.recv_timeout(Duration::from_secs(60)).unwrap() {
-                TranscriptEvent::Partial(_) => {}
-                TranscriptEvent::Final(text) => break text.to_lowercase(),
-                TranscriptEvent::Failed(error) => panic!("{error}"),
-            }
-        };
-        assert!(text.contains("quick brown fox"), "{text}");
-        assert!(text.contains("back home"), "{text}");
+    }
+
+    impl Drop for Model {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_quantized_model_file_is_preferred_and_a_missing_one_is_said() {
+        let both = Model::with("both", &["tokens.txt", "encoder.onnx", "encoder.int8.onnx"]);
+        let config = TransducerConfig::with_model(&both.0);
+        assert!(
+            config
+                .file("encoder")
+                .unwrap()
+                .ends_with("encoder.int8.onnx")
+        );
+        for (name, files) in [
+            ("encoder", &["tokens.txt"][..]),
+            ("decoder", &["tokens.txt", "encoder.onnx"][..]),
+            (
+                "joiner",
+                &["tokens.txt", "encoder.onnx", "decoder.onnx"][..],
+            ),
+        ] {
+            let model = Model::with(name, files);
+            let Err(Error::Unavailable(_)) = TransducerConfig::with_model(&model.0).sherpa() else {
+                unreachable!("a model without its {name} is not installed");
+            };
+        }
     }
 }
