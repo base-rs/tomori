@@ -479,6 +479,32 @@ mod tests {
         assert_eq!(approval.title, "Bash");
     }
     #[test]
+    fn a_queue_emptied_to_fit_leaves_the_snapshot_within_its_budget() {
+        // Every entry is finished, so the queue is emptied, and its last entry has no comma beside it.
+        let entry = |id: usize| tomori_protocol::QueueEntry {
+            id: format!("q{id}"),
+            source: 1,
+            speaker: "Ada".into(),
+            text: "x".repeat(200),
+            state: tomori_protocol::QueueState::Delivered,
+        };
+        let mut state = SpaceState {
+            messages: vec![message(0, "Done.".into())],
+            queue: (0..1000).map(entry).collect(),
+            approval: Some(tomori_protocol::Approval {
+                id: "request-1".into(),
+                title: "Bash".into(),
+                text: "y".repeat(SNAPSHOT_BUDGET),
+                options: Vec::new(),
+            }),
+            ..SpaceState::default()
+        };
+        fit_state(&mut state);
+        assert!(state.queue.is_empty());
+        assert!(json_len(&state) <= SNAPSHOT_BUDGET);
+    }
+
+    #[test]
     fn escapes_are_counted_as_json_writes_them() {
         for character in ['"', '\\', '\n', '\r', '\t', '\u{8}', '\u{c}'] {
             assert_eq!(escaped_len(character), json_len(&character.to_string()) - 2);
