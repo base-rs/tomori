@@ -1008,7 +1008,7 @@ impl Connection {
             conversation.microphone_failed(error);
         }
         if let Some(reopen) = reopen {
-            self.reopen(reopen);
+            self.reopen(reopen, conversation);
         }
         self.perform(conversation);
         if self
@@ -1206,9 +1206,11 @@ impl Connection {
                         distrusted: false,
                         pairing: false,
                     };
-                    self.open(link);
+                    self.open(link, conversation);
                 }
-                Action::Paired { token, certificate } => self.paired(token, certificate),
+                Action::Paired { token, certificate } => {
+                    self.paired(token, certificate, conversation)
+                }
                 Action::Admitted { token, certificate } => self.admitted(token, certificate),
                 Action::Disconnect => self.disconnect(),
                 Action::Rescan => {
@@ -1335,7 +1337,7 @@ impl Connection {
 
     /// Close the connection without stalling the frame: closing waits briefly for the server.
     /// Connect as `link` says.
-    fn open(&mut self, link: Link) {
+    fn open(&mut self, link: Link, conversation: &mut Conversation) {
         self.disconnect();
         let mut options = Options::new(
             link.address.clone(),
@@ -1346,11 +1348,15 @@ impl Connection {
         options.transport = link.transport;
         options.token = link.token.clone();
         options.pairing = link.pairing;
-        // Fails only if its thread or scheduler cannot be made, as a thread that cannot start would.
-        let mut client = Client::connect(options).expect("the connection's thread starts");
-        self.speaker.attach(&mut client);
-        self.client = Some(client);
-        self.link = Some(link);
+        // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
+        match crate::system::connect(options) {
+            Ok(mut client) => {
+                self.speaker.attach(&mut client);
+                self.client = Some(client);
+                self.link = Some(link);
+            }
+            Err(error) => conversation.fail(format!("Cannot start a connection: {error}")),
+        }
     }
 
     /// Keep what a connection over TLS established: the server's certificate, pinned from then on, and a token given at startup.
@@ -1408,7 +1414,7 @@ impl Connection {
         }
     }
 
-    fn reopen(&mut self, reopen: Reopen) {
+    fn reopen(&mut self, reopen: Reopen, conversation: &mut Conversation) {
         let mut link = self.link.take().expect("a client is kept with its link");
         link.token = None;
         link.pending_token = false;
@@ -1420,7 +1426,7 @@ impl Connection {
             Reopen::ToPair => link.pairing = true,
             Reopen::WithoutToken => {}
         }
-        self.open(link);
+        self.open(link, conversation);
     }
 
     /// A knock admitted this device: keep its collaborator token for the server, with the certificate the connection presented, to present when it connects again. The connection is already a collaborator's, so it is not reopened.
@@ -1450,7 +1456,7 @@ impl Connection {
     }
 
     /// Pairing gave this device an owner token: keep it with the certificate the pairing connection presented, which replaces one it distrusted, and connect with both. See `design/security.md`.
-    fn paired(&mut self, token: String, certificate: Fingerprint) {
+    fn paired(&mut self, token: String, certificate: Fingerprint, conversation: &mut Conversation) {
         let mut link = self.link.take().expect("a client is kept with its link");
         self.store
             .remember_certificate(&link.key, &certificate.to_string());
@@ -1463,7 +1469,7 @@ impl Connection {
         link.pinned = true;
         link.distrusted = false;
         link.pairing = false;
-        self.open(link);
+        self.open(link, conversation);
     }
 
     fn disconnect(&mut self) {
@@ -2608,6 +2614,37 @@ mod tests {
     }
 
     #[test]
+    fn a_speaker_thread_that_cannot_start_is_reported_once_and_started_again_later() {
+        let mut client = client();
+        let fake = FakeSpeaker::default();
+        let mut speaker = Speaker::new(Box::new(fake.clone()));
+        speaker.attach(&mut client);
+
+        crate::system::refuse("tomori-speaker");
+        speaker.open();
+        let error = speaker.poll().expect("the failure is shown");
+        assert_eq!(
+            error,
+            "Cannot start the speaker thread: the system refused to start tomori-speaker Replies cannot be heard."
+        );
+        assert!(speaker.output.is_none());
+        // Not shown again when it fails again before the speaker opens.
+        crate::system::refuse("tomori-speaker");
+        speaker.retry_at = Some(Instant::now());
+        speaker.open();
+        assert_eq!(speaker.poll(), None);
+        assert!(speaker.output.is_none());
+
+        // Started again once the retry is due.
+        speaker.retry_at = Some(Instant::now());
+        speaker.open();
+        until(|| fake.opened.load(Ordering::Relaxed) == 1);
+        assert_eq!(speaker.poll(), None);
+        assert!(speaker.output.is_some());
+        client.close();
+    }
+
+    #[test]
     fn opening_the_speaker_discards_audio_queued_while_nothing_played() {
         let fake = FakeSpeaker::default();
         let mut speaker = Speaker::new(Box::new(fake.clone()));
@@ -3483,6 +3520,29 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(conversation.menu_model().notice, None);
+        }
+
+        #[test]
+        fn a_connection_that_cannot_start_is_reported_and_tried_again_when_chosen_again() {
+            let server = Server::start();
+            let (mut conversation, mut connection) = participant("Ada", None);
+            crate::system::refuse(crate::system::CONNECTION);
+            conversation.connect(Choice::new("Studio", server.address(), Source::Discovered));
+            connection.poll(true, &mut conversation);
+            assert_eq!(
+                conversation.problem().as_deref(),
+                Some("Cannot start a connection: the system refused to start connection")
+            );
+            assert!(connection.client.is_none());
+            assert!(connection.link.is_none());
+            // The headset is still usable: choosing the server again connects.
+            conversation.connect(Choice::new("Studio", server.address(), Source::Discovered));
+            until(&mut connection, &mut conversation, |connection, _| {
+                connection
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| client.state().is_connected())
+            });
         }
 
         #[test]

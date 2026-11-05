@@ -76,7 +76,7 @@ impl Speaking {
     }
 }
 
-/// Open `playback` on its own thread. Failing to open, and failures once open, are reported through `failed`.
+/// Open `playback` on its own thread. Failing to start the thread or to open, and failures once open, are reported through `failed`.
 pub fn start(
     playback: Arc<dyn Playback>,
     player: Shared,
@@ -89,23 +89,24 @@ pub fn start(
     let thread_opened = opened.clone();
     let communication = Arc::new(std::sync::atomic::AtomicI32::new(0));
     let thread_communication = communication.clone();
-    std::thread::Builder::new()
-        .name("tomori-speaker".into())
-        .spawn(move || {
-            let report = failed.clone();
-            match playback.open(player, Box::new(move |error| report(error)), route) {
-                // Kept until the speaker is dropped, which disconnects the channel.
-                Ok(output) => {
-                    thread_communication
-                        .store(output.communication.unwrap_or(0), Ordering::Relaxed);
-                    thread_opened.store(true, Ordering::Relaxed);
-                    let _ = stopped.recv();
-                    drop(output);
-                }
-                Err(error) => failed(error),
+    let report = failed.clone();
+    let started = crate::system::spawn("tomori-speaker", move || {
+        let report = failed.clone();
+        match playback.open(player, Box::new(move |error| report(error)), route) {
+            // Kept until the speaker is dropped, which disconnects the channel.
+            Ok(output) => {
+                thread_communication.store(output.communication.unwrap_or(0), Ordering::Relaxed);
+                thread_opened.store(true, Ordering::Relaxed);
+                let _ = stopped.recv();
+                drop(output);
             }
-        })
-        .expect("the speaker thread starts");
+            Err(error) => failed(error),
+        }
+    });
+    // Reported as a failure to open, so that the speaker is opened again later.
+    if let Err(error) = started {
+        report(format!("Cannot start the speaker thread: {error}"));
+    }
     Speaking {
         _stop: stop,
         opened,

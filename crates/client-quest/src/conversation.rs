@@ -3274,7 +3274,7 @@ impl Conversation {
     }
 
     /// The problem to show: this participant's newest error, else the space's ongoing problem unless dismissed here.
-    fn problem(&self) -> Option<String> {
+    pub(crate) fn problem(&self) -> Option<String> {
         self.error.clone().or_else(|| {
             self.space
                 .as_ref()
