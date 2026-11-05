@@ -6,165 +6,38 @@ mod android;
 #[cfg(target_os = "android")]
 mod android_audio;
 #[cfg(not(target_os = "android"))]
-mod child_process;
-#[cfg(not(target_os = "android"))]
 mod cli;
-#[cfg(not(target_os = "android"))]
-mod console;
-#[cfg(not(target_os = "android"))]
-mod cpal_audio;
-#[cfg(not(target_os = "android"))]
-mod desktop;
-#[cfg(not(target_os = "android"))]
-mod desktop_audio;
-#[cfg(not(target_os = "android"))]
-mod desktop_participant;
-#[cfg(not(target_os = "android"))]
-mod desktop_window;
-#[cfg(not(target_os = "android"))]
-mod discover;
-
-#[cfg(not(target_os = "android"))]
-mod headless_spectator;
-#[cfg(not(target_os = "android"))]
-mod pipewire_video;
-#[cfg(not(target_os = "android"))]
-mod spectator;
-#[cfg(not(target_os = "android"))]
-mod spectator_feed;
-#[cfg(not(target_os = "android"))]
-mod spectator_view;
 mod vulkan;
-#[cfg(not(target_os = "android"))]
-mod window;
 mod xr;
 mod xr_types;
 
-// The renderers, from `tomori-render`, under the paths this crate's own modules use.
+// The modules this crate's own modules use, from `tomori-scene` and `tomori-render`, under their paths.
 use tomori_render::{controller, graphics, scene_graphics};
-#[cfg(all(test, not(target_os = "android")))]
-use tomori_scene::test_support;
-
-// The platform-neutral modules, from `tomori-scene`, under the paths this crate's own modules use.
-#[cfg(all(test, not(target_os = "android")))]
-use tomori_scene::server_choice;
-#[cfg(not(target_os = "android"))]
-use tomori_scene::{
-    caption, capture, delegation, environment, hand_menu, interaction, playback, pointing,
-    spatial_audio, swarm, transcript, ui_text,
-};
-use tomori_scene::{
-    connection, conversation, feedback, hands, haptics, identity, log_cadence, scene,
-};
+#[cfg(target_os = "android")]
+use tomori_scene::identity;
+use tomori_scene::{connection, conversation, feedback, hands, haptics, log_cadence, scene};
 
 #[cfg(not(target_os = "android"))]
 pub use cli::{Command, Mode};
+/// The desktop's modes, from `tomori-client-desktop`.
 #[cfg(not(target_os = "android"))]
-pub use spectator_feed::SpectatorOptions;
+pub use tomori_client_desktop::{
+    DESKTOP_CONTROLS, audio_application_name, pipewire_alsa_properties, run_console,
+    run_demo as run, run_desktop, run_discover,
+};
+/// The spectator's modes, from `tomori-client-spectator`.
+#[cfg(not(target_os = "android"))]
+pub use tomori_client_spectator::{
+    SpectatorOptions, run_pipewire as run_spectator_pipewire,
+    run_pipewire_preview as run_spectator_pipewire_preview, run_window as run_spectator,
+};
 pub use tomori_scene::identity::Overrides;
 
-/// Run the windowed desktop demo without an XR runtime or headset.
-#[cfg(not(target_os = "android"))]
-pub fn run() -> anyhow::Result<()> {
-    desktop_window::run_demo(None, false)
-}
-
-/// Render a read-only, participant-following view of a live space.
-#[cfg(not(target_os = "android"))]
-pub fn run_spectator(options: SpectatorOptions) -> anyhow::Result<()> {
-    desktop_window::run_demo(Some(spectator_feed::Feed::new(options)), false)
-}
-
-/// PipeWire video source of a live space, without a window. It needs PipeWire, on Linux.
-#[cfg(not(target_os = "android"))]
-pub fn run_spectator_pipewire(options: SpectatorOptions) -> anyhow::Result<()> {
-    pipewire_video::Producer::start()
-        .and_then(|producer| headless_spectator::run(spectator_feed::Feed::new(options), producer))
-}
-
-/// PipeWire video source of a live space, with a preview window. It needs PipeWire, on Linux.
-#[cfg(not(target_os = "android"))]
-pub fn run_spectator_pipewire_preview(options: SpectatorOptions) -> anyhow::Result<()> {
-    desktop_window::run_demo(Some(spectator_feed::Feed::new(options)), true)
-}
-
-/// Run against the host's active OpenXR runtime instead of a desktop window.
+/// Run against the host's active OpenXR runtime instead of a desktop window, with the desktop's microphone and speaker.
 #[cfg(not(target_os = "android"))]
 pub fn run_xr(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = desktop_connection(overrides);
+    let (conversation, connection) = tomori_client_desktop::connection(overrides);
     xr::run_desktop(conversation, connection)
-}
-
-/// Take part in a server's spaces from a desktop window, as the headset does, with the keyboard and mouse for its controls.
-#[cfg(not(target_os = "android"))]
-pub fn run_desktop(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = desktop_connection(overrides);
-    desktop_window::run_participant(conversation, connection)
-}
-
-/// The desktop window's keys and what they stand for on the headset.
-#[cfg(not(target_os = "android"))]
-pub const DESKTOP_CONTROLS: &str = desktop_participant::CONTROLS;
-
-/// Show the headset's panel in the terminal, to use a server without a headset or a GPU.
-#[cfg(not(target_os = "android"))]
-pub fn run_console(overrides: Overrides) -> anyhow::Result<()> {
-    let (conversation, connection) = desktop_connection(overrides);
-    console::run(
-        conversation,
-        connection,
-        std::io::BufReader::new(std::io::stdin()),
-        &mut |line| println!("{line}"),
-    );
-    Ok(())
-}
-
-/// List the servers on the network, and the spaces on a chosen one.
-#[cfg(not(target_os = "android"))]
-pub fn run_discover(server: Option<String>) -> anyhow::Result<()> {
-    discover::run(server)
-}
-
-/// The application name for this process's audio streams, so that the audio server tells the spectator's speaker from a participant's.
-#[cfg(not(target_os = "android"))]
-pub fn audio_application_name(spectator: bool) -> &'static str {
-    if spectator {
-        "Tomori spectator"
-    } else {
-        "Tomori"
-    }
-}
-
-/// The `PIPEWIRE_ALSA` properties that name this process's streams, unless the user has set their own (`already_set`); `None` where PipeWire's ALSA plugin is not used.
-///
-/// PipeWire, and its PulseAudio layer, remember where a stream was routed by its application name, which the ALSA plugin otherwise derives from the executable's name. The spectator and the participant modes are the same executable, so routing the spectator to a capture sink, as `docs/slack-huddle.md` does, would also send a participant's speaker there, where they would hear nothing.
-#[cfg(not(target_os = "android"))]
-pub fn pipewire_alsa_properties(spectator: bool, already_set: bool) -> Option<String> {
-    (cfg!(target_os = "linux") && !already_set).then(|| {
-        format!(
-            "{{ application.name = \"{}\" }}",
-            audio_application_name(spectator)
-        )
-    })
-}
-
-/// Desktop runs keep nothing, so each is a new participant.
-#[cfg(not(target_os = "android"))]
-fn desktop_connection(
-    overrides: Overrides,
-) -> (conversation::Conversation, connection::Connection) {
-    let store = identity::Store::new(None);
-    let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
-    let mut conversation = conversation::Conversation::new(&identity.name);
-    let connection = connection::Connection::new(
-        identity,
-        store,
-        Box::new(()),
-        Box::new(desktop_audio::Microphone),
-        Box::new(desktop_audio::Speaker),
-        &mut conversation,
-    );
-    (conversation, connection)
 }
 
 // Bound each input batch so that a continuous input stream cannot prevent the
@@ -444,29 +317,5 @@ mod android_event_pump_tests {
         };
         assert!(drain_input_batch(&mut next));
         assert!(!drain_input_batch(&mut next));
-    }
-}
-
-#[cfg(all(test, not(target_os = "android")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_spectator_and_participants_name_their_audio_differently() {
-        assert_ne!(audio_application_name(true), audio_application_name(false));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn pipewire_alsa_names_the_streams_unless_the_user_already_did() {
-        assert_eq!(
-            pipewire_alsa_properties(true, false).as_deref(),
-            Some("{ application.name = \"Tomori spectator\" }")
-        );
-        assert_eq!(
-            pipewire_alsa_properties(false, false).as_deref(),
-            Some("{ application.name = \"Tomori\" }")
-        );
-        assert_eq!(pipewire_alsa_properties(false, true), None);
     }
 }

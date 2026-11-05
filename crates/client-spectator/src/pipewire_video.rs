@@ -196,10 +196,15 @@ pub struct Producer {
 impl Producer {
     /// Start `gst-launch-1.0` with PipeWire's sink.
     pub fn start() -> Result<Self> {
+        Self::spawn(Self::command())
+    }
+
+    /// The GStreamer command that [`start`](Self::start) runs, which ends with this process.
+    pub fn command() -> Command {
         let mut command = gstreamer_command();
         // A killed spectator cannot run Drop, so the PipeWire child must also end with it, including when a consumer is absent.
         crate::child_process::end_with_parent(&mut command);
-        Self::spawn(command)
+        command
     }
 
     /// Start `command`, which reads the frames from its standard input, as [`gstreamer_command`] does.

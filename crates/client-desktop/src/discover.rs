@@ -45,7 +45,7 @@ fn report(servers: &discovery::Servers, spaces: Option<&[SpaceSummary]>) {
 fn hint(servers: &discovery::Servers, spaces: Option<&[SpaceSummary]>) -> Option<&'static str> {
     match spaces {
         Some([]) => None,
-        Some(_) => Some("Join one with: tomori --spectator --server ADDRESS --space SPACE_ID"),
+        Some(_) => Some("Join one with: tomori-spectator --server ADDRESS --space SPACE_ID"),
         None if servers.compatible().is_empty() => {
             Some("No servers found. Start a server, or pass one: tomori discover --server ADDRESS")
         }
@@ -334,10 +334,9 @@ mod tests {
             attention: None,
             attention_age: None,
         };
-        assert!(
-            hint(&some, Some(std::slice::from_ref(&space)))
-                .unwrap()
-                .starts_with("Join one")
+        assert_eq!(
+            hint(&some, Some(std::slice::from_ref(&space))),
+            Some("Join one with: tomori-spectator --server ADDRESS --space SPACE_ID")
         );
         report(&some, Some(&[space]));
         report(&none, None);

@@ -136,8 +136,10 @@ Both tracked controller grip poses are rendered using the bundled, MIT-licensed 
 
 ```sh
 cargo run -p tomori-client-quest -- discover --server 127.0.0.1:8765
-cargo run -p tomori-client-quest -- --spectator --server 127.0.0.1:8765 --space SPACE_ID
+cargo run -p tomori-client-spectator -- --server 127.0.0.1:8765 --space SPACE_ID
 ```
+
+The spectator is its own executable, `tomori-spectator`, in the `tomori-client-spectator` package; `tomori-spectator --help` lists its options. `tomori --spectator`, `--spectator-pipewire` and `--spectator-pipewire-preview` still run it as before.
 
 The spectator requests a **1920×1080 physical-pixel** content area at startup, with a 1080p minimum and no window decorations, to match a 1080p OBS canvas. Press **Esc** to close it. Resizing larger changes the render resolution. On a 1080-pixel-high display the desktop panel can cover part of the borderless window; the compositor may also constrain sizes on smaller or scaled displays. Check the actual size in the startup log and OBS preview.
 
@@ -145,9 +147,9 @@ In OBS, add the spectator window as a window/screen capture. The spectator plays
 
 ### Experimental direct PipeWire video (Linux)
 
-Instead of capturing a window, run `cargo run -p tomori-client-quest -- --spectator-pipewire --server 127.0.0.1:8765 --space SPACE_ID`. It publishes `Tomori-Spectator` (`tomori-spectator`) **without creating a window or display surface**. Press **Ctrl-C** to stop it. For an optional window showing the same direct output, use `cargo run -p tomori-client-quest -- --spectator-pipewire-preview --server 127.0.0.1:8765 --space SPACE_ID` instead; Escape closes that window and stops its output. Run only one direct-output spectator at a time.
+Instead of capturing a window, run `cargo run -p tomori-client-spectator -- --pipewire --server 127.0.0.1:8765 --space SPACE_ID`. It publishes `Tomori-Spectator` (`tomori-spectator`) **without creating a window or display surface**. Press **Ctrl-C** to stop it. For an optional window showing the same direct output, use `cargo run -p tomori-client-spectator -- --pipewire-preview --server 127.0.0.1:8765 --space SPACE_ID` instead; Escape closes that window and stops its output. Run only one direct-output spectator at a time.
 
-Both modes render to a fixed **1920×1080 RGBA** texture at up to 30 fps. The optional preview window requests 1920×1080; the `--spectator` window-capture fallback still renders at its actual window size. The Quest reports presence through the server. Audio plays through the spectator's desktop output, or the PipeWire output named with `--audio-output NAME` (see `pactl list short sinks`); the PipeWire node carries video only. Any local client with PipeWire access may be able to view it.
+Both modes render to a fixed **1920×1080 RGBA** texture at up to 30 fps. The optional preview window requests 1920×1080; the window-capture fallback, without `--pipewire`, still renders at its actual window size. The Quest reports presence through the server. Audio plays through the spectator's desktop output, or the PipeWire output named with `--audio-output NAME` (see `pactl list short sinks`); the PipeWire node carries video only. Any local client with PipeWire access may be able to view it.
 
 For the direct virtual camera and microphone used to share this view in a Slack Huddle without OBS, see [the Linux setup notes](docs/slack-huddle.md).
 
@@ -174,7 +176,7 @@ cmake -S /tmp/opencode/obs-pwvideo-build -B /tmp/opencode/obs-pwvideo-build/buil
 cmake --build /tmp/opencode/obs-pwvideo-build/build
 ```
 
-Run these commands from the project directory; the clone directory must not already exist. The plugin is **not installed automatically**. When ready to change OBS, follow [the plugin's installation instructions](https://github.com/hoshinolina/obs-pwvideo#how-to-build-from-source), using the patched build and its `data` directory. Check for an existing installation before copying anything. Do not install both patched and AUR versions at once. OBS must be restarted to load a different plugin; do not restart during a stream. Verify the live preview, performance and audio/video sync before going live. Keep `--spectator` and window capture as the fallback.
+Run these commands from the project directory; the clone directory must not already exist. The plugin is **not installed automatically**. When ready to change OBS, follow [the plugin's installation instructions](https://github.com/hoshinolina/obs-pwvideo#how-to-build-from-source), using the patched build and its `data` directory. Check for an existing installation before copying anything. Do not install both patched and AUR versions at once. OBS must be restarted to load a different plugin; do not restart during a stream. Verify the live preview, performance and audio/video sync before going live. Keep the `tomori-spectator` window and window capture as the fallback.
 
 ### Legacy PC bridge audio (not used by server clients)
 
@@ -289,7 +291,7 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 
 ## Layout / interop
 
-- `crates/client-quest/src/desktop.rs`: the server-less and spectator windows, orbit camera, mouse attraction; `desktop_participant.rs`: the `--desktop` window. `window.rs` is what a window gives its contents, and `desktop_window.rs` the winit and surface calls alone.
+- `crates/client-desktop/src/desktop.rs`: the server-less window, orbit camera, mouse attraction; `desktop_participant.rs`: the `--desktop` window. `crates/client-spectator/src/spectator_window.rs` is the spectator's window. `window.rs` is what a window gives its contents, and `desktop_window.rs` the winit and surface calls alone.
 - `crates/client-quest/src/xr.rs`: Android/desktop OpenXR lifecycle, predicted views, controller actions: the device calls only, with the values read and the choices made in `xr_types.rs`.
 - `crates/scene/src/scene.rs`: the frame step the headset and the desktop window share, from plain input; `scene/headset.rs` and `scene/desktop.rs` hold each platform's own logic, and `crates/render/src/scene_graphics.rs` draws a frame.
 - `crates/client-quest/src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed two-layer XR swapchain images, one layer per eye.
@@ -316,7 +318,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-environment-sky`](crates/environment-sky/readme.md): the Sky environment's renderer, which Tomori's clients draw.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
 
-`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead. The application is being split into crates of its own, unpublished until the headset has a builder: `tomori-scene`, in `crates/scene`, is the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code; and `tomori-render`, in `crates/render`, holds the wgpu renderers and shaders that the headset, the desktop window and the spectator share. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
+`tomori-client-quest`, the headset and desktop application in `crates/client-quest`, is released as an APK instead. The application is being split into crates of its own, unpublished until the headset has a builder: `tomori-scene`, in `crates/scene`, is the platform-neutral client, with the frame step, the conversation and connection, and the panels' layout, free of rendering, windowing and device code; and `tomori-render`, in `crates/render`, holds the wgpu renderers and shaders that the headset, the desktop window and the spectator share; `tomori-client-desktop`, in `crates/client-desktop`, holds the desktop modes; and `tomori-client-spectator`, in `crates/client-spectator`, the spectator and its `tomori-spectator` executable. [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
 ## Third-Party Components
 

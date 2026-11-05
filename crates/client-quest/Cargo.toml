@@ -37,13 +37,9 @@ jni = "0.21"
 ndk = { version = "0.9", features = ["audio", "api-level-29"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-cpal = "0.18"
 env_logger = "0.11"
-pollster = "0.4"
-winit = "0.30"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+tomori-client-desktop = { version = "0.1.0", path = "../client-desktop" }
+tomori-client-spectator = { version = "0.1.0", path = "../client-spectator" }
 
 # Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -67,18 +63,6 @@ reason = "OpenXR runtime calls: the instance, session, swapchain, actions and th
 [[package.metadata.bake.test.coverage.exclude]]
 path = "src/vulkan.rs"
 reason = "Creates the Vulkan instance and device through OpenXR and imports the runtime's swapchain images into wgpu; needs an OpenXR runtime."
-
-[[package.metadata.bake.test.coverage.exclude]]
-path = "src/desktop_window.rs"
-reason = "winit's event loop and window, and the window's Vulkan or Metal surface; needs a display."
-
-[[package.metadata.bake.test.coverage.exclude]]
-path = "src/desktop_audio.rs"
-reason = "Opens the default microphone and speaker through cpal; needs audio devices."
-
-[[package.metadata.bake.test.coverage.exclude]]
-path = "src/child_process.rs"
-reason = "Runs in a forked child before it executes its program, where the child's coverage counters are discarded."
 
 [package.metadata.android]
 package = "io.github.ioquatix.tomori"
