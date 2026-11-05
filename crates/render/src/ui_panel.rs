@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn a_panel_cuts_a_mesh_too_large_for_it_and_draws_nothing_when_empty() {
         crate::test_support::log_everything();
-        tomori_environment_sky::test_gpu::with(|gpu| {
+        crate::test_gpu::with(|gpu| {
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
             let pipeline = Pipeline::new(&gpu.device, format, 1);
             let mut panel = Panel::new(&gpu.device, &pipeline, 12);

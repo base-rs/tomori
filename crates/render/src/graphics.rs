@@ -795,7 +795,7 @@ fn cube() -> Vec<Vertex> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tomori_environment_sky::test_gpu;
+    use crate::test_gpu;
 
     #[test]
     fn sky_environment_renders_stereo_switches_and_preserves_recenter() {

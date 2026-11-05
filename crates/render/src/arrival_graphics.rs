@@ -1027,7 +1027,7 @@ mod tests {
         };
         let mesh = label_mesh(&scene, None);
         assert!(mesh.len() <= MAX_VERTICES && mesh.len() > MAX_VERTICES - 6);
-        tomori_environment_sky::test_gpu::with(|gpu| {
+        crate::test_gpu::with(|gpu| {
             let mut renderer = crate::graphics::Renderer::new(
                 &gpu.device,
                 &gpu.queue,

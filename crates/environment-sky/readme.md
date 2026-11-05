@@ -113,6 +113,8 @@ cargo test -p tomori-environment-sky --locked
 The Vulkan tests render on a GPU, or on a software driver such as Mesa's lavapipe,
 and are skipped, saying so, where there is no Vulkan adapter at all, unless
 `TOMORI_REQUIRE_GPU=1` is set, as CI sets it. Every shader is also validated with naga.
+They use `tomori-render`'s shared test device and WGSL validation, its `test-gpu` feature,
+as the clients' tests do; only the tests depend on `tomori-render`.
 
 CPU tests check bounded, finite, deterministic geometry and an unobstructed
 central work volume, periodic noise and render-target size bounds. A Vulkan

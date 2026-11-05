@@ -3548,7 +3548,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tomori-client",
- "tomori-environment-sky",
  "tomori-protocol",
  "tomori-render",
  "tomori-scene",
@@ -3574,8 +3573,8 @@ dependencies = [
  "bytemuck",
  "glam",
  "image",
- "naga",
  "pollster",
+ "tomori-render",
  "wgpu",
 ]
 
@@ -3610,6 +3609,7 @@ dependencies = [
  "gltf",
  "image",
  "log",
+ "naga",
  "pollster",
  "serde_json",
  "tomori-environment-sky",

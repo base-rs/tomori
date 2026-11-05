@@ -129,6 +129,9 @@ jobs:
       - name: Build the scene on its own
         # The platform-neutral client, with only its own features, likewise.
         run: cargo apk -- build --package tomori-scene --target aarch64-linux-android --locked
+      - name: Build the renderer on its own
+        # The renderers, with only their own features, likewise, so that a host-only dependency in them is caught.
+        run: cargo apk -- build --package tomori-render --target aarch64-linux-android --locked
       - uses: actions/upload-artifact@v7
         with:
           name: tomori-apk

@@ -56,7 +56,8 @@ serde_json = "1"
 tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
 # A server on a loopback port, with a scripted backend, for the command's tests.
 tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
-tomori-environment-sky = { version = "0.1.0", path = "../environment-sky", features = ["test-gpu"] }
+# The device for offscreen rendering tests.
+tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
 
 # The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See the Tests section of readme.md.
 [[package.metadata.bake.test.coverage.exclude]]

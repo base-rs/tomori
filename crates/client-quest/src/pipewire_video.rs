@@ -295,7 +295,7 @@ impl Drop for Producer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tomori_environment_sky::test_gpu;
+    use tomori_render::test_gpu;
 
     #[test]
     fn frame_layout_is_tightly_packed_rgba_1080p() {

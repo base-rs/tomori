@@ -12,8 +12,6 @@ mod light_bake;
 mod lightmap;
 mod mesh;
 mod shadows;
-#[cfg(any(test, feature = "test-gpu"))]
-pub mod test_gpu;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -253,7 +251,7 @@ impl Sky {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_gpu;
+    use tomori_render::test_gpu;
 
     #[test]
     fn every_shader_is_valid_wgsl() {

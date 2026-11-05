@@ -99,6 +99,7 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_gpu;
     use crate::{
         arrival,
         controller::Pose,
@@ -107,7 +108,6 @@ mod tests {
     };
     use glam::Vec3;
     use std::time::Instant;
-    use tomori_environment_sky::test_gpu;
 
     #[test]
     fn a_frame_draws_its_panels_where_the_step_placed_them() {

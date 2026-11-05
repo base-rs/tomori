@@ -10,6 +10,8 @@ pub mod controller;
 pub mod controller_graphics;
 pub mod graphics;
 pub mod scene_graphics;
+#[cfg(any(test, feature = "test-gpu"))]
+pub mod test_gpu;
 #[cfg(test)]
 mod test_support;
 pub mod ui_panel;
