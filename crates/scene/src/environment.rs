@@ -103,6 +103,13 @@ mod tests {
     const FLOOR: Environment = Environment::new("floor");
 
     #[test]
+    fn the_default_is_the_grid() {
+        // Tested here as well as where other crates use it, so that its coverage does not depend on whether they
+        // inline it.
+        assert_eq!(Environment::default(), Environment::MINIMAL);
+    }
+
+    #[test]
     fn the_starting_scenery_is_named_or_sky() {
         crate::test_support::log_everything();
         let drawable = Environment::BUILT_IN;

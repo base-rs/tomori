@@ -1869,6 +1869,17 @@ mod tests {
     }
 
     #[test]
+    fn participants_are_remembered_as_long_as_asked() {
+        // Tested here as well as by the integration tests that use it, so that its coverage does not depend on
+        // whether they inline it.
+        let retention = Duration::from_secs(60);
+        assert_eq!(
+            server().with_participant_retention(retention).retention,
+            retention
+        );
+    }
+
+    #[test]
     fn cards_are_read_on_a_thread_of_their_own_and_a_lost_read_is_a_failure() {
         use crate::cards::{Failure, Fetched};
         let live = Cancellation::new();
