@@ -1858,15 +1858,15 @@ mod tests {
         let rate = Arc::new(AtomicU32::new(16_000));
         let mut voice = voice(&rate, true, Some("The microphone failed."));
         voice.begin(&client, "u1".into(), 0, None).unwrap();
+        // Waits at least once, however soon the capture fails, so that how the race went changes no coverage.
         let deadline = Instant::now() + Duration::from_secs(5);
-        let failure = loop {
-            if let Some(failure) = voice.failure() {
-                break failure;
-            }
+        let mut failure = None;
+        while failure.is_none() {
             assert!(Instant::now() < deadline, "no failure reported");
             std::thread::sleep(Duration::from_millis(1));
-        };
-        assert_eq!(failure, "The microphone failed.");
+            failure = voice.failure();
+        }
+        assert_eq!(failure.as_deref(), Some("The microphone failed."));
         voice.finish(Some(&client), false).unwrap();
 
         // Closed before it is noticed: nothing is reported once the recording has ended.
@@ -2158,14 +2158,15 @@ mod tests {
 
     /// Poll the speaker until it reports a failure.
     fn failure(speaker: &mut Speaker) -> String {
+        // Waits at least once, however soon the speaker fails, so that how the race went changes no coverage.
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(error) = speaker.poll() {
-                return error;
-            }
+        let mut error = None;
+        while error.is_none() {
             assert!(Instant::now() < deadline, "no failure reported");
             std::thread::sleep(Duration::from_millis(1));
+            error = speaker.poll();
         }
+        error.unwrap()
     }
 
     fn feedback_connection() -> (Connection, Conversation) {

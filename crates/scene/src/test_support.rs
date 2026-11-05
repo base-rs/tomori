@@ -180,7 +180,7 @@ impl Remote {
         self.client.send(message).expect("the message is queued");
     }
 
-    /// The first message `select` chooses, waiting for it, while `meanwhile` runs between events, such as the frames of the client tested.
+    /// The first message `select` chooses, waiting for it, while `meanwhile` runs before each look at the events, such as the frames of the client tested. It runs at least once, however soon the message arrives.
     pub fn wait_for<T>(
         &self,
         mut meanwhile: impl FnMut(),
@@ -189,6 +189,7 @@ impl Remote {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             assert!(std::time::Instant::now() < deadline, "timed out");
+            meanwhile();
             while let Some(event) = self.client.try_event() {
                 if let tomori_client::Event::Message(message) = event
                     && let Some(selected) = select(&message)
@@ -196,7 +197,6 @@ impl Remote {
                     return selected;
                 }
             }
-            meanwhile();
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
