@@ -117,6 +117,9 @@ enum Talk {
         utterance: String,
         heard: String,
         answering: bool,
+        /// What the server last said it is doing with the words, once it has them all; `None` until then, and
+        /// throughout from a server that does not say. See `design/speech.md`.
+        received: Option<crate::recording::Received>,
     },
 }
 
@@ -802,8 +805,22 @@ impl Conversation {
                     *heard = text;
                 }
             }
-            // Not yet shown: the recording card says "Sending…" until the outcome.
-            ServerMessage::TranscriptProgress { .. } => {}
+            ServerMessage::TranscriptProgress {
+                utterance,
+                stage,
+                part,
+            } => {
+                // Only words on their way are being transcribed; an earlier utterance's progress is no longer shown.
+                if let Some(Talk::Sending {
+                    utterance: ours,
+                    received,
+                    ..
+                }) = self.talk.as_mut()
+                    && *ours == utterance
+                {
+                    *received = Some(crate::recording::Received { stage, part });
+                }
+            }
             ServerMessage::TranscriptFailed { utterance, error } => {
                 log::warn!("Utterance {utterance} failed: {error}");
                 if self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str()) {
@@ -2387,6 +2404,7 @@ impl Conversation {
                     utterance,
                     heard,
                     answering,
+                    received: None,
                 });
             }
             return;
@@ -2618,11 +2636,15 @@ impl Conversation {
                 });
             }
             Some(Talk::Sending {
-                heard, answering, ..
+                heard,
+                answering,
+                received,
+                ..
             }) => {
                 return Some(Phase::Sending {
                     heard: heard.clone(),
                     answering: *answering,
+                    received: *received,
                 });
             }
             None => {}
@@ -3404,8 +3426,22 @@ impl Conversation {
                 },
                 tail(heard, COLUMNS - 12)
             )),
-            Some(Talk::Sending { heard, .. }) => {
-                Some(format!("Sending: {}...", tail(heard, COLUMNS - 12)))
+            Some(Talk::Sending {
+                heard, received, ..
+            }) => {
+                let label = match received {
+                    None => "Sending",
+                    Some(received)
+                        if received.stage == tomori_protocol::TranscriptStage::Waiting =>
+                    {
+                        "Waiting"
+                    }
+                    Some(_) => "Transcribing",
+                };
+                Some(format!(
+                    "{label}: {}...",
+                    tail(heard, COLUMNS - 5 - label.len())
+                ))
             }
             None => None,
         };
@@ -3772,6 +3808,7 @@ mod tests {
     use super::*;
     use crate::server_choice::{Source, USB};
     use std::time::Duration;
+    use tomori_protocol::TranscriptStage;
     use tomori_protocol::{
         AgentInstructions, Approval, ApprovalOption, Message, Participant, Question, QueueEntry,
     };
@@ -6341,6 +6378,21 @@ mod tests {
         assert!(conversation.text().contains("Sending: hello the..."));
         conversation.apply(transcript(&utterance, "hello there", false));
         assert!(conversation.text().contains("Sending: hello there..."));
+        // The status line says what the server says it is doing with them.
+        for (stage, said) in [
+            (TranscriptStage::Waiting, "Waiting: hello there..."),
+            (
+                TranscriptStage::Transcribing,
+                "Transcribing: hello there...",
+            ),
+        ] {
+            conversation.apply(Event::Message(ServerMessage::TranscriptProgress {
+                utterance: utterance.clone(),
+                stage,
+                part: None,
+            }));
+            assert!(conversation.text().contains(said));
+        }
         conversation.apply(transcript(&utterance, "Hello there.", true));
         assert!(conversation.text().contains("Mic off"));
         // Releasing again does nothing.
@@ -7249,18 +7301,44 @@ mod tests {
                 if elapsed >= Duration::from_secs(2) && heard == "check the"
         ));
         conversation.talk(false);
-        assert_eq!(
-            conversation.recording_phase(Instant::now()),
+        let sending = |received| {
             Some(Phase::Sending {
                 heard: "check the".into(),
-                answering: false
+                answering: false,
+                received,
             })
-        );
+        };
+        // Sending until the server says it has the words, as an older server never does.
+        assert_eq!(conversation.recording_phase(Instant::now()), sending(None));
+        // Then what it is doing with them, as it says; another utterance's progress is not this one's.
+        let progress = |utterance: &str, stage, part| {
+            Event::Message(ServerMessage::TranscriptProgress {
+                utterance: utterance.to_owned(),
+                stage,
+                part,
+            })
+        };
+        conversation.apply(progress("earlier", TranscriptStage::Waiting, None));
+        assert_eq!(conversation.recording_phase(Instant::now()), sending(None));
+        let part = Some(tomori_protocol::TranscriptPart { number: 2, of: 3 });
+        for (stage, part) in [
+            (TranscriptStage::Transcribing, None),
+            (TranscriptStage::Waiting, None),
+            (TranscriptStage::Transcribing, part),
+        ] {
+            conversation.apply(progress(&utterance, stage, part));
+            assert_eq!(
+                conversation.recording_phase(Instant::now()),
+                sending(Some(crate::recording::Received { stage, part }))
+            );
+        }
         conversation.apply(Event::Message(ServerMessage::Transcript {
-            utterance,
+            utterance: utterance.clone(),
             text: "check the CI".into(),
             finished: true,
         }));
+        // Progress after the outcome changes nothing.
+        conversation.apply(progress(&utterance, TranscriptStage::Transcribing, None));
         conversation.apply(space(|space| {
             space.queue = vec![
                 entry("q-1", "Bob", QueueState::Queued),
@@ -8496,7 +8574,8 @@ mod tests {
                 phase,
                 crate::recording::Phase::Sending {
                     heard: String::new(),
-                    answering: false
+                    answering: false,
+                    received: None,
                 }
             );
             // An answer names the question it answers.
