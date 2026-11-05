@@ -203,7 +203,7 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
     let github = GitHubService::start(repository);
     let state = State::new("cards");
     let server = start(github.github(), &state);
-    let (_, owner) = server.issue("Ada's Quest", Grant::Owner);
+    let (_, owner) = server.issue("Ada", Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     let space = create(&mut ada, "github");
     assert!(space.cards);
@@ -348,7 +348,8 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
     assert_eq!(prompts[2].text, "Ada: or this?");
 
     // Elsewhere there are no cards to watch, place or point at.
-    let mut dee = server.connect_with_token("dee", "Dee", &owner);
+    let (_, dee_token) = server.issue("Dee", Grant::Owner);
+    let mut dee = server.connect_with_token("dee", "Dee", &dee_token);
     let sky = create(&mut dee, "sky");
     assert!(!sky.cards);
     dee.send(&ClientMessage::WatchCards);
@@ -424,7 +425,7 @@ fn cards_are_watched_placed_kept_and_pointed_at_without_the_token_ever_leaving_t
     let kept = std::fs::read_to_string(state.0.join(tomori_server::kept::SPACES_FILE)).unwrap();
     assert!(kept.contains(ISSUE) && !kept.contains(TOKEN));
     let server = start(github.github(), &state);
-    let (_, owner) = server.issue("Ada's Quest", Grant::Owner);
+    let (_, owner) = server.issue("Ada", Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     ada.send(&ClientMessage::Join {
         space: space.id.clone(),
@@ -447,7 +448,7 @@ fn a_failed_read_is_shown_to_watchers_and_tried_again_later() {
     let github = GitHubService::start(|| (401, "{}".to_owned()));
     let state = State::new("refused");
     let server = start(github.github(), &state);
-    let (_, owner) = server.issue("Ada's Quest", Grant::Owner);
+    let (_, owner) = server.issue("Ada", Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     create(&mut ada, "github");
     ada.send(&ClientMessage::WatchCards);
@@ -495,7 +496,7 @@ fn a_used_up_rate_limit_answered_with_200_is_waited_for_and_said_once() {
     github.repository = "o/limited";
     let state = State::new("limited");
     let server = start(github.github(), &state);
-    let (_, owner) = server.issue("Ada's Quest", Grant::Owner);
+    let (_, owner) = server.issue("Ada", Grant::Owner);
     let mut ada = server.connect_with_token("ada", "Ada", &owner);
     create(&mut ada, "github");
     ada.send(&ClientMessage::WatchCards);
