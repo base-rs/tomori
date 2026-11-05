@@ -475,10 +475,12 @@ What the implementation changed from this plan:
   - These are one pull request, because the spectator's window was the same contents type as the server-less window, `Demo`. `Demo` is now the server-less window only, and the spectator crate has its own `SpectatorWindow`.
   - `desktop_window.rs` keeps the server-less and participant runners and gains `show(settings, open, with)` for other crates' contents. The closures that start contents once the window has a device stay in that excluded file.
   - `tomori --spectator…` still works beside `tomori-spectator`.
-- **The connection is not yet in `tomori-client`.** It is not a move:
-  - The connection calls 22 of the conversation's methods and carries out its `Action`s. In `tomori-client` it would drive the conversation through a public trait, with `Action`, the server choices, identity, the audio device traits, the feedback model and the poses moving with it.
-  - Its 2,250 lines of tests reach into its private state and use the real `Conversation`. They cannot stay in the scene, and in `tomori-client` they cannot use the scene's `Conversation`: a dev-dependency cycle would give them a second copy of `tomori-client`. They would have to be rewritten against a test session.
-  - That is a design change to a published crate's interface, so it is proposed as its own pull request, after the builder.
+- **The connection moves to `tomori-client` in #174**, after the builder, as its own design change:
+  - The boundary is a trait, `tomori_client::connection::Session`, which the scene's `Conversation` implements, so the scene depends on the client and never the reverse. A message channel was not needed: the connection already runs on the frame's thread.
+  - The connection needs five things from a session: `next_action`, taken one at a time, so that a report can withdraw what is queued behind a failure; `apply` for the client's events; `report` for its own `Report`s (the server given at startup, the kept Feedback setting, focus loss, the servers found, the frame's tick, the connection generation, failures, the microphone failing, words not sent, security notices and replaying); `is_browsing`; and `observe`, which tells the feedback model what waits for the participant.
+  - The scene needs from the connection only what it had: `poll`, `feedback`, `request_microphone`, `send_presence` with protocol poses, and `listen`, which hands the scene the other participants' heads so that it places their voices on its seats.
+  - The identity and its store of certificates and tokens, the server choices, the feedback model, and the `Capture` and `Playback` traits moved with it; the helpers for device adapters stay in the scene.
+  - The tests drive the connection through a scripted session, against a scripted peer and the real test server. `tomori-client` dev-depends on `tomori-server` by path only, as Sky does on `tomori-render`, so that packaging leaves the cycle out.
 - **Sceneries and the builder:**
   - `Scenery::prepare` and `encode` take `&self`, as Sky's hooks do, because the renderer draws with `&self`.
   - `Scenery` gains `resize`, which Sky needs.
