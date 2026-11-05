@@ -543,6 +543,8 @@ fn an_engine_stopped_while_applying_what_waits_stops_and_ignores_audio_for_no_ut
             })
             .unwrap();
     }
+    // Nor does falling behind fail one that is not open.
+    sender.send(Command::Behind { key: 9 }).unwrap();
     sender.send(Command::Stop).unwrap();
     assert!(!engine.turn());
     let Ok(TranscriptEvent::Failed(Error::Stopped(_))) = events.try_recv() else {

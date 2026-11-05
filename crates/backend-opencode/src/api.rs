@@ -2102,10 +2102,15 @@ pub(crate) mod tests {
         );
     }
 
-    /// A first page of as many messages as are read, and another.
+    /// A first page of as many messages as are read, after a record that is
+    /// not a message, and another.
     fn many_messages(_method: &str, _path: &str) -> (&'static str, String) {
-        let messages = (0..100)
-            .map(|index| json!({"id": format!("m{index}"), "type": "user", "text": ""}))
+        let switched = json!({"id": "switched", "type": "agent-switched"});
+        let messages = std::iter::once(switched)
+            .chain(
+                (0..100)
+                    .map(|index| json!({"id": format!("m{index}"), "type": "user", "text": ""})),
+            )
             .collect();
         page(messages, json!("more"))
     }
