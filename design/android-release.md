@@ -35,7 +35,7 @@ Local builds, `scripts/android.sh build` and `run`, stay in the dev profile, sig
 
 ## Setup
 
-The maintainer, before the first release that should carry the APK:
+The maintainer set up Tomori's release key this way in November 2026, before the first release to carry the APK; its certificate's digest is `8a055eaf0845c023bd7cd9afe9ff45275f10fdc6b8688759ca11e6767f1676bd`. A new key, should the key ever be replaced, is set up the same way:
 
 1. Generates the key on a trusted machine, outside any checkout. Its distinguished name is published in every APK's certificate. `keytool` prompts for the password:
 
@@ -54,7 +54,7 @@ The maintainer, before the first release that should carry the APK:
 
 3. Creates the `android-release` environment, deployable only from `main`, with the maintainer as required reviewer, and adds the secrets `ANDROID_RELEASE_KEYSTORE`, the keystore base64-encoded, and `ANDROID_RELEASE_KEYSTORE_PASSWORD`, which `release-artifacts.yml` gives its sign step as the files `$RELEASE_SECRETS/ANDROID_RELEASE_KEYSTORE` and `$RELEASE_SECRETS/ANDROID_RELEASE_KEYSTORE_PASSWORD`.
 
-4. Makes the `v*` tag ruleset block updates as well as deletion, as `cargo bake cargo:setup:github:apply` does from bake-cargo 0.8.0.
+4. Makes the `v*` tag ruleset block updates as well as deletion, as `cargo bake cargo:setup:github:apply` does.
 
 ## Rationale
 
