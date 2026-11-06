@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! An example of a server built on `tomori-server` by another project: it offers a backend and an environment of its own, registered through [`tomori_server::Builder`], beside Tomori's, without changing Tomori. Its executable, `tomori-example-server`, takes the same command line as `tomori-server`, so `tomori-example-server --backend placeholder` offers the placeholder backend.
-
 mod placeholder;
 
 pub use placeholder::{Placeholder, PlaceholderSession};

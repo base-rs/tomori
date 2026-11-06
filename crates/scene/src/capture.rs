@@ -7,7 +7,6 @@
 //!
 //! - a device that pushes interleaved frames to a callback, such as cpal's, passes them through [`downmix`];
 //! - a device that is read from, such as AAudio's, implements [`InputStream`] and runs [`run_capture`] on its capture thread, which decides what is delivered at the push-to-talk boundary and when a lost connection stops live capture.
-
 use tomori_client::capture::Active;
 
 /// Average interleaved channels into mono, for a device adapter whose device delivers `channels` samples per frame. `output` is cleared first, and receives one sample per whole frame; a trailing partial frame is dropped.

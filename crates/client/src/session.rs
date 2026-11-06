@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The connection thread: one duplex exchange at a time, reconnecting with backoff.
-
 use std::cell::Cell;
 use std::convert::Infallible;
 use std::future::Future;

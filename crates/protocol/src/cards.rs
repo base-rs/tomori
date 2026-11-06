@@ -6,7 +6,6 @@
 //! a space's snapshots stay small, and only to clients that ask with [`crate::ClientMessage::WatchCards`]. It is
 //! meant to move onto the environment state synchronization of issue #76: the cards are a keyed collection, placing
 //! one is an intent, and watching is interest. See `design/github.md`.
-
 use serde::{Deserialize, Serialize};
 
 use crate::Pose;

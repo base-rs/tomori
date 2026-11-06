@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-server` process: its scheduler, its console thread, and how it handles SIGINT and SIGTERM. Ending the process at once is in `exit.rs`.
-
 use base_scheduler::Cancellation;
 use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::block_on;

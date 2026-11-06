@@ -4,7 +4,6 @@
 //! Markdown-lite: a message's Markdown as blocks of text with their emphasis, for the transcript to style, so that none of `**`, `#` or backticks shows. Parsed with `base-markdown`, as the speech crate splits replies.
 //!
 //! Headings, list items with their bullets or numbers, code blocks, quotes, rules and table rows are blocks; strong text, emphasis and inline code are marked within them; links show their text only.
-
 use std::sync::LazyLock;
 
 use base_markdown::{

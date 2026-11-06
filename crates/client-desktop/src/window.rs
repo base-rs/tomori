@@ -4,7 +4,6 @@
 //! What a desktop window gives the contents it shows, and what they ask of it, so that the contents are tested without a display.
 //!
 //! The window itself, its winit event loop and its Vulkan surface, is `desktop_window.rs`, which holds only those calls: it turns each window event into an [`Input`], and draws through a [`Surface`]. Everything the window does with them is decided here and in the contents: the server-less window ([`crate::desktop`]), the participant's ([`crate::desktop_participant`]), and the spectator's, in `tomori-client-spectator`. See `design/desktop.md`.
-
 use anyhow::Result;
 use glam::Vec2;
 use std::time::Instant;

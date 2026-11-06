@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Ending a child process with its parent. On Linux this runs in the forked child before it executes its program, where the child's coverage counters are discarded with its memory, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
-
 use std::process::Command;
 
 /// Have Linux end the process `command` starts, with `SIGTERM`, when this process ends, even if it is killed and cannot run `Drop`. Elsewhere, the child is only ended by `Drop`.

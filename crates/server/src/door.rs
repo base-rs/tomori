@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Admission at the door: the credentials on the HTTP request that opens a connection decide what it is admitted as, before it reaches the hub. See `design/security.md`.
-
 use std::sync::Arc;
 
 use tomori_security::{

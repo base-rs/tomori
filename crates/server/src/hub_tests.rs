@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The hub's rarer paths, driven through [`Hub::handle`] and the calls the supervisor and the space drivers make: refusals, a driver that has stopped, and state that has moved on meanwhile.
-
 use super::*;
 use crate::fake::FakeBackend;
 use crate::outbox::Popped;

@@ -4,7 +4,6 @@
 //! Building a headset of your own on Tomori's: the sceneries it draws, by the identifiers that spaces name their environments by, and running it on the headset, a desktop OpenXR runtime or the desktop window. [`Builder::default`] is Tomori's own build, which the `tomori` executable and APK run.
 //!
 //! An environment's client half, which [#75](https://github.com/ioquatix/tomori/issues/75) defines, will be registered here too, once it exists. Until then a build registers sceneries: what it draws for an environment that its server offers.
-
 use tomori_render::scenery::{Sceneries, Scenery, Target};
 use tomori_scene::environment::Environment;
 

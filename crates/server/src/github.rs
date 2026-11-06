@@ -6,7 +6,6 @@
 //!
 //! The token is never sent to clients, put in a space's state, told to the agent or logged: [`Token`]'s `Debug` hides
 //! it, it has no `Display`, and it is read only to make a request's `authorization` field.
-
 use std::ffi::OsString;
 use std::fmt;
 use std::process::Command;

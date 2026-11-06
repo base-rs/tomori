@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Spaces run only beneath the workspace roots, and only a limited number at once. See `design/workspaces.md`.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

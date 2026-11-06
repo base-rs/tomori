@@ -13,7 +13,6 @@
 //! A participant who joins or returns while listening, having missed part of the latest reply, streams from that reply's start and then everything after it, until their cursor reaches the live edge, where they become live. A replay streams the same way, from the start of the reply asked for, but stops as soon as a later reply starts live: live speech wins.
 //!
 //! Nothing here touches the network or a clock; the hub records items, applies joins, departures and engagement, and asks [`Retention::pace`] what each streaming listener should be sent at a given time.
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

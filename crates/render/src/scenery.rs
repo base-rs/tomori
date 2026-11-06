@@ -4,7 +4,6 @@
 //! Scenery drawn natively in each eye's pass, as Sky is, and the sceneries a client can draw, by the identifiers that spaces name their environments by. See `design/environments.md`.
 //!
 //! The contract is Sky's existing hooks, named for what they do. The Minimal grid is built into the [`Renderer`](crate::graphics::Renderer), and is what a client shows for an environment it cannot draw. An environment's client half, which #75 defines, will register its scenery through the same [`Sceneries`].
-
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};

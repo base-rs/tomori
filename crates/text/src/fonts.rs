@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The bundled faces, in the order a character is looked for in them: Noto Sans Mono for Latin, Greek, Cyrillic, punctuation, box drawing and most symbols; Noto Sans Symbols 2 and Noto Sans Math for the dingbats and arrows it lacks; and Noto Sans JP, cut to the kana, punctuation and first and second level kanji of JIS X 0208, for Japanese. They are compiled in, and their outlines are read only when a glyph is first drawn.
-
 use ab_glyph::{Font, FontRef, GlyphId};
 use std::sync::LazyLock;
 

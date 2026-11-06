@@ -4,7 +4,6 @@
 //! Sentence boundaries within the speakable text of one complete leaf block.
 //!
 //! Every decision depends only on the text before the boundary and the first non-space character after it.
-
 use std::ops::Range;
 
 /// Words that end with a full stop without ending a sentence.

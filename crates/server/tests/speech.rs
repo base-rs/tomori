@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Speech recognition and agent speech end to end, with a fake recognizer and synthesizer in place of the real engines.
-
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 

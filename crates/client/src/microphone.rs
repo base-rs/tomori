@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Outgoing microphone audio. See `design/live-audio.md` and `design/speech.md`.
-
 use tomori_protocol::{AudioFrame, ClientMessage, Gate};
 
 use crate::{SendError, Sender};

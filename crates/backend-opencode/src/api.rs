@@ -6,7 +6,6 @@
 //! Every helper builds a [`Request`], submits it through the pooled
 //! [`Client`], and parses the JSON body. The client and its requests borrow
 //! from the scheduler, so these run on the connection thread.
-
 use base_http::{
     Field, Method, Path, Request,
     body::{BodyFrame, BufferedBody, EmptyBody, ReadableBody},

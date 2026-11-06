@@ -26,13 +26,13 @@ app = []
 [dependencies]
 anyhow = "1"
 ash = "0.38"
-tomori-client = { version = "0.1.0", path = "../client" }
+tomori-client = { version = "0.2.0", path = "../client" }
 glam = "0.30"
 log = "0.4"
 openxr = "0.22"
-tomori-protocol = { version = "0.1.0", path = "../protocol" }
-tomori-render = { version = "0.1.0", path = "../render" }
-tomori-scene = { version = "0.1.0", path = "../scene" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tomori-render = { version = "0.2.0", path = "../render" }
+tomori-scene = { version = "0.2.0", path = "../scene" }
 serde = { version = "1", features = ["derive"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 wgpu-hal = { version = "30.0.1", features = ["vulkan"] }
@@ -45,8 +45,8 @@ ndk = { version = "0.9", features = ["audio", "api-level-29"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
-tomori-client-desktop = { version = "0.1.0", path = "../client-desktop" }
-tomori-client-spectator = { version = "0.1.0", path = "../client-spectator" }
+tomori-client-desktop = { version = "0.2.0", path = "../client-desktop" }
+tomori-client-spectator = { version = "0.2.0", path = "../client-spectator" }
 
 # Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -56,13 +56,13 @@ wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
 pollster = "0.4"
 serde_json = "1"
 # The scene's test devices and TLS test server.
-tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
+tomori-scene = { version = "0.2.0", path = "../scene", features = ["testing"] }
 # A server on a loopback port, with a scripted backend, for the command's tests.
-tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
+tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
 # The device for offscreen rendering tests, and a scenery that counts what it draws.
-tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
+tomori-render = { version = "0.2.0", path = "../render", features = ["test-gpu"] }
 # A window shown on that device, to run the builder's window modes without a display.
-tomori-client-desktop = { version = "0.1.0", path = "../client-desktop", features = ["testing"] }
+tomori-client-desktop = { version = "0.2.0", path = "../client-desktop", features = ["testing"] }
 
 # The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See the Tests section of readme.md.
 [[package.metadata.bake.test.coverage.exclude]]

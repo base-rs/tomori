@@ -7,7 +7,6 @@
 //!
 //! Where cards are put is the space's, shared by everyone in it, so a card put down is sent to the server, and shown
 //! where it was put until the server's cards say so too. Nothing here reaches GitHub.
-
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3};

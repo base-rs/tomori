@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Stopping engine threads when the server shuts down.
-
 use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
     time::Instant,

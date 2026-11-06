@@ -4,7 +4,6 @@
 //! Splitting a long utterance at its pauses, so each part fits the offline recognizer's 30 second window.
 //!
 //! Whisper decodes at most 30 seconds at once. An utterance longer than [`MAX_SEGMENT`] is decoded as consecutive segments, each ending at the quietest point of the last [`SEARCH`] before its limit, so a cut falls between words rather than through one. A [`VoiceActivity`] detector, when there is one, decides first: a point it hears no speech around is preferred to one it does, and loudness decides between the rest. Only a signal with no pause at all, such as a steady tone or noise, is cut at the limit itself.
-
 use std::ops::Range;
 
 use super::RATE;

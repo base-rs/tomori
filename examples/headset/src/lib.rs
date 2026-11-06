@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! An example of a headset built on `tomori-client-quest` by another project: it draws a scenery of its own, a flat coloured floor, for the placeholder environment that `tomori-example-server` offers, registered through [`tomori::Builder`] beside Tomori's own, without changing Tomori. Its executable, `tomori-example-headset`, takes the same command line as `tomori`.
-
 use glam::{Mat4, Vec3};
 use tomori_render::scenery::{Scenery, Target};
 use wgpu::util::DeviceExt;

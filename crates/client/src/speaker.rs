@@ -4,7 +4,6 @@
 //! The platform speaker, which plays other participants and the agent's speech through the client's [`crate::playback::Player`], behind a trait that each client's devices implement. See `design/live-audio.md`.
 //!
 //! The output stream stays open while connected. It opens and closes on its own thread, so that the frame does not wait for the device. Its callback renders the player at the device rate; [`crate::connection::Connection`] controls the player and silences it while push-to-talk records. `tomori-scene`'s `playback` module renders the player into a device's format.
-
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},

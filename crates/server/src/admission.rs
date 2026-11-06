@@ -6,7 +6,6 @@
 //! A peer that opens a socket and sends nothing, or trickles a request head, or leaves a keep-alive connection idle, would otherwise hold one of the server's connection slots for ever. Each connection is idle from when it is accepted until its request head is complete, and again from when a response is finished until the next head is complete. A connection that stays idle for the request timeout is cancelled. `/connect` exchanges are then covered by the hub, which releases a connection that has not said Hello within the same timeout, and by the keepalive sweep. See `design/server.md`.
 //!
 //! TODO(upstream): base-http1's `RequestReader::read_request` and base-http-server's `serve_connection` have no request-head or keep-alive idle timeout. Once `base_http1::Options` (or `base_http_server::Options`) offers a deadline for reading a request head, measured from accept and from the end of the previous response, use it and remove this module.
-
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};

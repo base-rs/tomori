@@ -10,7 +10,6 @@
 //! Paragraph, heading and list item text is spoken, with emphasis markers removed and links read by their text. Code blocks, tables, raw HTML, images, footnotes and bare URLs are not.
 //!
 //! How the message is divided into deltas never changes the result. A reference or footnote definition applies only to uses in its own or a later document-level block: an earlier use remains literal, and its leftover `[label]` or `[^note]` syntax is removed, so it usually reads the same.
-
 mod blocks;
 mod sentence;
 

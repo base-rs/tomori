@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Ducking: agent speech eases down while a person speaks, so that people talking with each other come first, and eases back once they stop. It is never stopped: the stream keeps playing underneath. See `design/spatial-audio.md`.
-
 use std::time::Duration;
 
 /// How far agent speech is lowered while a person speaks.

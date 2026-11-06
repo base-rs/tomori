@@ -4,7 +4,6 @@
 //! The GitHub environment's prototype against a fake GitHub: cards reach participants who watch them, are read again
 //! only while someone does, are placed for everyone in the space and kept with it, and pointing at one tells the agent
 //! which; the token never reaches a client, the agent, the record of spaces or the log. See `design/github.md`.
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;

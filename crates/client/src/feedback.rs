@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! One vocabulary of feedback, heard and felt: each [`Event`] pairs a short sound cue with a controller vibration on the hand that acted, with the same rhythm, filtered by the participant's [`Settings`]. Pure, so that the frame loop and the connection only report what happened and apply what comes out. See `design/feedback.md`.
-
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 

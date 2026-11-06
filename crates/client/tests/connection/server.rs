@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! A minimal Tomori server on `base-http-server`: it answers each `/connect` request body with a response body that streams concurrently, frame by frame.
-
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;

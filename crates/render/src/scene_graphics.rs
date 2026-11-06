@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Drawing what the frame step decided: [`draw`] applies a [`Frame`] to the renderer, and [`Panels`] holds the shared panels' GPU buffers, for both the headset and the desktop window.
-
 use glam::Mat4;
 
 use crate::{

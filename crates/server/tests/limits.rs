@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Every server frame stays within the protocol's frame limit, whatever clients and the agent send. See `design/server.md`.
-
 use std::sync::Arc;
 use tomori_protocol::{ClientMessage, MAX_FRAME_BYTES, QueueState, ServerMessage};
 

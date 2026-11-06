@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Devices and connections for tests, from [`tomori_scene::test_support`], and saving what a rendering test drew.
-
 pub use tomori_scene::test_support::*;
 
 /// Save `sheet`, what a test drew, as a PNG at the path the environment variable `variable` names, if it names one, to look at.

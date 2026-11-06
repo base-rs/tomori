@@ -5,7 +5,6 @@
 
 //!
 //! It needs an OpenXR runtime and a headset, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`. The values it reads become plain types, and the choices it makes from what the runtime offers are made, in [`crate::xr_types`].
-
 use crate::{
     controller,
     feedback::Hand,

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Tasks that build, sign and check the headset's release APK, configured by the workspace's `[workspace.metadata.bake.android.apk]` and the package's `[package.metadata.android]`. See `design/android-release.md`.
-
 pub mod apk;
 
 use apk::{Application, Tools};

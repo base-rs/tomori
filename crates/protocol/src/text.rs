@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Rules for text that people choose and others read: display names, and text quoted on one line, such as in a context block told to the agent. See `design/security.md`.
-
 use unicode_normalization::UnicodeNormalization;
 
 /// The most characters in a display name.

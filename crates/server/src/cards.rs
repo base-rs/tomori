@@ -7,7 +7,6 @@
 //!
 //! The cards are fetched once for the server and shared by every space in the environment; each space keeps its own
 //! placements, which are kept with the space across restarts and never sent to the source.
-
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 

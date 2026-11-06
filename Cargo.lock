@@ -3480,7 +3480,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tomori-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-backend-opencode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "base-http",
@@ -3514,7 +3514,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base-endpoint",
  "base-http",
@@ -3535,7 +3535,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-client-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-client-quest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -3580,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-client-spectator"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3601,7 +3601,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-discovery"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flume",
  "mdns-sd",
@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-environment-sky"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3622,7 +3622,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-example-headset"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3636,7 +3636,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-example-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "futures-lite",
@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "serde",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "basisu",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base-markdown",
  "bytemuck",
@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-security"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "rcgen",
@@ -3712,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "base-endpoint",
@@ -3743,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-speech"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base-markdown",
  "libc",
@@ -3754,7 +3754,7 @@ dependencies = [
 
 [[package]]
 name = "tomori-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
 ]

@@ -4,7 +4,6 @@
 //! When the headset asks for the microphone, ahead of the first recording, and how it follows the answer without waiting for it. See `design/arrival.md`.
 //!
 //! The platform's dialog is a system panel shown over the immersive app. Asking as the session first gained focus put it up before the app had shown a single frame, while the system was still settling the launch, and the participant could be left in a black world. Asking is a call that returns at once, so it never stopped frames; what matters is when it is made. So the request waits until the scene has been shown with focus for [`SETTLE`]. Android answers later, with no callback that a native activity receives, so the frame loop checks again every [`CHECK`] until the microphone is allowed or the request has evidently been answered without allowing it; those checks only decide what the participant is told and what is logged, and the frame loop never waits for them.
-
 use std::time::{Duration, Instant};
 
 /// How long the scene must have been shown, with focus, before the request is made, so that the dialog appears over a world already drawn.

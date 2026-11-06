@@ -18,7 +18,6 @@
 //! attempt. The stream does not replay what was missed, so each session whose
 //! state had been read is read again once the stream reopens and presented
 //! with [`Event::Resynchronized`]; one that cannot be is closed with the reason.
-
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

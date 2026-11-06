@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The glyph atlas on the GPU: a single-channel texture holding `tomori-text`'s atlas, which panels, labels and signs sample through one bind group. [`Glyphs::sync`] uploads the rows the atlas has gained since it last ran, from the shelf that was open then, and the whole atlas when it has grown, which also replaces the bind group. Glyphs never move in the atlas, so meshes built from it before stay valid.
-
 use std::sync::{Mutex, PoisonError};
 use tomori_text::atlas::{self, WIDTH};
 

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Asking the system for threads, a scheduler and signal handlers, which fails only when it runs out of them or refuses. A test refuses the next request for one on its own thread through `refuse`, to check what its caller does then.
-
 use std::io;
 use std::thread::{Builder, JoinHandle};
 

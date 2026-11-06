@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The panel's text as the console prints it, 40 columns by 12 rows of the characters the headset draws, laid out by [`crate::ui_text`]. On the headset and the desktop window, the status pill (`pill`) and the right wrist's transcript (`transcript`) show the conversation instead.
-
 pub const COLUMNS: usize = 40;
 pub const ROWS: usize = 12;
 

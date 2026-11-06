@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The connection's tests. Its parts, the voice, the speaker, the echo test and the replay, are tested on their own; the connection as a whole is driven through [`Session`] by [`Script`], a session that asks for what each test says and records what it is told, against a scripted [`Peer`] or a real [`Server`].
-
 use super::*;
 use crate::{
     capture::{Active, Failed, Samples},

@@ -6,7 +6,6 @@
 //! Backends report structured facts as [`Event`]s. They never produce text for
 //! display or speech; the server owns that projection. See
 //! `design/agent-backends.md`.
-
 use std::fmt;
 use std::future::Future;
 

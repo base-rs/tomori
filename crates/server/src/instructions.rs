@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session. See `design/spaces.md`.
-
 use tomori_protocol::AgentInstructions;
 
 /// The entry of Tomori's own layer.

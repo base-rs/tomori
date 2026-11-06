@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The spectator's borderless window, following a participant in a live space; and, with a PipeWire producer, the spectator's video source with the window as its preview: the window's contents, as `tomori-client-desktop`'s window shows them. See `design/spectator.md`.
-
 use crate::{
     graphics::Renderer,
     pipewire_video::{self, Producer, Video},

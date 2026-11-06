@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-spectator` executable's command line: which output, which space and whom to follow, and running it.
-
 use crate::SpectatorOptions;
 use anyhow::{Context, Result, bail};
 

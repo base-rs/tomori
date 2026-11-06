@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Spaces kept across server restarts. See `design/spaces.md`.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

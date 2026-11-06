@@ -10,7 +10,6 @@
 //! stream ends, the thread finds the service again and reconnects, and re-reads
 //! each attached session. Permissions and questions are answered only
 //! when a participant acts. See `design/agent-backends.md`.
-
 use std::sync::Mutex;
 
 use tomori_backend::{

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! File operations whose failures the operating system almost never produces, such as taking a lock or syncing a file, so that tests can inject them. Production builds run each operation directly.
-
 use std::io;
 use std::path::Path;
 

@@ -4,7 +4,6 @@
 //! Rendering the player for the platform speaker's device adapters. See `design/live-audio.md`.
 //!
 //! Each client's speaker is a [`tomori_client::speaker::Playback`], which its own crate implements over the platform's audio interface. Its output callback calls [`render_channels`] with the device's rate and channel count, which never waits for the player, so that the callback cannot stall the device.
-
 use tomori_client::{playback::Layout, speaker::Shared};
 
 /// Render the player at `sample_rate` into `output`, mono or interleaved stereo, or silence if another stream holds it.

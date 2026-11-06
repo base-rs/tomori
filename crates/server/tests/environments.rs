@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Changing a space's environment after it is created. See `design/environments.md`.
-
 use std::sync::Arc;
 
 use tomori_backend::Event;

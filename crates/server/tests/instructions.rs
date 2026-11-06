@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The instructions Tomori gives a space's agent, in layers. See `design/spaces.md`.
-
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 

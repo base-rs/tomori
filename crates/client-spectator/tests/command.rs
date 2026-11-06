@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-spectator` executable: its command line, and each output as far as it gets without a display, a server or PipeWire, as on a CI runner.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::RwLock;

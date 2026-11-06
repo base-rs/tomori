@@ -6,7 +6,6 @@
 //! The panel stays where it is while the participant looks around, so they can look past it at the swarm or a worker station and read it without it swimming against the world. Only when their head has turned more than [`TURN`] away from it, or moved more than [`MOVE`] from where it was placed, for longer than [`DWELL`], does it glide back in front of them over [`GLIDE`]. It is kept upright, turning only about the vertical axis, so looking down at it does not tip it.
 //!
 //! This is free of rendering code: it turns a head pose into the panel's pose each frame.
-
 use glam::{Mat4, Quat, Vec3};
 
 /// How far the head may turn away from the panel before it follows.

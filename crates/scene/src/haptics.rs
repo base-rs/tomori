@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The controllers' vibration: what [`tomori_client::feedback::Feedback`] hands out each frame, applied through OpenXR's haptic output action, one action, `haptic`, for both hands, which `xr.rs` creates and calls. See `design/feedback.md`.
-
 use std::time::Duration;
 use tomori_client::feedback::{Hand, Haptic};
 
