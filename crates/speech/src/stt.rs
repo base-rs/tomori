@@ -8,7 +8,6 @@
 //! Utterances from several participants may be active at once; they share the recognizer and are decoded in turn. Finishing utterances take priority over partial decodes. An utterance whose audio waits for more than [`BACKLOG`] samples to be decoded fails with [`Error::Behind`].
 //!
 //! A panic in the recognizer disables recognition until the process restarts: it is logged once, and every open and later utterance fails with [`Error::Stopped`].
-
 mod offline;
 mod punctuation;
 mod resample;

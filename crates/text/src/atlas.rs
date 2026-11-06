@@ -6,7 +6,6 @@
 //! Tiles are packed on shelves, left to right and top to bottom, each shelf as tall as its tallest tile; the atlas is [`WIDTH`] pixels wide and grows downwards, doubling, up to [`MAX_HEIGHT`]. The texture only needs the rows from the open shelf down uploaded after a change, as earlier shelves are closed. One atlas, behind [`with`], is shared by every panel and label in the process, so that each glyph is drawn into it once.
 //!
 //! Drawing a glyph costs tens of microseconds, so a thread that draws frames, such as the headset's, sets itself a [`Budget`] for each frame: once a frame has spent it, a glyph not yet drawn is not drawn, as if it had no outline, and [`waited`] counts it, so that whoever built a mesh with it builds it again next frame, when the glyph is drawn. [`frame`] starts the next frame's budget and says what this one spent. Other threads, such as tests' and the console's, have no budget, and draw every glyph when it is first asked for.
-
 use crate::{
     distance,
     fonts::{self, Kind},

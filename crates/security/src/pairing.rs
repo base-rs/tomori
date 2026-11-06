@@ -4,7 +4,6 @@
 //! The pairing code, shared by the server and the devices that pair with it. See `design/security.md`.
 //!
 //! The device commits to a random value before the server sends its own, and reveals it only then, so neither side, nor anyone relaying between them, can choose a value after seeing the other's. Both derive the code from the certificate fingerprint as each saw it and the two values: a relay holding another certificate shows the two ends different codes, except by a one-in-a-million chance.
-
 use sha2::{Digest, Sha256};
 
 use crate::Fingerprint;

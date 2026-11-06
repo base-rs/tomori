@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Silero voice activity detection in-process through sherpa-onnx, which finds the pauses at which the offline recognizer splits a long utterance. See [`super::segment`].
-
 use std::{
     ops::Range,
     path::{Path, PathBuf},

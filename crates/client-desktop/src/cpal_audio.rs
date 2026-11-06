@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Desktop audio streams' samples and errors, in cpal's terms: mixing a microphone's samples to mono, rendering the player into a speaker's format, and which stream errors lose audio. `desktop_audio.rs` opens the streams with these.
-
 use cpal::{FromSample, Sample};
 use tomori_client::{
     capture::Failed,

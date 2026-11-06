@@ -4,7 +4,6 @@
 //! Whether the participant is wearing their device and attending to Tomori, from what the platform reports. See `design/spaces.md` and `design/clients.md`.
 //!
 //! A client feeds [`Tracker`] the platform's signals: whether the application has input, and, where a sensor reports it, whether the device is worn. It reports one [`Engagement`] to the server when that changes. Being away stops the live microphone; returning lets the server play what was missed from the start of the latest reply.
-
 use tomori_protocol::Engagement;
 
 /// Whether the application has the participant's input.

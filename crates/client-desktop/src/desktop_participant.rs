@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The desktop window as a participant: it connects to a Tomori server and presents arrival, the space and the hand menu as the headset does, seen from a head at standing height that the mouse turns, with the keyboard for the controller's buttons and the mouse for its ray. See `design/desktop.md`.
-
 use crate::{
     connection::Connection,
     conversation::Conversation,

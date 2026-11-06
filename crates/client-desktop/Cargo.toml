@@ -20,10 +20,10 @@ cpal = "0.18"
 glam = "0.30"
 log = "0.4"
 pollster = "0.4"
-tomori-client = { version = "0.1.0", path = "../client" }
-tomori-protocol = { version = "0.1.0", path = "../protocol" }
-tomori-render = { version = "0.1.0", path = "../render" }
-tomori-scene = { version = "0.1.0", path = "../scene" }
+tomori-client = { version = "0.2.0", path = "../client" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tomori-render = { version = "0.2.0", path = "../render" }
+tomori-scene = { version = "0.2.0", path = "../scene" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 winit = "0.30"
 
@@ -33,8 +33,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
 # The device for offscreen rendering tests, and a scenery that counts what it draws.
-tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
-tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
+tomori-render = { version = "0.2.0", path = "../render", features = ["test-gpu"] }
+tomori-scene = { version = "0.2.0", path = "../scene", features = ["testing"] }
 
 # The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See design/testing.md.
 [[package.metadata.bake.test.coverage.exclude]]

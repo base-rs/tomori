@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The desktop window's own logic as a participant: the keyboard and mouse as the controller's buttons and ray, a head at standing height that the mouse turns, the palms held up in view while their panels are open, the window's focus, and knocks announced in the title. `desktop_participant.rs` turns winit's events into these calls and draws what they return. See `design/desktop.md`.
-
 use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec2, Vec3};

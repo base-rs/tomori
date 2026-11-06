@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Short sound cues, synthesized rather than loaded from files: each is a few sine partials per note with a quick attack and an exponential decay, described in [`Earcon::spec`]. Every cue is rendered once at the device rate when a [`super::Mixer`] is created, so that playing one only copies samples. See `design/feedback.md`.
-
 use std::f64::consts::TAU;
 
 /// A sound cue. Each marks a moment something changed; see `design/feedback.md` for when each plays.

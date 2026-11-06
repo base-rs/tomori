@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Where each source sounds from: a listener's head and the sources' positions in the scene, turned into a gain, a delay and a low-pass for each ear. Simple panning rather than head-related transfer functions, so that it costs a few operations per sample. See `design/spatial-audio.md`.
-
 use std::f32::consts::FRAC_PI_4;
 
 /// A position in the scene, in metres: +X right, +Y up and −Z forward from where the participant first stood, as OpenXR has it.

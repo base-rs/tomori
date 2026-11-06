@@ -8,7 +8,6 @@
 //! - [`tts`]: ordered synthesis of those sentences.
 //!
 //! Engines run in this process through sherpa-onnx, on threads owned by this crate; see `readme.md`. A panic in an engine disables that engine: it is logged once, and every later request fails with [`Error::Stopped`]. Each engine thread can be stopped and waited for with a [`Stopper`] when the server shuts down.
-
 mod error;
 pub mod speakable;
 mod stop;

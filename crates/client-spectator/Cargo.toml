@@ -21,11 +21,11 @@ glam = "0.30"
 log = "0.4"
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }
-tomori-client = { version = "0.1.0", path = "../client" }
-tomori-client-desktop = { version = "0.1.0", path = "../client-desktop" }
-tomori-protocol = { version = "0.1.0", path = "../protocol" }
-tomori-render = { version = "0.1.0", path = "../render" }
-tomori-scene = { version = "0.1.0", path = "../scene" }
+tomori-client = { version = "0.2.0", path = "../client" }
+tomori-client-desktop = { version = "0.2.0", path = "../client-desktop" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tomori-render = { version = "0.2.0", path = "../render" }
+tomori-scene = { version = "0.2.0", path = "../scene" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 winit = "0.30"
 
@@ -34,10 +34,10 @@ libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
-tomori-client-desktop = { version = "0.1.0", path = "../client-desktop", features = ["testing"] }
+tomori-client-desktop = { version = "0.2.0", path = "../client-desktop", features = ["testing"] }
 # The device for offscreen rendering tests.
-tomori-render = { version = "0.1.0", path = "../render", features = ["test-gpu"] }
-tomori-scene = { version = "0.1.0", path = "../scene", features = ["testing"] }
+tomori-render = { version = "0.2.0", path = "../render", features = ["test-gpu"] }
+tomori-scene = { version = "0.2.0", path = "../scene", features = ["testing"] }
 
 # The files left out of the 100% region-coverage gate: each holds only calls into a device or platform that CI cannot provide, and the logic around those calls is in covered modules. See design/testing.md.
 [[package.metadata.bake.test.coverage.exclude]]

@@ -10,7 +10,6 @@
 //! Resource listings are turned into permissions, questions and workers the
 //! same way, so attaching to a session recovers what live events would have
 //! reported.
-
 use serde_json::Value;
 use tomori_backend::{
     AnswerValue, Event, Field, FieldKind, FieldOption, Grant, GrantScope, Mode, Permission,

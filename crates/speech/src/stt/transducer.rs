@@ -4,7 +4,6 @@
 //! Streaming recognition in-process with a sherpa-onnx streaming transducer, such as NVIDIA's cache-aware streaming FastConformer.
 //!
 //! Each utterance has its own sherpa-onnx stream, which keeps the encoder's cache between pieces of audio, so every sample is decoded once, as it arrives. Greedy transducer search only appends to its hypothesis, so words already emitted do not change.
-
 use std::{
     path::{Path, PathBuf},
     sync::Arc,

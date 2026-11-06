@@ -4,7 +4,6 @@
 //! The recording indicator on the left controller: while X is held, a small card rising from the controller, above X, with the time against the server's limit, the words heard so far and the release hint; then what became of the words; and a `LIVE` badge while the live microphone is on. See `design/hand-menu.md`.
 //!
 //! [`Phase`] is what the indicator says, from the conversation; [`canvas`] lays it out; [`Anchor`] places it, following the left grip pose through a short smoothing filter, or the left wrist from hand tracking, or else a spot low in the view, and turns it to face the head. All of it is free of rendering code.
-
 use std::time::Duration;
 
 use glam::{Mat4, Quat, Vec3};

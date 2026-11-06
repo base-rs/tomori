@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! `tomori-server auth mint|list|rename|revoke`: manage the tokens in the server's state directory. A running server applies changes within a few seconds. See `design/security.md`.
-
 use std::path::{Path, PathBuf};
 
 use tomori_security::{Grant, TokenStore};

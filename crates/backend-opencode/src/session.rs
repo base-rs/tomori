@@ -6,7 +6,6 @@
 //! The handle owns one end of the session's event channel and shares the
 //! connection's commands channel. [`next_event`] reads the channel; the other
 //! methods send a command and wait for its reply.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

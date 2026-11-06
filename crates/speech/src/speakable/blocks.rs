@@ -4,7 +4,6 @@
 //! Speakable text of the leaf blocks within one complete document-level block.
 //!
 //! The events come from base-markdown's `IncrementalParser`, which emits a document-level block only once no later text can change it, so everything here works on final text and nothing is held back.
-
 use std::ops::Range;
 
 use base_markdown::stream::{Event, EventKind, Tag, TagKind, Text};

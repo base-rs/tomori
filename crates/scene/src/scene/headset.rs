@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The headset's own logic, from plain copies of what OpenXR reports: the controllers' actions as buttons, which poses can be trusted, where the scene stands after a recentre, which palm shows what from the controllers and hand tracking, the live microphone's grip, the session's focus and the vibrations to give. `xr.rs` reads the runtime into these types and carries out what they decide.
-
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};

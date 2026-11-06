@@ -20,7 +20,6 @@
 //! `create` starts a new agent session, such as `create opencode /home/sam/project`, which the server accepts only
 //! beneath one of its workspace roots; the directory cannot contain spaces. The title defaults to the directory's last
 //! component. The space is bound to the first environment the server offers, which the connected state lists.
-
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::sync::mpsc::RecvTimeoutError;

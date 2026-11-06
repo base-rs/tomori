@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Resolving the server address given in [`crate::Options::address`].
-
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Poll, Waker};

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Logs events that repeat often at a slow cadence, so that they cannot push lifecycle events out of the headset's logcat buffer. See `design/client-logging.md`.
-
 use std::time::{Duration, Instant};
 
 /// How often the headset summarizes the stereo frames it submits.

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The server's web pages: a sign-in page that takes a token, and a status page for owners. Plain HTML written here, without scripts or a web framework. See `design/security.md`.
-
 use std::fmt::Write;
 
 use tomori_protocol::{Activity, ConnectionRole};

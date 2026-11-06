@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The result cards' pages and their navigation with the right stick: a card's content is wrapped and paged here, once, so that navigation and the renderer use the same pages.
-
 use crate::delegation::{Kind, Presentation, Workspace};
 
 /// The most result cards shown.

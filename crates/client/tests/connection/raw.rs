@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! A raw HTTP/1.1 peer that sends a scripted response, for server behaviour the mini server does not produce.
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::mpsc::{self, Receiver};

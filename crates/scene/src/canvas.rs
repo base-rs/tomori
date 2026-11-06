@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! What a panel shows: a [`Canvas`] of rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up: a quad per glyph, drawn from its tile in `tomori-text`'s atlas, and filled quads, drawn from the atlas's solid block, so that one pipeline draws both. It needs no GPU, so that layouts are tested without one. The renderer's panels draw it.
-
 use bytemuck::{Pod, Zeroable};
 use tomori_text::atlas::SOLID;
 

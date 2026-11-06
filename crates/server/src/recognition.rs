@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! A [`Transcriber`] backed by the speech crate's streaming [`Recognition`]. See `design/speech.md`.
-
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 

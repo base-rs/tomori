@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-server` command line, which a [`Builder`] runs: parsing it, configuring a [`Server`] from it with the builder's backends, environments and hooks, and serving until signalled. See `design/server.md` and `design/security.md`.
-
 use std::fmt::Display;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};

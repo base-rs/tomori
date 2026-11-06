@@ -8,7 +8,6 @@
 //! Each grapheme drawn takes a cell, or two for a wide one, such as a CJK ideograph or a full-width form, whose second cell holds [`WIDE`], so that a row's cells are its columns. A grapheme is drawn as the one character its letter and marks compose to, leaving out marks that do not compose; [`shown`] is the character drawn for it, which is itself where a bundled font has it, its base letter where only that is, or `?`, so that the console shows what the headset draws. Every kind of line break, such as CRLF, a lone carriage return or a form feed, is one, as a line feed is. Other control characters, variation selectors and zero-width spaces and joiners take no cell. Lines break at spaces and, between CJK characters, wherever Unicode's line breaking rules (UAX #14) allow, so never before closing punctuation such as "。".
 //!
 //! [`glyph`] places a cell's glyph from `tomori-text`'s atlas, for the renderers, which draw it from the atlas's signed distance fields.
-
 use tomori_text::atlas;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 use unicode_segmentation::UnicodeSegmentation;

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! What each connection may do. A connection is admitted at the door with an [`Access`]; its role at any moment follows from that and the space it is in, and one table decides which client messages each role may send. See `design/security.md`.
-
 use tomori_protocol::{ClientMessage, ConnectionRole};
 
 /// What a connection was admitted as.

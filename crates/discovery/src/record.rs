@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The TXT record and the translation of resolved services into [`Event`]s, kept free of sockets so that it can be unit-tested.
-
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use tomori_protocol::PROTOCOL_VERSION;

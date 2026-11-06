@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Helpers for end-to-end tests: a server on an ephemeral port with the fake backend, and a blocking client speaking raw HTTP/1.1 chunked framing over TCP.
-
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};

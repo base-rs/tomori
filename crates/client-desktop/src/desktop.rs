@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The server-less window: the window's contents, as `desktop_window.rs` shows them. See `design/desktop.md`. The spectator's window is `tomori-client-spectator`'s.
-
 use crate::{
     graphics::Renderer,
     pointing::Ray,

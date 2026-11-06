@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Roles, visitors and admission by tokens. See `design/security.md`.
-
 use std::time::Duration;
 
 use tomori_protocol::{ClientMessage, ConnectionRole, Gate, Pose, ServerMessage, SpaceState};

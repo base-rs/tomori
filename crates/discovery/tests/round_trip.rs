@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Advertise and browse in one process over real multicast DNS.
-
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 

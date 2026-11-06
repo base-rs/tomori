@@ -4,7 +4,6 @@
 //! Finds the speech models for the tests that run them.
 //!
 //! The models are looked for where the server looks for them, in `.tools/` under the repository, as `scripts/fetch-asr-model.sh` and `scripts/fetch-tts-model.sh` fetch them, or under `TOMORI_SPEECH_ROOT` when it is set. A test whose model is missing is skipped with a message on standard error, unless `TOMORI_REQUIRE_MODELS` is set to anything but `0` or the empty string, as CI sets it, so that a missing model fails the tests rather than silently skipping them.
-
 use std::{
     io::Write,
     path::{Path, PathBuf},

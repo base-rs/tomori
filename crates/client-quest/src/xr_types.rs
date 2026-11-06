@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The headset's OpenXR values as [`crate::scene::headset`]'s plain types, and the choices made from what the runtime offers, so that `xr.rs` holds only the device calls.
-
 use crate::{
     controller::{self, Pose},
     hands,

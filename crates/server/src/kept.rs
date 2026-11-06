@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The spaces a server keeps across restarts, in its state directory. See `design/spaces.md`.
-
 use std::fmt;
 use std::fs::{self, File};
 use std::io;

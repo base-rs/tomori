@@ -21,11 +21,11 @@ glam = "0.30"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tomori-client = { version = "0.1.0", path = "../client" }
-tomori-protocol = { version = "0.1.0", path = "../protocol" }
-tomori-security = { version = "0.1.0", path = "../security" }
-tomori-text = { version = "0.1.0", path = "../text" }
-tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"], optional = true }
+tomori-client = { version = "0.2.0", path = "../client" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tomori-security = { version = "0.2.0", path = "../security" }
+tomori-text = { version = "0.2.0", path = "../text" }
+tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"], optional = true }
 # Text is laid out by grapheme, composed, at the widths East Asian Width gives, with lines broken between CJK characters where UAX #14 allows.
 unicode-linebreak = "0.1.5"
 unicode-normalization = "0.1.24"
@@ -34,4 +34,4 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 # A server on a loopback port, with a scripted backend, for the tests that take part in its spaces.
-tomori-server = { version = "0.1.0", path = "../server", default-features = false, features = ["fake"] }
+tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }

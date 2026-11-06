@@ -4,7 +4,6 @@
 //! The desktop window's calls into the window system: winit's event loop and window, and the window's Vulkan or Metal surface. It needs a display, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
 //!
 //! Only those calls belong here. Each window event becomes a [`window::Input`] and each frame is drawn through a [`window::Surface`]; what the window does with them is decided by its [`window::Contents`], in covered modules: the server-less window, the participant's, or what [`show`] is given, such as the spectator's. The desktop's modes open their windows through [`Desktop`], so that their tests can show the same contents through `window::test::Headless` instead. See `design/desktop.md`.
-
 use crate::window::{self, Contents, Flow, Gpu, Input, Settings, Shell, Wake};
 use anyhow::{Context, Result};
 use glam::Vec2;

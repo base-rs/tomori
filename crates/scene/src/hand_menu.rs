@@ -4,7 +4,6 @@
 //! The hand menu: shown above the left wrist while the left palm is turned up, as a top-level menu of sections chosen by pointing, with a cue on the wrist when something waits. See `design/hand-menu.md`.
 //!
 //! Its items are arrival objects, so that they are drawn, labelled, pointed at and chosen as arrival's are.
-
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec2, Vec3};

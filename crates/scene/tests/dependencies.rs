@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The platform-neutral client depends on no rendering, windowing or platform audio crate, on the host or the headset, as `design/clients.md` requires.
-
 use std::process::Command;
 
 /// Crates that would tie the scene to a renderer, a window, a device or a platform.

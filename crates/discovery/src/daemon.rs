@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Starting the multicast DNS responder and querier, whose failures come from the system, such as running out of descriptors, and cannot be made to happen in tests.
-
 use mdns_sd::{IfKind, Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::{Error, SERVICE_TYPE};

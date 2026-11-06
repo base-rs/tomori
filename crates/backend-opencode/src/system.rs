@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Starting the backend's connection thread, which fails only when the system runs out of threads. A test refuses the next start of one on its own thread through `refuse`, to check what its caller does then.
-
 use std::io;
 use std::thread::{Builder, JoinHandle};
 

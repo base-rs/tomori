@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! What a backend gets from the trait's default methods when it implements only the required ones, as a backend outside this repository might.
-
 use std::future::{Future, Ready, ready};
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};

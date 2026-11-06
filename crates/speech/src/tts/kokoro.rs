@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Kokoro synthesis in-process through sherpa-onnx, on a thread owned by the synthesizer.
-
 use std::{
     cell::Cell,
     panic::{self, AssertUnwindSafe},

@@ -7,7 +7,6 @@
 //! Both directions carry a sequence of [`Frame`]s: JSON control messages
 //! ([`ClientMessage`] and [`ServerMessage`]) and binary [`AudioFrame`]s. See
 //! `design/server.md`.
-
 mod audio;
 mod cards;
 mod frame;

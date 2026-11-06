@@ -12,7 +12,7 @@ categories = ["network-programming"]
 
 [dependencies]
 mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
-tomori-protocol = { version = "0.1.0", path = "../protocol" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
 
 [dev-dependencies]
 # The channel a browser receives from its querier, so that tests can send it events.

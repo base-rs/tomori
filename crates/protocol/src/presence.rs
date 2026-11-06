@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Hand joint positions carried in a participant's presence update.
-
 use serde::{Deserialize, Serialize};
 
 /// The number of hand joints in the OpenXR EXT hand-joint order.

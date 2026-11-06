@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Devices and connections for tests: a microphone and a speaker without hardware, and a server whose spaces a participant takes part in.
-
 use crate::conversation::Conversation;
 use tomori_client::{
     capture::{Capture, Failed, Recording, Samples},

@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Flat panels in the world, such as the hand menu: a panel's plane and orientation, and the rectangles of its rows in it. Each row is laid out once, as an [`Area`], which the renderer draws its row within and which [`crate::pointing`] points at, by meeting the panel's plane and finding the rectangle that holds the point, so that what is pointed at is what is drawn at any tilt. See `design/hand-menu.md`.
-
 use glam::{Vec2, Vec3};
 
 use crate::pointing::Ray;

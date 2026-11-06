@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-example-server` executable, run as `tomori-server` would be, on an ephemeral loopback port without advertising.
-
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;

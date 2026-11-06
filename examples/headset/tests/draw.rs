@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The example headset draws its placeholder floor for a space bound to the placeholder environment, where Tomori's own build shows the grid, and in the window that `tomori`'s command line opens for its build.
-
 use glam::{Mat4, Vec3};
 use tomori_example_headset::{COLOUR, ENVIRONMENT, builder};
 use tomori_render::graphics::Renderer;

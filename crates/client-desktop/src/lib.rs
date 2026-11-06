@@ -4,7 +4,6 @@
 //! Tomori on the desktop: the server-less window, taking part in a server's spaces from a window or a terminal, and finding servers on the network. The window, its event loop and the desktop's microphone and speaker are here too, for the spectator's window to use.
 //!
 //! Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
-
 pub mod console;
 pub mod cpal_audio;
 pub mod desktop;

@@ -6,7 +6,6 @@
 //! The streaming transducer's vocabulary has no capitals or punctuation, so its transcripts are lowercase and unpunctuated. [`Punctuated`] wraps a [`StreamingRecognizer`] and passes each utterance's final transcript through a [`Punctuator`] on the recognition thread. Partial transcripts are left as they are: punctuation and capitals depend on the words that follow, so punctuating partials would change words already shown as committed.
 //!
 //! Punctuation never fails an utterance. If the punctuator returns an error, or changes the words rather than only their case and punctuation, the transcript is delivered as recognized. A panic in the punctuator disables punctuation until the process restarts, logged once, and later transcripts are delivered as recognized.
-
 use std::{
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},

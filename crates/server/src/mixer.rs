@@ -4,7 +4,6 @@
 //! Real-time mixing of participant and agent speech streams, ported from `bridge/audio.mjs`. Not yet wired to a spectator feed.
 //!
 //! Each source keeps at most [`BUFFER_LIMIT`] samples: audio that arrives faster than it is mixed drops its oldest samples instead of building latency, and a source with nothing buffered contributes silence. See `design/live-audio.md`.
-
 use std::collections::VecDeque;
 
 /// The mixer's sample rate. Sources must be resampled to this rate before pushing.

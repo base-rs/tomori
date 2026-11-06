@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Who said what, and in which colour: the agent in cyan, each person in a colour from their public handle, the same on every headset, and anyone the client cannot name in grey. See `design/spaces.md`.
-
 use std::collections::HashMap;
 
 use tomori_protocol::{Participant, SpaceState};

@@ -4,7 +4,6 @@
 //! Authentication, tokens, the server's certificate and certificate pinning, shared by the Tomori server and its clients. See `design/security.md`.
 //!
 //! Authenticators say who a connection is, never what it may do: the server keeps roles against the [`Principal`]s they report. The `issue` feature adds the server's side: the [`TokenStore`], which issues tokens and authenticates them, and the server's certificate.
-
 mod authenticate;
 #[cfg(feature = "issue")]
 mod certificate;

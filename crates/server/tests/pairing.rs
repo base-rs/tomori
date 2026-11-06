@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Pairing a device as an owner. See `design/security.md`.
-
 use std::sync::mpsc::channel;
 use std::time::Duration;
 

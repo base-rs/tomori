@@ -4,7 +4,6 @@
 //! The set of agent backends this server can bind spaces to.
 //!
 //! A backend is any [`Backend`], from this repository, such as OpenCode's, or from another crate: [`Backends::with`] holds each behind one type, [`AnyBackend`], whose sessions are [`AnySession`]s. Nothing else in the server names a concrete backend.
-
 use std::future::Future;
 use std::pin::Pin;
 

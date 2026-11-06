@@ -6,7 +6,6 @@
 //! [`Client`] is the connection itself. [`connection::Connection`] builds a whole client's connection on it for a [`connection::Session`], the client's conversation with the server: it chooses the server, keeps its certificate and token for this device, records from the microphone, plays through the speaker and cues what happens.
 //!
 //! See `design/server.md`, `design/live-audio.md` and `design/clients.md`.
-
 pub mod capture;
 pub mod connection;
 pub mod engagement;

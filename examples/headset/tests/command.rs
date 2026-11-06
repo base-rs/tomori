@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-example-headset` executable takes `tomori`'s command line, as far as it gets without a display or an OpenXR runtime, as on a CI runner.
-
 use std::process::{Command, Output, Stdio};
 
 /// `tomori-example-headset` with `arguments`, without a display, an OpenXR runtime or a server.

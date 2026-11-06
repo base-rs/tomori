@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Where each voice comes from in this client's scene: the agent from the swarm, and each other participant from a seat on a circle at the edge of the space, moved by their head. Pure, so that the layout is tested; the player pans and attenuates from it. See `design/spatial-audio.md`.
-
 use std::collections::HashMap;
 
 use tomori_client::{

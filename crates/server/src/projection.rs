@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Text shown to participants, derived from structured backend facts. Backends never produce UI text; see `design/agent-backends.md`.
-
 use std::fmt::Write;
 
 use tomori_backend::{AnswerValue, Field, FieldKind, Grant, GrantScope, Permission, Question};

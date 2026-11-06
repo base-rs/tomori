@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The headset's microphone and speaker through AAudio, behind [`tomori_client::capture::Capture`] and [`tomori_client::speaker::Playback`]. Compiled only for Android.
-
 pub mod capture {
     use ndk::audio::{
         AudioDirection, AudioFormat, AudioInputPreset, AudioSharingMode, AudioStream,

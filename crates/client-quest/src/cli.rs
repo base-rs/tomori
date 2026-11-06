@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The desktop executable's command line: what `tomori` is asked to do, and running it.
-
 use crate::{Overrides, SpectatorOptions};
 use anyhow::{Context, Result, bail, ensure};
 

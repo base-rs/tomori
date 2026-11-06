@@ -3,7 +3,6 @@
 
 //! Finding the GitHub environment's token with a command, as `gh auth token`, in a process of its own: a child started
 //! beside the other tests would hold their locked state directories open. See `design/github.md`.
-
 use std::process::Command;
 
 use tomori_server::github::Token;

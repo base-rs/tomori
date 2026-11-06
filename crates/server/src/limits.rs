@@ -4,7 +4,6 @@
 //! Size limits that keep every server frame within [`tomori_protocol::MAX_FRAME_BYTES`]. See `design/server.md`.
 //!
 //! Strings supplied by clients are bounded when they arrive, and rejected with an error that does not repeat them. Space snapshots and the lobby listing are then trimmed to a byte budget when they are rendered, because they also carry text produced by the agent.
-
 use tomori_protocol::{SpaceState, SpaceSummary};
 
 /// Longest participant identity in `Hello`, in bytes.

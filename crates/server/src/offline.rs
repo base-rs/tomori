@@ -4,7 +4,6 @@
 //! A [`Transcriber`] that buffers each utterance and decodes it whole, once, with the offline recognizer. See `design/speech.md`.
 //!
 //! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so nothing is shown while the participant is still speaking, and the transcript arrives a couple of seconds after they let go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`tomori_speech::stt::MAX_UTTERANCE`].
-
 use std::{
     collections::HashMap,
     sync::{Mutex, PoisonError},

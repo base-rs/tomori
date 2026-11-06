@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Building, signing and checking a release APK, with the programs that `Tools` names. See `design/android-release.md`.
-
 use bake::{Error, Result, Value};
 use std::ffi::OsStr;
 use std::fs;

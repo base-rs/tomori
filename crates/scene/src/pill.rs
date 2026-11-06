@@ -4,7 +4,6 @@
 //! The status pill: what is left of the floating panel in a space, two short rows low in the view, so that something needing the participant is seen without a gesture. The first row says what the agent is doing; the second shows only when something needs them, and says where to look. See `design/interaction.md`.
 //!
 //! This is free of rendering code: [`rows`] lays out a [`Status`] that the conversation gives.
-
 use tomori_protocol::Activity;
 
 use crate::ui_text::{Row, Span, Style, cut};

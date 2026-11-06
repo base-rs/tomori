@@ -10,7 +10,6 @@
 //! Clips are the LibriSpeech test wavs shipped with the default streaming model, and sentences synthesized with Kokoro in four voices. Each streaming model is fed 100 ms frames in real time through [`Recognition`], as push-to-talk delivers them, and then again as fast as it can decode. Whisper, which cannot stream, decodes each whole clip; its first partial is estimated as a 1 second refresh interval, as a windowed re-decoding scheme would use, plus the time to decode that first second.
 //!
 //! With `--punctuation`, the streaming models' final transcripts are punctuated as the server punctuates them, and the time each punctuation takes is reported. Word errors ignore case and punctuation either way.
-
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
