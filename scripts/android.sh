@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Build, install and run a headset build on the Quest. `--package NAME` builds another package than Tomori's own, `tomori-client-quest`, such as `tomori-example-headset`; the application ID, the APK's name and the OpenXR loader's folder are read from that package's `[package.metadata.android]`. See crates/client-quest/context/android.md.
+# `--release` builds the release profile, signed with the keystore that CARGO_APK_RELEASE_KEYSTORE and CARGO_APK_RELEASE_KEYSTORE_PASSWORD name, as `cargo bake android:apk:build` does with a throwaway key; without it, the dev profile is signed with the local debug key.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-usage() { echo "Usage: $0 [--package NAME] {build|run|path|logs|devices}" >&2; exit 2; }
+usage() { echo "Usage: $0 [--package NAME] [--release] {build|run|path|logs|devices}" >&2; exit 2; }
 name=tomori-client-quest
+profile=debug
+profile_arguments=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --package|-p) [[ $# -ge 2 ]] || usage; name="$2"; shift 2 ;;
         --package=*) name="${1#--package=}"; shift ;;
+        --release) profile=release; profile_arguments=(--release); shift ;;
         -*) usage ;;
         *) break ;;
     esac
@@ -37,7 +41,7 @@ read_package() {
         echo "$name has no application ID: set package in its [package.metadata.android]." >&2
         exit 1
     fi
-    apk="$target_directory/debug/apk/$apk_name.apk"
+    apk="$target_directory/$profile/apk/$apk_name.apk"
 }
 
 # Optional local SDK/toolchain paths; deliberately not committed.
@@ -66,7 +70,7 @@ if [[ -n "$runtime_libs" ]]; then
 fi
 # cargo-apk resolves the SHERPA_ONNX_ARCHIVE_DIR set in .cargo/config.toml and panics if it is missing, although the headset does not link the speech libraries: the directory is needed, not scripts/fetch-sherpa-onnx.sh.
 mkdir -p .tools/sherpa-onnx
-cargo apk build -p "$name" --lib
+cargo apk build -p "$name" --lib ${profile_arguments[@]+"${profile_arguments[@]}"}
 echo "Built $apk ($package)."
 if [[ "$command" == run ]]; then
     adb install -r "$apk"

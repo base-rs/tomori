@@ -78,3 +78,14 @@ adb shell am start -n com.example.observe/android.app.NativeActivity
 ```
 
 Debug builds are signed with the local debug key, `~/.android/debug.keystore`, which `cargo-apk` creates if needed.
+
+## Releasing
+
+`--release` builds the release profile, which `cargo-apk` signs with the keystore that `CARGO_APK_RELEASE_KEYSTORE` names, with the password in `CARGO_APK_RELEASE_KEYSTORE_PASSWORD`; it never uses the debug key for a release. The APK is then `target/release/apk/NAME.apk`, and is not debuggable. Android identifies an app's updates by that key, so keep it, and a backup, out of the repository, and check what you publish with the SDK's build tools: `apksigner verify --print-certs` prints the signer's certificate digest, and `aapt2 dump badging` must name your application ID and print no `application-debuggable`:
+
+```sh
+CARGO_APK_RELEASE_KEYSTORE=… CARGO_APK_RELEASE_KEYSTORE_PASSWORD=… bash scripts/android.sh --package observe --release build
+apksigner verify --print-certs "$(bash scripts/android.sh --package observe --release path)"
+```
+
+Tomori's own release builds its APK unsigned, so that the build never has the key, signs it in a step of its own, and checks it against its committed certificate, with Bake tasks in its repository, `cargo bake android:apk:build`, `sign` and `verify`; its `design/android-release.md` and `scripts/release-artifacts/` show how.

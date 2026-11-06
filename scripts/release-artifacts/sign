@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# bake-cargo's release artifacts sign step, which .github/workflows/release-artifacts.yml runs on a fresh runner with the android-release environment's secrets as files in $RELEASE_SECRETS: aligns each APK in $RELEASE_ARTIFACTS and signs it in place with the release key, then writes its SHA-256 beside it. See design/android-release.md.
+#
+# It does what `cargo bake android:apk:sign` does, with the SDK's zipalign and apksigner alone, rather than through Bake: running Bake here would compile the tasks and their dependencies, whose build scripts would run beside the secrets. The keystore is decoded into $RELEASE_SECRETS, which the workflow removes after this step, and apksigner reads the password from its file, never from a command line.
+set -euo pipefail
+umask 077
+: "${RELEASE_ARTIFACTS:?Set RELEASE_ARTIFACTS to the directory of APKs to sign}"
+: "${RELEASE_SECRETS:?Set RELEASE_SECRETS to the directory of the secrets}"
+: "${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK directory}"
+tools="$ANDROID_HOME/build-tools/35.0.0"
+if [[ ! -x "$tools/apksigner" && -n "${GITHUB_ACTIONS:-}" ]]; then
+    (yes || true) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;35.0.0" > /dev/null
+fi
+for secret in ANDROID_RELEASE_KEYSTORE ANDROID_RELEASE_KEYSTORE_PASSWORD; do
+    if [[ ! -s "$RELEASE_SECRETS/$secret" ]]; then
+        echo "There is no $secret secret in $RELEASE_SECRETS." >&2
+        exit 1
+    fi
+done
+keystore="$RELEASE_SECRETS/release.keystore"
+base64 --decode "$RELEASE_SECRETS/ANDROID_RELEASE_KEYSTORE" > "$keystore"
+
+shopt -s nullglob
+apks=("$RELEASE_ARTIFACTS"/*.apk)
+if [[ ${#apks[@]} -eq 0 ]]; then
+    echo "There is no APK in $RELEASE_ARTIFACTS to sign." >&2
+    exit 1
+fi
+aligned="$(mktemp -d)"
+trap 'rm -rf "$aligned"' EXIT
+for apk in "${apks[@]}"; do
+    name="$(basename "$apk")"
+    "$tools/zipalign" -f 4 "$apk" "$aligned/$name"
+    "$tools/apksigner" sign --v4-signing-enabled false --ks "$keystore" --ks-pass "file:$RELEASE_SECRETS/ANDROID_RELEASE_KEYSTORE_PASSWORD" --in "$aligned/$name" --out "$apk"
+    (cd "$RELEASE_ARTIFACTS" && sha256sum "$name" > "$name.sha256")
+    echo "Signed $name."
+done

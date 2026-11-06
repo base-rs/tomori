@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# bake-cargo's release artifacts verify step, which .github/workflows/release-artifacts.yml runs after the secrets are removed: $RELEASE_ARTIFACTS must hold exactly tomori-$RELEASE_VERSION.apk and its SHA-256, which must match, and the APK must pass `cargo bake android:apk:verify` against main's android/release-certificate.sha256. Fails if any check, or any tool it runs, fails. See design/android-release.md.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+: "${RELEASE_ARTIFACTS:?Set RELEASE_ARTIFACTS to the directory of signed APKs}"
+: "${RELEASE_VERSION:?Set RELEASE_VERSION to the version released}"
+source scripts/release-artifacts/android-tools.sh
+android_tools verify
+
+apk="tomori-$RELEASE_VERSION.apk"
+files="$(cd "$RELEASE_ARTIFACTS" && find . -mindepth 1 -printf '%P\n' | sort)"
+if [[ "$files" != "$(printf '%s\n%s' "$apk" "$apk.sha256")" ]]; then
+    echo "$RELEASE_ARTIFACTS must hold only $apk and $apk.sha256, not:" >&2
+    echo "$files" >&2
+    exit 1
+fi
+(cd "$RELEASE_ARTIFACTS" && sha256sum --check --strict "$apk.sha256")
+
+# The release certificate is main's, so that a release made before it was committed can be checked too; RELEASE_CERTIFICATE names another, such as a pull request's throwaway key's.
+certificate="${RELEASE_CERTIFICATE:-}"
+if [[ -z "$certificate" ]]; then
+    certificate="$(mktemp)"
+    trap 'rm -f "$certificate"' EXIT
+    # Only main's tip in CI's shallow checkout; a full clone stays complete.
+    depth=()
+    if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then depth=(--depth 1); fi
+    git fetch --quiet ${depth[@]+"${depth[@]}"} --no-tags origin main
+    if ! git show FETCH_HEAD:android/release-certificate.sha256 > "$certificate"; then
+        echo "Commit the release certificate's SHA-256 digest to android/release-certificate.sha256 on main; see design/android-release.md." >&2
+        exit 1
+    fi
+fi
+cargo bake android:apk:verify "$RELEASE_ARTIFACTS/$apk" --certificate "$certificate"
