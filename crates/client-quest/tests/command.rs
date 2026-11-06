@@ -113,18 +113,21 @@ fn discover_browses_the_network_for_servers() {
 #[test]
 fn the_pipewire_source_stops_when_gstreamer_does() {
     use std::os::unix::fs::PermissionsExt;
-    // GStreamer that takes the video for a moment, then stops, as when PipeWire goes away.
-    let bin = directory("gstreamer-stops");
-    let gstreamer = bin.join("gst-launch-1.0");
-    {
-        let _writing = SPAWN.write().unwrap();
-        std::fs::write(&gstreamer, "#!/bin/sh\nexec /bin/sleep 1\n").unwrap();
-        std::fs::set_permissions(&gstreamer, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let output = tomori(&["--spectator-pipewire"], Some(&bin));
-    assert!(!output.status.success());
-    let stderr = stderr(&output);
-    assert!(stderr.contains("GStreamer exited"), "{stderr}");
+    // The spectator opens a headless Vulkan adapter before it starts GStreamer, so this is a GPU test: skipped where there is no adapter, unless `TOMORI_REQUIRE_GPU` is set.
+    tomori_render::test_gpu::with(|_| {
+        // GStreamer that takes the video for a moment, then stops, as when PipeWire goes away.
+        let bin = directory("gstreamer-stops");
+        let gstreamer = bin.join("gst-launch-1.0");
+        {
+            let _writing = SPAWN.write().unwrap();
+            std::fs::write(&gstreamer, "#!/bin/sh\nexec /bin/sleep 1\n").unwrap();
+            std::fs::set_permissions(&gstreamer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = tomori(&["--spectator-pipewire"], Some(&bin));
+        assert!(!output.status.success());
+        let stderr = stderr(&output);
+        assert!(stderr.contains("GStreamer exited"), "{stderr}");
+    });
 }
 
 #[test]

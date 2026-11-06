@@ -27,9 +27,9 @@ jobs:
           components: clippy, rustfmt
       - name: Install Bake launcher
         run: cargo install bake --locked
-      # Project-specific: Clippy and the tests build the desktop client and the speech crate, which need ALSA and the sherpa-onnx libraries, as in test.yml.
-      - name: Install the ALSA development files for the desktop client
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+      # Project-specific: Clippy and the tests build the desktop client and the speech crate, which need ALSA and the sherpa-onnx libraries, and the rendering tests draw on Mesa's software Vulkan driver, lavapipe, with the Vulkan loader, as in test.yml.
+      - name: Install the ALSA development files for the desktop client, and lavapipe
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers
       - name: Fetch the sherpa-onnx libraries
         run: bash scripts/fetch-sherpa-onnx.sh
       - name: Detect an explicit release request
