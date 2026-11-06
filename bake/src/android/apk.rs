@@ -379,12 +379,22 @@ esac"#
         }
 
         /// A fake tool, running `body` after recording its arguments.
+        ///
+        /// It is written by `install`, not by this process: a process that other tests' threads fork while it holds a file open for writing passes the descriptor to the child until it runs its program, and running the file meanwhile fails with "Text file busy". `install`'s descriptor is closed when it exits, before the tool runs.
         fn tool(&self, name: &str, body: &str) {
-            let path = self.write(
-                &format!("tools/{name}"),
+            let source = self.write(
+                &format!("sources/{name}"),
                 &format!("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$0.args\"\n{body}\n"),
             );
-            fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
+            let path = self.path(&format!("tools/{name}"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let installed = Command::new("install")
+                .args(["-m", "755"])
+                .arg(source)
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(installed.success());
         }
 
         fn arguments(&self, name: &str) -> String {

@@ -143,9 +143,21 @@ esac"#
         path
     }
 
+    /// A fake tool, written by `install` rather than by this process, as `tomori-bake`'s own fake tools are: a file this process holds open for writing while another test's thread forks stays open in the child until it runs its program, and running the file meanwhile fails with "Text file busy".
     fn tool(&self, name: &str, body: &str) {
-        let path = self.write(name, &format!("#!/usr/bin/env bash\n{body}\n"));
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = self.write(
+            &format!("sources/{name}"),
+            &format!("#!/usr/bin/env bash\n{body}\n"),
+        );
+        let path = self.path(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let installed = Command::new("install")
+            .args(["-m", "755"])
+            .arg(source)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(installed.success());
     }
 
     /// The task executable in this workspace, with its SDK and `keytool`, its own target directory and no password.
