@@ -574,18 +574,43 @@ mod tests {
     #[test]
     fn environment_changes_an_owners_space_and_says_what_happened() {
         let mut conversation = lobby(ConnectionRole::Owner);
-        conversation.apply(space(|state| state.environment_changes = true));
+        conversation.apply(space(|state| {
+            state.environment_changes = true;
+            state.environment = "minimal".into();
+        }));
         let (out, _) = session(&mut conversation, &["environment  sky "]);
         assert!(
             out.contains("(Changing the environment to Sky for everyone.)"),
             "{out}"
         );
+        // Choosing the one the space is in asks the server for nothing.
+        conversation.apply(space(|state| state.environment_changes = true));
+        let (out, _) = session(&mut conversation, &["environment sky"]);
+        assert!(out.contains("(The space is already in Sky.)"), "{out}");
         let mut conversation = joined();
         let (out, _) = session(&mut conversation, &["environment sky"]);
         assert!(
             out.contains("(This server does not change a space's environment.)"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_change_to_an_environment_this_build_cannot_present_shows_what_it_needs() {
+        let mut conversation = joined();
+        conversation.apply(space(|state| {
+            state.environment = "observe".into();
+            state.environment_version = Some(2);
+        }));
+        // The panel is drawn once a line is read.
+        let (out, _) = session(&mut conversation, &["nonsense"]);
+        assert!(
+            out.contains("Unknown environment: observe version 2"),
+            "{out}"
+        );
+        conversation.apply(space(|state| state.environment_version = Some(2)));
+        let (out, _) = session(&mut conversation, &["nonsense"]);
+        assert!(out.contains("sky needs version 2, not 1"), "{out}");
     }
 
     #[test]

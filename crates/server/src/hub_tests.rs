@@ -79,6 +79,7 @@ impl Client {
             participant: participant.to_owned(),
             name: participant.to_owned(),
             names: false,
+            environments: None,
         });
     }
 
@@ -220,6 +221,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         participant: "bob".to_owned(),
         name: "Bob".to_owned(),
         names: false,
+        environments: None,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -1452,6 +1454,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         participant: participant.to_owned(),
         name: name.to_owned(),
         names,
+        environments: None,
     });
     client.read()
 }
@@ -2553,4 +2556,33 @@ fn a_restored_space_runs_its_server_side_only_once_bound_to_its_session_again() 
     assert!(!hub.server_sides.is_current(&unbound, 1));
     hub.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_space_names_its_environment_s_version_only_while_the_server_offers_it() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("observe", "Observe").with_version(2),
+    ]));
+    let mut bound = request("ada");
+    bound.environment = "observe".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let client = Client::greeted(&hub, Access::open(), "ada");
+    let version = |client: &Client| {
+        // Joining ends with the space's state.
+        let Some(ServerMessage::Space { state }) = client.read().pop() else {
+            unreachable!("joining sends the space's state last");
+        };
+        state.environment_version
+    };
+    client.send(ClientMessage::Join { space: id.clone() });
+    assert_eq!(version(&client), Some(2));
+    // A server built with other environments no longer offers it: the space stays in it, naming no version.
+    hub.set_environments(Environments::new([crate::environments::Environment::new(
+        "sky", "Sky",
+    )]));
+    client.send(ClientMessage::Leave);
+    client.send(ClientMessage::Join { space: id });
+    assert_eq!(version(&client), None);
 }

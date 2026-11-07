@@ -75,6 +75,38 @@ pub struct EnvironmentInfo {
     pub id: String,
     /// A short name for display.
     pub label: String,
+    /// The environment's protocol version, which a client must present it at. 1 from older servers, which had no
+    /// versions.
+    #[serde(default = "first_version")]
+    pub version: u32,
+}
+
+/// An environment a client can present, at the protocol version it presents it at, as it lists it in
+/// [`crate::ClientMessage::Hello`], so that the server offers it only the environments it lists at the same version.
+/// See `design/environments.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EnvironmentVersion {
+    /// The environment's identifier, as in [`EnvironmentInfo::id`].
+    pub id: String,
+    /// The version presented, read as 1 when absent.
+    #[serde(default = "first_version")]
+    pub version: u32,
+}
+
+impl EnvironmentVersion {
+    /// The environment `id` at `version`.
+    pub fn new(id: impl Into<String>, version: u32) -> Self {
+        Self {
+            id: id.into(),
+            version,
+        }
+    }
+}
+
+/// An environment's version where a peer names none, as one from before versions: every environment then was at
+/// version 1.
+fn first_version() -> u32 {
+    1
 }
 
 /// The agent's observed state. `Unknown` is never treated as idle or complete, and stands for any state a newer server sends that this build does not know.
@@ -126,6 +158,11 @@ pub struct SpaceState {
     /// The identifier of the environment the space is bound to, the same for every participant. A client that does not know it shows the Minimal grid and names it. Empty from older servers, which did not name one.
     #[serde(default)]
     pub environment: String,
+    /// The protocol version of [`Self::environment`], so that a client that presents it at another version, or not at
+    /// all, shows the Minimal grid and names the version it needs. Absent from older servers, and when the server no
+    /// longer offers the environment. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_version: Option<u32>,
     pub activity: Activity,
     /// Recent conversation, oldest first, projected to displayable text.
     pub messages: Vec<Message>,
@@ -652,6 +689,30 @@ mod tests {
                 .environment,
             ""
         );
+    }
+
+    #[test]
+    fn a_space_names_its_environments_version_unless_the_server_is_older() {
+        let state = SpaceState {
+            environment: "observe".into(),
+            environment_version: Some(2),
+            ..SpaceState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["environment_version"], 2);
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+        // An older server, or an environment no longer offered, names none, and sends no field.
+        let unversioned = serde_json::to_value(SpaceState::default()).unwrap();
+        assert!(unversioned.get("environment_version").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpaceState>(unversioned)
+                .unwrap()
+                .environment_version,
+            None
+        );
+        // An environment a client presents, at its version.
+        let presented = EnvironmentVersion::new("observe", 2);
+        assert_eq!((presented.id.as_str(), presented.version), ("observe", 2));
     }
 
     #[test]

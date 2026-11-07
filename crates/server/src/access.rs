@@ -138,6 +138,7 @@ mod tests {
                 participant: "p".into(),
                 name: "n".into(),
                 names: false,
+                environments: None,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },

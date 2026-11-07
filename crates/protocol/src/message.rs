@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BackendInfo, ConnectionRole, EnvironmentInfo, Gate, KnockRequest, KnockState, SessionSummary,
-    SpaceState, SpaceSummary, WorkspaceRoot,
+    BackendInfo, ConnectionRole, EnvironmentInfo, EnvironmentVersion, Gate, KnockRequest,
+    KnockState, SessionSummary, SpaceState, SpaceSummary, WorkspaceRoot,
 };
 
 /// A tracked pose in the space's coordinate system.
@@ -118,6 +118,37 @@ fn readable_pointed<'de, D: serde::Deserializer<'de>>(
         .map(|resources| resources.into_iter().next())
 }
 
+/// [`ClientMessage::Hello::environments`], without the entries that cannot be read as an [`EnvironmentVersion`], each
+/// skipped and logged at debug level, so that a newer client's list never costs it the connection. A field that is not
+/// a list is read as absent, as from an older client.
+fn readable_environments<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<EnvironmentVersion>>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(|field| match field {
+        serde_json::Value::Array(entries) => Some(
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    EnvironmentVersion::deserialize(entry)
+                        .inspect_err(|error| {
+                            log::debug!("Skipped an environment that could not be read: {error}.")
+                        })
+                        .ok()
+                })
+                .collect(),
+        ),
+        serde_json::Value::Null => None,
+        _ => {
+            log::debug!("Skipped environments that are not a list.");
+            None
+        }
+    })
+}
+
+/// The most entries a server keeps from a client's [`ClientMessage::Hello::environments`], counted after those it
+/// cannot read or whose identifier it does not take are skipped; it ignores the rest. See `design/environments.md`.
+pub const ENVIRONMENT_LIMIT: usize = 64;
+
 /// The most resources a server takes from one utterance's [`ClientMessage::UtteranceBegin::attention`]; it ignores
 /// the rest. It counts the resources read, after entries that could not be read or are of an unknown kind are skipped,
 /// and before those the space does not have are ignored.
@@ -158,6 +189,17 @@ pub enum ClientMessage {
         /// Whether this client understands [`ServerMessage::Name`]. Absent from older clients, which are never sent it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         names: bool,
+        /// The environments this client can present, each at its protocol version, so that the server offers it only
+        /// those it lists at the same version. Absent from older clients, which are offered every environment. An
+        /// entry that cannot be read is skipped, and a field that is not a list is read as absent; the server also skips
+        /// an entry whose identifier is empty or too long, and keeps at most [`ENVIRONMENT_LIMIT`] of the rest. See
+        /// `design/environments.md`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "readable_environments"
+        )]
+        environments: Option<Vec<EnvironmentVersion>>,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
@@ -274,8 +316,9 @@ pub enum ClientMessage {
         text: String,
     },
     /// Bind the current space to `environment`, one of those the server offers in `Welcome`, for everyone in it. Owners
-    /// only. Sent only to a server whose [`crate::SpaceState::environment_changes`] is set. See
-    /// `design/environments.md`.
+    /// only. Sent only to a server whose [`crate::SpaceState::environment_changes`] is set. A server that agrees on
+    /// versions takes only one offered to this client; anyone in the space who cannot present it shows the Minimal
+    /// grid and names what it needs. See `design/environments.md`.
     SetEnvironment {
         environment: String,
     },
@@ -355,7 +398,10 @@ pub enum ServerMessage {
         backends: Vec<BackendInfo>,
         /// The directories a space may run in, so a client can choose one without typing a path. Empty unless the connection is an owner.
         roots: Vec<WorkspaceRoot>,
-        /// The environments a space may be bound to, the first being the one bound when a `CreateSpace` names none. Absent from older servers.
+        /// The environments a space may be bound to, each with its version, the first being the one bound when a
+        /// `CreateSpace` from this client names none: every one the server offers, or, when Hello listed
+        /// environments, only those listed at the same version. Absent from older servers. See
+        /// `design/environments.md`.
         #[serde(default)]
         environments: Vec<EnvironmentInfo>,
         /// The longest utterance, in seconds, that the server's speech recognition takes, so that a client can warn before it is reached. Absent from older servers and for recognition without a limit. See `design/speech.md`.
@@ -1056,6 +1102,105 @@ mod tests {
     }
 
     #[test]
+    fn environment_versions_are_additions_older_peers_ignore() {
+        let hello = |environments| ClientMessage::Hello {
+            protocol: 2,
+            participant: "p".into(),
+            name: "Ada".into(),
+            names: false,
+            environments,
+        };
+        // A newer client lists what it presents, at each version.
+        let listing = hello(Some(vec![
+            EnvironmentVersion::new("minimal", 1),
+            EnvironmentVersion::new("observe", 2),
+        ]));
+        let json = serde_json::to_value(&listing).unwrap();
+        assert_eq!(
+            json["environments"],
+            serde_json::json!([{"id": "minimal", "version": 1}, {"id": "observe", "version": 2}])
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            listing
+        );
+        // An empty list is still a list: the client presents nothing the server offers.
+        let empty = serde_json::to_value(hello(Some(Vec::new()))).unwrap();
+        assert_eq!(empty["environments"], serde_json::json!([]));
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(empty).unwrap(),
+            hello(Some(Vec::new()))
+        );
+
+        // An older client lists nothing, and sends no field.
+        let older =
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"});
+        assert_eq!(serde_json::to_value(hello(None)).unwrap(), older);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(older).unwrap(),
+            hello(None)
+        );
+
+        // An entry without a version is at version 1, one that cannot be read is skipped with the rest kept, and an
+        // entry's unknown fields are ignored.
+        let lenient: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello", "protocol": 2, "participant": "p", "name": "Ada",
+            "environments": [
+                {"id": "sky"},
+                {"version": 3},
+                "minimal",
+                {"id": "observe", "version": "two"},
+                {"id": "floor", "version": 2, "colour": "green"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            lenient,
+            hello(Some(vec![
+                EnvironmentVersion::new("sky", 1),
+                EnvironmentVersion::new("floor", 2),
+            ]))
+        );
+        // A field that is not a list, or null, is read as absent.
+        for field in [serde_json::json!("sky"), serde_json::Value::Null] {
+            let odd: ClientMessage = serde_json::from_value(serde_json::json!({
+                "type": "hello", "protocol": 2, "participant": "p", "name": "Ada", "environments": field,
+            }))
+            .unwrap();
+            assert_eq!(odd, hello(None));
+        }
+
+        // A newer server offers each environment with its version; an older one offers none, read as version 1.
+        let welcome: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "welcome", "protocol": 2, "server": "tomori", "source": 1, "backends": [], "roots": [],
+            "environments": [{"id": "sky", "label": "Sky"}, {"id": "observe", "label": "Observe", "version": 2}],
+        }))
+        .unwrap();
+        let ServerMessage::Welcome { environments, .. } = welcome else {
+            unreachable!("read as a welcome above");
+        };
+        assert_eq!(
+            environments,
+            [
+                EnvironmentInfo {
+                    id: "sky".into(),
+                    label: "Sky".into(),
+                    version: 1,
+                },
+                EnvironmentInfo {
+                    id: "observe".into(),
+                    label: "Observe".into(),
+                    version: 2,
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&environments[1]).unwrap(),
+            serde_json::json!({"id": "observe", "label": "Observe", "version": 2})
+        );
+    }
+
+    #[test]
     fn hello_carries_no_credentials() {
         // Credentials belong on the HTTP request that opens the connection; see `design/security.md`.
         let hello = ClientMessage::Hello {
@@ -1063,6 +1208,7 @@ mod tests {
             participant: "p".into(),
             name: "Ada".into(),
             names: false,
+            environments: None,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -1078,6 +1224,7 @@ mod tests {
             participant: "p".into(),
             name: "Quest 3".into(),
             names: true,
+            environments: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -1096,6 +1243,7 @@ mod tests {
                 participant: "p".into(),
                 name: "Ada".into(),
                 names: false,
+                environments: None,
             }
         );
 

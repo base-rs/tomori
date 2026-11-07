@@ -17,6 +17,9 @@ let hello = ClientMessage::Hello {
     protocol: PROTOCOL_VERSION,
     participant: "a-secret-stable-identity".into(),
     name: "Console".into(),
+    names: false,
+    // The environments this client presents, with their versions; `None` is offered every one.
+    environments: None,
 };
 let bytes = Frame::client(&hello).encode();
 

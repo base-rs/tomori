@@ -71,6 +71,7 @@ impl Participant {
             participant: participant.to_owned(),
             name: name.to_owned(),
             names: false,
+            environments: None,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),

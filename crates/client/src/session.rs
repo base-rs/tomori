@@ -312,6 +312,7 @@ async fn exchange(
                 .clone(),
             // Every client built with this crate reads `Name`, which it hands on as any other message.
             names: true,
+            environments: options.environments.clone(),
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {

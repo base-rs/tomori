@@ -10,6 +10,6 @@ Its executable takes the same command line as `tomori-server`:
 cargo run -p tomori-example-server -- --backend placeholder --auth open --no-advertise
 ```
 
-A client then offers the placeholder backend and, after Sky and Grid, the Placeholder environment, which clients show as the Minimal grid since none has its client half. Its tests run the executable and create a space with both.
+A client then offers the placeholder backend and, after Sky and Grid, the Placeholder environment, at version 1, to a client that presents it, such as the [example headset](../headset/readme.md), or that lists no environments, as one from before versions, which shows it as the Minimal grid. Its tests run the executable and create a space with both.
 
 See the Building a Tomori Server guide in [`crates/server/context/`](../../crates/server/context/getting-started.md).

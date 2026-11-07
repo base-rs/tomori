@@ -402,19 +402,38 @@ impl TestClient {
     }
 
     pub fn hello(&mut self, participant: &str, name: &str) {
+        self.hello_presenting(participant, name, None);
+    }
+
+    /// Say hello as [`Self::hello`] does, listing the environments this client `presents`, and return those the welcome offers it. See `design/environments.md`.
+    pub fn hello_presenting(
+        &mut self,
+        participant: &str,
+        name: &str,
+        presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
+    ) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.send(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             participant: participant.to_owned(),
             name: name.to_owned(),
             names: false,
+            environments: presents,
         });
         // The welcome is the first reply to hello.
-        (self.source, self.role) = self.wait_for(|message| {
-            let ServerMessage::Welcome { source, role, .. } = message else {
+        let environments;
+        (self.source, self.role, environments) = self.wait_for(|message| {
+            let ServerMessage::Welcome {
+                source,
+                role,
+                environments,
+                ..
+            } = message
+            else {
                 unreachable!("the welcome comes first, not {message:?}");
             };
-            Some((*source, *role))
+            Some((*source, *role, environments.clone()))
         });
+        environments
     }
 
     fn write_chunk(&mut self, data: &[u8]) {

@@ -21,15 +21,15 @@ pub use cards::{Card, CardKind, Cards, Checks, Label, MAX_CARDS};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{
-    ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, Pose, Resource, ServerMessage,
-    TranscriptPart, TranscriptStage,
+    ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, Pose, Resource,
+    ServerMessage, TranscriptPart, TranscriptStage,
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,
-    Engagement, EnvironmentInfo, KnockRequest, KnockState, Message, Mode, Participant,
-    Presentation, PresentationKind, Question, QueueEntry, QueueState, Role, SessionSummary,
-    SpaceState, SpaceSummary, SpeechSetting, Worker, WorkerState, WorkspaceRoot,
+    Engagement, EnvironmentInfo, EnvironmentVersion, KnockRequest, KnockState, Message, Mode,
+    Participant, Presentation, PresentationKind, Question, QueueEntry, QueueState, Role,
+    SessionSummary, SpaceState, SpaceSummary, SpeechSetting, Worker, WorkerState, WorkspaceRoot,
 };
 
 /// The protocol version sent in [`ClientMessage::Hello`] and [`ServerMessage::Welcome`].
