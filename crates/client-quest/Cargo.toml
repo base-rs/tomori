@@ -31,6 +31,8 @@ glam = "0.30"
 log = "0.4"
 openxr = "0.22"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
+# On Android, environments' assets are read from the APK's `assets` folder, which the app adds to the shared library.
+tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
 tomori-render = { version = "0.2.0", path = "../render" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
 serde = { version = "1", features = ["derive"] }

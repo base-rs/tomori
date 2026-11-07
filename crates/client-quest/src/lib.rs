@@ -185,6 +185,8 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             .with_max_level(log::LevelFilter::Info),
     );
     std::panic::set_hook(Box::new(|info| log::error!("{info}")));
+    // Environments' assets are bundled in the APK's `assets` folder; see design/assets.md.
+    tomori_assets::Library::shared().add(android::ApkAssets::new(&app));
     let mut pump = AndroidEventPump::new(&app);
     // Service already queued startup events without allowing an input flood to
     // delay initialization indefinitely.

@@ -404,3 +404,24 @@ impl Drop for MulticastLock {
         self.release();
     }
 }
+
+/// The APK's `assets` folder, where an environment's assets are bundled on Android, each at its path, `ENVIRONMENT/NAME`.
+/// See `design/assets.md`.
+pub struct ApkAssets(AndroidApp);
+
+impl ApkAssets {
+    pub fn new(app: &AndroidApp) -> Self {
+        Self(app.clone())
+    }
+}
+
+impl tomori_assets::Source for ApkAssets {
+    fn read(&self, asset: &tomori_assets::AssetRef, limit: usize) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let path = std::ffi::CString::new(asset.path()).ok()?;
+        let file = self.0.asset_manager().open(&path)?;
+        let mut bytes = Vec::new();
+        file.take(limit as u64).read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    }
+}
