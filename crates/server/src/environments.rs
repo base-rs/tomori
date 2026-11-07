@@ -224,7 +224,7 @@ impl Environments {
         }
     }
 
-    /// The environment to bind a new space to, or change one to, for a client that `presents` these: as [`Self::choose`] among those offered to it, saying so when the server offers it none.
+    /// The environment to bind a new space to, or change one to, for a client that `presents` these: as [`Self::choose`] among those offered to it, saying so when the server offers it none, and naming the version of one the server offers that the client does not present at it.
     pub fn choose_for(
         &self,
         requested: Option<&str>,
@@ -234,7 +234,27 @@ impl Environments {
         if offered.0.is_empty() && !self.0.is_empty() {
             return Err("The server offers no environment this client can present.".to_owned());
         }
+        // The server's own identifier and version, never the request's text, so that the refusal says why.
+        if let Some(environment) = requested
+            .and_then(|requested| self.get(requested))
+            .filter(|environment| offered.get(&environment.id).is_none())
+        {
+            return Err(format!(
+                "This client cannot present {} at version {}; available: {}.",
+                environment.id,
+                environment.version,
+                offered.ids().join(", ")
+            ));
+        }
         offered.choose(requested)
+    }
+
+    /// The identifiers offered, in order.
+    fn ids(&self) -> Vec<&str> {
+        self.0
+            .iter()
+            .map(|environment| environment.id.as_str())
+            .collect()
     }
 
     /// What the environment `id` tells the agent about what it presents and how to use it, its layer of a space's instructions; see `design/spaces.md`. An environment no longer offered, such as one a kept space was bound to by a server built with other environments, contributes none.
@@ -257,17 +277,10 @@ impl Environments {
         match found {
             Some(environment) => Ok(environment.id.clone()),
             None if self.0.is_empty() => Err("The server offers no environments.".to_owned()),
-            None => {
-                let ids: Vec<&str> = self
-                    .0
-                    .iter()
-                    .map(|environment| environment.id.as_str())
-                    .collect();
-                Err(format!(
-                    "Unknown environment; available: {}.",
-                    ids.join(", ")
-                ))
-            }
+            None => Err(format!(
+                "Unknown environment; available: {}.",
+                self.ids().join(", ")
+            )),
         }
     }
 }
@@ -373,13 +386,18 @@ mod tests {
             .map(|info| info.id)
             .collect();
         assert_eq!(ids, [MINIMAL]);
-        // The first offered to it is its default, and one not offered to it is refused, naming those that are.
+        // The first offered to it is its default, and one not offered to it is refused, naming the version the server
+        // offers it at and those offered to the client, while one the server does not offer is unknown.
         assert_eq!(
             offered.choose_for(None, Some(&presents)),
             Ok(MINIMAL.to_owned())
         );
         assert_eq!(
             offered.choose_for(Some("observe"), Some(&presents)),
+            Err("This client cannot present observe at version 2; available: minimal.".to_owned())
+        );
+        assert_eq!(
+            offered.choose_for(Some("floor"), Some(&presents)),
             Err("Unknown environment; available: minimal.".to_owned())
         );
         assert_eq!(

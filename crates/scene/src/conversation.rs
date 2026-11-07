@@ -1725,8 +1725,10 @@ impl Conversation {
             return Some("The server named no environment.".into());
         }
         match (self.presents(id), space.environment_version) {
+            // Says which side has which version. A server that agrees on versions does not offer this client the environment, so it is named by its label only when known, and otherwise by its identifier.
             (Some(presented), Some(version)) if presented.version() != version => Some(format!(
-                "{id} needs version {version}, not {}",
+                "{} needs version {version}; this app has {}",
+                self.environment_name(id),
                 presented.version()
             )),
             (Some(_), _) => None,
@@ -5701,7 +5703,10 @@ mod tests {
         conversation.apply(space(|state| state.environment_version = Some(2)));
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         let text = conversation.text();
-        assert!(text.contains("sky needs version 2, not 1"), "{text}");
+        assert!(
+            text.contains("Sky needs version 2; this app has 1"),
+            "{text}"
+        );
         assert_fits(&mut conversation);
         assert_eq!(
             conversation
@@ -5710,7 +5715,7 @@ mod tests {
                 .unwrap()
                 .environment
                 .as_deref(),
-            Some("sky needs version 2, not 1")
+            Some("Sky needs version 2; this app has 1")
         );
         // One it lacks names the version the space needs.
         conversation.apply(space(|state| {
@@ -5762,8 +5767,11 @@ mod tests {
         conversation.apply(space(|state| state.environment_version = Some(2)));
         let (environment, text, menu) = warned(&mut conversation);
         assert_eq!(environment, Environment::MINIMAL);
-        assert!(text.contains("sky needs version 2, not 1"), "{text}");
-        assert_eq!(menu.as_deref(), Some("sky needs version 2, not 1"));
+        assert!(
+            text.contains("Sky needs version 2; this app has 1"),
+            "{text}"
+        );
+        assert_eq!(menu.as_deref(), Some("Sky needs version 2; this app has 1"));
         // Back to what it presents: Sky again, and the warning goes.
         conversation.apply(space(|state| state.environment_version = Some(1)));
         let (environment, text, menu) = warned(&mut conversation);
@@ -5797,7 +5805,7 @@ mod tests {
         assert!(
             conversation
                 .text()
-                .contains("github needs version 2, not 1")
+                .contains("github needs version 2; this app has 1")
         );
     }
 
@@ -5875,10 +5883,14 @@ mod tests {
         assert!(
             conversation
                 .text()
-                .contains("minimal needs version 3, not 1")
+                .contains("minimal needs version 3; this app has 1")
         );
         conversation.apply(space(|state| state.environment_version = Some(1)));
-        assert!(conversation.text().contains("sky needs version 1, not 2"));
+        assert!(
+            conversation
+                .text()
+                .contains("Sky needs version 1; this app has 2")
+        );
         conversation.apply(space(|state| state.environment_version = Some(2)));
         assert_eq!(conversation.environment().version(), 2);
         assert_eq!(conversation.environment(), Environment::SKY);
@@ -8360,12 +8372,15 @@ mod tests {
         }));
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         let (name, environments) = offered(&conversation);
-        assert_eq!(name.as_deref(), Some("minimal needs version 2, not 1"));
+        assert_eq!(
+            name.as_deref(),
+            Some("Grid needs version 2; this app has 1")
+        );
         assert_eq!(
             environments[1],
             (
                 "minimal".into(),
-                "minimal needs version 2, not 1".into(),
+                "Grid needs version 2; this app has 1".into(),
                 true
             )
         );

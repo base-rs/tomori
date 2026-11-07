@@ -141,13 +141,19 @@ fn a_client_creates_spaces_only_in_environments_it_presents() {
     assert_eq!(space.environment, "observe");
     assert_eq!(space.environment_version, Some(2));
 
-    // One it was not offered is refused, naming those it was, including one it lists at another version.
+    // One it was not offered is refused, naming those it was, and, for one it lists at another version, the version
+    // the server offers.
     let (mut tomori, _) = present(
         &server,
         "tomori",
         Some(&[("sky", 1), ("minimal", 1), ("observe", 1)]),
     );
     create(&mut tomori, "Elsewhere", Some("observe"));
+    assert_eq!(
+        tomori.error(),
+        "This client cannot present observe at version 2; available: sky, minimal."
+    );
+    create(&mut tomori, "Elsewhere", Some("floor"));
     assert_eq!(
         tomori.error(),
         "Unknown environment; available: sky, minimal."
@@ -214,7 +220,10 @@ fn an_owner_s_change_reaches_everyone_whether_or_not_they_can_present_it() {
 
     // A change to an environment the requester does not present is refused as one the server does not offer it.
     change(&mut ada, "minimal");
-    assert_eq!(ada.error(), "Unknown environment; available: sky, observe.");
+    assert_eq!(
+        ada.error(),
+        "This client cannot present minimal at version 1; available: sky, observe."
+    );
 
     // A collaborator without Observe, a visitor with it at another version, and a client from before versions.
     let (_, bob_token) = server.issue(
@@ -271,7 +280,10 @@ fn an_owner_s_change_reaches_everyone_whether_or_not_they_can_present_it() {
     ada.hello_presenting("ada", "Ada", listed(Some(&[("sky", 1)])));
     join(&mut ada, &space.id);
     change(&mut ada, "observe");
-    assert_eq!(ada.error(), "Unknown environment; available: sky.");
+    assert_eq!(
+        ada.error(),
+        "This client cannot present observe at version 2; available: sky."
+    );
 
     // A closed space keeps its environment, and says so.
     server.backend.started()[0].emit(Event::Closed { reason: None });

@@ -610,7 +610,7 @@ mod tests {
         );
         conversation.apply(space(|state| state.environment_version = Some(2)));
         let (out, _) = session(&mut conversation, &["nonsense"]);
-        assert!(out.contains("sky needs version 2, not 1"), "{out}");
+        assert!(out.contains("Sky needs version 2; this app has 1"), "{out}");
     }
 
     #[test]
