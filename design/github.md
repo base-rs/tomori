@@ -4,7 +4,7 @@ This describes the GitHub environment's first prototype: one repository's open i
 
 ## Requirement
 
-**Offered only when configured.** A server offers the GitHub environment, identifier `github`, labelled GitHub, only when it is started with `--github-repository OWNER/NAME`, after the environments it offers otherwise (see `environments.md`). Its token is the value of `GITHUB_TOKEN`, or else what `gh auth token` prints; a server given the flag without a token does not start, and says where it looked. A server built through the builder offers it with `Server::with_github` (see `builders.md`).
+**Offered only when configured.** A server offers the GitHub environment, identifier `github`, labelled GitHub, only when it is started with `--github-repository OWNER/NAME`, after the environments it offers otherwise (see `environments.md`). Its token is the value of `GITHUB_TOKEN`, or else what `gh auth token` prints; a server given the flag without a token does not start, and says where it looked. A server built through the builder offers it with `Server::with_github` (see `builders.md`). A client presents it only when its application registers it, presenting it over the grid, as Tomori's own app and spectator do (see `environments.md`); its identity is `github` at version 1, in `tomori-server`'s `github` module and Tomori's own apps until it moves into crates of its own.
 
 **The token stays on the server.** The token is used only for the `authorization` field of the server's requests to GitHub. It is never sent to a client, put in a space's state or kept spaces, told to the agent or logged, and a failure names where the token was looked for but never what was found. The server only reads: one GraphQL query, and nothing that changes GitHub.
 

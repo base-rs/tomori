@@ -817,7 +817,7 @@ mod tests {
         use crate::locomotion::{Locomotion, Surface};
         let mut conversation = joined();
         conversation.set_locomotion(vec![(
-            crate::environment::Environment::SKY,
+            crate::test_support::SKY,
             Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(20.0))]),
         )]);
         let mut desktop = desktop(&mut conversation);

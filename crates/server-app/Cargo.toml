@@ -1,0 +1,35 @@
+[package]
+name = "tomori-server-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The tomori-server executable: Tomori's own server, built on the tomori-server library with Tomori's own environments registered"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "agents", "xr", "server", "speech"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "tomori-server"
+path = "src/main.rs"
+
+[features]
+default = ["fake", "opencode", "speech"]
+# The library's features, which the executable is built with; see crates/server/readme.md.
+fake = ["tomori-server/fake"]
+opencode = ["tomori-server/opencode"]
+speech = ["tomori-server/speech"]
+speech-shared = ["tomori-server/speech-shared"]
+
+[dependencies]
+tomori-environment-sky = { version = "0.2.0", path = "../environment-sky" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tomori-server = { version = "0.2.0", path = "../server", default-features = false }
+
+[dev-dependencies]
+# The test client that the command's tests connect with.
+tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

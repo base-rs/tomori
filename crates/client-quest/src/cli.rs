@@ -172,17 +172,22 @@ impl Command {
             Mode::Xr => builder.run_xr(self.overrides),
             Mode::Console => builder.run_console(self.overrides),
             Mode::Discover => crate::run_discover(self.overrides.server),
-            Mode::Spectator => crate::run_spectator(self.spectator_options()),
-            Mode::SpectatorPipewire => crate::run_spectator_pipewire(self.spectator_options()),
-            Mode::SpectatorPipewirePreview => {
-                crate::run_spectator_pipewire_preview(self.spectator_options())
+            Mode::Spectator => {
+                crate::run_spectator(self.spectator_options(), builder.into_sceneries())
             }
+            Mode::SpectatorPipewire => {
+                crate::run_spectator_pipewire(self.spectator_options(), builder.into_sceneries())
+            }
+            Mode::SpectatorPipewirePreview => crate::run_spectator_pipewire_preview(
+                self.spectator_options(),
+                builder.into_sceneries(),
+            ),
             Mode::Licenses => {
                 println!("{}", licenses());
                 Ok(())
             }
             Mode::Help => {
-                println!("{}", help());
+                println!("{}", help(&builder.environments()));
                 Ok(())
             }
         }
@@ -199,11 +204,20 @@ pub fn licenses() -> String {
     )
 }
 
-/// What `--help` shows.
-pub fn help() -> String {
+/// What `--help` shows, for a build that draws `drawable`, which `TOMORI_ENVIRONMENT` chooses among, starting with the first after the grid.
+pub fn help(drawable: &[tomori_scene::environment::Environment]) -> String {
+    use tomori_scene::environment::Environment;
+    let choices: Vec<&str> = drawable
+        .iter()
+        .filter(|environment| **environment != Environment::MINIMAL)
+        .chain(std::iter::once(&Environment::MINIMAL))
+        .map(|environment| environment.id())
+        .collect();
     format!(
-        "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder and fonts.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT=sky|minimal selects the desktop window's initial environment (default sky); with a server, the space chooses it.",
-        crate::DESKTOP_CONTROLS
+        "tomori [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder and fonts.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `tomori discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
+        crate::DESKTOP_CONTROLS,
+        choices.join("|"),
+        Environment::first(drawable).id()
     )
 }
 
@@ -380,9 +394,16 @@ mod tests {
 
     #[test]
     fn help_and_licenses_say_what_they_should() {
-        assert!(help().contains(crate::DESKTOP_CONTROLS));
-        assert!(help().starts_with("tomori [MODE]"));
-        assert!(help().contains("also the tomori-spectator executable"));
+        use tomori_scene::environment::Environment;
+        let help = help(&[Environment::MINIMAL, Environment::new("deck")]);
+        assert!(help.contains(crate::DESKTOP_CONTROLS));
+        assert!(help.starts_with("tomori [MODE]"));
+        assert!(help.contains("also the tomori-spectator executable"));
+        // It names the build's environments, starting with the first after the grid.
+        assert!(help.contains(
+            "TOMORI_ENVIRONMENT=deck|minimal selects the desktop window's initial environment (default deck);"
+        ));
+        assert!(super::help(&[]).contains("TOMORI_ENVIRONMENT=minimal selects the desktop window's initial environment (default minimal);"));
         assert!(licenses().contains("Basis Universal transcoder:"));
         assert!(licenses().contains("Noto Sans JP"));
     }

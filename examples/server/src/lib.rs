@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! An example of a server built on `tomori-server` by another project: it offers a backend and an environment of its own, registered through [`tomori_server::Builder`], beside Tomori's, without changing Tomori. Its executable, `tomori-example-server`, takes the same command line as `tomori-server`, so `tomori-example-server --backend placeholder` offers the placeholder backend.
+//! An example of a server built on `tomori-server` by another project: it offers a backend and an environment of its own, registered through [`tomori_server::Builder`], beside Tomori's Sky and grid, which it registers from their own crates as Tomori's own server does, without changing Tomori. Its executable, `tomori-example-server`, takes the same command line as `tomori-server`, so `tomori-example-server --backend placeholder` offers the placeholder backend.
 mod placeholder;
 
 pub use placeholder::{Placeholder, PlaceholderSession};
@@ -20,9 +20,17 @@ pub fn environment() -> Environment {
     Environment::new(ENVIRONMENT, "Placeholder").with_instructions(INSTRUCTIONS)
 }
 
-/// Tomori's own server, with the placeholder backend and environment too.
+/// A server with Tomori's own backends, Sky and the Minimal grid, each registered by the identity its crate gives, and the placeholder backend and environment too. The library's builder offers no environment until it is registered.
 pub fn builder() -> Builder {
     Server::builder()
         .backend(placeholder::NAME, || Ok(Placeholder))
+        .environment(
+            Environment::new(tomori_environment_sky::ID, tomori_environment_sky::LABEL)
+                .with_version(tomori_environment_sky::VERSION),
+        )
+        .environment(
+            Environment::new(tomori_protocol::GRID, "Grid")
+                .with_version(tomori_protocol::GRID_VERSION),
+        )
         .environment(environment())
 }

@@ -10,6 +10,20 @@ use tomori_client::{
     speaker::{self, Output, Playback, Route, Shared},
 };
 
+/// An environment standing in for one an application registers with a scenery, as Tomori's own app registers Sky: the test server's first environment, `tomori_server::test_support::SKY`. Nothing outside tests names it.
+pub const SKY: crate::environment::Environment = crate::environment::Environment::new("sky");
+
+/// An environment standing in for one an application presents over the grid, as Tomori's own app presents the GitHub prototype, whose cards the scene presents.
+pub const GITHUB: crate::environment::Environment = crate::environment::Environment::new("github");
+
+/// A conversation for `name` that draws [`SKY`] and presents [`GITHUB`] over the grid, as an application's, such as Tomori's own, does.
+pub fn conversation(name: &str) -> Conversation {
+    let mut conversation = Conversation::new(name);
+    conversation.set_drawable(vec![SKY]);
+    conversation.set_over_grid(vec![GITHUB]);
+    conversation
+}
+
 /// Evaluate every log line's arguments, from now on in this test binary, so that what each would say is exercised; nothing is written, as no logger is installed.
 pub fn log_everything() {
     log::set_max_level(log::LevelFilter::Trace);
@@ -55,7 +69,7 @@ fn presenting(
     overrides.name = Some(name.to_owned());
     overrides.token = token;
     let identity = Identity::new(&store, None, overrides);
-    let mut conversation = Conversation::new(&identity.name);
+    let mut conversation = conversation(&identity.name);
     let connection = Connection::new(
         identity,
         store,

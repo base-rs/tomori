@@ -1825,7 +1825,7 @@ mod tests {
     fn travelling() -> Conversation {
         let mut conversation = joined();
         conversation.set_locomotion(vec![(
-            crate::environment::Environment::SKY,
+            crate::test_support::SKY,
             crate::locomotion::Locomotion::teleport(vec![crate::locomotion::Surface::rectangle(
                 Vec3::ZERO,
                 glam::Vec2::splat(20.0),

@@ -51,7 +51,7 @@ impl Demo {
         }
     }
 
-    /// Show the server-less swarm, drawn with `gpu`, among Tomori's own sceneries.
+    /// Show the server-less swarm, drawn with `gpu`, with nothing but the grid.
     pub fn new(gpu: Gpu) -> Self {
         Self::with_sceneries(gpu, &Sceneries::default())
     }

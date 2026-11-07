@@ -1132,7 +1132,11 @@ mod tests {
     /// The server `arguments` configure with no speech, or why it cannot be configured.
     fn configured(arguments: &Arguments) -> Result<(Server, Option<String>), String> {
         let mut engines = Engines::default();
-        let configured = configure(Server::builder(), arguments, None, &mut engines);
+        // Offering environments, as an application registers them.
+        let builder = crate::test_support::environments()
+            .into_iter()
+            .fold(Server::builder(), Builder::environment);
+        let configured = configure(builder, arguments, None, &mut engines);
         assert!(engines.stop(Instant::now()));
         configured
     }

@@ -12,5 +12,5 @@ fn main() -> anyhow::Result<()> {
         // SAFETY: the process has started no other thread yet, so nothing reads the environment concurrently.
         unsafe { std::env::set_var(name, value) };
     }
-    command.run()
+    command.run(tomori_client_spectator::app::sceneries())
 }

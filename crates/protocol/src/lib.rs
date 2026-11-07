@@ -10,7 +10,6 @@
 mod audio;
 mod cards;
 mod channel;
-pub mod environments;
 mod frame;
 mod keepalive;
 mod message;
@@ -34,6 +33,12 @@ pub use space::{
     Participant, Presentation, PresentationKind, Question, QueueEntry, QueueState, Role,
     SessionSummary, SpaceState, SpaceSummary, SpeechSetting, Worker, WorkerState, WorkspaceRoot,
 };
+
+/// The identifier of the Minimal grid, the plain floor grid that every client draws, built in: outside any space, and in a space whose environment it cannot present at the version the space names. It is the protocol's fallback rather than an environment of its own, so its identity is here; every other environment, Tomori's own included, defines its identity in its own crate, and an application registers it. A server offers the grid only when it registers it, as Tomori's own does. See `design/environments.md`.
+pub const GRID: &str = "minimal";
+
+/// The protocol version of the Minimal grid, [`GRID`], which every client presents it at.
+pub const GRID_VERSION: u32 = 1;
 
 /// The protocol version sent in [`ClientMessage::Hello`] and [`ServerMessage::Welcome`].
 pub const PROTOCOL_VERSION: u32 = 2;

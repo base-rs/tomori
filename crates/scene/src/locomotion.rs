@@ -887,7 +887,7 @@ mod tests {
         // Another environment.
         turn(&mut travel, input(&floors, Vec2::X, None));
         travel.update(Input {
-            place: Some(("space-1", Environment::SKY)),
+            place: Some(("space-1", crate::test_support::SKY)),
             ..input(&floors, Vec2::ZERO, None)
         });
         assert_eq!(travel.rig(), Rig::default());
@@ -895,13 +895,13 @@ mod tests {
         turn(&mut travel, input(&floors, Vec2::X, None));
         let none = Locomotion::None;
         travel.update(Input {
-            place: Some(("space-1", Environment::SKY)),
+            place: Some(("space-1", crate::test_support::SKY)),
             ..input(&none, Vec2::X, None)
         });
         assert_eq!(travel.rig(), Rig::default());
         assert_eq!(
             travel.update(Input {
-                place: Some(("space-1", Environment::SKY)),
+                place: Some(("space-1", crate::test_support::SKY)),
                 ..input(&none, Vec2::X, None)
             }),
             Outcome::default()

@@ -245,6 +245,7 @@ fn creating_or_listing_is_refused_by_a_backend_that_cannot_attach_or_a_server_sh
     let backend = FakeBackend::new();
     backend.attach_nothing();
     let (hub, jobs) = hub_with(backend);
+    hub.set_environments(Environments::new(crate::test_support::environments()));
     let client = Client::greeted(&hub, Access::open(), "ada");
     let create = |session: Option<&str>| ClientMessage::CreateSpace {
         title: "Space".to_owned(),

@@ -105,7 +105,18 @@ impl Transcriber for TextTranscriber {
     }
 }
 
-/// A server running on its own thread, listening on an ephemeral loopback port. Dropping it shuts the server down.
+/// The identifier of the first environment a test server offers: an environment standing in for one an application registers, as Tomori's own server program registers Sky. Nothing outside tests names it.
+pub const SKY: &str = "sky";
+
+/// The environments a test server offers unless it is given its own: [`SKY`], first, so that a space whose creator names none is bound to it, and the grid, as Tomori's own server program offers Sky and the grid. A server offers none until it is given some; see `design/environments.md`.
+pub fn environments() -> [crate::Environment; 2] {
+    [
+        crate::Environment::new(SKY, "Sky"),
+        crate::Environment::new(tomori_protocol::GRID, "Grid"),
+    ]
+}
+
+/// A server running on its own thread, listening on an ephemeral loopback port. Dropping it shuts the server down, and it offers [`environments`] unless it is given its own.
 pub struct TestServer {
     pub address: SocketAddr,
     pub backend: FakeBackend,
@@ -123,7 +134,7 @@ impl TestServer {
         Self::with_backend(FakeBackend::new())
     }
 
-    /// A server that admits holders of its tokens, issued with [`TestServer::issue`], and anyone else as a visitor if `visitors`. `configure` may change the server further, such as its visitor limit.
+    /// A server that admits holders of its tokens, issued with [`TestServer::issue`], and anyone else as a visitor if `visitors`, offering [`environments`]. `configure` may change the server further, such as its visitor limit or the environments it offers.
     pub fn with_tokens(
         visitors: bool,
         configure: impl FnOnce(Server) -> Server + Send + 'static,
@@ -141,6 +152,7 @@ impl TestServer {
         let mut server = Self::with_server(FakeBackend::new(), move |backends| {
             configure(
                 Server::new(backends, Arc::new(TextTranscriber::default()))
+                    .with_environments(environments())
                     .with_tokens(tokens, visitors),
             )
         });
@@ -221,7 +233,7 @@ impl TestServer {
         })
     }
 
-    /// A server built by `build` from the backends, such as with another transcriber or a synthesizer.
+    /// A server built by `build` from the backends, such as with another transcriber or a synthesizer, offering [`environments`] unless `build` offers its own.
     pub fn with_server(
         backend: FakeBackend,
         build: impl FnOnce(Backends) -> Server + Send + 'static,
@@ -242,8 +254,9 @@ impl TestServer {
                 // Tests name `/tmp` or the temporary directory unless they give their own roots.
                 let roots = WorkspaceRoots::new(["/tmp".into(), std::env::temp_dir()])
                     .expect("the temporary directories exist");
-                let server =
-                    build(Backends::new().with(backend)).with_default_workspace_roots(roots);
+                let server = build(Backends::new().with(backend))
+                    .with_default_workspace_roots(roots)
+                    .with_default_environments(environments());
                 block_on(async {
                     let address = "127.0.0.1:0".parse().unwrap();
                     let listener = crate::bind(&scheduler, address, &cancellation)
@@ -552,7 +565,7 @@ impl TestClient {
             backend: FAKE_BACKEND_NAME.to_owned(),
             directory: "/tmp".to_owned(),
             session: None,
-            environment: Some(tomori_protocol::environments::SKY.id.to_owned()),
+            environment: Some(SKY.to_owned()),
             instructions: None,
         });
         let title = title.to_owned();

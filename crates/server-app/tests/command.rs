@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The `tomori-server` executable, run as a separate process. Every server here listens on an ephemeral loopback port and does not advertise.
+//! The `tomori-server` executable, Tomori's own server program, run as a separate process. Every server here listens on an ephemeral loopback port and does not advertise.
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -95,9 +95,20 @@ fn sigterm_shuts_the_server_down_in_order() {
         .unwrap()
         .parse()
         .unwrap();
-    // It serves: a client is welcomed.
+    // It serves: a client is welcomed, and offered Tomori's own environments, Sky first, then the grid.
     let mut client = tomori_server::test_support::TestClient::open(address);
-    client.hello("quest", "Ada");
+    let offered: Vec<(String, String, u32)> = client
+        .hello_presenting("quest", "Ada", None)
+        .into_iter()
+        .map(|environment| (environment.id, environment.label, environment.version))
+        .collect();
+    assert_eq!(
+        offered,
+        [
+            ("sky".to_owned(), "Sky".to_owned(), 1),
+            ("minimal".to_owned(), "Grid".to_owned(), 1)
+        ]
+    );
     drop(client);
 
     // SAFETY: `kill` only sends a signal to the child.

@@ -1,0 +1,31 @@
+[package]
+name = "tomori-environment-sky-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The client half of Tomori's moonlit Sky environment: its renderer, and its registration as a scenery"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "wgpu", "xr", "sky", "environment"]
+categories = ["rendering", "graphics"]
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+tomori-environment-sky = { version = "0.2.0", path = "../environment-sky" }
+tomori-render = { version = "0.2.0", path = "../render" }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+
+[dev-dependencies]
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The device for offscreen rendering tests and WGSL validation.
+tomori-render = { version = "0.2.0", path = "../render", features = ["test-gpu"] }
+# The swarm and the arrival's scenery, to draw Sky as a client does.
+tomori-scene = { version = "0.2.0", path = "../scene" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+
+[build-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"

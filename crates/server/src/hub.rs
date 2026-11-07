@@ -3983,7 +3983,7 @@ impl Hub {
     }
 
     /// The environments offered, as clients are told them.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fake"))]
     pub(crate) fn environment_info(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.environments().info()
     }

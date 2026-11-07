@@ -80,7 +80,7 @@ impl Participant {
         }
     }
 
-    /// Take part as `conversation` and `connection` describe, drawn with `gpu`, among Tomori's own sceneries.
+    /// Take part as `conversation` and `connection` describe, drawn with `gpu`, with nothing but the grid.
     pub fn new(gpu: Gpu, conversation: Conversation, connection: Connection) -> Self {
         Self::with_sceneries(gpu, conversation, connection, &Sceneries::default())
     }
@@ -93,6 +93,7 @@ impl Participant {
         sceneries: &Sceneries,
     ) -> Self {
         conversation.set_drawable(sceneries.environments());
+        conversation.set_over_grid(sceneries.over_grid());
         conversation.set_locomotion(sceneries.locomotion());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
@@ -453,7 +454,8 @@ mod tests {
             let (mut conversation, connection) =
                 server.participant("Ada", Some(server.owner("Ada")));
             conversation.join_space(space.id);
-            let mut sceneries = Sceneries::default();
+            // A scenery for the space's environment, as an application registers one.
+            let mut sceneries = tomori_render::scenery::test::Counted::default().sceneries("sky");
             sceneries.set_locomotion(
                 "sky",
                 Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),

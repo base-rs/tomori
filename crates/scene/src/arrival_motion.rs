@@ -732,7 +732,7 @@ mod tests {
     }
 
     fn entered(id: &str) -> Scene {
-        Scene::entered(Some(Key::Space(id.into())), Environment::SKY)
+        Scene::entered(Some(Key::Space(id.into())), crate::test_support::SKY)
     }
 
     /// Run frames from `start` until `end`, checking that no object or the environment jumps between frames.
@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(
             motion.scenery(now),
             Scenery {
-                environment: Environment::SKY,
+                environment: crate::test_support::SKY,
                 reveal: None
             }
         );
@@ -1066,7 +1066,7 @@ mod tests {
         );
         now += APPROACH_TIME * 0.5;
         let growing = motion.scenery(now + REVEAL * 0.3);
-        assert_eq!(growing.environment, Environment::SKY);
+        assert_eq!(growing.environment, crate::test_support::SKY);
         let sphere = growing.reveal.unwrap();
         assert!(sphere.centre.distance(APPROACH) < 1e-4);
         // Small at first, around the participant past halfway, and whole at the end.
@@ -1120,7 +1120,7 @@ mod tests {
         assert_eq!(
             motion.scenery(now),
             Scenery {
-                environment: Environment::SKY,
+                environment: crate::test_support::SKY,
                 reveal: None
             }
         );
@@ -1135,7 +1135,7 @@ mod tests {
         // Changed back, the sky grows again from the space, whole by the end.
         motion.update(&entered("one"), now);
         let growing = motion.scenery(now + REVEAL * 0.3);
-        assert_eq!(growing.environment, Environment::SKY);
+        assert_eq!(growing.environment, crate::test_support::SKY);
         assert!(growing.reveal.unwrap().centre.distance(APPROACH) < 1e-4);
         assert_eq!(motion.scenery(now + REVEAL).reveal, None);
     }
@@ -1146,7 +1146,7 @@ mod tests {
         let mut now = settle(&mut motion, &joining("one"), 0.0);
         now = settle(&mut motion, &entered("one"), now);
         let whole = Scenery {
-            environment: Environment::SKY,
+            environment: crate::test_support::SKY,
             reveal: None,
         };
         assert_eq!(motion.scenery(now), whole);

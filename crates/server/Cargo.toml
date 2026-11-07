@@ -3,16 +3,12 @@ name = "tomori-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The Tomori server: spaces, agent sessions and live audio over one duplex connection per client"
+description = "The Tomori server library: spaces, agent sessions and live audio over one duplex connection per client, and the builder a server registers its backends and environments on"
 repository.workspace = true
 license.workspace = true
 readme = "readme.md"
 keywords = ["tomori", "agents", "xr", "server", "speech"]
-categories = ["network-programming", "command-line-utilities"]
-
-[[bin]]
-name = "tomori-server"
-path = "src/main.rs"
+categories = ["network-programming"]
 
 [[test]]
 name = "connection"

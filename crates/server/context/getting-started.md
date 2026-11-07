@@ -1,10 +1,10 @@
 # Building a Tomori Server
 
-`tomori-server` is both the `tomori-server` executable and the library it is built from. Use this guide to build a server of your own that offers backends and environments Tomori doesn't have, without forking Tomori or changing its source. To run Tomori's own server, install `tomori-server` instead, as its readme explains.
+`tomori-server` is the library that Tomori's own server, the `tomori-server` executable from `tomori-server-app`, is built from. Use this guide to build a server of your own that offers backends and environments Tomori doesn't have, without forking Tomori or changing its source. To run Tomori's own server, install `tomori-server-app` instead, as `tomori-server`'s readme explains.
 
 ## A server of your own
 
-A downstream server is a binary crate that depends on `tomori-server` and calls `Server::builder`, which starts with Tomori's own backends and environments, registers its own on it, and runs the process's command line:
+A downstream server is a binary crate that depends on `tomori-server` and calls `Server::builder`, which starts with Tomori's own backends and no environments, registers its own on it, and runs the process's command line:
 
 ```rust
 use std::process::ExitCode;
@@ -30,7 +30,7 @@ The executable takes the same command line as `tomori-server`, including `auth` 
 
 ## Environments
 
-`Builder::environment` offers an environment for spaces: its identifier, which clients map to what they present, the label they show, its protocol version, 1 unless `Environment::with_version` gives another, and optionally its layer of the instructions a space's agent is given. Environments are offered in order, after Tomori's own Sky and Grid, and the first is the one a space whose creator names none is bound to; registering an identifier already offered replaces that environment in its place. A client that lists the environments it presents in its `Hello`, as Tomori's own do, is offered only those it presents at the same version, and creates and changes spaces only in them; an owner's change still applies to everyone in the space. A client that joins a space in an environment it lacks, or has at another version, shows the Minimal grid and names the version it needs, so a headset needs the environment's client side, at the same version, to present it. Raise the version when a client side of the earlier version could not present the environment; a change it can ignore, such as a new optional field, keeps it.
+`Builder::environment` offers an environment for spaces: its identifier, which clients map to what they present, the label they show, its protocol version, 1 unless `Environment::with_version` gives another, and optionally its layer of the instructions a space's agent is given. Environments are offered in the order registered, and the first is the one a space whose creator names none is bound to; registering an identifier already offered replaces that environment in its place. The builder offers none until you register some, so a server that registers none refuses to create spaces. To offer Tomori's own, register them from their crates, as Tomori's own server, `tomori_server_app::builder()`, does: Sky by the identity in `tomori-environment-sky`, `Environment::new(tomori_environment_sky::ID, tomori_environment_sky::LABEL).with_version(tomori_environment_sky::VERSION)`, and the grid by `tomori_protocol::GRID` and `GRID_VERSION`. A client that lists the environments it presents in its `Hello`, as Tomori's own do, is offered only those it presents at the same version, and creates and changes spaces only in them; an owner's change still applies to everyone in the space. A client that joins a space in an environment it lacks, or has at another version, shows the Minimal grid and names the version it needs, so a headset needs the environment's client side, at the same version, to present it. Raise the version when a client side of the earlier version could not present the environment; a change it can ignore, such as a new optional field, keeps it.
 
 An environment may also have a server side, a program in the server that runs while a space is bound to the environment, which `Environment::with_server_side` registers with it. Implement `ServerSide` from `tomori-environment`:
 
@@ -53,7 +53,7 @@ impl ServerSide for Observe {
 let observe = Environment::new("observe", "Observe").with_server_side(Observe);
 ```
 
-The server runs it on a thread of its own, once each time a space is bound to the environment: when the space is created in it, an owner changes it to it, or it is bound to its session again after a restart. It is given the space's identifier, title and directory and a cancellation, which is cancelled when the space is bound to another environment, closes, or the server stops; the server waits only `Server::with_drain_timeout` for sides to stop when it stops itself. A side that returns an `Error` or panics is shown in the space, which keeps its environment and conversation, and is not run again for that binding. Environments have no client sides, state, data sources or tools yet. Those are planned, and will be registered through the same builder.
+The server runs it on a thread of its own, once each time a space is bound to the environment: when the space is created in it, an owner changes it to it, or it is bound to its session again after a restart. It is given the space's identifier, title and directory and a cancellation, which is cancelled when the space is bound to another environment, closes, or the server stops; the server waits only `Server::with_drain_timeout` for sides to stop when it stops itself. A side that returns an `Error` or panics is shown in the space, which keeps its environment and conversation, and is not run again for that binding. Environments have no state, data sources or tools on the server yet. Those are planned, and will be registered through the same builder. To make an environment of your own, with a common crate for its identity and server and client crates beside it, follow `tomori-environment`'s Making an Environment guide.
 
 ## Other settings
 

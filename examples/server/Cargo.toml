@@ -12,8 +12,10 @@ publish = false
 [dependencies]
 async-channel = "2"
 tomori-backend = { version = "0.2.0", path = "../../crates/backend" }
+# Sky's identity, to offer it as Tomori's own server does.
+tomori-environment-sky = { version = "0.2.0", path = "../../crates/environment-sky" }
+tomori-protocol = { version = "0.2.0", path = "../../crates/protocol" }
 tomori-server = { version = "0.2.0", path = "../../crates/server" }
 
 [dev-dependencies]
 futures-lite = "2"
-tomori-protocol = { version = "0.2.0", path = "../../crates/protocol" }

@@ -22,7 +22,7 @@ The user asked for a friend without a headset to try Tomori from the desktop cli
 
 ## Scope
 
-`crates/client-desktop`: the `--desktop` mode (`desktop_participant.rs`, its logic in `crates/scene`'s `scene/desktop.rs` and the shared frame step in its `scene.rs`), the server-less window (`desktop.rs`), the window's events and surface as its contents see them (`window.rs`) and the winit and surface calls themselves (`desktop_window.rs`), and the desktop's microphone and speaker (`desktop_audio.rs`, `cpal_audio.rs`); `crates/client-spectator`'s window (`spectator_window.rs`) and command line (`cli.rs`); and, in `crates/client-quest`, the `tomori` command line (`cli.rs`), the headset's sample count (`xr.rs`, `vulkan.rs` and the `tomori.msaa` extra in `lib.rs`), and, in `crates/render`, the renderer's sample count (`graphics.rs` and every pipeline drawn in its scene pass, including `crates/environment-sky`).
+`crates/client-desktop`: the `--desktop` mode (`desktop_participant.rs`, its logic in `crates/scene`'s `scene/desktop.rs` and the shared frame step in its `scene.rs`), the server-less window (`desktop.rs`), the window's events and surface as its contents see them (`window.rs`) and the winit and surface calls themselves (`desktop_window.rs`), and the desktop's microphone and speaker (`desktop_audio.rs`, `cpal_audio.rs`); `crates/client-spectator`'s window (`spectator_window.rs`) and command line (`cli.rs`); and, in `crates/client-quest`, the `tomori` command line (`cli.rs`), the headset's sample count (`xr.rs`, `vulkan.rs` and the `tomori.msaa` extra in `lib.rs`), and, in `crates/render`, the renderer's sample count (`graphics.rs` and every pipeline drawn in its scene pass, including Sky's, in `crates/environment-sky-client`).
 
 ## Validation
 

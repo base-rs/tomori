@@ -9,4 +9,6 @@ bake = ">=0.20.1"
 base-project = ">=0.1.7"
 
 [dev-dependencies]
+# Reads `cargo metadata`, for the dependency rule between the core, environments and apps.
+serde_json = "1"
 tempfile = "3"

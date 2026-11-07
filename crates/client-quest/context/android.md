@@ -4,7 +4,7 @@ A headset build of your own, made with `tomori::Builder` (see `design/builders.m
 
 ## The crate
 
-The build is a library crate, compiled as a shared library for the APK, that depends on `tomori-client-quest` without its default `app` feature, which holds Tomori's own `android_main`, and writes its own:
+The build is a library crate, compiled as a shared library for the APK, that depends on `tomori-client-quest` without its default `app` feature, which holds Tomori's own app, its `android_main` and its environments' crates, and writes its own:
 
 ```toml
 [lib]
@@ -22,7 +22,7 @@ fn android_main(app: tomori::AndroidApp) {
 }
 ```
 
-A scenery registered with `scenery` presents its environment at protocol version 1; `versioned_scenery("observe", 2, my_scenery)` presents it at another, which must match the version the server offers it at (see `design/environments.md`). `tomori::AndroidApp` is `android-activity`'s, re-exported so that the build's version matches Tomori's. The `rlib` is for the build's tests and any desktop executable, which runs the same builder with `tomori::main(builder)`.
+`tomori::Builder::default()` draws nothing but the built-in grid, so the build registers every environment it presents, its own and others' from their client crates, such as Sky's with `.register(tomori_environment_sky_client::register)`. A scenery registered with `scenery` presents its environment at protocol version 1; `versioned_scenery("observe", 2, my_scenery)` presents it at another, which must match the version the server offers it at (see `design/environments.md`). `tomori::AndroidApp` is `android-activity`'s, re-exported so that the build's version matches Tomori's. The `rlib` is for the build's tests and any desktop executable, which runs the same builder with `tomori::main(builder)`.
 
 ## The manifest
 

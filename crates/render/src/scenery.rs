@@ -1,9 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Scenery drawn natively in each eye's pass, as Sky is, and the sceneries a client can draw, by the identifiers that spaces name their environments by. See `design/environments.md`.
+//! Scenery drawn natively in each eye's pass, and the sceneries a client can draw, by the identifiers that spaces name their environments by. See `design/environments.md`.
 //!
-//! The contract is Sky's existing hooks, named for what they do. The Minimal grid is built into the [`Renderer`](crate::graphics::Renderer), and is what a client shows for an environment it cannot draw. An environment's client side, which #75 defines, will register its scenery through the same [`Sceneries`].
+//! The Minimal grid is built into the [`Renderer`](crate::graphics::Renderer), and is what a client shows for an environment it cannot draw. Every other environment's client half registers its scenery through [`Sceneries`] from its own crate, such as `tomori-environment-sky-client`, and an application registers the environments it presents.
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
@@ -36,70 +36,21 @@ pub trait Scenery {
     fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 }
 
-impl Scenery for tomori_environment_sky::Sky {
-    fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
-        self.prepare_eye(queue, eye, scene_to_clip);
-    }
-
-    fn encode(&self, encoder: &mut wgpu::CommandEncoder, eye: usize) {
-        self.encode_clouds(encoder, eye);
-    }
-
-    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
-        tomori_environment_sky::Sky::draw(self, pass, eye);
-    }
-
-    fn draw_translucent(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
-        self.draw_clouds(pass, eye);
-    }
-
-    fn set_reveal(&mut self, reveal: Option<(Vec3, f32)>) {
-        tomori_environment_sky::Sky::set_reveal(self, reveal);
-    }
-
-    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        tomori_environment_sky::Sky::resize(self, device, width, height);
-    }
-}
-
 /// Makes a scenery for a renderer's target.
 type Create = Arc<dyn Fn(&Target) -> Box<dyn Scenery> + Send + Sync>;
 
-/// The sceneries a client can draw, by the identifiers spaces name them by, in the order they were registered, with the locomotion each environment allows. The Minimal grid is built in, and is not registered.
-#[derive(Clone)]
+/// The sceneries a client can draw, by the identifiers spaces name them by, in the order they were registered, with the locomotion each environment allows, and the environments it presents over the grid without a scenery of their own. The Minimal grid is built in, and is not registered. It starts empty: an application registers the environments it presents, each through its own crate, such as Sky's `tomori_environment_sky_client::register`. See `design/environments.md`.
+#[derive(Clone, Default)]
 pub struct Sceneries {
     entries: Vec<(Environment, Create)>,
     locomotion: Vec<(Environment, Locomotion)>,
-}
-
-/// Tomori's moonlit sky, for `target`.
-pub fn sky(target: &Target) -> Box<dyn Scenery> {
-    Box::new(tomori_environment_sky::Sky::with_samples(
-        target.device,
-        target.queue,
-        target.format,
-        target.width,
-        target.height,
-        target.samples,
-    ))
-}
-
-impl Default for Sceneries {
-    /// Tomori's own: [`sky`], at the version `tomori_protocol::environments::SKY` gives it, which the server offers it at.
-    fn default() -> Self {
-        let mut sceneries = Self::empty();
-        sceneries.register_versioned(Environment::SKY.id(), Environment::SKY.version(), sky);
-        sceneries
-    }
+    over_grid: Vec<Environment>,
 }
 
 impl Sceneries {
-    /// None but the built-in grid.
+    /// None but the built-in grid, as [`Sceneries::default`] is.
     pub fn empty() -> Self {
-        Self {
-            entries: Vec::new(),
-            locomotion: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Draw `create`'s scenery for the environment `id`, at protocol version 1, in place of any registered before under the same identifier.
@@ -111,7 +62,7 @@ impl Sceneries {
         self.register_versioned(id, 1, create);
     }
 
-    /// Draw `create`'s scenery for the environment `id` at protocol `version`, in place of any registered before under the same identifier, whatever its version. The grid, `minimal`, is built in, at the version `tomori_protocol::environments::MINIMAL` gives it: a scenery registered for it is drawn with it, at the grid's version whatever version it is registered at. A client presents the environment only for a space whose environment is at the same version, and shows the grid for one at another; see `design/environments.md`.
+    /// Draw `create`'s scenery for the environment `id` at protocol `version`, in place of any registered before under the same identifier, whatever its version. The grid, [`tomori_protocol::GRID`], is built in, at [`tomori_protocol::GRID_VERSION`]: a scenery registered for it is drawn with it, at the grid's version whatever version it is registered at. A client presents the environment only for a space whose environment is at the same version, and shows the grid for one at another; see `design/environments.md`.
     pub fn register_versioned(
         &mut self,
         id: &'static str,
@@ -124,7 +75,19 @@ impl Sceneries {
         self.entries.push((environment, Arc::new(create)));
     }
 
-    /// Let participants travel as `locomotion` says in a space bound to the environment `id`, when its scenery is drawn, in place of any declared before for it. An environment declared nothing has none, as Tomori's own do. See `design/locomotion.md`.
+    /// Present the environment `id` at protocol `version` over the grid, without a scenery of its own, in place of any presented so before under the same identifier: a client lists it in its `Hello` and shows a space in it without a notice, drawing the grid and whatever the shared scene presents of it, as the GitHub prototype's cards. A scenery registered for the same identifier is drawn instead, at its own version. See `design/environments.md`.
+    pub fn present_over_grid(&mut self, id: &'static str, version: u32) {
+        let environment = Environment::new(id).with_version(version);
+        self.over_grid.retain(|presented| *presented != environment);
+        self.over_grid.push(environment);
+    }
+
+    /// The environments presented over the grid, in the order they were presented, for the conversation.
+    pub fn over_grid(&self) -> Vec<Environment> {
+        self.over_grid.clone()
+    }
+
+    /// Let participants travel as `locomotion` says in a space bound to the environment `id`, when its scenery is drawn, in place of any declared before for it. An environment declared nothing has none. See `design/locomotion.md`.
     ///
     /// Provisional: once environments have server sides (#75), the profile is to come from the environment's server side instead, and this may be deprecated.
     pub fn set_locomotion(&mut self, id: &'static str, locomotion: Locomotion) {
@@ -206,6 +169,11 @@ pub mod test {
         }
     }
 
+    /// A scenery that draws nothing, for registering where what is drawn does not matter.
+    pub fn blank(_target: &Target) -> Box<dyn Scenery> {
+        Box::new(Counted::default())
+    }
+
     impl Scenery for Counted {
         fn prepare(&self, _queue: &wgpu::Queue, _eye: usize, _scene_to_clip: Mat4) {}
 
@@ -222,7 +190,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn locomotion_is_declared_by_identifier_and_tomori_s_own_declare_none() {
+    fn locomotion_is_declared_by_identifier_and_none_by_default() {
         use crate::locomotion::Surface;
         assert!(Sceneries::default().locomotion().is_empty());
         let mut sceneries = Sceneries::empty();
@@ -244,26 +212,27 @@ mod tests {
     fn the_grid_is_built_in_and_sceneries_are_kept_in_order_by_identifier() {
         let mut sceneries = Sceneries::empty();
         assert_eq!(sceneries.environments(), [Environment::MINIMAL]);
+        // Nothing but the grid is registered by default: an application registers its environments.
+        assert_eq!(Sceneries::default().environments(), [Environment::MINIMAL]);
+        assert!(Sceneries::default().over_grid().is_empty());
         assert!(sceneries.contains("minimal"));
-        assert!(!sceneries.contains("sky"));
-        sceneries.register("floor", sky);
-        sceneries.register("sky", sky);
+        assert!(!sceneries.contains("deck"));
+        sceneries.register("floor", test::blank);
+        sceneries.register("deck", test::blank);
         // Registering an identifier again replaces it, at the end.
-        sceneries.register("floor", sky);
+        sceneries.register("floor", test::blank);
         assert_eq!(
             sceneries.environments(),
             [
                 Environment::MINIMAL,
-                Environment::SKY,
+                Environment::new("deck"),
                 Environment::new("floor")
             ]
         );
         // A scenery for the grid is drawn with it, and the grid is listed once.
-        sceneries.register("minimal", sky);
+        sceneries.register("minimal", test::blank);
         assert_eq!(sceneries.environments().len(), 3);
-        assert_eq!(Sceneries::default().environments(), Environment::BUILT_IN);
-        // Tomori's own are at their built-in versions, and another at version 1 unless registered at another, which
-        // registering again replaces.
+        // Each is at version 1 unless registered at another, which registering again replaces.
         let versions = |sceneries: &Sceneries| -> Vec<(&str, u32)> {
             sceneries
                 .environments()
@@ -271,23 +240,36 @@ mod tests {
                 .map(|environment| (environment.id(), environment.version()))
                 .collect()
         };
-        assert_eq!(
-            versions(&Sceneries::default()),
-            Environment::BUILT_IN.map(|environment| (environment.id(), environment.version()))
-        );
-        sceneries.register_versioned("floor", 2, sky);
+        sceneries.register_versioned("floor", 2, test::blank);
         // The grid is built in at its own version, whatever version a scenery drawn with it is registered at.
-        sceneries.register_versioned("minimal", 3, sky);
+        sceneries.register_versioned("minimal", 3, test::blank);
         assert_eq!(
             versions(&sceneries),
             [
-                ("minimal", Environment::MINIMAL.version()),
-                ("sky", 1),
+                (tomori_protocol::GRID, tomori_protocol::GRID_VERSION),
+                ("deck", 1),
                 ("floor", 2)
             ]
         );
-        sceneries.register("floor", sky);
+        sceneries.register("floor", test::blank);
         assert_eq!(sceneries.environments()[2].version(), 1);
+    }
+
+    #[test]
+    fn environments_presented_over_the_grid_are_kept_in_order_by_identifier() {
+        let mut sceneries = Sceneries::empty();
+        sceneries.present_over_grid("board", 1);
+        sceneries.present_over_grid("inbox", 2);
+        // Presenting an identifier again replaces it, at the end.
+        sceneries.present_over_grid("board", 3);
+        let presented: Vec<(&str, u32)> = sceneries
+            .over_grid()
+            .into_iter()
+            .map(|environment| (environment.id(), environment.version()))
+            .collect();
+        assert_eq!(presented, [("inbox", 2), ("board", 3)]);
+        // They have no scenery of their own.
+        assert_eq!(sceneries.environments(), [Environment::MINIMAL]);
     }
 
     #[test]
@@ -350,6 +332,13 @@ mod tests {
             });
             render(&renderer);
             assert_eq!(counted.drawn(), 2);
+            assert_eq!(renderer.environment(), floor);
+            // A blank scenery is made for a renderer, and draws nothing.
+            let mut blank = Sceneries::empty();
+            blank.register("blank", test::blank);
+            let renderer = Renderer::with_sceneries(&device, &queue, format, 8, 8, 1, &blank);
+            assert_eq!(renderer.environments()[1], Environment::new("blank"));
+            render(&renderer);
         });
     }
 }

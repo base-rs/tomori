@@ -57,11 +57,13 @@ mod tests {
         });
         let mut frame: Frame = serde_json::from_value(legacy).unwrap();
         assert_eq!(frame.environment, crate::environment::Environment::MINIMAL);
-        frame.environment = crate::environment::Environment::SKY;
+        let decoded: Frame = serde_json::from_value(serde_json::to_value(&frame).unwrap()).unwrap();
+        assert_eq!(decoded.environment, frame.environment);
+        // An application's environment is sent by its identifier, and read back only as the grid, the one built in.
+        frame.environment = tomori_scene::test_support::SKY;
         let mut encoded = serde_json::to_value(&frame).unwrap();
         assert_eq!(encoded["environment"], "sky");
-        let decoded: Frame = serde_json::from_value(encoded.clone()).unwrap();
-        assert_eq!(decoded.environment, frame.environment);
+        assert!(serde_json::from_value::<Frame>(encoded.clone()).is_err());
         encoded["environment"] = "unknown".into();
         assert!(serde_json::from_value::<Frame>(encoded).is_err());
     }

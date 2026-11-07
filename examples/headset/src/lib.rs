@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! An example of a headset built on `tomori-client-quest` by another project: it draws a scenery of its own, a flat coloured floor, for the placeholder environment that `tomori-example-server` offers, registered through [`tomori::Builder`] beside Tomori's own, without changing Tomori. Its executable, `tomori-example-headset`, takes the same command line as `tomori`.
+//! An example of a headset built on `tomori-client-quest` by another project: it draws a scenery of its own, a flat coloured floor, for the placeholder environment that `tomori-example-server` offers, registered through [`tomori::Builder`] beside Tomori's Sky, which it registers from Sky's own crate as Tomori's own app does, without changing Tomori. Its executable, `tomori-example-headset`, takes the same command line as `tomori`.
 use glam::{Mat4, Vec3};
 use tomori_render::scenery::{Scenery, Target};
 use wgpu::util::DeviceExt;
@@ -12,9 +12,11 @@ pub const ENVIRONMENT: &str = "placeholder";
 /// The floor's colour, linear.
 pub const COLOUR: [f32; 3] = [0.55, 0.25, 0.45];
 
-/// Tomori's own headset, drawing the placeholder floor too.
+/// A headset drawing Sky, from `tomori-environment-sky-client`, and the placeholder floor too. The library's builder draws nothing but the grid until a scenery is registered.
 pub fn builder() -> tomori::Builder {
-    tomori::Builder::default().scenery(ENVIRONMENT, floor)
+    tomori::Builder::default()
+        .register(tomori_environment_sky_client::register)
+        .scenery(ENVIRONMENT, floor)
 }
 
 /// This build's headset on the Quest, in place of Tomori's own, which this crate turns off by depending on `tomori-client-quest` without its default `app` feature.

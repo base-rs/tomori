@@ -17,11 +17,12 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "tomori"
 path = "src/main.rs"
+required-features = ["app"]
 
 [features]
 default = ["app"]
-# Tomori's own `android_main`, which runs `Builder::default()` on the Quest. A headset build of another project's turns it off, with `default-features = false`, to write its own that runs its builder; see design/builders.md.
-app = []
+# Tomori's own app: `tomori::app::builder()`, which registers Tomori's own environments from their crates, the `tomori` executable that runs it, and the `android_main` that runs it on the Quest. A headset build of another project's turns it off, with `default-features = false`, to write its own `android_main` that runs its builder, and to depend on no environment it does not register; see design/builders.md.
+app = ["dep:tomori-environment-sky-client"]
 
 [dependencies]
 anyhow = "1"
@@ -35,6 +36,8 @@ tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
 tomori-render = { version = "0.2.0", path = "../render" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
+# Sky, which Tomori's own app registers.
+tomori-environment-sky-client = { version = "0.2.0", path = "../environment-sky-client", optional = true }
 serde = { version = "1", features = ["derive"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 wgpu-hal = { version = "30.0.1", features = ["vulkan"] }
@@ -48,7 +51,8 @@ ndk = { version = "0.9", features = ["audio", "api-level-29"] }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
 tomori-client-desktop = { version = "0.2.0", path = "../client-desktop" }
-tomori-client-spectator = { version = "0.2.0", path = "../client-spectator" }
+# Without the spectator's own app, as the spectator modes draw this build's sceneries.
+tomori-client-spectator = { version = "0.2.0", path = "../client-spectator", default-features = false }
 
 # Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -61,6 +65,8 @@ serde_json = "1"
 tomori-scene = { version = "0.2.0", path = "../scene", features = ["testing"] }
 # A server on a loopback port, with a scripted backend, for the command's tests.
 tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
+# Tomori's own server program, whose environments Tomori's own app must agree with. It has no version, so that packaging leaves it out: only the tests use it.
+tomori-server-app = { path = "../server-app", default-features = false }
 # The device for offscreen rendering tests, and a scenery that counts what it draws.
 tomori-render = { version = "0.2.0", path = "../render", features = ["test-gpu"] }
 # A window shown on that device, to run the builder's window modes without a display.

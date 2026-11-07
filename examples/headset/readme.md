@@ -1,6 +1,6 @@
 # Example Headset
 
-An example of a headset that another project builds on [`tomori-client-quest`](../../crates/client-quest), without changing Tomori. It draws a placeholder scenery of its own, a flat coloured floor, for the placeholder environment that [the example server](../server/readme.md) offers, registered through `tomori::Builder`, beside Tomori's own Sky and grid.
+An example of a headset that another project builds on [`tomori-client-quest`](../../crates/client-quest), without changing Tomori. It draws a placeholder scenery of its own, a flat coloured floor, for the placeholder environment that [the example server](../server/readme.md) offers, registered through `tomori::Builder`, beside the grid and Tomori's Sky, which it registers from [`tomori-environment-sky-client`](../../crates/environment-sky-client/readme.md), as Tomori's own app does, since the builder draws nothing but the grid until a scenery is registered.
 
 ## Usage
 

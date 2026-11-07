@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The scenery the renderer draws, by the identifier spaces name their environments by. The grid, `minimal`, is built in; Tomori's own build also draws Sky, whose renderer lives in a sub-crate; and a client built with the headset's builder may draw others, which it registers with `tomori-render`.
+//! The scenery the renderer draws, by the identifier spaces name their environments by. The grid, `minimal`, is built in; every other environment is registered by the application, from the environment's own crate, with `tomori-render`, as Tomori's own app registers Sky from `tomori-environment-sky-client`.
 //!
 //! A headset follows the conversation: arrival and the lobby use the Minimal grid, and a space uses the environment it is bound to, named by the server; see `design/environments.md`. Only the desktop window, which has no server, chooses one itself.
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -37,26 +37,13 @@ impl Default for Environment {
 }
 
 impl Environment {
-    /// The grid, which every client draws, at the identifier and version [`tomori_protocol::environments::MINIMAL`] gives the server and client alike.
-    pub const MINIMAL: Self = Self::built_in(tomori_protocol::environments::MINIMAL);
-    /// Tomori's moonlit sky, as [`tomori_protocol::environments::SKY`] gives it.
-    pub const SKY: Self = Self::built_in(tomori_protocol::environments::SKY);
-    /// The GitHub environment's prototype, as [`tomori_protocol::environments::GITHUB`] gives it, whose cards every client built on this crate presents over the grid, since the scene draws them rather than a scenery; see `design/github.md`.
-    pub const GITHUB: Self = Self::built_in(tomori_protocol::environments::GITHUB);
-    /// What Tomori's own build draws: the grid and Sky.
-    pub const BUILT_IN: [Self; 2] = [Self::MINIMAL, Self::SKY];
+    /// The grid, which every client draws built in, at [`tomori_protocol::GRID`] and [`tomori_protocol::GRID_VERSION`]: the only environment this crate knows.
+    pub const MINIMAL: Self =
+        Self::new(tomori_protocol::GRID).with_version(tomori_protocol::GRID_VERSION);
 
     /// The environment with the identifier `id`, as a scenery is registered under it, at protocol version 1.
     pub const fn new(id: &'static str) -> Self {
         Self { id, version: 1 }
-    }
-
-    /// One of Tomori's own environments, at the identifier and version the server offers it by.
-    pub const fn built_in(environment: tomori_protocol::environments::BuiltIn) -> Self {
-        Self {
-            id: environment.id,
-            version: environment.version,
-        }
     }
 
     /// The environment, presented at protocol `version`.
@@ -86,14 +73,10 @@ impl Environment {
         )
     }
 
-    /// The scenery among `drawable` that `name` asks for, or Sky without a name or for one this build does not draw, or the grid without Sky.
+    /// The scenery among `drawable` that `name` asks for, or, without a name or for one this build does not draw, the first of `drawable` that is not the grid, or the grid when there is none, such as Sky in Tomori's own build.
     #[cfg(any(not(target_os = "android"), test))]
     fn named(name: Option<&str>, drawable: &[Self]) -> Self {
-        let fallback = if drawable.contains(&Self::SKY) {
-            Self::SKY
-        } else {
-            Self::MINIMAL
-        };
+        let fallback = Self::first(drawable);
         match name {
             None => fallback,
             Some(name) => Self::for_space(name, drawable).unwrap_or_else(|| {
@@ -101,6 +84,15 @@ impl Environment {
                 fallback
             }),
         }
+    }
+
+    /// The first of `drawable` that is not the grid, or the grid when there is none: what the desktop window starts with, and names as its default.
+    pub fn first(drawable: &[Self]) -> Self {
+        drawable
+            .iter()
+            .copied()
+            .find(|environment| *environment != Self::MINIMAL)
+            .unwrap_or(Self::MINIMAL)
     }
 
     /// The environment a space names by its identifier, as offered by the server, among those `drawable`, or `None` when this build cannot draw it. The grid is always drawable, at its own version, since it is built in, whatever version a scenery drawn with it is registered at; any other is at the version it is registered at.
@@ -129,13 +121,12 @@ impl Serialize for Environment {
     }
 }
 
-/// Read back only as one of Tomori's own, since the identifier of another is not kept.
+/// Read back only as the grid, the one environment built in, since the identifier of another is not kept.
 impl<'de> Deserialize<'de> for Environment {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let id = String::deserialize(deserializer)?;
-        Self::for_space(&id, &Self::BUILT_IN).ok_or_else(|| {
-            serde::de::Error::unknown_variant(&id, &[Self::MINIMAL.id, Self::SKY.id])
-        })
+        Self::for_space(&id, &[])
+            .ok_or_else(|| serde::de::Error::unknown_variant(&id, &[Self::MINIMAL.id]))
     }
 }
 
@@ -144,37 +135,36 @@ mod tests {
     use super::*;
 
     const FLOOR: Environment = Environment::new("floor");
+    const DECK: Environment = Environment::new("deck");
 
     #[test]
     fn the_default_is_the_grid() {
         // Tested here as well as where other crates use it, so that its coverage does not depend on whether they
         // inline it.
         assert_eq!(Environment::default(), Environment::MINIMAL);
+        assert_eq!(
+            (Environment::MINIMAL.id(), Environment::MINIMAL.version()),
+            (tomori_protocol::GRID, tomori_protocol::GRID_VERSION)
+        );
     }
 
     #[test]
-    fn the_starting_scenery_is_named_or_sky() {
+    fn the_starting_scenery_is_named_or_the_first_registered() {
         crate::test_support::log_everything();
-        let drawable = Environment::BUILT_IN;
+        let drawable = [Environment::MINIMAL, DECK, FLOOR];
         assert_eq!(
             Environment::named(Some("minimal"), &drawable),
             Environment::MINIMAL
         );
-        assert_eq!(Environment::named(Some("sky"), &drawable), Environment::SKY);
-        assert_eq!(Environment::named(None, &drawable), Environment::SKY);
+        assert_eq!(Environment::named(Some("floor"), &drawable), FLOOR);
+        assert_eq!(Environment::named(None, &drawable), DECK);
+        assert_eq!(Environment::named(Some("moon"), &drawable), DECK);
+        // A build that draws nothing but the grid starts with it.
         assert_eq!(
-            Environment::named(Some("moon"), &drawable),
-            Environment::SKY
-        );
-        // Another build's own, and one without Sky.
-        assert_eq!(
-            Environment::named(Some("floor"), &[Environment::MINIMAL, FLOOR]),
-            FLOOR
-        );
-        assert_eq!(
-            Environment::named(None, &[Environment::MINIMAL, FLOOR]),
+            Environment::named(None, &[Environment::MINIMAL]),
             Environment::MINIMAL
         );
+        assert_eq!(Environment::first(&[]), Environment::MINIMAL);
     }
 
     #[test]
@@ -183,46 +173,36 @@ mod tests {
     }
 
     #[test]
-    fn selection_roundtrips_and_rejects_unknown_presets() {
-        for value in Environment::BUILT_IN {
-            assert_eq!(
-                serde_json::from_str::<Environment>(&serde_json::to_string(&value).unwrap())
-                    .unwrap(),
-                value
-            );
-            assert_eq!(
-                value
-                    .next(&Environment::BUILT_IN)
-                    .next(&Environment::BUILT_IN),
-                value
-            );
-        }
+    fn selection_roundtrips_as_the_grid_and_rejects_others() {
+        let value = Environment::MINIMAL;
+        assert_eq!(
+            serde_json::from_str::<Environment>(&serde_json::to_string(&value).unwrap()).unwrap(),
+            value
+        );
         assert!(serde_json::from_str::<Environment>("\"unknown\"").is_err());
+        assert!(serde_json::from_str::<Environment>("\"floor\"").is_err());
         assert!(serde_json::from_str::<Environment>("null").is_err());
         assert_eq!(serde_json::to_string(&FLOOR).unwrap(), "\"floor\"");
     }
 
     #[test]
     fn the_desktop_window_cycles_through_what_it_can_draw() {
-        let drawable = [Environment::MINIMAL, Environment::SKY, FLOOR];
-        assert_eq!(Environment::MINIMAL.next(&drawable), Environment::SKY);
-        assert_eq!(Environment::SKY.next(&drawable), FLOOR);
+        let drawable = [Environment::MINIMAL, DECK, FLOOR];
+        assert_eq!(Environment::MINIMAL.next(&drawable), DECK);
+        assert_eq!(DECK.next(&drawable), FLOOR);
         assert_eq!(FLOOR.next(&drawable), Environment::MINIMAL);
         // One it cannot draw starts again, and with nothing to draw it is the grid.
         assert_eq!(
             Environment::new("moon").next(&drawable),
             Environment::MINIMAL
         );
-        assert_eq!(Environment::SKY.next(&[]), Environment::MINIMAL);
+        assert_eq!(DECK.next(&[]), Environment::MINIMAL);
     }
 
     #[test]
     fn spaces_name_environments_by_their_identifier() {
-        let drawable = Environment::BUILT_IN;
-        assert_eq!(
-            Environment::for_space("sky", &drawable),
-            Some(Environment::SKY)
-        );
+        let drawable = [Environment::MINIMAL, DECK];
+        assert_eq!(Environment::for_space("deck", &drawable), Some(DECK));
         assert_eq!(
             Environment::for_space("minimal", &drawable),
             Some(Environment::MINIMAL)
@@ -239,29 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn tomoris_own_are_at_the_identifiers_and_versions_the_server_offers_them_by() {
-        // Called here, at run time, as well as in the constants, so that its coverage does not depend on them alone.
-        let built_in: Vec<(&str, u32)> = tomori_protocol::environments::ALL
-            .into_iter()
-            .map(Environment::built_in)
-            .map(|environment| (environment.id(), environment.version()))
-            .collect();
-        let own: Vec<(&str, u32)> = [Environment::MINIMAL, Environment::SKY, Environment::GITHUB]
-            .into_iter()
-            .map(|environment| (environment.id(), environment.version()))
-            .collect();
-        assert_eq!(built_in, own);
-    }
-
-    #[test]
     fn an_environment_is_the_same_at_any_version() {
         let floor = FLOOR.with_version(2);
         assert_eq!(FLOOR.version(), 1);
         assert_eq!(floor.version(), 2);
         // A renderer draws the scenery registered under an identifier, so versions do not tell environments apart.
         assert_eq!(floor, FLOOR);
-        assert_ne!(floor, Environment::SKY);
-        let set: std::collections::HashSet<Environment> = [FLOOR, floor, Environment::SKY].into();
+        assert_ne!(floor, DECK);
+        let set: std::collections::HashSet<Environment> = [FLOOR, floor, DECK].into();
         assert_eq!(set.len(), 2);
     }
 }

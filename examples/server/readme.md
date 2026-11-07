@@ -1,6 +1,6 @@
 # Example Server
 
-An example of a server that another project builds on [`tomori-server`](../../crates/server/readme.md), without changing Tomori. It offers a placeholder backend, which repeats each prompt back, and a placeholder environment, which tells the agent it presents nothing yet, beside Tomori's own, registered through `tomori_server::Server::builder()`.
+An example of a server that another project builds on [`tomori-server`](../../crates/server/readme.md), without changing Tomori. It offers a placeholder backend, which repeats each prompt back, and a placeholder environment, which tells the agent it presents nothing yet, beside Tomori's own backends, registered through `tomori_server::Server::builder()`. The builder offers no environment until one is registered, so it also registers Sky, by the identity in [`tomori-environment-sky`](../../crates/environment-sky/readme.md), and the Minimal grid, as Tomori's own server does.
 
 ## Usage
 

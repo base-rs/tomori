@@ -97,12 +97,12 @@ impl Command {
         variables
     }
 
-    /// Run the command, until its window or connection closes.
-    pub fn run(self) -> Result<()> {
+    /// Run the command, drawing `sceneries` and the grid, until its window or connection closes.
+    pub fn run(self, sceneries: tomori_render::scenery::Sceneries) -> Result<()> {
         match self.mode {
-            Mode::Window => crate::run_window(self.options),
-            Mode::Pipewire => crate::run_pipewire(self.options),
-            Mode::PipewirePreview => crate::run_pipewire_preview(self.options),
+            Mode::Window => crate::run_window(self.options, sceneries),
+            Mode::Pipewire => crate::run_pipewire(self.options, sceneries),
+            Mode::PipewirePreview => crate::run_pipewire_preview(self.options, sceneries),
             Mode::Help => {
                 println!("{HELP}");
                 Ok(())
