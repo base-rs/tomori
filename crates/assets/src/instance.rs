@@ -1,8 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! An instance of a model: where it stands, its pose, and which of its nodes are shown, such as a chicken without its
-//! cone, sharing the model's data with every other instance of it.
+//! An instance of a model: where it stands, its pose, and which of its nodes are shown, such as a lantern without its
+//! glass, sharing the model's data with every other instance of it.
 use std::sync::Arc;
 
 use glam::Mat4;

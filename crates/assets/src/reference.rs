@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 /// ```
 /// use tomori_assets::Digest;
 ///
-/// let digest = Digest::of(b"chicken");
+/// let digest = Digest::of(b"lantern");
 /// assert_eq!(Digest::parse(&digest.to_string()), Some(digest));
 /// assert_eq!(Digest::parse("not hex"), None);
 /// ```
@@ -68,12 +68,12 @@ impl fmt::Debug for Digest {
 /// ```
 /// use tomori_assets::{AssetRef, Digest};
 ///
-/// let chicken = AssetRef::new("farmyard", 1, "chicken.glb", Digest::of(b"chicken"));
-/// assert_eq!(chicken.environment(), "farmyard");
-/// assert_eq!(chicken.version(), 1);
-/// assert_eq!(chicken.name(), "chicken.glb");
-/// assert_eq!(chicken.path(), "farmyard/chicken.glb");
-/// assert_eq!(chicken.digest(), Digest::of(b"chicken"));
+/// let lantern = AssetRef::new("garden", 1, "lantern.glb", Digest::of(b"lantern"));
+/// assert_eq!(lantern.environment(), "garden");
+/// assert_eq!(lantern.version(), 1);
+/// assert_eq!(lantern.name(), "lantern.glb");
+/// assert_eq!(lantern.path(), "garden/lantern.glb");
+/// assert_eq!(lantern.digest(), Digest::of(b"lantern"));
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -155,12 +155,12 @@ mod tests {
 
     #[test]
     fn a_reference_matches_only_its_bytes() {
-        let chicken = AssetRef::new("farmyard", 1, "chicken.glb", Digest::of(b"chicken"));
+        let lantern = AssetRef::new("garden", 1, "lantern.glb", Digest::of(b"lantern"));
         assert_eq!(
-            (chicken.environment(), chicken.version(), chicken.name()),
-            ("farmyard", 1, "chicken.glb")
+            (lantern.environment(), lantern.version(), lantern.name()),
+            ("garden", 1, "lantern.glb")
         );
-        assert!(chicken.matches(b"chicken"));
-        assert!(!chicken.matches(b"duck"));
+        assert!(lantern.matches(b"lantern"));
+        assert!(!lantern.matches(b"candle"));
     }
 }

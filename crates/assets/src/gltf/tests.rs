@@ -356,7 +356,7 @@ fn a_broken_or_hostile_file_is_refused_with_what_is_wrong() {
     unsupported(|glb| glb.json["meshes"][0]["primitives"][0]["mode"] = json!(1));
     unsupported(|glb| glb.json["meshes"][0]["primitives"][0]["targets"] = json!([]));
     unsupported(|glb| glb.json["meshes"][0]["primitives"][0]["attributes"]["JOINTS_2"] = json!(0));
-    unsupported(|glb| glb.json["images"][0]["uri"] = json!("chicken.png"));
+    unsupported(|glb| glb.json["images"][0]["uri"] = json!("texture.png"));
     unsupported(|glb| glb.json["images"][0]["mimeType"] = json!("image/webp"));
     unsupported(|glb| {
         glb.json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["texCoord"] = json!(1)

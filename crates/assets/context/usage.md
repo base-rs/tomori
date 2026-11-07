@@ -16,7 +16,7 @@
 
 - `Model` is checked data: `nodes` (each with a `name`, `parent`, `children`, `rest` `Transform`, `mesh` and `skin`), `roots`, `order` (parents before children), `meshes` of `Primitive`s, `materials`, decoded `textures`, `skins` and `animations` of `Channel`s. `Model::built(nodes, roots, meshes, materials, &limits)` checks geometry built in code the same way, so a procedural model can stand in for a file, or be replaced by one. `node(name)` and `animation(name)` find them.
 - `Pose::rest(&model)` and `Pose::sampled(&model, animation, seconds)` give each node's local transform; `blend` mixes two, translation and scale linearly and rotation along the shorter arc; `set_local` lets a controller move a node beyond the animation; `globals` composes them. `joint_matrices` gives a skin's matrices, and `deformed` skins a primitive's vertices on the CPU exactly as the GPU does, for tests and for measuring motion.
-- `Instance::new(model)` places a model with a `transform`, a pose (`set_pose`) and nodes shown or hidden by name (`set_shown`, as for a chicken's cone); `draws` lists what it draws.
+- `Instance::new(model)` places a model with a `transform`, a pose (`set_pose`) and nodes shown or hidden by name (`set_shown`, as for a lantern's glass); `draws` lists what it draws.
 
 ## Drawing (`gpu` feature)
 

@@ -13,13 +13,13 @@ An environment names each asset beside the code that uses it, by its environment
 ```rust
 use tomori_assets::{AssetRef, Digest, Embedded, Instance, Library};
 
-const CHICKEN: &[u8] = include_bytes!("../assets/models/chicken.glb");
+const LANTERN: &[u8] = include_bytes!("../assets/models/lantern.glb");
 
-let chicken = AssetRef::new("farmyard", 1, "chicken.glb", Digest::parse("…").unwrap());
-Library::shared().add(Embedded::new().with(CHICKEN));
-let model = Library::shared().model(&chicken)?;
+let lantern = AssetRef::new("garden", 1, "lantern.glb", Digest::parse("…").unwrap());
+Library::shared().add(Embedded::new().with(LANTERN));
+let model = Library::shared().model(&lantern)?;
 let mut instance = Instance::new(model);
-instance.set_shown("cone", false);
+instance.set_shown("glass", false);
 ```
 
 A file whose bytes are not the digest's is never used, and one that is broken, hostile or larger than the `Limits` is refused with an `Error`, never a panic or an unbounded allocation. Geometry built in code is a `Model` too, made with `Model::built` and checked the same way, so that a procedural model and one read from a file are drawn alike, and either can replace the other. An environment's server side, which draws nothing, depends on it with `default-features = false`.
