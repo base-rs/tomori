@@ -29,13 +29,15 @@ impl Digest {
 
     /// The digest written as 64 hexadecimal digits, in either case, or `None` if `hex` is not one.
     pub fn parse(hex: &str) -> Option<Self> {
-        if hex.len() != 64 || !hex.is_ascii() {
-            return None;
-        }
+        // Each digit by itself, so that nothing but 64 hexadecimal digits is taken, not even a sign.
+        let digits = hex
+            .chars()
+            .map(|digit| digit.to_digit(16))
+            .collect::<Option<Vec<u32>>>()
+            .filter(|digits| digits.len() == 64)?;
         let mut bytes = [0; 32];
-        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
-            let pair = std::str::from_utf8(pair).unwrap_or_default();
-            *byte = u8::from_str_radix(pair, 16).ok()?;
+        for (byte, pair) in bytes.iter_mut().zip(digits.chunks(2)) {
+            *byte = (pair[0] * 16 + pair[1]) as u8;
         }
         Some(Self(bytes))
     }
@@ -151,6 +153,7 @@ mod tests {
         assert_eq!(Digest::parse(&"g".repeat(64)), None);
         assert_eq!(Digest::parse(&"é".repeat(32)), None);
         assert_eq!(Digest::parse("00"), None);
+        assert_eq!(Digest::parse(&"+f".repeat(32)), None);
     }
 
     #[test]

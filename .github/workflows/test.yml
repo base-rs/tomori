@@ -66,6 +66,15 @@ jobs:
       - name: Run Clippy
         if: matrix.rust == 'stable'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # An environment's server side uses tomori-assets without its gpu feature, so its core must build, lint cleanly and depend on no GPU crate without it. See design/assets.md.
+      - name: Check tomori-assets without the GPU
+        if: matrix.rust == 'stable'
+        run: |
+          cargo clippy --package tomori-assets --no-default-features --all-targets --locked -- -D warnings
+          if cargo tree --package tomori-assets --no-default-features --edges normal --prefix none --locked | grep -E '^(wgpu|naga|ash|tomori-render) '; then
+            echo "::error file=crates/assets/Cargo.toml::tomori-assets depends on a GPU crate without its gpu feature."
+            exit 1
+          fi
       - name: Run tests
         if: matrix.rust == 'minimum'
         env:

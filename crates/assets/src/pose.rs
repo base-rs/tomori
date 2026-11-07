@@ -24,6 +24,10 @@ impl Pose {
 
     /// The model's pose at `time` seconds into animation `animation`, every node it does not move at rest, each
     /// channel holding its first keyframe before it and its last after it.
+    ///
+    /// # Panics
+    ///
+    /// If `animation` is not one of the model's: find it with [`Model::animation`].
     pub fn sampled(model: &Model, animation: usize, time: f32) -> Self {
         let mut pose = Self::rest(model);
         for channel in &model.animations[animation].channels {
@@ -51,18 +55,30 @@ impl Pose {
     }
 
     /// Node `node`'s transform relative to its parent.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is not one of the model's.
     pub fn local(&self, node: usize) -> &Transform {
         &self.locals[node]
     }
 
     /// Set node `node`'s transform relative to its parent, as a controller does to turn a head or lean a body beyond
     /// what an animation does.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is not one of the model's.
     pub fn set_local(&mut self, node: usize, transform: Transform) {
         self.locals[node] = transform;
     }
 
     /// Each node's transform in the model's space, its parents' composed with its own. A node outside the model's scene
     /// stays at the identity.
+    ///
+    /// # Panics
+    ///
+    /// If this is not a pose of `model`, with a transform for each of its nodes.
     pub fn globals(&self, model: &Model) -> Vec<Mat4> {
         let mut globals = vec![Mat4::IDENTITY; self.locals.len()];
         for &node in &model.order {
@@ -78,6 +94,10 @@ impl Pose {
 
 /// The matrices of skin `skin`'s joints, in the order of its joints, for nodes at `globals`: each takes a vertex bound
 /// to that joint to where the joint now puts it, in the model's space.
+///
+/// # Panics
+///
+/// If `skin` is not one of the model's, or `globals` are not of its nodes, as [`Pose::globals`] gives them.
 pub fn joint_matrices(model: &Model, skin: usize, globals: &[Mat4]) -> Vec<Mat4> {
     let skin = &model.skins[skin];
     skin.joints

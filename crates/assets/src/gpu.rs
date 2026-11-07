@@ -653,6 +653,10 @@ impl Renderer {
     }
 
     /// Place `instances`, each of `model`, in `batch`, to be drawn as they are now, growing its buffers if need be.
+    ///
+    /// # Panics
+    ///
+    /// If an instance is not of the model `model` was uploaded from.
     pub fn place(
         &self,
         device: &wgpu::Device,

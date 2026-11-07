@@ -471,7 +471,8 @@ impl<'a> Reader<'a> {
             .collect())
     }
 
-    fn primitive(&self, info: &PrimitiveInfo) -> Result<Primitive, Error> {
+    /// The primitive `info`, with at most `indices` indices: what is left of the limit on every primitive's together, since primitives can share one accessor, and each alone would otherwise be allowed the whole limit.
+    fn primitive(&self, info: &PrimitiveInfo, indices: usize) -> Result<Primitive, Error> {
         if info.mode.is_some_and(|mode| mode != 4) {
             return Err(Error::unsupported("only triangle lists are read"));
         }
@@ -591,18 +592,21 @@ impl<'a> Reader<'a> {
                 )));
             }
         }
+        let left = indices;
         primitive.indices = match info.indices {
             Some(indices) => {
                 let elements = self.elements(
                     indices,
                     &[Kind::Scalar],
                     &[5121, 5123, 5125],
-                    self.limits.indices,
+                    // An accessor longer than what is left is refused before anything is read from it.
+                    left,
                 )?;
                 (0..elements.count)
                     .map(|index| elements.integer(index, 0))
                     .collect()
             }
+            // As many as its vertices, which are bounded over every primitive already.
             None => (0..count as u32).collect(),
         };
         Ok(primitive)
@@ -761,6 +765,7 @@ impl<'a> Reader<'a> {
             )));
         }
         let mut vertices = 0;
+        let mut indices = 0;
         let meshes = document
             .meshes
             .iter()
@@ -769,8 +774,10 @@ impl<'a> Reader<'a> {
                     .primitives
                     .iter()
                     .map(|primitive| {
-                        let primitive = self.primitive(primitive)?;
+                        let primitive =
+                            self.primitive(primitive, self.limits.indices.saturating_sub(indices))?;
                         vertices += primitive.positions.len();
+                        indices += primitive.indices.len();
                         if vertices > self.limits.vertices {
                             return Err(Error::too_large("too many vertices"));
                         }
@@ -924,13 +931,15 @@ impl<'a> Reader<'a> {
                 .clone(),
             // Without a scene, every node without a parent.
             None => {
-                let children: Vec<usize> = document
-                    .nodes
-                    .iter()
-                    .flat_map(|node| node.children.clone())
-                    .collect();
+                // Marked rather than searched, so that a file listing many children costs no more than reading them.
+                let mut child = vec![false; document.nodes.len()];
+                for &node in document.nodes.iter().flat_map(|node| &node.children) {
+                    if let Some(marked) = child.get_mut(node) {
+                        *marked = true;
+                    }
+                }
                 (0..document.nodes.len())
-                    .filter(|node| !children.contains(node))
+                    .filter(|node| !child[*node])
                     .collect()
             }
         };

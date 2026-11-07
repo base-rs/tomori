@@ -71,7 +71,7 @@ impl Instance {
         &self.pose
     }
 
-    /// Pose it as `pose`, a pose of its model.
+    /// Pose it as `pose`, a pose of its model; [`Self::draws`] panics if it is another model's.
     pub fn set_pose(&mut self, pose: Pose) {
         self.pose = pose;
     }

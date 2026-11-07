@@ -198,7 +198,8 @@ impl Glb {
         read(&self.bytes(), &Limits::default())
     }
 
-    /// The model the file holds.
+    /// The model the file holds, for the drawing tests.
+    #[cfg(feature = "gpu")]
     pub(crate) fn read_model(&self) -> Model {
         self.read().unwrap()
     }
@@ -266,6 +267,9 @@ fn a_file_without_a_scene_indices_or_a_binary_is_read_as_its_nodes() {
     empty.json["buffers"] = json!([]);
     let model = empty.read().unwrap();
     assert_eq!(model.roots, [0]);
+    // A child that is not in the file, without a scene, is refused as it would be with one.
+    empty.json["nodes"] = json!([{"name": "alone", "children": [7]}]);
+    assert_eq!(empty.read().unwrap_err().kind(), ErrorKind::Invalid);
     // Vertex colours without alpha, and influences that weigh nothing, which follow the first joint.
     let mut glb = Glb::arm();
     let weights = glb.floats(&[0.0; 12], "VEC4", 4);
@@ -508,6 +512,31 @@ fn counts_over_the_whole_file_are_bounded() {
     assert_eq!(
         read(&glb.bytes(), &limits).unwrap_err().kind(),
         ErrorKind::TooLarge
+    );
+    // Indices over every primitive together, refused before they are read, so that primitives sharing one accessor cannot each be allowed the whole limit.
+    let mut glb = Glb::arm();
+    let primitive = glb.json["meshes"][0]["primitives"][0].clone();
+    glb.json["meshes"][0]["primitives"] = json!([primitive.clone(), primitive.clone(), primitive]);
+    let limits = Limits {
+        indices: 8,
+        ..Limits::default()
+    };
+    let error = read(&glb.bytes(), &limits).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Invalid);
+    assert_eq!(
+        error.to_string(),
+        "an accessor has 3 elements, not from 1 to 2"
+    );
+    // Within the limit, they are read.
+    let limits = Limits {
+        indices: 9,
+        ..Limits::default()
+    };
+    assert_eq!(
+        read(&glb.bytes(), &limits).unwrap().meshes[0]
+            .primitives
+            .len(),
+        3
     );
 }
 
