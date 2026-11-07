@@ -26,7 +26,33 @@ impl ServerSide for Observe {
 }
 ```
 
-The interface is 0.x, and grows as the rest of the environment framework does, such as its state, intents and client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).
+A side shares what its environment presents with the clients in its space through the state channel: `Space::share` keeps a state for everyone in the space now and whoever joins later, `Space::announce` sends an event with the state it leaves, `Space::describe` describes what a participant can point at for the space's agent, and `Space::next_intent` takes what participants ask of it, which the side validates. The state, events and intents are the environment's own JSON, which the server carries without reading:
+
+```rust
+use std::time::Duration;
+use tomori_environment::{Result, ServerSide, Space};
+
+struct Counter;
+
+impl ServerSide for Counter {
+    fn run(&self, space: &Space) -> Result<()> {
+        let mut count = 0;
+        space.share(format!(r#"{{"count":{count}}}"#))?;
+        while !space.cancellation().is_cancelled() {
+            if let Some(intent) = space.next_intent(Duration::from_millis(100)) {
+                count += 1;
+                space.announce(
+                    format!(r#"{{"by":{}}}"#, intent.participant()),
+                    format!(r#"{{"count":{count}}}"#),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+```
+
+The interface is 0.x, and grows as the rest of the environment framework does, such as its client side. Its requirements are in Tomori's [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md) and [`design/builders.md`](https://github.com/ioquatix/tomori/blob/main/design/builders.md).
 
 ## See Also
 

@@ -52,6 +52,11 @@ pub enum Resource {
     /// in the GitHub environment. See `design/github.md`.
     #[non_exhaustive]
     Card { card: String },
+    /// Something the space's environment presents, by the identity its server side gives it, such as one of its
+    /// lanterns of a garden. The server describes it from what the environment's server side last said of it, and only
+    /// while the space is in that environment. See `design/environments.md`.
+    #[non_exhaustive]
+    Object { object: String },
     #[serde(other)]
     Unknown,
 }
@@ -67,6 +72,13 @@ impl Resource {
     /// The card whose [`crate::Card::id`] is `card`.
     pub fn card(card: impl Into<String>) -> Self {
         Self::Card { card: card.into() }
+    }
+
+    /// The object of the space's environment whose identity is `object`, as its server side describes it.
+    pub fn object(object: impl Into<String>) -> Self {
+        Self::Object {
+            object: object.into(),
+        }
     }
 }
 
@@ -200,6 +212,12 @@ pub enum ClientMessage {
             deserialize_with = "readable_environments"
         )]
         environments: Option<Vec<EnvironmentVersion>>,
+        /// Whether this client reads [`ServerMessage::EnvironmentState`] and [`ServerMessage::EnvironmentEvent`]. Absent
+        /// from older clients, which would refuse them and are never sent them. The server sends an environment's
+        /// state and events only to a client that sets this and lists the environment at the same version. See
+        /// `design/environments.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        environment_state: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
@@ -372,6 +390,16 @@ pub enum ClientMessage {
     SetName {
         name: String,
     },
+    /// Ask the server side of the current space's environment, `environment` at `version`, for something, in the
+    /// environment's own `intent`, at most [`crate::MESSAGE_LIMIT`] bytes. Participants only. Sent only once the server
+    /// has sent this connection the environment's [`ServerMessage::EnvironmentState`] in the space, so never to an older
+    /// server. The server drops it quietly, as it is ambient, when the space is in another environment or version, when
+    /// it is too large, or too soon after the last; the server side validates the rest. See `design/environments.md`.
+    EnvironmentIntent {
+        environment: String,
+        version: u32,
+        intent: crate::Payload,
+    },
     /// Sent when nothing has been received for the keepalive interval. Valid before Hello. See [`crate::Keepalive`].
     Ping {
         nonce: u64,
@@ -513,6 +541,23 @@ pub enum ServerMessage {
     /// This participant's display name changed, as by a rename from this or another device using the same token, or by `tomori-server auth rename`. Sent only to a client whose Hello set `names`.
     Name {
         name: String,
+    },
+    /// The state the server side of the current space's environment, `environment` at `version`, keeps for the space,
+    /// in the environment's own `state`, at most [`crate::STATE_LIMIT`] bytes: it replaces any state sent before. Sent
+    /// after [`ServerMessage::Space`] on joining, and whenever the server side replaces it, only to a client whose Hello
+    /// set `environment_state` and listed the environment at the same version. See `design/environments.md`.
+    EnvironmentState {
+        environment: String,
+        version: u32,
+        state: crate::Payload,
+    },
+    /// Something that happened in the current space's environment, `environment` at `version`, in the environment's own
+    /// `event`, at most [`crate::MESSAGE_LIMIT`] bytes, sent to those in the space now whom the state is sent to. It
+    /// follows the state it changes, and the state kept for anyone joining later already includes it.
+    EnvironmentEvent {
+        environment: String,
+        version: u32,
+        event: crate::Payload,
     },
     /// Sent when nothing has been received for the keepalive interval. See [`crate::Keepalive`].
     Ping {
@@ -1109,6 +1154,7 @@ mod tests {
             name: "Ada".into(),
             names: false,
             environments,
+            environment_state: false,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -1201,6 +1247,83 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_channel_is_an_addition_older_peers_never_see() {
+        // An older client says nothing of reading environments' state, and is read as not reading it.
+        let older =
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"});
+        let ClientMessage::Hello {
+            environment_state, ..
+        } = serde_json::from_value(older).unwrap()
+        else {
+            unreachable!("a hello");
+        };
+        assert!(!environment_state);
+        let hello = ClientMessage::Hello {
+            protocol: 2,
+            participant: "p".into(),
+            name: "Ada".into(),
+            names: false,
+            environments: None,
+            environment_state: true,
+        };
+        let json = serde_json::to_value(&hello).unwrap();
+        assert_eq!(json["environment_state"], true);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            hello
+        );
+        // Each envelope names its environment and version around the environment's own payload.
+        let payload = crate::Payload::new(serde_json::json!({"lantern": 3}));
+        let intent = ClientMessage::EnvironmentIntent {
+            environment: "garden".into(),
+            version: 1,
+            intent: payload.clone(),
+        };
+        let json = serde_json::json!({"type": "environment_intent", "environment": "garden", "version": 1, "intent": {"lantern": 3}});
+        assert_eq!(serde_json::to_value(&intent).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            intent
+        );
+        for (message, kind, field) in [
+            (
+                ServerMessage::EnvironmentState {
+                    environment: "garden".into(),
+                    version: 1,
+                    state: payload.clone(),
+                },
+                "environment_state",
+                "state",
+            ),
+            (
+                ServerMessage::EnvironmentEvent {
+                    environment: "garden".into(),
+                    version: 1,
+                    event: payload.clone(),
+                },
+                "environment_event",
+                "event",
+            ),
+        ] {
+            let json = serde_json::to_value(&message).unwrap();
+            assert_eq!(json["type"], kind);
+            assert_eq!(json[field]["lantern"], 3);
+            assert_eq!(
+                serde_json::from_value::<ServerMessage>(json).unwrap(),
+                message
+            );
+        }
+        // An object of the environment is a resource, by identity only, which an older peer skips.
+        let object = Resource::object("lantern-3");
+        let json = serde_json::to_value(&object).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "object", "object": "lantern-3"})
+        );
+        assert_eq!(serde_json::from_value::<Resource>(json).unwrap(), object);
+    }
+
+    #[test]
     fn hello_carries_no_credentials() {
         // Credentials belong on the HTTP request that opens the connection; see `design/security.md`.
         let hello = ClientMessage::Hello {
@@ -1209,6 +1332,7 @@ mod tests {
             name: "Ada".into(),
             names: false,
             environments: None,
+            environment_state: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -1225,6 +1349,7 @@ mod tests {
             name: "Quest 3".into(),
             names: true,
             environments: None,
+            environment_state: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -1244,6 +1369,7 @@ mod tests {
                 name: "Ada".into(),
                 names: false,
                 environments: None,
+                environment_state: false,
             }
         );
 

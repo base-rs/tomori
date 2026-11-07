@@ -214,6 +214,7 @@ mod tests {
             name: "Samuel".into(),
             names: false,
             environments: None,
+            environment_state: false,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,

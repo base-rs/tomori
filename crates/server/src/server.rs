@@ -1977,6 +1977,7 @@ mod tests {
                 name: "Ada".to_owned(),
                 names: false,
                 environments: None,
+                environment_state: false,
             },
             tomori_protocol::ClientMessage::Join { space: id },
             tomori_protocol::ClientMessage::WatchCards,

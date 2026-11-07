@@ -169,6 +169,7 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
         name: "Ada".into(),
         names: false,
         environments: None,
+        environment_state: false,
     }));
     request.extend(chunk(&ClientMessage::Join {
         space: space.to_owned(),

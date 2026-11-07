@@ -97,7 +97,8 @@ impl Attended {
     fn is(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (Resolved::Worker { id, .. }, Resolved::Worker { id: other, .. })
-            | (Resolved::Card { id, .. }, Resolved::Card { id: other, .. }) => id == other,
+            | (Resolved::Card { id, .. }, Resolved::Card { id: other, .. })
+            | (Resolved::Object { id, .. }, Resolved::Object { id: other, .. }) => id == other,
             _ => false,
         }
     }
@@ -111,6 +112,9 @@ enum Resolved {
     /// A card on the board of a space that shows cards, as [`crate::cards::Board::describe`] described it as the
     /// utterance began, since the board changes only when it is read again. See `design/github.md`.
     Card { id: String, description: String },
+    /// Something the space's environment presents, as its server side last described it as the utterance began. See
+    /// `design/environments.md`.
+    Object { id: String, description: String },
 }
 
 /// The longest worker title told to the agent, in characters.
@@ -141,6 +145,8 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
     let (id, title) = match attended {
         Attended(Resolved::Worker { id, title }) => (id, title),
         Attended(Resolved::Card { description, .. }) => return description.clone(),
+        // Cleaned as the side described it; its identity, which a client gave, is not told.
+        Attended(Resolved::Object { description, .. }) => return description.clone(),
     };
     let session = one_line(id, limits::SESSION_BYTES);
     let backend = one_line(backend, limits::NAME_BYTES);
@@ -1030,6 +1036,7 @@ impl SpaceModel {
         &self,
         resource: &tomori_protocol::Resource,
         cards: Option<&crate::cards::Board>,
+        objects: Option<&crate::channel::Channel>,
     ) -> Option<Attended> {
         match resource {
             tomori_protocol::Resource::Worker { worker, .. }
@@ -1055,6 +1062,18 @@ impl SpaceModel {
                     description,
                 }))
             }
+            // An object only of the environment the space is in now, as its side described it.
+            tomori_protocol::Resource::Object { object, .. }
+                if object.len() <= crate::channel::OBJECT_BYTES =>
+            {
+                let description = objects
+                    .filter(|channel| channel.environment == self.environment)?
+                    .describe(object)?;
+                Some(Attended(Resolved::Object {
+                    id: object.clone(),
+                    description: description.to_owned(),
+                }))
+            }
             _ => None,
         }
     }
@@ -1066,12 +1085,13 @@ impl SpaceModel {
         &self,
         attention: &[tomori_protocol::Resource],
         cards: Option<&crate::cards::Board>,
+        objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
         let mut resolved: Vec<Attended> = Vec::new();
         for attended in attention
             .iter()
             .take(tomori_protocol::ATTENTION_LIMIT)
-            .filter_map(|resource| self.attended(resource, cards))
+            .filter_map(|resource| self.attended(resource, cards, objects))
         {
             if !resolved.iter().any(|known| known.is(&attended)) {
                 resolved.push(attended);
@@ -2372,7 +2392,7 @@ mod tests {
                 state: tomori_backend::WorkerState::Running,
             }],
         });
-        let attention = space.resolve(&[resource("ses_review")], None);
+        let attention = space.resolve(&[resource("ses_review")], None, None);
         assert!(space.enqueue_attending(
             "a".into(),
             1,
@@ -2408,7 +2428,7 @@ mod tests {
             workers: vec![backend_worker("ses_1", tomori_backend::WorkerState::Idle)],
         });
         space.set_attribution(false);
-        let attention = space.resolve(&[resource("ses_1")], None);
+        let attention = space.resolve(&[resource("ses_1")], None, None);
         space.enqueue_attending("a".into(), 1, "Ada".into(), "and?".into(), attention);
         assert_eq!(
             space.next_prompt().unwrap().text,
@@ -2429,7 +2449,7 @@ mod tests {
                 state: tomori_backend::WorkerState::Running,
             }],
         });
-        let attention = space.resolve(&[resource("ses_1")], None);
+        let attention = space.resolve(&[resource("ses_1")], None, None);
         space.enqueue_attending("a".into(), 1, "Ada".into(), "and this?".into(), attention);
         let text = space.next_prompt().unwrap().text;
         assert_eq!(
@@ -2455,7 +2475,7 @@ mod tests {
                 state: tomori_backend::WorkerState::Running,
             }],
         });
-        let attention = space.resolve(&[resource(id)], None);
+        let attention = space.resolve(&[resource(id)], None, None);
         let block = context("open\"]\ncode[", &attention, &space.workers).unwrap();
         assert_eq!(
             block,
@@ -2482,7 +2502,11 @@ mod tests {
                 state: tomori_backend::WorkerState::Running,
             }],
         });
-        let attention = space.resolve(&[tomori_protocol::Resource::worker("ses_[forged]\n")], None);
+        let attention = space.resolve(
+            &[tomori_protocol::Resource::worker("ses_[forged]\n")],
+            None,
+            None,
+        );
         space.enqueue_attending(
             "a".into(),
             1,
@@ -2524,8 +2548,12 @@ mod tests {
         let card = tomori_protocol::Resource::card("github://o/r/issues/1");
         let worker = resource("ses_1");
         // A card is resolved only on a board, as for a space that shows it.
-        assert_eq!(space.resolve(std::slice::from_ref(&card), None), []);
-        let attention = space.resolve(&[worker.clone(), card.clone(), card, worker], Some(&board));
+        assert_eq!(space.resolve(std::slice::from_ref(&card), None, None), []);
+        let attention = space.resolve(
+            &[worker.clone(), card.clone(), card, worker],
+            Some(&board),
+            None,
+        );
         assert_eq!(attention.len(), 2);
         space.enqueue_attending("a".into(), 1, "Ada".into(), "and?".into(), attention);
         let prompt = space.next_prompt().unwrap().text;
@@ -2553,24 +2581,29 @@ mod tests {
         });
         // A worker the space never had, an oversized identity and a kind this server does not know resolve to
         // nothing, whatever the client claims.
-        assert_eq!(space.attended(&resource("ses_forged"), None), None);
+        assert_eq!(space.attended(&resource("ses_forged"), None, None), None);
         assert_eq!(
-            space.attended(&resource(&"s".repeat(limits::SESSION_BYTES + 1)), None),
+            space.attended(
+                &resource(&"s".repeat(limits::SESSION_BYTES + 1)),
+                None,
+                None
+            ),
             None
         );
         assert_eq!(
-            space.attended(&tomori_protocol::Resource::Unknown, None),
+            space.attended(&tomori_protocol::Resource::Unknown, None, None),
             None
         );
         assert_eq!(
             space.resolve(
                 &[resource("ses_forged"), tomori_protocol::Resource::Unknown],
+                None,
                 None
             ),
             []
         );
         // One that leaves after the words were queued is named as the space knew it, and said to be gone.
-        let attention = space.resolve(&[resource("ses_1")], None);
+        let attention = space.resolve(&[resource("ses_1")], None, None);
         space.enqueue_attending("b".into(), 1, "Ada".into(), "and this?".into(), attention);
         space.apply(Event::WorkersChanged { workers: vec![] });
         assert_eq!(
@@ -2586,7 +2619,7 @@ mod tests {
                 tomori_backend::WorkerState::Running,
             )],
         });
-        let attention = space.resolve(&[resource("ses_1")], None);
+        let attention = space.resolve(&[resource("ses_1")], None, None);
         space.enqueue_attending("c".into(), 1, "Ada".into(), "x".into(), attention);
         space.cancel("c").unwrap();
         assert!(space.attending.is_empty());
@@ -2611,7 +2644,7 @@ mod tests {
         assert_eq!(space.queue.entries()[0].text, "[Music] deploy it");
         space.apply(Event::Delivered { key: "a".into() });
         space.apply(Event::Idle);
-        let attention = space.resolve(&[resource("ses_1")], None);
+        let attention = space.resolve(&[resource("ses_1")], None, None);
         space.enqueue_attending(
             "b".into(),
             1,
@@ -2648,7 +2681,7 @@ mod tests {
             .into_iter()
             .map(|id| resource(id))
             .collect();
-        let attention = space.resolve(&named, None);
+        let attention = space.resolve(&named, None, None);
         assert_eq!(
             attention,
             [&ids[0], &ids[1], &ids[2]].map(|id| Attended(Resolved::Worker {
@@ -2658,6 +2691,7 @@ mod tests {
         );
         let attention = space.resolve(
             &ids[..5].iter().map(|id| resource(id)).collect::<Vec<_>>(),
+            None,
             None,
         );
         assert_eq!(attention.len(), tomori_protocol::ATTENTION_LIMIT);
@@ -3120,7 +3154,7 @@ mod tests {
             space.apply(Event::WorkersChanged {
                 workers: vec![backend_worker("w", WorkerState::Running)],
             });
-            let attended = || space.resolve(&[tomori_protocol::Resource::worker("w")], None);
+            let attended = || space.resolve(&[tomori_protocol::Resource::worker("w")], None, None);
             let (first, second) = (attended(), attended());
             space.enqueue_attending("a".into(), 1, "Ada".into(), "one".into(), first);
             space.enqueue_attending("b".into(), 1, "Ada".into(), "two".into(), second);

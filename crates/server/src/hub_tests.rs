@@ -80,6 +80,7 @@ impl Client {
             name: participant.to_owned(),
             names: false,
             environments: None,
+            environment_state: false,
         });
     }
 
@@ -222,6 +223,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         name: "Bob".to_owned(),
         names: false,
         environments: None,
+        environment_state: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -1455,6 +1457,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         name: name.to_owned(),
         names,
         environments: None,
+        environment_state: false,
     });
     client.read()
 }
@@ -2585,4 +2588,471 @@ fn a_space_names_its_environment_s_version_only_while_the_server_offers_it() {
     client.send(ClientMessage::Leave);
     client.send(ClientMessage::Join { space: id });
     assert_eq!(version(&client), None);
+}
+
+/// A server side that shares a count, describes one thing, and counts each intent it takes, announcing who sent it.
+struct Counter;
+
+impl tomori_environment::ServerSide for Counter {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        space.share(r#"{"count":0}"#)?;
+        space.describe(vec![tomori_environment::Object::new(
+            "thing-1",
+            "a [shiny]\nthing",
+        )])?;
+        // What the server refuses is said to the side, which may carry on.
+        assert!(space.share("not json").is_err());
+        assert!(
+            space
+                .announce(
+                    format!("\"{}\"", "a".repeat(tomori_protocol::MESSAGE_LIMIT)),
+                    "{}"
+                )
+                .is_err()
+        );
+        let mut count = 0;
+        while !space.cancellation().is_cancelled() {
+            if let Some(intent) = space.next_intent(std::time::Duration::from_millis(2)) {
+                count += 1;
+                space.announce(
+                    format!(
+                        r#"{{"by":{},"asked":{}}}"#,
+                        intent.participant(),
+                        intent.payload()
+                    ),
+                    format!(r#"{{"count":{count}}}"#),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A client that says Hello presenting `presents`, reading environments' state if `reads`, as `participant`.
+fn presenting(
+    hub: &Arc<Hub>,
+    access: Access,
+    participant: &str,
+    presents: Option<Vec<EnvironmentVersion>>,
+    reads: bool,
+) -> Client {
+    let client = Client::connect(hub, access);
+    client.send(ClientMessage::Hello {
+        protocol: PROTOCOL_VERSION,
+        participant: participant.to_owned(),
+        name: participant.to_owned(),
+        names: false,
+        environments: presents,
+        environment_state: reads,
+    });
+    client.read();
+    client
+}
+
+/// The environment messages among `messages`, as `(kind, payload)`.
+fn channel_messages(messages: Vec<ServerMessage>) -> Vec<(&'static str, serde_json::Value)> {
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            ServerMessage::EnvironmentState {
+                environment,
+                version,
+                state,
+            } => {
+                assert_eq!((environment.as_str(), version), ("counter", 1));
+                Some(("state", state.value().clone()))
+            }
+            ServerMessage::EnvironmentEvent {
+                environment,
+                version,
+                event,
+            } => {
+                assert_eq!((environment.as_str(), version), ("counter", 1));
+                Some(("event", event.value().clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn eventually_in(what: &str, ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn an_environment_s_side_shares_its_state_with_those_who_present_it_and_takes_participants_intents()
+{
+    let (hub, _jobs) = hub_waiting();
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("counter", "Counter").with_server_side(Counter),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "counter".to_owned();
+    let (id, commands) = running(
+        &hub,
+        &bound,
+        Snapshot {
+            busy: Some(false),
+            ..Snapshot::default()
+        },
+    );
+    eventually_in("the side shares its state", || {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .is_some_and(|channel| channel.state.is_some() && !channel.objects.is_empty())
+    });
+    let counter = || Some(vec![EnvironmentVersion::new("counter", 1)]);
+    // Ada presents Sky as well, so that she can change the space to it.
+    let ada = presenting(
+        &hub,
+        Access::open(),
+        "ada",
+        Some(vec![
+            EnvironmentVersion::new("counter", 1),
+            EnvironmentVersion::new("sky", 1),
+        ]),
+        true,
+    );
+    // A client from before the channel, one that presents another version, and one that does not say it reads state are sent nothing of it.
+    let older = presenting(&hub, Access::open(), "older", None, false);
+    let other = presenting(
+        &hub,
+        Access::open(),
+        "other",
+        Some(vec![EnvironmentVersion::new("counter", 2)]),
+        true,
+    );
+    let silent = presenting(&hub, Access::open(), "silent", counter(), false);
+    let visitor = presenting(&hub, Access::visitor(), "vic", counter(), true);
+    let join = |client: &Client| {
+        client.send(ClientMessage::Join { space: id.clone() });
+        let messages = client.read();
+        // The state follows the space's.
+        let space = messages
+            .iter()
+            .position(|message| matches!(message, ServerMessage::Space { .. }));
+        let state = messages
+            .iter()
+            .position(|message| matches!(message, ServerMessage::EnvironmentState { .. }));
+        if let Some(state) = state {
+            assert!(space.unwrap() < state);
+        }
+        channel_messages(messages)
+    };
+    let initial = vec![("state", serde_json::json!({"count": 0}))];
+    assert_eq!(join(&ada), initial);
+    assert_eq!(join(&visitor), initial);
+    for client in [&older, &other, &silent] {
+        assert!(join(client).is_empty());
+    }
+
+    // A participant's intent reaches the side, whose event reaches everyone it shares with, and whose state is kept for whoever joins later.
+    let intent = |value: serde_json::Value| ClientMessage::EnvironmentIntent {
+        environment: "counter".into(),
+        version: 1,
+        intent: tomori_protocol::Payload::new(value),
+    };
+    ada.send(intent(serde_json::json!({"bump": 1})));
+    let source = {
+        let state = hub.lock();
+        let key = state.connections[&ada.connection]
+            .participant
+            .clone()
+            .unwrap();
+        state.participants[&key].source
+    };
+    let event = vec![(
+        "event",
+        serde_json::json!({"by": source, "asked": {"bump": 1}}),
+    )];
+    eventually_in("the side announces", || {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .is_some_and(|channel| channel.state.as_ref().unwrap().value()["count"] == 1)
+    });
+    assert_eq!(channel_messages(ada.read()), event);
+    assert_eq!(channel_messages(visitor.read()), event);
+    for client in [&older, &other, &silent] {
+        assert!(channel_messages(client.read()).is_empty());
+    }
+    let later = presenting(&hub, Access::open(), "later", counter(), true);
+    assert_eq!(join(&later), [("state", serde_json::json!({"count": 1}))]);
+
+    // A visitor only watches.
+    visitor.send(intent(serde_json::json!({"bump": 2})));
+    assert_eq!(
+        visitor.errors(),
+        ["Visitors can watch, but not act in a space."]
+    );
+    // Another environment or version, one too large, or one outside a space is dropped quietly.
+    for wrong in [
+        ClientMessage::EnvironmentIntent {
+            environment: "sky".into(),
+            version: 1,
+            intent: tomori_protocol::Payload::new(serde_json::json!({})),
+        },
+        ClientMessage::EnvironmentIntent {
+            environment: "counter".into(),
+            version: 2,
+            intent: tomori_protocol::Payload::new(serde_json::json!({})),
+        },
+        intent(serde_json::json!(
+            "a".repeat(tomori_protocol::MESSAGE_LIMIT)
+        )),
+    ] {
+        ada.send(wrong);
+    }
+    let lobby = presenting(&hub, Access::open(), "lobby", counter(), true);
+    lobby.send(intent(serde_json::json!({"bump": 3})));
+    assert!(lobby.errors().is_empty());
+    // Beyond the burst, a participant's intents are dropped until the rate allows more.
+    for _ in 0..crate::channel::INTENT_BURST as usize * 2 {
+        later.send(intent(serde_json::json!({"bump": 4})));
+    }
+    eventually_in("the side takes the burst", || {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .is_some_and(|channel| {
+                channel.state.as_ref().unwrap().value()["count"]
+                    == 1 + crate::channel::INTENT_BURST as u64
+            })
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .unwrap()
+            .state
+            .as_ref()
+            .unwrap()
+            .value()["count"],
+        1 + crate::channel::INTENT_BURST as u64
+    );
+    assert_eq!(
+        channel_messages(ada.read()).len(),
+        crate::channel::INTENT_BURST as usize
+    );
+    // Reconnecting does not refill the burst: the bucket is the participant's, not their connection's.
+    let again = presenting(&hub, Access::open(), "later", counter(), true);
+    join(&again);
+    for _ in 0..crate::channel::INTENT_BURST as usize {
+        again.send(intent(serde_json::json!({"bump": 5})));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let count = |hub: &Arc<Hub>| {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .unwrap()
+            .state
+            .as_ref()
+            .unwrap()
+            .value()["count"]
+            .as_u64()
+            .unwrap()
+    };
+    // At most what the rate has refilled since, far less than another burst.
+    assert!(count(&hub) < 1 + 2 * crate::channel::INTENT_BURST as u64 - 2);
+    ada.read();
+
+    // What a participant points at in the environment as they begin speaking is described as its side described it.
+    ada.send(ClientMessage::UtteranceBegin {
+        utterance: "u1".into(),
+        answer: None,
+        progress: false,
+        naming: false,
+        attention: vec![
+            tomori_protocol::Resource::object("thing-1"),
+            tomori_protocol::Resource::object("thing-1"),
+            tomori_protocol::Resource::object("thing-2"),
+            tomori_protocol::Resource::object("x".repeat(crate::channel::OBJECT_BYTES + 1)),
+        ],
+    });
+    ada.send(ClientMessage::UtteranceEnd {
+        utterance: "u1".into(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(utterance, "what's that?");
+    let prompt = std::iter::from_fn(|| commands.try_recv().ok())
+        .find_map(|command| match command {
+            SpaceCommand::Send(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("the words are handed to the agent");
+    assert_eq!(
+        prompt.text,
+        "ada: [Pointing at a (shiny) thing] what's that?"
+    );
+
+    // Changed to another environment, the side and what it kept are gone: nobody joining is sent its state, and nothing it described is resolved.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".into(),
+    });
+    assert!(ada.errors().is_empty());
+    assert!(hub.lock().space(&id).unwrap().channel.is_none());
+    let last = presenting(&hub, Access::open(), "last", counter(), true);
+    assert!(join(&last).is_empty());
+    let state = hub.lock();
+    let record = state.space(&id).unwrap();
+    assert!(
+        record
+            .model
+            .resolve(&[tomori_protocol::Resource::object("thing-1")], None, None)
+            .is_empty()
+    );
+    drop(state);
+    hub.shutdown();
+}
+
+#[test]
+fn a_side_whose_binding_or_space_has_moved_on_keeps_and_sends_nothing() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("counter", "Counter").with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "counter".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let binding = hub.server_sides.binding(&id).unwrap();
+    let outlet = |space: &str, binding: u64, environment: &str| SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: space.to_owned(),
+        binding,
+        environment: environment.to_owned(),
+        version: 1,
+    };
+    let kept = || {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .map(|channel| (channel.binding, channel.state.clone()))
+    };
+    use tomori_environment::Outlet;
+    // Another binding's side, a space that has gone, and a side of another environment keep nothing.
+    assert_eq!(
+        outlet(&id, binding + 1, "counter").share("1".into()),
+        Ok(())
+    );
+    assert_eq!(
+        outlet(&id, binding + 1, "counter")
+            .describe(vec![tomori_environment::Object::new("a", "b")]),
+        Ok(())
+    );
+    assert_eq!(outlet("gone", binding, "counter").share("1".into()), Ok(()));
+    assert_eq!(kept(), None);
+    // A description before any state begins what the binding keeps; nobody joining is sent a state that is not there.
+    assert_eq!(
+        outlet(&id, binding, "counter").describe(vec![tomori_environment::Object::new("a", "b")]),
+        Ok(())
+    );
+    assert_eq!(kept(), Some((binding, None)));
+    let ada = presenting(
+        &hub,
+        Access::open(),
+        "ada",
+        Some(vec![EnvironmentVersion::new("counter", 1)]),
+        true,
+    );
+    ada.send(ClientMessage::Join { space: id.clone() });
+    assert!(channel_messages(ada.read()).is_empty());
+    // What an earlier binding kept is begun anew for the current one.
+    hub.lock().space_mut(&id).unwrap().channel =
+        Some(crate::channel::Channel::new(binding + 7, "counter", 1));
+    assert_eq!(outlet(&id, binding, "counter").share("2".into()), Ok(()));
+    assert_eq!(
+        kept(),
+        Some((
+            binding,
+            Some(tomori_protocol::Payload::new(serde_json::json!(2)))
+        ))
+    );
+    assert_eq!(
+        channel_messages(ada.read()),
+        [("state", serde_json::json!(2))]
+    );
+    // A space changed to another environment while its side still runs keeps nothing more of it.
+    hub.lock().space_mut(&id).unwrap().model.environment = "sky".to_owned();
+    assert_eq!(outlet(&id, binding, "counter").share("3".into()), Ok(()));
+    assert_eq!(kept().unwrap().1.unwrap().value(), &serde_json::json!(2));
+    // Once the hub has gone, there is nowhere to send anything.
+    let orphan = outlet(&id, binding, "counter");
+    hub.shutdown();
+    drop(ada);
+    drop(_commands);
+    drop(hub);
+    assert_eq!(orphan.share("4".into()), Ok(()));
+    assert_eq!(orphan.announce("4".into(), "4".into()), Ok(()));
+    assert_eq!(orphan.describe(Vec::new()), Ok(()));
+}
+
+#[test]
+fn a_binding_s_first_update_reaches_those_in_the_space_as_its_state() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("counter", "Counter").with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "counter".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let binding = hub.server_sides.binding(&id).unwrap();
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding,
+        environment: "counter".to_owned(),
+        version: 1,
+    };
+    let ada = presenting(
+        &hub,
+        Access::open(),
+        "ada",
+        Some(vec![EnvironmentVersion::new("counter", 1)]),
+        true,
+    );
+    ada.send(ClientMessage::Join { space: id.clone() });
+    assert!(channel_messages(ada.read()).is_empty());
+    use tomori_environment::Outlet;
+    // A side that announces before it has shared anything: those in the space, who have no state to apply an event to, are sent the state it leaves, and the event after it.
+    assert_eq!(
+        outlet.announce(r#"{"by":1}"#.into(), r#"{"count":1}"#.into()),
+        Ok(())
+    );
+    assert_eq!(
+        outlet.announce(r#"{"by":2}"#.into(), r#"{"count":2}"#.into()),
+        Ok(())
+    );
+    assert_eq!(
+        channel_messages(ada.read()),
+        [
+            ("state", serde_json::json!({"count": 1})),
+            ("event", serde_json::json!({"by": 2})),
+        ]
+    );
 }

@@ -263,7 +263,7 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 }
 
 #[test]
-fn hello_lists_the_environments_the_client_presents_on_every_connection() {
+fn hello_lists_the_environments_the_client_presents_and_reads_their_state_on_every_connection() {
     let server = MiniServer::start(localhost(), Mode::Normal);
     let mut options = options(server.address);
     let presents = vec![tomori_protocol::EnvironmentVersion::new("observe", 2)];
@@ -277,7 +277,7 @@ fn hello_lists_the_environments_the_client_presents_on_every_connection() {
     for connection in [1, 2] {
         assert!(matches!(
             server.received(connection).first(),
-            Some(Received::Message(ClientMessage::Hello { environments: Some(listed), .. })) if *listed == presents
+            Some(Received::Message(ClientMessage::Hello { environments: Some(listed), environment_state: true, .. })) if *listed == presents
         ));
     }
 }

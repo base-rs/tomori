@@ -362,6 +362,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         name: "n".into(),
         names: false,
         environments: None,
+        environment_state: false,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();

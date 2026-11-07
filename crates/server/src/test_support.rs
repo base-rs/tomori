@@ -418,6 +418,7 @@ impl TestClient {
             name: name.to_owned(),
             names: false,
             environments: presents,
+            environment_state: false,
         });
         // The welcome is the first reply to hello.
         let environments;
