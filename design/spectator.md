@@ -8,7 +8,7 @@ For the virtual camera, the PipeWire spectator renders at 1920×1080 at up to 30
 
 The spectator animates its swarm from the joined space's observed activity rather than displaying a static neutral arrangement. Worker transitions use the animated swarm's positions. This does not replace the shared-scene requirement in [clients.md](clients.md).
 
-The spectator plays stereo and hears as the participant it follows does, from their head, with the others seated around them, or from its neutral view with nobody to follow (see `spatial-audio.md`), so that its audience hears the agent where they see the swarm. Presence does not carry where the followed participant travelled (#183), so it seats the others around the space's home, which is around them only until they travel.
+The spectator plays stereo and hears as the participant it follows does, from their head as their presence gives it in the space's shared scene, with each other participant at their head as their presence gives it, without seats, or from its neutral view with nobody to follow (see `spatial-audio.md`), so that its audience hears the agent where they see the swarm and each person where they are, wherever they have travelled.
 
 The spectator follows the participant's head from their presence, which carries where they travelled in an environment that allows it (see `locomotion.md`), so it sees from where they are; it draws none of their teleport preview.
 
@@ -33,3 +33,4 @@ Spectator rendering and its shared view, not headset rendering or in-world scene
 - Test that observed activity drives a moving spectator swarm using the same simulation as the headset, and inspect that worker transitions use its current positions.
 - Check the PipeWire and virtual camera formats and verify that the camera receives frames at 1920×1080.
 - Test that the spectator's conversation never reports engagement.
+- Test that, after the followed participant travels and turns, the spectator hears from their head and places another participant at that participant's head from presence.

@@ -167,7 +167,6 @@ impl Participant {
         spatial_audio::listen(
             connection,
             drawn.frame.listener,
-            drawn.frame.rig,
             drawn.frame.agent,
             conversation,
         );
@@ -491,6 +490,24 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            // The presence the window sends has its travel applied, so Bea receives the head where the participant now is in the shared scene, which their room takes back to where they stand at home, and hears them there.
+            let (_, scene_to_space) = window.step(&mut surface);
+            let home = tomori_scene::arrival::HOME;
+            let head = bea.wait_for(
+                || window.redraw(&mut surface).unwrap(),
+                |message| match message {
+                    ServerMessage::Presence { head, .. }
+                        if scene_to_space
+                            .transform_point3(Vec3::from_array(head.position))
+                            .distance(home)
+                            < 1e-4 =>
+                    {
+                        Some(*head)
+                    }
+                    _ => None,
+                },
+            );
+            assert!(Vec3::from_array(head.position).distance(home) > 0.1);
             // The transcript shows on the right wrist, a panel in the scene, where the participant now is.
             input(&mut window, &mut surface, press(KeyCode::KeyT, true));
             input(&mut window, &mut surface, press(KeyCode::KeyT, false));

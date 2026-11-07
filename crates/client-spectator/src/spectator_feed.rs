@@ -217,7 +217,7 @@ impl Feed {
         // Build the frame.
         let frame = self.build_frame(&presence, aspect, dt);
 
-        // The audience hears as the participant it follows, from their head, or from the neutral view; see `design/spatial-audio.md`. Presence does not carry where they travelled, so the others stay seated around the space's home.
+        // The audience hears as the participant it follows, from their head, or from the neutral view, and the others from their heads, all in the space's shared scene, where presence already puts each of them; see `design/spatial-audio.md`.
         let listener = match self.following.and_then(|source| presence.get(&source)) {
             Some(followed) => Pose {
                 position: followed.head.position,
@@ -232,7 +232,6 @@ impl Feed {
         crate::spatial_audio::listen(
             &mut self.connection,
             Some(listener),
-            tomori_scene::locomotion::Rig::default(),
             crate::spatial_audio::centre(&frame.agents),
             &self.conversation,
         );
@@ -495,6 +494,83 @@ mod tests {
                 },
             );
         });
+    }
+
+    #[test]
+    fn the_spectator_hears_from_the_participant_it_follows_and_the_others_where_they_are_after_travelling()
+     {
+        use tomori_scene::{arrival::HOME, locomotion::Rig};
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let cy = server.remote("Cy", Some(server.owner("Cy")));
+        cy.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+        cy.space(|| {}, |state| (state.id == space).then_some(()));
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space),
+            follow: Some("Bea".into()),
+            token: None,
+        });
+        until(&mut feed, |feed, _| {
+            feed.conversation.joined_space().is_some_and(|(space, _)| {
+                space
+                    .participants
+                    .iter()
+                    .any(|participant| participant.name == "Cy")
+            })
+        });
+        let (space, _) = feed.conversation.joined_space().unwrap();
+        let source = |name: &str| {
+            space
+                .participants
+                .iter()
+                .find(|participant| participant.name == name)
+                .unwrap()
+                .source
+        };
+        let cy_source = source("Cy");
+        // Bea teleported 12 m away onto a ledge 3 m up, and turned; her client sends her head there, in the shared scene.
+        let mut travelled = Rig::default();
+        travelled.teleport(Vec3::new(4.0, 3.0, -11.0), HOME);
+        travelled.turn(1.0, travelled.matrix().transform_point3(HOME));
+        let head = travelled.matrix().transform_point3(HOME);
+        let orientation = Quat::from_rotation_y(1.0).to_array();
+        bea.send(ClientMessage::Presence {
+            head: tomori_protocol::Pose {
+                position: head.to_array(),
+                orientation,
+            },
+            left: None,
+            right: None,
+            hands: None,
+        });
+        // Cy travelled to stand 1 m in front of her, as she now faces.
+        let ahead = head + Quat::from_array(orientation) * -Vec3::Z;
+        cy.send(ClientMessage::Presence {
+            head: tomori_protocol::Pose {
+                position: ahead.to_array(),
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            },
+            left: None,
+            right: None,
+            hands: None,
+        });
+        let frame = until(&mut feed, |feed, _| {
+            feed.following.is_some() && feed.connection.placed().position(cy_source).is_some()
+        });
+        // The audience sees and hears from where she stands.
+        assert!(Vec3::new(frame.head[12], frame.head[13], frame.head[14]).distance(head) < 1e-4);
+        let placed = feed.connection.placed().clone();
+        let listener = placed.listener.expect("the audience hears from her head");
+        assert_eq!(listener.position, head.to_array());
+        assert_eq!(listener.orientation, orientation);
+        // Cy is heard where their presence says, 1 m in front of her, rather than seated around the space's home.
+        assert_eq!(placed.position(cy_source), Some(ahead.to_array()));
+        // Bea is the listener, so she is not also a voice.
+        assert_eq!(placed.sources.len(), 2);
     }
 
     #[test]

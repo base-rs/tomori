@@ -264,6 +264,7 @@ pub(crate) struct Travel {
 
 impl Travel {
     /// Where the participant's room is in the scene, as it was last settled.
+    #[cfg(test)]
     pub fn rig(&self) -> Rig {
         self.rig
     }

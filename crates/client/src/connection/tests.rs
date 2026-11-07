@@ -2300,11 +2300,17 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(*watched.lock().unwrap(), [2]);
+    // Nothing is placed until the first listen.
+    assert_eq!(*connection.placed(), Scene::default());
     let placed = |connection: &mut Connection| {
         let mut voices = None;
         // This client is participant 1, as the peer welcomed it.
         connection.listen([4, 3, 2, 1, 3], |scene, placed| {
             scene.sources.clear();
+            scene
+                .sources
+                .extend(placed.others.iter().map(|source| (*source, [1.0; 3])));
+            scene.mono = true;
             let mut heads: Vec<_> = placed.heads.keys().copied().collect();
             heads.sort_unstable();
             voices = Some((placed.others.to_vec(), heads, placed.mono));
@@ -2312,6 +2318,9 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
         voices.expect("placed")
     };
     assert_eq!(placed(&mut connection), (vec![2, 3], vec![2], false));
+    // What was placed can be read back, as the player was given it.
+    assert_eq!(connection.placed().sources, [(2, [1.0; 3]), (3, [1.0; 3])]);
+    assert!(connection.placed().mono && connection.placed().listener.is_none());
     peer.say(ServerMessage::Left, &mut connection, &mut session);
     assert_eq!(placed(&mut connection), (vec![2, 3], vec![], false));
 }

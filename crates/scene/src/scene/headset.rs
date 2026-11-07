@@ -1625,6 +1625,26 @@ mod tests {
         );
     }
 
+    /// Send `presence` to a server, as the headset's frame loop does, from a participant in a space, and return the head another participant in the space receives with it.
+    fn relayed(presence: crate::scene::Presence) -> tomori_protocol::Pose {
+        let server = crate::test_support::Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let (mut conversation, mut connection) =
+            server.participant("Ada", Some(server.owner("Ada")));
+        conversation.join_space(space);
+        bea.wait_for(
+            || {
+                connection.poll(true, &mut conversation);
+                presence.send(&mut connection);
+            },
+            |message| match message {
+                tomori_protocol::ServerMessage::Presence { head, .. } => Some(*head),
+                _ => None,
+            },
+        )
+    }
+
     /// A space in Sky, declared for this test to teleport onto a floor 20 m across.
     fn travelling() -> Conversation {
         let mut conversation = joined();
@@ -1675,7 +1695,6 @@ mod tests {
         assert!(Vec3::from_array(head.position).distance(Vec3::new(0.0, 1.6, 0.0)) < 1e-4);
         // That frame is drawn dark, from where the poses were placed, so that the view does not jump.
         assert_eq!(drawn.frame.blink, 1.0);
-        assert_eq!(drawn.frame.rig, crate::locomotion::Rig::default());
         assert_eq!(
             rig.headset
                 .haptics(&mut rig.feedback, rig.start + HOLD)
@@ -1695,18 +1714,12 @@ mod tests {
         joints[1].position = wrist;
         let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [Some(joints), None], HOLD * 2);
         let travelled = Vec3::new(0.2, 1.6, -1.5);
-        // It comes back from dark, and the frame says where the room now is, for the voices around it.
+        // It comes back from dark.
         assert!(drawn.frame.blink > 0.0 && drawn.frame.blink < 1.0);
-        assert!(
-            drawn
-                .frame
-                .rig
-                .matrix()
-                .transform_point3(Vec3::new(0.0, 1.6, 0.0))
-                .distance(travelled)
-                < 1e-4
-        );
         let presence = drawn.frame.presence.unwrap();
+        // The headset's frame loop sends that presence as it is, so another participant in the space receives the head where this participant travelled, in the shared scene, and hears them there.
+        let head = relayed(presence);
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
         let hand = presence.hands[controller::LEFT].unwrap().joints[1].unwrap();
         assert!(Vec3::from_array(hand.position).distance(wrist + Vec3::new(0.2, 0.0, -1.5)) < 1e-4);
         assert!(Vec3::from_array(presence.head.position).distance(travelled) < 1e-4);

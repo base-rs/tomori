@@ -315,7 +315,6 @@ pub fn run(
         tomori_scene::spatial_audio::listen(
             &mut connection,
             drawn.frame.listener,
-            drawn.frame.rig,
             drawn.frame.agent,
             &conversation,
         );
