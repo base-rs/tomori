@@ -3479,6 +3479,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
+name = "tomori-assets"
+version = "0.2.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "image",
+ "log",
+ "pollster",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tomori-render",
+ "wgpu",
+]
+
+[[package]]
 name = "tomori-backend"
 version = "0.2.0"
 dependencies = [
@@ -3567,6 +3583,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "tomori-assets",
  "tomori-client",
  "tomori-client-desktop",
  "tomori-client-spectator",

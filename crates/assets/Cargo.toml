@@ -1,0 +1,32 @@
+[package]
+name = "tomori-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Content-addressed glTF assets for Tomori's environments: validated loading, model instances and poses, and skinned drawing with wgpu"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "gltf", "animation", "skinning", "xr"]
+categories = ["game-development", "rendering"]
+
+[features]
+default = ["gpu"]
+# Drawing models with wgpu: uploading them and skinning them on the GPU. Without it, with `default-features = false`, the crate is free of GPU code, as an environment's server side wants it.
+gpu = ["dep:wgpu", "dep:bytemuck"]
+
+[dependencies]
+glam = "0.30"
+# Base colour textures embedded in a `.glb`, decoded within limits.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+bytemuck = { version = "1", features = ["derive"], optional = true }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"], optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
+# The device for offscreen rendering tests and WGSL validation. It has no version, so that packaging leaves it out: only the tests use it.
+tomori-render = { path = "../render", features = ["test-gpu"] }
