@@ -60,7 +60,7 @@ From the repository root:
 bash scripts/fetch-sherpa-onnx.sh # .tools/sherpa-onnx: the native libraries, checked against a pinned SHA-256 (20 MB)
 bash scripts/fetch-asr-model.sh   # .tools/asr: sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8 (130 MB) and sherpa-onnx-online-punct-en-2024-08-06 (30 MB)
 bash scripts/fetch-tts-model.sh   # .tools/tts/kokoro-multi-lang-v1_0 (380 MB)
-cargo run -p tomori-server --bin tomori-server -- --speech-root .
+cargo run -p tomori-server-app --bin tomori-server -- --speech-root .
 ```
 
 `TransducerConfig::from_root`, `PunctuationConfig::from_root`, `KokoroConfig::from_root`, `WhisperConfig::from_root` and `SileroVadConfig::from_root` expect this layout. `bash scripts/fetch-asr-model.sh whisper` also fetches Whisper `small.en` (640 MB download) and the Silero voice activity detector (`silero_vad.onnx`, 0.6 MB, checked against the digest the release publishes), for `--speech-backend offline` and the benchmark. Without the detector, the offline backend splits long utterances by loudness alone, and the server says so when it starts.
@@ -78,7 +78,7 @@ The `sherpa-onnx` crate links prebuilt sherpa-onnx and ONNX Runtime libraries fr
 - The build script unpacks the archive into `target/sherpa-onnx-prebuilt` (about 90 MB) and links whatever it finds there on later builds without checking it again. The script removes the copy in the workspace's target directory, as `cargo metadata` reports it, unless the verified archive is beside it. To be sure the libraries were built from the verified archive, delete `target/sherpa-onnx-prebuilt` and build again.
 - An environment variable overrides the setting in `.cargo/config.toml`: setting `SHERPA_ONNX_ARCHIVE_DIR` yourself uses another directory, and setting `SHERPA_ONNX_LIB_DIR` links the libraries in that directory instead, as for CUDA below. Neither is checked. Cargo reads `.cargo/config.toml` from the directory it runs in, so build from inside the repository: `cargo build --manifest-path` run from elsewhere ignores the setting and lets the build script download an unchecked archive.
 
-Outside this repository, such as when a project depends on `tomori-speech` or `tomori-server` from crates.io, or runs `cargo install tomori-server`, this repository's `.cargo/config.toml` does not apply. Set `SHERPA_ONNX_ARCHIVE_DIR` to a directory holding the archive that [`scripts/fetch-sherpa-onnx.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/fetch-sherpa-onnx.sh) has verified, or the `sherpa-onnx` build script downloads the archive from GitHub without checking it. On docs.rs, it downloads and links nothing.
+Outside this repository, such as when a project depends on `tomori-speech` or `tomori-server` from crates.io, or runs `cargo install tomori-server-app`, this repository's `.cargo/config.toml` does not apply. Set `SHERPA_ONNX_ARCHIVE_DIR` to a directory holding the archive that [`scripts/fetch-sherpa-onnx.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/fetch-sherpa-onnx.sh) has verified, or the `sherpa-onnx` build script downloads the archive from GitHub without checking it. On docs.rs, it downloads and links nothing.
 
 By default the libraries are linked statically and run on the CPU, so `tomori-server` needs no extra shared libraries at run time:
 
@@ -96,7 +96,7 @@ The GPU build of sherpa-onnx is published only as shared libraries. To use it:
 
    ```bash
    SHERPA_ONNX_LIB_DIR=$PWD/.tools/sherpa-onnx/sherpa-onnx-v1.13.8-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu/lib \
-   	cargo build --release -p tomori-server --features speech-shared
+   	cargo build --release -p tomori-server-app --features speech-shared
    ```
 
    The build script sets an rpath to that directory, so keep the libraries there, or put them on `LD_LIBRARY_PATH`.

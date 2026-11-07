@@ -99,7 +99,11 @@ fn a_space_in_the_placeholder_environment_shows_the_floor() {
     let placeholder = Environment::new(ENVIRONMENT);
     assert_eq!(
         builder.environments(),
-        [Environment::MINIMAL, Environment::SKY, placeholder]
+        [
+            Environment::MINIMAL,
+            Environment::new(tomori_environment_sky_client::ID),
+            placeholder
+        ]
     );
 
     // A space bound to the placeholder environment is drawn in it, where Tomori's own build shows the grid.

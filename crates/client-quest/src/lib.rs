@@ -5,6 +5,8 @@
 mod android;
 #[cfg(target_os = "android")]
 mod android_audio;
+#[cfg(feature = "app")]
+pub mod app;
 mod builder;
 #[cfg(not(target_os = "android"))]
 mod cli;
@@ -43,7 +45,7 @@ pub use tomori_client_spectator::{
 /// How participants travel in an environment, for [`Builder::locomotion`]; see `design/locomotion.md`.
 pub use tomori_scene::locomotion::{Locomotion, Surface};
 
-/// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop` and the server-less window draw its sceneries, and `--console` names its environments. The spectator modes draw Tomori's own sceneries, as `tomori-spectator` does, whatever the build. A downstream build's `main` is `tomori::main(builder)`.
+/// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop`, the server-less window and the spectator modes draw its sceneries, and `--console` names its environments. Tomori's own `main` is `tomori::main(tomori::app::builder())`, and a downstream build's `main` is `tomori::main(builder)`.
 #[cfg(not(target_os = "android"))]
 pub fn main(builder: Builder) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -167,11 +169,11 @@ impl<'a> AndroidEventPump<'a> {
     }
 }
 
-/// Tomori's own headset, [`Builder::default`], with the default `app` feature, which a build of its own turns off to write its own `android_main`; see [`Builder::run_android`].
+/// Tomori's own headset, [`app::builder`], with the default `app` feature, which a build of its own turns off to write its own `android_main`; see [`Builder::run_android`].
 #[cfg(all(target_os = "android", feature = "app"))]
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    Builder::default().run_android(app)
+    crate::app::builder().run_android(app)
 }
 
 /// The headset on Android, drawing `sceneries`, until the activity is destroyed; see [`Builder::run_android`].
@@ -207,6 +209,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             let samples = android_samples(&android);
             let (mut conversation, connection) = android_connection(android);
             conversation.set_drawable(sceneries.environments());
+            conversation.set_over_grid(sceneries.over_grid());
             conversation.set_locomotion(sceneries.locomotion());
             xr::run(
                 &platform,

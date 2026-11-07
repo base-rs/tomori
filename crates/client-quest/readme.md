@@ -13,11 +13,13 @@ tomori --desktop --server 192.168.1.10:8765  # take part in a server's spaces
 tomori --xr --server 192.168.1.10:8765       # a desktop OpenXR runtime
 ```
 
-`tomori --help` lists every mode. A headset of your own registers its sceneries on Tomori's own build, at version 1 with `Builder::scenery`, or at the environment's protocol version with `Builder::versioned_scenery`. The build's `Hello` lists them with their versions, so that a server offers it only environments it presents at the same version:
+`tomori --help` lists every mode. `tomori::Builder::default()` draws nothing but the built-in grid; Tomori's own build, `tomori::app::builder()`, behind the default `app` feature, registers Tomori's own environments on it, each from its own crate. A headset of your own registers its sceneries, at version 1 with `Builder::scenery`, or at the environment's protocol version with `Builder::versioned_scenery`, and those of other environments from their client crates with `Builder::register`, such as Sky's. The build's `Hello` lists them with their versions, so that a server offers it only environments it presents at the same version:
 
 ```rust
 fn builder() -> tomori::Builder {
     tomori::Builder::default()
+        // Sky, as Tomori's own build draws it.
+        .register(tomori_environment_sky_client::register)
         .scenery("observe", my_scenery)
         // Teleport onto a floor 40 m across, and turn in snaps of 30°; Tomori's own environments declare none. Provisional, until environments have server sides to declare it.
         .locomotion(
@@ -40,7 +42,7 @@ fn android_main(app: tomori::AndroidApp) {
 }
 ```
 
-Depend on it without default features, which hold Tomori's own `android_main`:
+Depend on it without default features, which hold Tomori's own app, its `android_main` and its environments' crates:
 
 ```toml
 tomori-client-quest = { version = "0.1.0", default-features = false }

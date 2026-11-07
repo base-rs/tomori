@@ -2,7 +2,7 @@
 
 A conversational spatial workspace for people and agents, currently a native **Rust + OpenXR + wgpu/Vulkan** prototype for **Meta Quest 3**. 128 agents inhabit a moonlit Sky environment or a minimal floor grid. Real stereo views use the headset's predicted poses and asymmetric eye projections. The Quest renders the interactive scene and joins conversations through a Tomori server on the PC, which runs the agent sessions.
 
-Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The headset and desktop application is the Rust package `tomori-client-quest`, whose library and executable are named `tomori`, and the server is `tomori-server`; the other crates are listed under [Crates](#crates). The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
+Tomori is the name of both the system and its conversational coordinator; see [docs/naming.md](docs/naming.md). The headset and desktop application is the Rust package `tomori-client-quest`, whose library and executable are named `tomori`, and the server is `tomori-server`, from the package `tomori-server-app`; the other crates are listed under [Crates](#crates). The headset finds servers with Bonjour or over USB; several participants can share a space. Hold **X** to talk to the space's agent: the server transcribes what you say and queues it, and the agent's replies are spoken. Sky is an early environment blockout, not finished artwork. Private workspace memory and session state are not included in this public source repository.
 
 - **Right trigger:** outside a space, choose what the right controller's ray points at; a pull that starts away from every object, or any pull inside a space, attracts the swarm to the right controller.
 - **A:** connect, join a space, or confirm an approval; otherwise reset the swarm.
@@ -10,7 +10,7 @@ Tomori is the name of both the system and its conversational coordinator; see [d
 
 ## Environments
 
-Each space is bound to one environment, chosen when it is created and the same for everyone in it; an owner can change it later, for everyone, from the hand menu's **Space** section (see [design/environments.md](design/environments.md)). The server offers **Sky**, the default for a new space: a fixed moonlit night, sparse stars, static cloud banks, a stable platform and an open shrine blockout with warm lanterns. The concrete renderer lives in [`crates/environment-sky`](crates/environment-sky/readme.md), separate from sessions, worker simulation and application input. It also offers **Grid**, the plain floor grid of the **Minimal** environment, which is also the waiting area outside any space.
+Each space is bound to one environment, chosen when it is created and the same for everyone in it; an owner can change it later, for everyone, from the hand menu's **Space** section (see [design/environments.md](design/environments.md)). The server offers **Sky**, the default for a new space: a fixed moonlit night, sparse stars, static cloud banks, a stable platform and an open shrine blockout with warm lanterns. Sky's renderer lives in [`crates/environment-sky-client`](crates/environment-sky-client/readme.md), separate from sessions, worker simulation and application input, and its identity in [`crates/environment-sky`](crates/environment-sky/readme.md). It also offers **Grid**, the plain floor grid of the **Minimal** environment, which is also the waiting area outside any space. Tomori's core crates know no environment but the grid: Tomori's own server and app register Sky and the others from their own crates, as another project's would ([design/environments.md](design/environments.md) describes how to make one).
 
 - **Quest / desktop XR:** choosing a server and a space happens on the grid; joining a space switches to its environment, and leaving returns to the grid. Inside a space, only an owner's change for the whole space switches it. A space whose environment this build doesn't know shows the grid, and its panel names the environment.
 - **Desktop window:** it has no server, so press **E** to switch between Sky and the grid (and any scenery a headset build of its own registers; see [examples/headset](examples/headset/readme.md)) (with `--desktop` and a server, **E** does nothing: the space chooses); or launch with `TOMORI_ENVIRONMENT=minimal cargo run -p tomori-client-quest` to start on the grid.
@@ -21,7 +21,7 @@ Each space is bound to one environment, chosen when it is created and the same f
 A first experiment of the GitHub environment proposed in [docs/proposals/github-and-code-environments.md](docs/proposals/github-and-code-environments.md): start the server with `--github-repository OWNER/NAME`, and an owner can change a space to **GitHub** from the hand menu's **Space** section. Its cards, the repository's open issues and pull requests, start in an inbox front left of you. Point at one with the right ray to highlight it, squeeze the right grip to pick it up and carry it along the ray, and let go to put it down, or over the inbox to put it back. Everyone in the space sees where cards are put, and the server keeps that with the space. Point at a card as you press **X** to ask the agent about it. The server reads GitHub, read-only, with the token in `GITHUB_TOKEN` or else from `gh auth token`, and never sends it to the headset or the agent:
 
 ```sh
-cargo run -p tomori-server --bin tomori-server -- --backend opencode --github-repository ioquatix/tomori
+cargo run -p tomori-server-app --bin tomori-server -- --backend opencode --github-repository ioquatix/tomori
 ```
 
 Nothing is changed on GitHub, and only participants see the cards; see [design/github.md](design/github.md).
@@ -42,7 +42,7 @@ Start the server on the PC with the OpenCode backend (see [design/server.md](des
 ```sh
 bash scripts/fetch-sherpa-onnx.sh
 opencode serve --service &
-cargo run -p tomori-server --bin tomori-server -- --backend opencode
+cargo run -p tomori-server-app --bin tomori-server -- --backend opencode
 ```
 
 Anyone who can reach the server can watch its spaces as a visitor. Creating spaces, talking to the agent and approving its tools need a token (see [design/security.md](design/security.md)). The easiest way to get one is to pair: choose the gold key beside the connected server in the headset, and it shows a 6-digit code. If the server's console shows the same code, type it there to confirm, or confirm it on the status page; the headset then keeps an owner token for that server. A server started with `--no-visitors` still admits a device that asks to pair.
@@ -50,7 +50,7 @@ Anyone who can reach the server can watch its spaces as a visitor. Creating spac
 You can also make an owner token on the PC, and give it to the headset or the desktop client once; each keeps it for that server:
 
 ```sh
-cargo run -p tomori-server --bin tomori-server -- auth mint --owner --name "Sam's Quest"
+cargo run -p tomori-server-app --bin tomori-server -- auth mint --owner --name "Sam's Quest"
 TOMORI_TOKEN=tomori_… bash scripts/android.sh run     # or: tomori --xr --server HOST:8765 --token tomori_…
 ```
 
@@ -134,7 +134,7 @@ Recognition and synthesis run inside the server through sherpa-onnx, whose libra
 ```sh
 bash scripts/fetch-asr-model.sh
 bash scripts/fetch-tts-model.sh
-cargo run -p tomori-server --bin tomori-server -- --backend opencode --speech-root .
+cargo run -p tomori-server-app --bin tomori-server -- --backend opencode --speech-root .
 ```
 
 Speech runs on the CPU, including on macOS; see [crates/speech/readme.md](crates/speech/readme.md) for CUDA on Linux. Without `--speech-root`, or if the recognition model can't load, every utterance fails with an error that says so. Without the punctuation model, which `scripts/fetch-asr-model.sh` also fetches, transcripts are lowercase and unpunctuated, and the server says "Transcript punctuation: unavailable" when it starts. Replies are spoken with Kokoro, which needs another 700 MB; without it the server says "Speech synthesis: off" or "unavailable" when it starts, and replies are only shown.
@@ -331,14 +331,15 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-environment`](crates/environment/readme.md): the interface of an environment's server side, which the server runs for the spaces bound to its environment.
 - [`tomori-assets`](crates/assets/readme.md): environments' models, loaded at runtime from content-addressed `.glb` assets, read as untrusted input, and drawn skinned on the GPU.
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
-- [`tomori-environment-sky`](crates/environment-sky/readme.md): the Sky environment's renderer, which Tomori's clients draw.
-- [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
+- [`tomori-environment-sky`](crates/environment-sky/readme.md) and [`tomori-environment-sky-client`](crates/environment-sky-client/readme.md): the Sky environment's identity, which its server and client halves share, and its renderer, which Tomori's own app and spectator register.
+- [`tomori-server`](crates/server/readme.md): the server library, which another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
+- [`tomori-server-app`](crates/server-app/readme.md): Tomori's own server, the `tomori-server` executable, installed with `cargo install tomori-server-app`, which registers Tomori's own environments on the library's builder.
 - [`tomori-text`](crates/text/readme.md): the bundled fonts and the signed-distance-field glyph atlas that text is drawn from.
 - [`tomori-scene`](crates/scene/readme.md): the platform-neutral client, with the frame step, the conversation, and the panels' layout, free of rendering, windowing and device code.
 - [`tomori-render`](crates/render/readme.md): the wgpu renderers and shaders that the headset, the desktop window and the spectator share, and the `Scenery` that draws an environment.
 - [`tomori-client-desktop`](crates/client-desktop/readme.md): the desktop modes.
 - [`tomori-client-spectator`](crates/client-spectator/readme.md): the spectator, installed with `cargo install tomori-client-spectator` for its `tomori-spectator` executable.
-- [`tomori-client-quest`](crates/client-quest/readme.md): the headset and desktop application, the `tomori` library and executable, and the library another project builds a headset of its own on, registering its own sceneries through `tomori::Builder`. [examples/headset](examples/headset/readme.md) is an example. Tomori's own headset is an APK.
+- [`tomori-client-quest`](crates/client-quest/readme.md): the headset and desktop application, the `tomori` library and executable, and the library another project builds a headset of its own on, registering its own sceneries through `tomori::Builder`. Tomori's own build, which registers Tomori's own environments, is its default `app` feature. [examples/headset](examples/headset/readme.md) is an example. Tomori's own headset is an APK.
 
 [design/crates.md](design/crates.md) gives the reasons, and [docs/naming.md](docs/naming.md) records that the names were free on crates.io.
 
@@ -371,11 +372,13 @@ No Tomori crate has been published yet. A release publishes the crates listed un
 2. `tomori-discovery`, `tomori-speech` and `tomori-backend-opencode`;
 3. `tomori-client`;
 4. `tomori-server`;
-5. `tomori-scene`, which depends on `tomori-server` for the test server behind its `testing` feature;
-6. `tomori-render`;
-7. `tomori-client-desktop`;
-8. `tomori-client-spectator`;
-9. `tomori-client-quest`.
+5. `tomori-server-app`;
+6. `tomori-scene`, which depends on `tomori-server` for the test server behind its `testing` feature;
+7. `tomori-render`;
+8. `tomori-environment-sky-client`;
+9. `tomori-client-desktop`;
+10. `tomori-client-spectator`;
+11. `tomori-client-quest`.
 
 ## Releases
 

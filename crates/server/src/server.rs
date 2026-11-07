@@ -250,7 +250,7 @@ impl Server {
         self
     }
 
-    /// Offer `environments` for spaces, in order, in place of Tomori's own, Sky and the Minimal grid: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. It may be called before or after [`Self::with_kept_spaces`]: a space's layer of the instructions is looked up in the environments offered whenever it is shown or given to the agent, so a restored space is given the same layer as a new one. See `design/environments.md`.
+    /// Offer `environments` for spaces, in order, in place of those offered before, which are none until some are: the first is the one a space whose creator names none is bound to. A space kept across a restart in an environment no longer offered stays in it, with no instructions from it. It may be called before or after [`Self::with_kept_spaces`]: a space's layer of the instructions is looked up in the environments offered whenever it is shown or given to the agent, so a restored space is given the same layer as a new one. See `design/environments.md`.
     pub fn with_environments(self, environments: impl IntoIterator<Item = Environment>) -> Self {
         self.hub.set_environments(Environments::new(environments));
         self
@@ -262,26 +262,28 @@ impl Server {
     /// [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
     pub fn with_github(self, github: crate::github::GitHub) -> Self {
         self.with_cards(
-            tomori_protocol::environments::GITHUB,
+            crate::github::ENVIRONMENT,
+            crate::github::VERSION,
             "GitHub",
             Arc::new(github),
         )
     }
 
-    /// Offer `environment`, one of Tomori's own, labelled `label`, whose spaces show the cards `source` reads.
+    /// Offer the environment `id` at protocol `version`, labelled `label`, whose spaces show the cards `source` reads.
     pub(crate) fn with_cards(
         mut self,
-        environment: tomori_protocol::environments::BuiltIn,
+        id: &str,
+        version: u32,
         label: &str,
         source: Arc<dyn crate::cards::CardSource>,
     ) -> Self {
         let name = source.source();
         self.hub.offer_environment(
-            Environment::built_in(environment, label)
+            Environment::new(id, label)
+                .with_version(version)
                 .with_instructions(crate::github::instructions(&name)),
         );
-        self.hub
-            .set_board(crate::cards::Board::new(environment.id, name));
+        self.hub.set_board(crate::cards::Board::new(id, name));
         self.cards = Some(source);
         self
     }
@@ -290,6 +292,18 @@ impl Server {
     #[cfg(test)]
     pub(crate) fn environments(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.hub.environment_info()
+    }
+
+    /// Offer `environments` unless some are offered already, as a test server does.
+    #[cfg(feature = "fake")]
+    pub(crate) fn with_default_environments(
+        self,
+        environments: impl IntoIterator<Item = Environment>,
+    ) -> Self {
+        if self.hub.environment_info().is_empty() {
+            self.hub.set_environments(Environments::new(environments));
+        }
+        self
     }
 
     /// Use `roots` unless roots were already given.
@@ -1950,7 +1964,12 @@ mod tests {
 
     /// A server showing `source`'s cards, with an owner watching them in a space that shows them.
     fn server_with_watcher(source: Arc<dyn crate::cards::CardSource>) -> Server {
-        let server = server().with_cards(tomori_protocol::environments::GITHUB, "GitHub", source);
+        let server = server().with_cards(
+            crate::github::ENVIRONMENT,
+            crate::github::VERSION,
+            "GitHub",
+            source,
+        );
         let (commands, _receiver) = async_channel::unbounded();
         let request = crate::hub::CreateRequest {
             title: "Cards".to_owned(),
@@ -2003,7 +2022,8 @@ mod tests {
         // A server without cards reads none.
         block_on(server().refresh_cards(&scheduler, &live));
         let server = server().with_cards(
-            tomori_protocol::environments::GITHUB,
+            crate::github::ENVIRONMENT,
+            crate::github::VERSION,
             "GitHub",
             scripted(Vec::new()),
         );

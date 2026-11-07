@@ -6,7 +6,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use tomori_environment::ServerSide;
-use tomori_protocol::environments::{BuiltIn, MINIMAL, SKY};
 use tomori_protocol::{EnvironmentInfo, EnvironmentVersion};
 
 /// An environment a server offers for spaces: its identifier, which clients map to what they present, the label they show, its protocol version, which a client must present it at, and its layer of the instructions a space's agent is given.
@@ -71,18 +70,6 @@ impl Environment {
             instructions: String::new(),
             side: None,
         }
-    }
-
-    /// One of Tomori's own environments, `environment`, which clients show as `label`, at the identifier and version that Tomori's own clients present it by, contributing no instructions. See `design/environments.md`.
-    ///
-    /// ```
-    /// use tomori_server::Environment;
-    ///
-    /// let sky = Environment::built_in(tomori_protocol::environments::SKY, "Sky");
-    /// assert_eq!((sky.id(), sky.version()), ("sky", 1));
-    /// ```
-    pub fn built_in(environment: BuiltIn, label: impl Into<String>) -> Self {
-        Self::new(environment.id, label).with_version(environment.version)
     }
 
     /// The environment, running `side` for each space bound to it, from when the space is bound until it is bound to another environment or closes, or the server stops. See `design/environments.md`.
@@ -157,19 +144,9 @@ impl Environment {
     }
 }
 
-/// The environments a server offers, in order: the first is the one a space whose creator names none is bound to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The environments a server offers, in order: the first is the one a space whose creator names none is bound to. None by default: an application registers those it offers, each by the identity in its own crate. See `design/environments.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Environments(Vec<Environment>);
-
-impl Default for Environments {
-    /// Tomori's own: Sky, first, so that a space whose creator names none is bound to it, and the Minimal grid, at the versions `tomori_protocol::environments` gives them. Every environment, Sky included, contributes no instructions yet.
-    fn default() -> Self {
-        Self(vec![
-            Environment::built_in(SKY, "Sky"),
-            Environment::built_in(MINIMAL, "Grid"),
-        ])
-    }
-}
 
 impl Environments {
     /// The environments offered, in order.
@@ -193,6 +170,11 @@ impl Environments {
     /// The environment offered with the identifier `id`, if there is one.
     pub fn get(&self, id: &str) -> Option<&Environment> {
         self.0.iter().find(|environment| environment.id == id)
+    }
+
+    /// The environments offered, in order, as a slice.
+    pub fn as_slice(&self) -> &[Environment] {
+        &self.0
     }
 
     /// The environments offered, in order.
@@ -303,9 +285,19 @@ fn presented(presents: &[EnvironmentVersion], environment: &Environment) -> bool
 mod tests {
     use super::*;
 
-    const SKY: &str = super::SKY.id;
-    const MINIMAL: &str = super::MINIMAL.id;
     use tomori_environment::Space;
+
+    /// Environments standing in for an application's, as Tomori's own server offers Sky and the grid.
+    const SKY: &str = "sky";
+    const MINIMAL: &str = tomori_protocol::GRID;
+
+    /// What an application offers, as Tomori's own server does.
+    fn tomoris() -> Environments {
+        Environments::new([
+            Environment::new(SKY, "Sky"),
+            Environment::new(MINIMAL, "Grid"),
+        ])
+    }
 
     struct Idle;
 
@@ -345,14 +337,14 @@ mod tests {
 
     #[test]
     fn an_offered_environment_is_found_by_its_identifier() {
-        let offered = Environments::default();
+        let offered = tomoris();
         assert_eq!(offered.get("sky").map(Environment::label), Some("Sky"));
         assert!(offered.get("observe").is_none());
     }
 
     #[test]
     fn only_offered_environments_are_bound() {
-        let offered = Environments::default();
+        let offered = tomoris();
         assert_eq!(offered.info().len(), 2);
         assert_eq!(offered.choose(Some(SKY)), Ok(SKY.to_owned()));
         assert_eq!(offered.choose(Some(MINIMAL)), Ok(MINIMAL.to_owned()));
@@ -369,8 +361,7 @@ mod tests {
 
     #[test]
     fn a_client_is_offered_the_environments_it_presents_at_their_versions() {
-        let offered =
-            Environments::default().with(Environment::new("observe", "Observe").with_version(2));
+        let offered = tomoris().with(Environment::new("observe", "Observe").with_version(2));
         assert_eq!(offered.version("observe"), Some(2));
         assert_eq!(offered.version(SKY), Some(1));
         assert_eq!(offered.version("unknown"), None);
@@ -427,7 +418,7 @@ mod tests {
 
     #[test]
     fn an_environment_offered_again_replaces_the_one_with_its_identifier() {
-        let offered = Environments::default()
+        let offered = tomoris()
             .with(Environment::new("observe", "Observe").with_instructions("Mind the topology."))
             .with(Environment::new(SKY, "Night").with_instructions("Mind the stars."));
         let labels: Vec<(String, String)> = offered
@@ -449,6 +440,8 @@ mod tests {
         assert_eq!(offered.instructions("observe"), "Mind the topology.");
         assert_eq!(offered.instructions(MINIMAL), "");
         assert_eq!(offered.instructions("unknown"), "");
-        assert_eq!(Environments::default().instructions(SKY), "");
+        assert_eq!(tomoris().instructions(SKY), "");
+        // None is offered until an application registers it.
+        assert_eq!(Environments::default(), Environments::new([]));
     }
 }

@@ -11,7 +11,7 @@ keywords = ["tomori", "wgpu", "xr", "rendering", "agents"]
 categories = ["rendering", "graphics"]
 
 [features]
-# `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with Sky's and the clients' tests. Enabled only by tests.
+# `test_gpu`: the device for offscreen rendering tests and WGSL validation, shared with environments' and the clients' tests. Enabled only by tests.
 test-gpu = ["dep:naga", "dep:pollster"]
 
 [dependencies]
@@ -23,7 +23,6 @@ gltf = { version = "1.4", default-features = false, features = ["utils", "names"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"
 tomori-client = { version = "0.2.0", path = "../client" }
-tomori-environment-sky = { version = "0.2.0", path = "../environment-sky" }
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-scene = { version = "0.2.0", path = "../scene" }
 tomori-text = { version = "0.2.0", path = "../text" }

@@ -63,13 +63,14 @@ impl SpectatorWindow {
         } else {
             (gpu.width, gpu.height)
         };
-        let mut renderer = Renderer::with_samples(
+        let mut renderer = Renderer::with_sceneries(
             &gpu.device,
             &gpu.queue,
             render_format,
             render_width,
             render_height,
             samples,
+            feed.sceneries(),
         );
         let initial = crate::environment::Environment::initial(renderer.environments());
         renderer.set_environment(initial);

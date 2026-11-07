@@ -40,7 +40,7 @@ Each push of the stick is one gesture, owned by the direction it first passes it
 
 **Voices are where people are.** Spatial audio places the listener and every source in the shared space: the listener at their head where they travelled, and each other participant at their head from presence, where they travelled, so that two people who travelled to meet hear each other where they stand. Two people can be in the same place, as when both stand at the centre of their own play space at home; that is allowed, and they can move apart (see `spatial-audio.md`).
 
-**Known limits.** The spectator draws only Tomori's own sceneries (see `builders.md`), so it shows a build's own environment, the kind that declares travel, as the grid, from where the participant travelled. Comfort, the blink, the snap angle, the stick's thresholds and the ring's size are still to be confirmed on the headset.
+**Known limits.** The spectator draws the sceneries it is given (see `builders.md`): `tomori`'s spectator modes draw the build's, but `tomori-spectator` draws only Tomori's own, so it shows another build's environment, the kind that declares travel, as the grid, from where the participant travelled. Comfort, the blink, the snap angle, the stick's thresholds and the ring's size are still to be confirmed on the headset.
 
 ## Rationale
 

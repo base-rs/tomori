@@ -1,24 +1,50 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Building a headset of your own on Tomori's: the sceneries it draws, by the identifiers that spaces name their environments by and at the environments' protocol versions, and running it on the headset, a desktop OpenXR runtime or the desktop window. [`Builder::default`] is Tomori's own build, which the `tomori` executable and APK run.
+//! Building a headset of your own on Tomori's: the sceneries it draws, by the identifiers that spaces name their environments by and at the environments' protocol versions, and running it on the headset, a desktop OpenXR runtime or the desktop window. [`Builder::default`] draws nothing but the built-in grid; each environment's client crate registers itself on it, as Tomori's own build, `crate::app::builder` behind the default `app` feature, registers Sky and the GitHub prototype for the `tomori` executable and APK.
 //!
 //! A scenery and its version are all of an environment's client side that a build registers until state synchronization ([#76](https://github.com/ioquatix/tomori/issues/76)) gives a client side more to present. A build's `Hello` lists the environments it registers, with their versions, so that its server offers it only those; see `design/environments.md`.
 use tomori_render::scenery::{Sceneries, Scenery, Target};
 use tomori_scene::{environment::Environment, locomotion::Locomotion};
 
-/// A headset build: the sceneries it draws, and how to run it.
+/// A headset build: the sceneries it draws, and how to run it. It starts with nothing but the built-in grid.
 #[derive(Clone, Default)]
 pub struct Builder {
     sceneries: Sceneries,
 }
 
 impl Builder {
-    /// No sceneries but the built-in grid, without Tomori's own Sky.
+    /// No sceneries but the built-in grid, as [`Builder::default`] is.
     pub fn empty() -> Self {
-        Self {
-            sceneries: Sceneries::empty(),
-        }
+        Self::default()
+    }
+
+    /// Register on this build's sceneries with `register`, such as an environment's own crate's, like `tomori_environment_sky_client::register`.
+    ///
+    /// ```
+    /// let builder = tomori::Builder::default().register(|sceneries| sceneries.present_over_grid("board", 1));
+    /// assert_eq!(builder.over_grid()[0].id(), "board");
+    /// ```
+    pub fn register(mut self, register: impl FnOnce(&mut Sceneries)) -> Self {
+        register(&mut self.sceneries);
+        self
+    }
+
+    /// Present the environment `id` at protocol `version` over the grid, without a scenery of its own, as the GitHub prototype's cards are presented: the build lists it in its `Hello` and shows a space in it without a notice. See `tomori-render`'s `Sceneries::present_over_grid`.
+    pub fn present_over_grid(mut self, id: &'static str, version: u32) -> Self {
+        self.sceneries.present_over_grid(id, version);
+        self
+    }
+
+    /// The environments this build presents over the grid, each at its version.
+    pub fn over_grid(&self) -> Vec<Environment> {
+        self.sceneries.over_grid()
+    }
+
+    /// The sceneries registered, for the spectator modes, which draw them too.
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn into_sceneries(self) -> Sceneries {
+        self.sceneries
     }
 
     /// Draw `create`'s scenery for a space bound to the environment `id`, at protocol version 1, in place of any registered under the same identifier.
@@ -62,7 +88,7 @@ impl Builder {
 
     /// A participant's conversation and connection, with the desktop's microphone and speaker, drawing this build's environments.
     #[cfg(not(target_os = "android"))]
-    fn participant(
+    pub(crate) fn participant(
         &self,
         overrides: crate::Overrides,
     ) -> (
@@ -71,6 +97,7 @@ impl Builder {
     ) {
         let (mut conversation, connection) = tomori_client_desktop::connection(overrides);
         conversation.set_drawable(self.environments());
+        conversation.set_over_grid(self.over_grid());
         conversation.set_locomotion(self.sceneries.locomotion());
         (conversation, connection)
     }
@@ -108,7 +135,7 @@ impl Builder {
 
     /// Run on the headset, until the activity is destroyed, from a build's own `android_main`.
     ///
-    /// Tomori's own `android_main` runs [`Builder::default`]. A build of another project's depends on this crate without its default `app` feature, so that the library leaves it out, and runs its own builder:
+    /// Tomori's own `android_main` runs Tomori's own build, with Sky and the GitHub prototype registered. A build of another project's depends on this crate without its default `app` feature, so that the library leaves it out, and runs its own builder:
     ///
     /// ```toml
     /// tomori-client-quest = { version = "0.1.0", default-features = false }
@@ -130,29 +157,34 @@ impl Builder {
 mod tests {
     use super::*;
 
+    use tomori_render::scenery::test::blank;
+
     #[test]
-    fn tomori_draws_the_grid_and_sky_and_a_build_adds_its_own() {
-        assert_eq!(Builder::default().environments(), Environment::BUILT_IN);
-        let mut builder = Builder::empty().scenery("floor", tomori_render::scenery::sky);
+    fn a_build_draws_the_grid_and_adds_its_own() {
+        assert_eq!(Builder::default().environments(), [Environment::MINIMAL]);
+        assert!(Builder::default().over_grid().is_empty());
+        let mut builder = Builder::empty().scenery("floor", blank);
         assert_eq!(
             builder.environments(),
             [Environment::MINIMAL, Environment::new("floor")]
         );
         assert_eq!(builder.environments()[1].version(), 1);
-        let versioned = builder
-            .clone()
-            .versioned_scenery("floor", 2, tomori_render::scenery::sky);
+        let versioned = builder.clone().versioned_scenery("floor", 2, blank);
         assert_eq!(versioned.environments()[1].version(), 2);
-        builder
-            .sceneries()
-            .register("sky", tomori_render::scenery::sky);
-        assert!(builder.sceneries().contains("sky"));
+        builder.sceneries().register("deck", blank);
+        assert!(builder.sceneries().contains("deck"));
         assert_eq!(builder.environments().len(), 3);
+        let builder = builder
+            .register(|sceneries| sceneries.register("moon", blank))
+            .present_over_grid("board", 2);
+        assert_eq!(builder.environments().len(), 4);
+        assert_eq!(builder.over_grid(), [Environment::new("board")]);
+        assert_eq!(builder.over_grid()[0].version(), 2);
     }
 
     #[test]
     fn a_participant_draws_the_builds_environments() {
-        let builder = Builder::empty().scenery("floor", tomori_render::scenery::sky);
+        let builder = Builder::empty().scenery("floor", blank);
         let (conversation, _connection) = builder.participant(crate::Overrides::default());
         assert_eq!(conversation.drawable(), builder.environments());
     }
@@ -161,61 +193,26 @@ mod tests {
     fn a_participant_lists_the_builds_environments_at_their_versions() {
         use tomori_client::connection::Session;
         use tomori_protocol::EnvironmentVersion;
-        // Tomori's own: the grid and Sky, and the GitHub prototype the scene presents, at version 1.
-        let (tomori, _connection) = Builder::default().participant(crate::Overrides::default());
-        assert_eq!(
-            tomori.environments(),
-            Some(vec![
-                EnvironmentVersion::new("minimal", 1),
-                EnvironmentVersion::new("sky", 1),
-                EnvironmentVersion::new("github", 1),
-            ])
-        );
-        // Another build's, at the version it registers.
-        let builder = Builder::empty().versioned_scenery("floor", 2, tomori_render::scenery::sky);
+        // A build lists the grid, its sceneries at the versions it registers, and what it presents over the grid.
+        let builder = Builder::empty()
+            .versioned_scenery("floor", 2, blank)
+            .present_over_grid("board", 3);
         let (conversation, _connection) = builder.participant(crate::Overrides::default());
         assert_eq!(
             conversation.environments(),
             Some(vec![
                 EnvironmentVersion::new("minimal", 1),
                 EnvironmentVersion::new("floor", 2),
-                EnvironmentVersion::new("github", 1),
+                EnvironmentVersion::new("board", 3),
             ])
         );
-    }
-
-    #[test]
-    fn tomoris_own_server_offers_tomoris_own_build_every_built_in_environment() {
-        use std::sync::Arc;
-        use tomori_client::connection::Session;
-        use tomori_server::github::{GitHub, Token};
-        use tomori_server::test_support::{TestClient, TestServer, TextTranscriber};
-        // Tomori's own server, offering every environment it can by default: Sky and the grid, and GitHub, given a
-        // repository, whose cards it reads only once someone watches them.
-        let server = TestServer::with_server(tomori_server::fake::FakeBackend::new(), |backends| {
-            let token = Token::new("not-a-real-token").unwrap();
-            tomori_server::Server::new(backends, Arc::new(TextTranscriber::default()))
-                .with_github(GitHub::new("ioquatix/tomori".parse().unwrap(), token))
-        });
-        let offered = |presents| {
-            let mut client = TestClient::open(server.address);
-            let offered: Vec<(String, u32)> = client
-                .hello_presenting("ada", "Ada", presents)
-                .into_iter()
-                .map(|info| (info.id, info.version))
-                .collect();
-            offered
-        };
-        // A client that lists nothing is offered every one, at the server's versions.
-        let everything = offered(None);
-        let mut ids: Vec<&str> = everything.iter().map(|(id, _)| id.as_str()).collect();
-        ids.sort_unstable();
-        let mut built_in = tomori_protocol::environments::ALL.map(|environment| environment.id);
-        built_in.sort_unstable();
-        assert_eq!(ids, built_in);
-        // Tomori's own build presents each, at the same identifier and version, so it is offered every one too.
-        let (tomori, _connection) = Builder::default().participant(crate::Overrides::default());
-        assert_eq!(offered(tomori.environments()), everything);
+        // An empty build, the grid alone.
+        let (conversation, _connection) =
+            Builder::default().participant(crate::Overrides::default());
+        assert_eq!(
+            conversation.environments(),
+            Some(vec![EnvironmentVersion::new("minimal", 1)])
+        );
     }
 
     #[test]
@@ -224,7 +221,7 @@ mod tests {
         assert!(Builder::default().sceneries().locomotion().is_empty());
         let teleport = Locomotion::teleport(vec![Surface::disc(glam::Vec3::ZERO, 5.0)]);
         let mut builder = Builder::empty()
-            .scenery("floor", tomori_render::scenery::sky)
+            .scenery("floor", blank)
             .locomotion("floor", Locomotion::fly(Vec::new(), 10.0))
             .locomotion("floor", teleport.clone());
         assert_eq!(

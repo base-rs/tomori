@@ -777,7 +777,7 @@ pub mod fixtures {
 
     /// Connected to a server as `role`, in the lobby.
     pub fn lobby(role: ConnectionRole) -> Conversation {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 1,
@@ -983,7 +983,7 @@ mod tests {
         use crate::locomotion::{Locomotion, Surface};
         let mut conversation = lobby(ConnectionRole::Owner);
         conversation.set_locomotion(vec![(
-            crate::environment::Environment::SKY,
+            crate::test_support::SKY,
             Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
         )]);
         let mut step = Step::default();
@@ -1005,7 +1005,7 @@ mod tests {
         assert_ne!(
             growing.scenery,
             arrival_motion::Scenery {
-                environment: crate::environment::Environment::SKY,
+                environment: crate::test_support::SKY,
                 reveal: None
             }
         );
@@ -1039,7 +1039,7 @@ mod tests {
         use tomori_protocol::Resource;
         let mut conversation = lobby(ConnectionRole::Owner);
         conversation.set_locomotion(vec![(
-            crate::environment::Environment::SKY,
+            crate::test_support::SKY,
             Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
         )]);
         conversation.apply(space(|state| {
@@ -1237,7 +1237,7 @@ mod tests {
         assert_eq!(step.board.held(), Some("github://o/r/issues/1"));
         // In an environment that allows travel, the left stick does not aim while a card is carried, which would put it down.
         conversation.set_locomotion(vec![(
-            crate::environment::Environment::SKY,
+            crate::test_support::SKY,
             crate::locomotion::Locomotion::teleport(vec![crate::locomotion::Surface::disc(
                 Vec3::ZERO,
                 20.0,

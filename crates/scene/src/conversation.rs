@@ -259,6 +259,8 @@ pub struct Conversation {
     environments: Vec<EnvironmentInfo>,
     /// The environments this build draws; a space bound to another shows the grid, and says so.
     drawable: Vec<Environment>,
+    /// The environments this build presents over the grid, without a scenery of their own, such as the GitHub prototype, whose cards the scene presents.
+    over_grid: Vec<Environment>,
     /// The locomotion profiles this build declares, by environment; see `design/locomotion.md`.
     locomotion: Vec<(Environment, Locomotion)>,
     /// The backend chosen on the backend ring, kept until the space is created.
@@ -391,7 +393,8 @@ impl Conversation {
             backends: Vec::new(),
             roots: Vec::new(),
             environments: Vec::new(),
-            drawable: Environment::BUILT_IN.to_vec(),
+            drawable: Vec::new(),
+            over_grid: Vec::new(),
             locomotion: Vec::new(),
             sessions: Vec::new(),
             menu_backend: None,
@@ -1676,9 +1679,14 @@ impl Conversation {
         &self.drawable
     }
 
-    /// Draw `drawable`, the environments this build has sceneries for, rather than Tomori's own, the grid and Sky.
+    /// Draw `drawable`, the environments this build has sceneries for, beside the built-in grid, which is all a conversation draws until it is given them.
     pub fn set_drawable(&mut self, drawable: Vec<Environment>) {
         self.drawable = drawable;
+    }
+
+    /// Present `over_grid` over the grid, without sceneries of their own, as the GitHub prototype's cards are: listed in `Hello` and shown without a notice. See `tomori-render`'s `Sceneries::present_over_grid`.
+    pub fn set_over_grid(&mut self, over_grid: Vec<Environment>) {
+        self.over_grid = over_grid;
     }
 
     /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
@@ -1715,12 +1723,12 @@ impl Conversation {
             .map_or(NONE, |(_, locomotion)| locomotion)
     }
 
-    /// The environments this build presents, each at its version, as its Hello lists them, each once: the grid first, always at its built-in version, then those it draws, at the versions their sceneries are registered at, and the GitHub environment's prototype, whose cards the scene presents over the grid, at its built-in version unless a scenery is registered for it. Tomori's own are at the versions `tomori_protocol::environments` gives them, which the server offers them at. See `design/environments.md`.
+    /// The environments this build presents, each at its version, as its Hello lists them, each once: the grid first, always at its built-in version, then those it draws, at the versions their sceneries are registered at, and those it presents over the grid, at the versions they are presented at unless a scenery is registered for them. Each environment's version is in its own crate, which its server half registers it with too. See `design/environments.md`.
     pub fn presented(&self) -> Vec<tomori_protocol::EnvironmentVersion> {
         let mut presented: Vec<Environment> = Vec::new();
         for environment in std::iter::once(Environment::MINIMAL)
             .chain(self.drawable.iter().copied())
-            .chain(std::iter::once(Environment::GITHUB))
+            .chain(self.over_grid.iter().copied())
         {
             if !presented.contains(&environment) {
                 presented.push(environment);
@@ -1734,10 +1742,14 @@ impl Conversation {
             .collect()
     }
 
-    /// What this build presents of the environment `id`: the environment it draws, or the GitHub prototype, which it presents over the grid, or `None` when it cannot present it at all.
+    /// What this build presents of the environment `id`: the environment it draws, or one it presents over the grid, or `None` when it cannot present it at all.
     fn presents(&self, id: &str) -> Option<Environment> {
-        Environment::for_space(id, &self.drawable)
-            .or_else(|| (id == Environment::GITHUB.id()).then_some(Environment::GITHUB))
+        Environment::for_space(id, &self.drawable).or_else(|| {
+            self.over_grid
+                .iter()
+                .copied()
+                .find(|environment| environment.id() == id)
+        })
     }
 
     /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment, or draws it at another version than the space's. See `design/environments.md`.
@@ -4376,7 +4388,7 @@ mod tests {
 
     /// Connected to a server that offers `backends` and `roots`, in the lobby.
     fn in_lobby(backends: Vec<BackendInfo>, roots: Vec<WorkspaceRoot>) -> Conversation {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.apply(connected_with(backends, roots));
@@ -4461,7 +4473,7 @@ mod tests {
 
     /// A conversation connected to a server and joined to [`SPACE`], with any request it shows there long enough to be chosen.
     fn joined(change: impl FnOnce(&mut SpaceState)) -> Conversation {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(space(change));
@@ -4499,7 +4511,7 @@ mod tests {
 
     #[test]
     fn connects_lists_and_joins() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         assert!(conversation.is_browsing());
         conversation.set_servers(vec![
             Choice::new("Studio", "10.0.0.1:8765", Source::Discovered),
@@ -4589,7 +4601,7 @@ mod tests {
 
     #[test]
     fn a_server_needing_attention_glows_and_offers_a_jump() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![
             advertising("Laptop", "10.0.0.2:8765", 1, 2),
             advertising("Desktop", "10.0.0.1:8765", 0, 0),
@@ -4627,7 +4639,7 @@ mod tests {
 
     #[test]
     fn a_jump_connects_and_joins_the_most_urgent_space_in_one_choice() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let laptop = advertising("Laptop", "10.0.0.2:8765", 1, 1);
         conversation.set_servers(vec![laptop.clone()]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
@@ -4674,7 +4686,7 @@ mod tests {
 
     #[test]
     fn a_jump_whose_attention_was_dealt_with_stays_in_the_lobby_and_says_so() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
@@ -4691,7 +4703,7 @@ mod tests {
 
     #[test]
     fn a_jump_moves_on_from_a_space_the_server_rejoined() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
@@ -4722,7 +4734,7 @@ mod tests {
         );
 
         // Already put in the space that needs attention: joining it says it has been seen.
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
@@ -4752,7 +4764,7 @@ mod tests {
     #[test]
     fn a_space_the_server_puts_you_in_unasked_is_joined_as_your_choice() {
         // A fresh launch connects, and the server puts the participant back in their last space.
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.take_actions();
@@ -4780,7 +4792,7 @@ mod tests {
 
     #[test]
     fn a_late_update_from_a_rejoined_space_does_not_lose_the_jump() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
@@ -4805,7 +4817,7 @@ mod tests {
 
     #[test]
     fn a_jump_to_a_space_that_has_gone_says_it_ended() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
@@ -4830,7 +4842,7 @@ mod tests {
 
     #[test]
     fn another_choice_before_the_listing_takes_over_from_a_jump() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 1, 0)]);
         conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
         conversation.apply(connected());
@@ -4852,7 +4864,7 @@ mod tests {
         // The selection starts on the space that needs attention, so A joins it.
         assert!(conversation.text().contains("> Deploy [needs you]"));
         // A jump object for a server that cannot be joined does nothing.
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let mut old = advertising("Old", "10.0.0.3:8765", 1, 0);
         old.unavailable = Some("protocol 2, needs 1".into());
         conversation.set_servers(vec![old]);
@@ -4920,7 +4932,7 @@ mod tests {
     #[test]
     fn the_remembered_server_is_not_connected_while_only_another_needs_attention() {
         let start = Instant::now();
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let mut remembered = advertising("Desktop", "10.0.0.1:8765", 0, 0);
         remembered.source = Source::Remembered;
         // Browsing finds the remembered server first, and the other a moment later.
@@ -4944,7 +4956,7 @@ mod tests {
         assert!(conversation.take_actions().is_empty());
 
         // When the remembered server needs attention too, it is connected.
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         remembered.replies = Some(1);
         conversation.set_servers(vec![
             remembered.clone(),
@@ -5009,7 +5021,7 @@ mod tests {
         role: ConnectionRole,
         certificate: tomori_client::Fingerprint,
     ) -> Conversation {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.apply(Event::State(ConnectionState::Connected {
@@ -5170,7 +5182,7 @@ mod tests {
     #[test]
     fn a_connection_admitted_only_to_pair_lists_no_spaces() {
         let certificate = tomori_client::Fingerprint::of(b"server certificate");
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.apply(Event::State(ConnectionState::Connected {
@@ -5548,7 +5560,7 @@ mod tests {
 
     #[test]
     fn pointing_chooses_servers_spaces_and_the_connected_server() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let mut old = Choice::new("Old", "10.0.0.3:8765", Source::Discovered);
         old.unavailable = Some("protocol 1, needs 2".into());
         let studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
@@ -5768,7 +5780,7 @@ mod tests {
     fn the_server_list_and_the_lobby_say_while_the_microphone_request_is_unanswered() {
         let status =
             |conversation: &Conversation| conversation.arrival().and_then(|view| view.status);
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         assert_eq!(
             status(&conversation).as_deref(),
             Some("Searching the network...")
@@ -5792,7 +5804,7 @@ mod tests {
         // Answered, neither says it any more.
         conversation.microphone_request(false);
         assert_ne!(status(&conversation).as_deref(), Some(MICROPHONE_REQUEST));
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.microphone_request(true);
         conversation.microphone_request(false);
         assert_eq!(
@@ -5803,13 +5815,13 @@ mod tests {
 
     #[test]
     fn arrival_and_the_lobby_use_the_grid_and_a_space_its_environment() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         conversation.apply(space(|_| {}));
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         // Leaving returns to the grid at once, before the server confirms.
         hold_b(&mut conversation);
         assert_eq!(conversation.mode(), Mode::Lobby);
@@ -5818,7 +5830,7 @@ mod tests {
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         // Returning to the servers keeps the grid.
         conversation.apply(space(|_| {}));
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         conversation.apply(Event::Message(ServerMessage::Left));
         conversation.back();
         assert_eq!(conversation.mode(), Mode::Servers);
@@ -5842,7 +5854,7 @@ mod tests {
         );
         // A known one is drawn, and the notice goes.
         conversation.apply(space(|_| {}));
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         assert!(!conversation.text().contains("environment"));
     }
 
@@ -5850,7 +5862,7 @@ mod tests {
     fn a_space_at_another_version_shows_the_grid_and_names_the_version() {
         // The space's state names the version; this build presents Sky at version 1.
         let mut conversation = joined(|state| state.environment_version = Some(1));
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         assert!(!conversation.text().contains("version"));
         conversation.apply(space(|state| state.environment_version = Some(2)));
         assert_eq!(conversation.environment(), Environment::MINIMAL);
@@ -5892,7 +5904,7 @@ mod tests {
         // In Sky, as an owner elsewhere changes the space for everyone.
         let mut conversation = joined(|state| state.environment_version = Some(1));
         assert_eq!(conversation.mode(), Mode::Space);
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         let warned = |conversation: &mut Conversation| {
             (
                 conversation.environment(),
@@ -5927,7 +5939,7 @@ mod tests {
         // Back to what it presents: Sky again, and the warning goes.
         conversation.apply(space(|state| state.environment_version = Some(1)));
         let (environment, text, menu) = warned(&mut conversation);
-        assert_eq!(environment, Environment::SKY);
+        assert_eq!(environment, crate::test_support::SKY);
         assert!(!text.contains("version"), "{text}");
         assert_eq!(menu.as_deref(), Some("Sky"));
     }
@@ -5964,7 +5976,7 @@ mod tests {
     #[test]
     fn hello_lists_what_this_build_presents_once_each_at_its_version() {
         use tomori_client::connection::Session;
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let listed = |conversation: &Conversation| -> Vec<(String, u32)> {
             conversation
                 .environments()
@@ -5983,7 +5995,7 @@ mod tests {
         );
         // A build that draws the GitHub prototype itself, or lists the grid again, lists each once.
         conversation.set_drawable(vec![
-            Environment::GITHUB.with_version(2),
+            crate::test_support::GITHUB.with_version(2),
             Environment::MINIMAL,
             Environment::new("floor"),
         ]);
@@ -6008,8 +6020,8 @@ mod tests {
         // prototype are at the versions registered.
         conversation.set_drawable(vec![
             Environment::MINIMAL.with_version(3),
-            Environment::SKY.with_version(2),
-            Environment::GITHUB.with_version(2),
+            crate::test_support::SKY.with_version(2),
+            crate::test_support::GITHUB.with_version(2),
         ]);
         let listed: Vec<(String, u32)> = conversation
             .environments()
@@ -6045,7 +6057,7 @@ mod tests {
         );
         conversation.apply(space(|state| state.environment_version = Some(2)));
         assert_eq!(conversation.environment().version(), 2);
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         conversation.apply(space(|state| {
             state.environment = "github".into();
             state.environment_version = Some(2);
@@ -6120,7 +6132,7 @@ mod tests {
 
     #[test]
     fn the_server_list_shows_advertised_counts() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let mut studio = Choice::new("Studio", "10.0.0.1:8765", Source::Discovered);
         studio.spaces = Some(2);
         studio.participants = Some(1);
@@ -6133,7 +6145,7 @@ mod tests {
 
     #[test]
     fn an_incompatible_server_cannot_be_chosen() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let mut old = Choice::new("Old", "10.0.0.3:8765", Source::Discovered);
         old.unavailable = Some("protocol 1, needs 2".into());
         conversation.set_servers(vec![old]);
@@ -6296,7 +6308,7 @@ mod tests {
 
     #[test]
     fn activity_is_never_ready_unless_the_server_says_idle() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         assert_eq!(conversation.activity(), SessionActivity::Unselected);
 
         let cases = [
@@ -6330,7 +6342,11 @@ mod tests {
 
     #[test]
     fn the_joined_space_is_current_only_while_connected_and_gone_after_leaving() {
-        assert!(Conversation::new("Ada").joined_space().is_none());
+        assert!(
+            crate::test_support::conversation("Ada")
+                .joined_space()
+                .is_none()
+        );
         let mut conversation = joined(|state| {
             state.workers = vec![tomori_protocol::Worker {
                 id: "w".into(),
@@ -7033,7 +7049,7 @@ mod tests {
 
     #[test]
     fn a_refused_join_from_the_lobby_leaves() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.apply(Event::Message(ServerMessage::Spaces {
@@ -7074,7 +7090,7 @@ mod tests {
 
     #[test]
     fn the_server_rejoining_after_a_reconnect_in_the_lobby_enters_the_space() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Override));
         conversation.apply(connected());
         conversation.apply(space(|_| {}));
@@ -7326,7 +7342,7 @@ mod tests {
         );
         assert_fits(&mut conversation);
 
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(
             (0..20)
                 .map(|i| Choice::new(long.clone(), format!("10.0.0.{i}:8765"), Source::Discovered))
@@ -7461,7 +7477,7 @@ mod tests {
 
     #[test]
     fn b_in_the_lobby_returns_to_the_server_list() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.take_actions();
         conversation.back();
@@ -7779,7 +7795,7 @@ mod tests {
 
     #[test]
     fn a_press_with_nothing_to_do_or_that_acts_is_not_a_refusal() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.press_a(None);
         assert!(!conversation.a_refused());
         let mut joined = joined(|space| space.approval = Some(approval(&[])));
@@ -7797,7 +7813,7 @@ mod tests {
         use feedback::{Level, Settings};
         // Each change is logged, sounds, vibration and mono or stereo, which this test evaluates itself rather than relying on another test in the binary to have turned logging on first.
         crate::test_support::log_everything();
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let kept = Settings {
             sounds: Level::Off,
             vibration: Level::Reduced,
@@ -7850,7 +7866,7 @@ mod tests {
                 .filter(|message| matches!(message, ClientMessage::Engagement { .. }))
                 .collect::<Vec<_>>()
         };
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.take_actions();
@@ -7881,7 +7897,7 @@ mod tests {
         assert_eq!(reports(&mut conversation), [engaged]);
 
         // A visitor sends no engagement, until admitted to act in the space.
-        let mut visitor = Conversation::new("Ada");
+        let mut visitor = crate::test_support::conversation("Ada");
         visitor.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         visitor.apply(connected());
         visitor.apply(Event::Message(ServerMessage::Role {
@@ -7912,7 +7928,7 @@ mod tests {
         );
 
         // The spectator never reports, so it follows live speech.
-        let mut spectator = Conversation::new("Spectator");
+        let mut spectator = crate::test_support::conversation("Spectator");
         spectator.follow_live_speech_only();
         spectator.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         spectator.apply(connected());
@@ -8489,7 +8505,7 @@ mod tests {
             Some("The space is already in Sky.")
         );
         // The scenery changes only when the server says the space has, for everyone alike.
-        assert_eq!(conversation.environment(), Environment::SKY);
+        assert_eq!(conversation.environment(), crate::test_support::SKY);
         conversation.apply(space(|space| {
             space.environment = "minimal".into();
             space.environment_changes = true;
@@ -9000,7 +9016,7 @@ mod tests {
 
     #[test]
     fn x_outside_a_space_explains_itself() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(connected());
         conversation.take_actions();
@@ -9083,7 +9099,7 @@ mod tests {
 
     #[test]
     fn keeps_the_selection_when_lists_change() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![
             Choice::new("A", "a", Source::Discovered),
             Choice::new("B", "b", Source::Discovered),
@@ -9103,7 +9119,7 @@ mod tests {
 
     #[test]
     fn selects_the_used_server_again_when_browsing_finds_it_after_returning() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let usb = Choice::new("USB", USB, Source::Usb);
         let servers = vec![
             Choice::new("A", "a", Source::Discovered),
@@ -9133,7 +9149,7 @@ mod tests {
 
     #[test]
     fn connecting_to_another_server_while_the_chosen_one_is_missing_forgets_it() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let usb = Choice::new("USB", USB, Source::Usb);
         let b = Choice::new("B", "b", Source::Discovered);
         conversation.set_servers(vec![usb.clone(), b.clone()]);
@@ -9159,7 +9175,7 @@ mod tests {
 
     #[test]
     fn connects_to_the_remembered_server_when_it_appears_but_only_once() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
         assert!(conversation.take_actions().is_empty());
         let start = Instant::now();
@@ -9187,7 +9203,7 @@ mod tests {
 
     #[test]
     fn moving_the_selection_stops_the_remembered_server_connecting() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![
             Choice::new("Other", "10.0.0.3:8765", Source::Discovered),
             Choice::new("USB", USB, Source::Usb),
@@ -9207,7 +9223,7 @@ mod tests {
 
     #[test]
     fn selects_the_best_server_until_one_is_chosen() {
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.set_servers(vec![Choice::new("USB", USB, Source::Usb)]);
         conversation.set_servers(vec![
             Choice::new("Studio", "10.0.0.2:8765", Source::Discovered),
@@ -9324,7 +9340,7 @@ mod tests {
 
         #[test]
         fn a_jump_finding_nothing_needs_you_stays_in_the_space_the_server_rejoined() {
-            let mut conversation = Conversation::new("Ada");
+            let mut conversation = crate::test_support::conversation("Ada");
             conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 1)]);
             conversation.choose_object(&arrival::Key::Jump("10.0.0.2:8765".into()));
             conversation.apply(connected());
@@ -9442,7 +9458,7 @@ mod tests {
 
         #[test]
         fn choosing_what_is_not_there_does_nothing() {
-            let mut conversation = Conversation::new("Ada");
+            let mut conversation = crate::test_support::conversation("Ada");
             conversation.set_servers(vec![advertising("Laptop", "10.0.0.2:8765", 0, 0)]);
             conversation.choose_object(&arrival::Key::Server("10.0.0.9:8765".into()));
             assert!(conversation.take_actions().is_empty());
@@ -9987,7 +10003,7 @@ mod tests {
 
         #[test]
         fn b_and_y_do_nothing_at_the_servers_and_dismiss_or_refetch_in_a_space() {
-            let mut conversation = Conversation::new("Ada");
+            let mut conversation = crate::test_support::conversation("Ada");
             conversation.back();
             assert_eq!(conversation.mode, Mode::Servers);
             let mut conversation = joined();
@@ -10191,7 +10207,7 @@ mod tests {
     #[test]
     fn as_its_connections_session_it_applies_what_the_connection_reports() {
         // The server given at startup is connected to as though it were chosen.
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         assert!(Session::is_browsing(&conversation));
         let given = Choice::new("10.0.0.1:8765", "10.0.0.1:8765", Source::Override);
         Session::report(&mut conversation, Report::Connecting(given.clone()));
@@ -10247,7 +10263,7 @@ mod tests {
         assert!(conversation.text().contains("Replaying"));
         // At the server list, the remembered server is connected to once it has been listed a while, but only while the list is seen.
         let start = Instant::now();
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         let mut remembered = advertising("Desktop", "10.0.0.1:8765", 0, 0);
         remembered.source = Source::Remembered;
         Session::report(&mut conversation, Report::Servers(vec![remembered.clone()]));
@@ -10307,7 +10323,7 @@ mod tests {
         visiting.apply(role(ConnectionRole::Visitor));
         assert_eq!(observed(&visiting), (vec![], 0));
         // A recording ten seconds from the server's limit is felt.
-        let mut conversation = Conversation::new("Ada");
+        let mut conversation = crate::test_support::conversation("Ada");
         conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
         conversation.apply(Event::State(ConnectionState::Connected {
             source: 1,

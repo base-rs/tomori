@@ -29,6 +29,7 @@ use std::{
     time::Instant,
 };
 use tomori_protocol::{Hand, ServerMessage};
+use tomori_render::scenery::Sceneries;
 
 /// A participant's latest presence report, as relayed by the server.
 #[derive(Clone)]
@@ -102,6 +103,8 @@ pub struct Feed {
     sequence: u64,
     /// The scenery shown outside a space, or in one from a server that names no environment, from `TOMORI_ENVIRONMENT`.
     environment: Environment,
+    /// The sceneries the spectator draws, as [`Self::with_sceneries`] gave them: the grid alone until then.
+    sceneries: Sceneries,
     last_poll: Instant,
     last_caption: Option<String>,
 }
@@ -189,10 +192,25 @@ impl Feed {
             scene: Scene::new(),
             swarm: SwarmAnimation::new(),
             sequence: 0,
-            environment: Environment::initial(&Environment::BUILT_IN),
+            environment: Environment::initial(&[]),
+            sceneries: Sceneries::empty(),
             last_poll: Instant::now(),
             last_caption: None,
         }
+    }
+
+    /// Draw `sceneries`, as the application that runs the spectator registers them, such as Tomori's own: its `Hello` lists their environments, a space in one is shown in it, and `TOMORI_ENVIRONMENT` chooses among them outside a space, as on the desktop window. See `design/environments.md`.
+    pub fn with_sceneries(mut self, sceneries: Sceneries) -> Self {
+        self.conversation.set_drawable(sceneries.environments());
+        self.conversation.set_over_grid(sceneries.over_grid());
+        self.environment = Environment::initial(&sceneries.environments());
+        self.sceneries = sceneries;
+        self
+    }
+
+    /// The sceneries the spectator draws, for its renderer.
+    pub fn sceneries(&self) -> &Sceneries {
+        &self.sceneries
     }
 
     /// Poll the connection and produce the current frame. Non-blocking.
@@ -403,8 +421,13 @@ mod tests {
     use tomori_client::{ConnectionState, Event};
     use tomori_protocol::{Activity, ClientMessage, SpaceState};
 
+    /// A spectator drawing a scenery for [`tomori_scene::test_support::SKY`] and presenting the GitHub prototype's
+    /// stand-in over the grid, as an application registers its environments.
     fn feed(options: SpectatorOptions) -> Feed {
-        Feed::with_audio(options, Box::new(Silent), Box::new(Nowhere))
+        let mut sceneries = tomori_render::scenery::test::Counted::default()
+            .sceneries(tomori_scene::test_support::SKY.id());
+        sceneries.present_over_grid(tomori_scene::test_support::GITHUB.id(), 1);
+        Feed::with_audio(options, Box::new(Silent), Box::new(Nowhere)).with_sceneries(sceneries)
     }
 
     /// Poll `feed` until `done` says so, returning the last frame.
@@ -647,7 +670,7 @@ mod tests {
     #[test]
     fn frames_show_the_joined_space_s_environment_as_it_changes() {
         let mut feed = feed(SpectatorOptions::default());
-        feed.environment = Environment::SKY;
+        feed.environment = tomori_scene::test_support::SKY;
         feed.conversation
             .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
         feed.conversation
@@ -678,12 +701,15 @@ mod tests {
         let frame = |feed: &mut Feed, environment: &str| versioned(feed, environment, None);
         // An owner's change reaches the spectator as it does everyone in the space.
         assert_eq!(frame(&mut feed, "minimal"), Environment::MINIMAL);
-        assert_eq!(frame(&mut feed, "sky"), Environment::SKY);
+        assert_eq!(frame(&mut feed, "sky"), tomori_scene::test_support::SKY);
         // One this build cannot draw shows the grid, and a server that names none keeps the spectator's own.
         assert_eq!(frame(&mut feed, "observe"), Environment::MINIMAL);
-        assert_eq!(frame(&mut feed, ""), Environment::SKY);
+        assert_eq!(frame(&mut feed, ""), tomori_scene::test_support::SKY);
         // At the version the spectator draws it at, Sky is drawn, and at another the grid, never its own version.
-        assert_eq!(versioned(&mut feed, "sky", Some(1)), Environment::SKY);
+        assert_eq!(
+            versioned(&mut feed, "sky", Some(1)),
+            tomori_scene::test_support::SKY
+        );
         assert_eq!(versioned(&mut feed, "sky", Some(2)), Environment::MINIMAL);
     }
 
@@ -706,6 +732,19 @@ mod tests {
                 ("github".to_owned(), 1)
             ]
         );
+        assert!(feed.sceneries().contains("sky"));
+        // Until it is given sceneries, it draws and lists the grid alone, and starts with it.
+        let plain = Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        );
+        assert_eq!(
+            plain.conversation.environments(),
+            Some(vec![tomori_protocol::EnvironmentVersion::new("minimal", 1)])
+        );
+        assert_eq!(plain.environment, Environment::MINIMAL);
+        assert_eq!(plain.sceneries().environments(), [Environment::MINIMAL]);
     }
 
     #[test]

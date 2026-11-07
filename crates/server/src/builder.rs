@@ -18,7 +18,7 @@ type Hook = Box<dyn FnOnce(Server) -> Server>;
 
 /// Builds and runs a Tomori server from the `tomori-server` command line, with the backends and environments registered on it.
 ///
-/// [`Server::builder`] starts with Tomori's own: the `fake` and `opencode` backends, as their Cargo features allow, and the Sky and Minimal grid environments. Another project builds its own server by registering more, or others in their place, without changing Tomori. Its executable then takes the same command line as `tomori-server`, including `auth`, serves the same way, with token authentication, TLS, Bonjour and speech, and offers what it registered: `--backend NAME` names a registered backend, and clients are offered every registered environment.
+/// [`Server::builder`] starts with Tomori's own backends, `fake` and `opencode`, as their Cargo features allow, and no environments: every environment registers itself, each by the identity in its own crate, as the `tomori-server` program, in the `tomori-server-app` package, registers Sky and the Minimal grid. Another project builds its own server the same way, registering its own, without changing Tomori. Its executable then takes the same command line as `tomori-server`, including `auth`, serves the same way, with token authentication, TLS, Bonjour and speech, and offers what it registered: `--backend NAME` names a registered backend, and clients are offered every registered environment.
 ///
 /// ```no_run
 /// use std::process::ExitCode;
@@ -36,7 +36,7 @@ type Hook = Box<dyn FnOnce(Server) -> Server>;
 /// }
 /// ```
 ///
-/// Environments here are what the server knows of them today: an identifier and label offered to clients, and their layer of a space's instructions. Their server sides, data sources and tools, planned in [#75](https://github.com/ioquatix/tomori/issues/75), [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
+/// Environments here are what the server knows of them today: an identifier, label and version offered to clients, their layer of a space's instructions, and their server sides. Their data sources and tools, planned in [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
 pub struct Builder {
     /// Each backend's name and how to make it, in the order `--help` lists them.
     backends: Vec<(String, Constructor)>,
@@ -45,7 +45,7 @@ pub struct Builder {
 }
 
 impl Default for Builder {
-    /// Tomori's own backends and environments, as `tomori-server` offers them.
+    /// Tomori's own backends, and no environments.
     fn default() -> Self {
         let builder = Self {
             backends: Vec::new(),
@@ -78,7 +78,7 @@ fn opencode(_arguments: &Arguments) -> Result<AnyBackend, String> {
 }
 
 impl Server {
-    /// A builder for a server with Tomori's own backends and environments, to register more on and run; see [`Builder`].
+    /// A builder for a server with Tomori's own backends and no environments, to register environments and more backends on and run; see [`Builder`].
     pub fn builder() -> Builder {
         Builder::default()
     }
@@ -115,10 +115,23 @@ impl Builder {
         self
     }
 
-    /// Offer `environment` for spaces, in place of one with the same identifier, or else after those already offered. The first offered, Sky unless replaced, is the one a space whose creator names none is bound to. See [`Environment`].
+    /// Offer `environment` for spaces, in place of one with the same identifier, or else after those already offered. The first offered is the one a space whose creator names none is bound to. See [`Environment`].
     pub fn environment(mut self, environment: Environment) -> Self {
         self.environments = self.environments.with(environment);
         self
+    }
+
+    /// The environments registered so far, in the order they are offered.
+    ///
+    /// ```
+    /// use tomori_server::{Environment, Server};
+    ///
+    /// let builder = Server::builder().environment(Environment::new("observe", "Observe"));
+    /// assert_eq!(builder.environments()[0].id(), "observe");
+    /// assert!(Server::builder().environments().is_empty());
+    /// ```
+    pub fn environments(&self) -> &[Environment] {
+        self.environments.as_slice()
     }
 
     /// Change the server once the command line has configured it, and before it serves, with `hook`, such as to set a limit with one of [`Server`]'s `with_` methods. Hooks run in the order they were given. Serving replaces the server's [`Server::with_counts`] callback with the one that advertises them.
@@ -154,7 +167,7 @@ impl Builder {
         command::finish(code, stopped, exit)
     }
 
-    /// Run the process's command line, as [`run`](Self::run) does, logging to standard error at `info` and above unless `RUST_LOG` says otherwise, unless the program has already set up logging. This is all `tomori-server`'s `main` does.
+    /// Run the process's command line, as [`run`](Self::run) does, logging to standard error at `info` and above unless `RUST_LOG` says otherwise, unless the program has already set up logging. `tomori-server`'s `main` runs this, on a builder registering Tomori's own environments.
     pub fn main(self) -> ExitCode {
         let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
             .try_init();
@@ -305,18 +318,19 @@ mod tests {
     }
 
     #[test]
-    fn registered_environments_are_offered_after_tomoris_and_replace_those_they_name() {
+    fn registered_environments_are_offered_in_order_and_replace_those_they_name() {
+        // None until they are registered.
+        assert!(Server::builder().into_parts().0.is_empty());
         let observe =
             Environment::new("observe", "Observe").with_instructions("Mind the topology.");
-        let night = Environment::new("sky", "Night");
+        let grid = Environment::new(tomori_protocol::GRID, "Grid");
+        let night = Environment::new("observe", "Night");
         let (environments, _) = Server::builder()
-            .environment(observe.clone())
+            .environment(observe)
+            .environment(grid.clone())
             .environment(night.clone())
             .into_parts();
-        assert_eq!(
-            environments,
-            [night, Environment::new("minimal", "Grid"), observe]
-        );
+        assert_eq!(environments, [night, grid]);
     }
 
     #[test]

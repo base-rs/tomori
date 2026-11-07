@@ -20,6 +20,8 @@ glam = "0.30"
 # Without Tomori's own `android_main`, as this build has its own.
 tomori-client-quest = { version = "0.2.0", path = "../../crates/client-quest", default-features = false }
 tomori-render = { version = "0.2.0", path = "../../crates/render" }
+# Sky, which this build draws as Tomori's own app does.
+tomori-environment-sky-client = { version = "0.2.0", path = "../../crates/environment-sky-client" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
 
 [dev-dependencies]

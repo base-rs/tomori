@@ -71,12 +71,14 @@ struct State {
 
 impl State {
     fn new((device, queue): (wgpu::Device, wgpu::Queue), feed: Feed, producer: Producer) -> Self {
-        let renderer = Renderer::new(
+        let renderer = Renderer::with_sceneries(
             &device,
             &queue,
             pipewire_video::FORMAT,
             pipewire_video::WIDTH,
             pipewire_video::HEIGHT,
+            1,
+            feed.sceneries(),
         );
         let spectator = SpectatorView::new(feed);
         let video = Video::new(&device, None, producer);

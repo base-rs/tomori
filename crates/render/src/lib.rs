@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Tomori's wgpu renderers and shaders, shared by the headset, the desktop window and the spectator: the swarm and its workers, arrival, the panels, the controllers' models and Sky, and [`scene_graphics::draw`], which applies a [`tomori_scene::scene::Frame`] to the [`graphics::Renderer`].
+//! Tomori's wgpu renderers and shaders, shared by the headset, the desktop window and the spectator: the swarm and its workers, arrival, the panels, the controllers' models and the sceneries registered with it, and [`scene_graphics::draw`], which applies a [`tomori_scene::scene::Frame`] to the [`graphics::Renderer`].
 //!
 //! It holds no window, device or platform code: each client creates its own device and targets, and hands them to the renderer. Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
 pub mod arrival_graphics;
