@@ -196,7 +196,8 @@ fn markdown(id: &str, text: &str, width: usize) -> std::rc::Rc<Vec<Vec<Cell>>> {
     })
 }
 
-fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
+/// `text`'s Markdown-lite as rows `width` wide, styled as the transcript styles a message, as a panel's body is too.
+pub(crate) fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
     let mut rows = Vec::new();
     for block in markdown_lite::parse(text) {
         let spans = |base: Style| -> Vec<Span> {

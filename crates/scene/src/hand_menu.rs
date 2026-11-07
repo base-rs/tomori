@@ -211,6 +211,10 @@ pub enum MenuKey {
     Pill,
     /// Turn travel off on this headset, staying room scale, or on again.
     Travel,
+    /// Add a projection wall where the participant stands, for everyone, as an owner.
+    AddWall,
+    /// Remove the added projection wall nearest the participant, for everyone, as an owner.
+    RemoveWall,
     /// Ask whether to leave the space.
     Leave,
     /// Leave the space, once asked.
@@ -301,6 +305,9 @@ pub struct SpaceInfo {
     pub environments: Vec<(String, String, bool)>,
     /// How many are here, and away.
     pub here: String,
+    /// For an owner in a space the server projects in, whether an added wall can be removed; `None` for anyone else,
+    /// who does not manage the walls. See `design/projection.md`.
+    pub walls: Option<bool>,
 }
 
 /// A participant, as People & security shows them.
@@ -342,6 +349,10 @@ pub enum Choice {
     Pill,
     /// Turn travel off here, or on again.
     Travel,
+    /// Add a projection wall here, for everyone.
+    AddWall,
+    /// Remove the added wall nearest here, for everyone.
+    RemoveWall,
     /// Leave the space.
     Leave,
     /// Step the sounds, or the vibration, to the next level.
@@ -582,6 +593,22 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                                 row(&[Part::Kept("  "), Part::Cut(name)]),
                             );
                         }
+                    }
+                }
+                // Only an owner adds and removes walls, for everyone.
+                if let Some(removable) = space.walls {
+                    text(
+                        &mut items,
+                        MenuKind::Heading,
+                        "Projection walls, for everyone".into(),
+                    );
+                    button(&mut items, MenuKey::AddWall, "Add a wall here".into());
+                    if removable {
+                        button(
+                            &mut items,
+                            MenuKey::RemoveWall,
+                            "Remove the nearest wall".into(),
+                        );
                     }
                 }
                 text(&mut items, MenuKind::Heading, "On this headset".into());
@@ -891,6 +918,8 @@ impl HandMenu {
             MenuKey::Mute => Some(Choice::Mute),
             MenuKey::Pill => Some(Choice::Pill),
             MenuKey::Travel => Some(Choice::Travel),
+            MenuKey::AddWall => Some(Choice::AddWall),
+            MenuKey::RemoveWall => Some(Choice::RemoveWall),
             MenuKey::Layer(layer) => {
                 self.section = Some(Section::Layer(*layer));
                 None
@@ -1520,6 +1549,7 @@ mod tests {
                 environment: Some("Sky".into()),
                 environments: Vec::new(),
                 here: "2 here".into(),
+                walls: None,
             }),
             people: vec![
                 Person {
@@ -1634,6 +1664,27 @@ mod tests {
             assert_eq!(rows[pill + 2].key, MenuKey::Leave);
         }
         assert_eq!(menu.choose(&MenuKey::Travel), Some(Choice::Travel));
+        // An owner adds walls, and removes the nearest added one where there is one, before this headset's settings.
+        assert!(!rows.iter().any(|row| row.key == MenuKey::AddWall));
+        for (removable, keys) in [
+            (false, vec![MenuKey::AddWall]),
+            (true, vec![MenuKey::AddWall, MenuKey::RemoveWall]),
+        ] {
+            model.space.as_mut().unwrap().walls = Some(removable);
+            let rows = items(Some(Section::Space), &model);
+            let heading = rows
+                .iter()
+                .position(|row| row.text == "Projection walls, for everyone")
+                .unwrap();
+            let shown: Vec<MenuKey> = rows[heading + 1..=heading + keys.len()]
+                .iter()
+                .map(|row| row.key.clone())
+                .collect();
+            assert_eq!(shown, keys);
+            assert_eq!(rows[heading + keys.len() + 1].text, "On this headset");
+        }
+        assert_eq!(menu.choose(&MenuKey::AddWall), Some(Choice::AddWall));
+        assert_eq!(menu.choose(&MenuKey::RemoveWall), Some(Choice::RemoveWall));
         // A visitor reads the mode and speech, and cannot switch them.
         let visitor = in_space(ConnectionRole::Visitor);
         let rows = items(Some(Section::Space), &visitor);

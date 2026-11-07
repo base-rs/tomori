@@ -35,6 +35,7 @@ mod panel_anchor;
 pub mod pill;
 pub mod playback;
 pub mod pointing;
+pub mod projection;
 pub mod recording;
 pub mod scene;
 pub mod spatial_audio;

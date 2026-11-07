@@ -106,7 +106,7 @@ fn inbox_slot(index: usize, count: usize) -> Mat4 {
 }
 
 /// A pose as a model.
-fn model(pose: &Pose) -> Option<Mat4> {
+pub(crate) fn model(pose: &Pose) -> Option<Mat4> {
     let rotation = Quat::from_array(pose.orientation);
     let position = Vec3::from_array(pose.position);
     (rotation.is_finite() && position.is_finite() && rotation.length() > 0.5)
@@ -114,7 +114,7 @@ fn model(pose: &Pose) -> Option<Mat4> {
 }
 
 /// A model as a pose, without its scale.
-fn pose(model: Mat4) -> Pose {
+pub(crate) fn pose(model: Mat4) -> Pose {
     let (_, rotation, position) = model.to_scale_rotation_translation();
     Pose {
         position: position.to_array(),
@@ -247,13 +247,13 @@ fn tray(source: &str, count: usize, status: Option<&str>) -> Canvas {
 
 /// A grip's squeeze, with hysteresis, as presses and releases.
 #[derive(Clone, Copy, Debug, Default)]
-struct Grip {
+pub(crate) struct Grip {
     held: bool,
 }
 
 impl Grip {
     /// Whether `value` pressed or released the grip this frame.
-    fn update(&mut self, value: Option<f32>) -> (bool, bool) {
+    pub(crate) fn update(&mut self, value: Option<f32>) -> (bool, bool) {
         let value = value.filter(|value| value.is_finite()).unwrap_or(0.0);
         let held = if self.held {
             value > RELEASE

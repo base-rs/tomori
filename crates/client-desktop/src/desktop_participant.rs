@@ -514,9 +514,11 @@ mod tests {
             // The transcript shows on the right wrist, a panel in the scene, where the participant now is.
             input(&mut window, &mut surface, press(KeyCode::KeyT, true));
             input(&mut window, &mut surface, press(KeyCode::KeyT, false));
-            let models = |window: &Participant, scene_to_space: Mat4| -> Vec<Mat4> {
+            // The transcript is drawn last, after the pill, which stands in the eyes' space; the space's projection
+            // wall, also in the scene, is drawn first, so it is the last panel that says the transcript shows.
+            let last = |window: &Participant, scene_to_space: Mat4| -> Option<Mat4> {
                 let list = window.panels.list(scene_to_space);
-                list.into_iter().map(|(_, model)| model).collect()
+                list.last().map(|(_, model)| *model)
             };
             let (view_projection, scene_to_space) = loop {
                 assert!(
@@ -524,7 +526,7 @@ mod tests {
                     "timed out showing the transcript"
                 );
                 let (view_projection, scene_to_space) = window.step(&mut surface);
-                if models(&window, scene_to_space) != models(&window, Mat4::IDENTITY) {
+                if last(&window, scene_to_space) != last(&window, Mat4::IDENTITY) {
                     break (view_projection, scene_to_space);
                 }
                 std::thread::sleep(Duration::from_millis(20));
