@@ -90,7 +90,11 @@ fn graph() -> Arc<Graph> {
 #[test]
 fn a_graph_names_what_it_uses_once() {
     let clip = || Clip::new(0, 0.0, 1.0);
-    let refused = |builder: Builder| builder.build().unwrap_err();
+    let refused = |builder: Builder| {
+        let error = builder.build().unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Invalid);
+        error.to_string()
+    };
     assert_eq!(refused(Graph::builder()), "an animator needs a state");
     assert_eq!(
         refused(Graph::builder().state("a", clip()).state("a", clip())),
@@ -103,6 +107,25 @@ fn a_graph_names_what_it_uses_once() {
     assert_eq!(
         refused(Graph::builder().state("a", clip().at_speed(0.0))),
         "the state a's clip does not play"
+    );
+    // A clip without end, an event outside its clip, and a fade that never ends would never play as they say.
+    assert_eq!(
+        refused(Graph::builder().state("a", Clip::new(0, 0.0, f32::INFINITY))),
+        "the state a's clip does not play"
+    );
+    for offset in [-0.5, 1.5, f32::NAN] {
+        assert_eq!(
+            refused(Graph::builder().state("a", clip().with_event(offset, "e"))),
+            "the state a's clip has an event outside it"
+        );
+    }
+    assert_eq!(
+        refused(
+            Graph::builder()
+                .state("a", clip())
+                .transition("a", "a", [], f64::INFINITY)
+        ),
+        "the transition to a fades for ever"
     );
     assert_eq!(
         refused(
@@ -295,6 +318,47 @@ fn root_motion_accumulates_over_loops_and_stops_with_the_clip() {
         (0.0, 0.625, 1.0, 1.0)
     );
     assert_eq!(RootMotion::new(1.0, vec![0.0]).at(0.5), 0.0);
+    // A table without distances carries nothing, rather than failing.
+    let empty = RootMotion::new(1.0, Vec::new());
+    assert_eq!((empty.at(0.5), empty.total()), (0.0, 0.0));
+}
+
+#[test]
+fn a_long_advance_reports_only_its_latest_events_and_one_without_end_changes_nothing() {
+    // A client joining long after a walk began advances to now in one step: it costs no more than a short one, and
+    // reports only the latest events, as a client advancing all along would have reported them last.
+    let mut late = Animator::new(graph(), 0.0);
+    late.set("walking", Value::Bool(true), 0.0);
+    let events = late.advance(1.0e9).events;
+    assert_eq!(events.len(), EVENT_LIMIT);
+    assert_eq!(
+        events
+            .iter()
+            .rev()
+            .take(3)
+            .map(|event| (event.name, event.at))
+            .collect::<Vec<_>>(),
+        [
+            ("left", 1.0e9),
+            ("right", 1.0e9 - 0.5),
+            ("left", 1.0e9 - 1.0)
+        ]
+    );
+    // The same as advancing over the last stretch in frames.
+    let mut along = Animator::new(graph(), 0.0);
+    along.set("walking", Value::Bool(true), 0.0);
+    along.advance(1.0e9 - 100.0);
+    let mut framed = Vec::new();
+    for frame in 1..=100 * 8 {
+        framed.extend(along.advance(1.0e9 - 100.0 + f64::from(frame) / 8.0).events);
+    }
+    assert_eq!(framed[framed.len() - EVENT_LIMIT..], events[..]);
+    assert_eq!(late.position(), along.position());
+    // A moment that is not finite is never reached.
+    for never in [f64::INFINITY, f64::NAN] {
+        assert_eq!(late.advance(never), Advance::default());
+        assert_eq!(late.now(), 1.0e9);
+    }
 }
 
 #[test]
@@ -386,4 +450,9 @@ fn planted_feet_carry_what_they_animate_as_far_as_they_sweep_back() {
         0.01,
     );
     assert!((soles.total() - 2.0).abs() < 1e-5);
+    // Without feet, or none near enough the ground, nothing carries it.
+    let footless = RootMotion::planted(&model, 0, (0.0, 2.0), &[], Vec3::X, 2.0, 0.01);
+    assert_eq!(footless.distances, [0.0; 5]);
+    let floating = RootMotion::planted(&model, 0, (0.0, 2.0), &feet, Vec3::X, 2.0, -1.0);
+    assert_eq!(floating.total(), 0.0);
 }

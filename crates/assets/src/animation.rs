@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
+use crate::Error;
 use crate::model::Model;
 use crate::pose::Pose;
 
@@ -24,7 +25,7 @@ use crate::pose::Pose;
 pub struct RootMotion {
     /// The time between samples, in seconds of the clip.
     pub step: f32,
-    /// The distance from the clip's start at each sample, the first 0.
+    /// The distance from the clip's start at each sample, the first 0. Without any, the clip carries nothing.
     pub distances: Vec<f32>,
 }
 
@@ -39,7 +40,12 @@ impl RootMotion {
     /// node's space, such as its sole. From each sample to the next, it moves as far as the foot on the ground sweeps
     /// back, the feet within `contact` of the lowest counting as on the ground, and of those the one sweeping back the
     /// most. So a walk, with a small `contact`, moves as its planted foot carries it, unevenly, and a scrambling sprint,
-    /// with a large one, as its pushing foot does, and neither foot slides.
+    /// with a large one, as its pushing foot does, and neither foot slides. From a sample at which no foot is on the
+    /// ground, as with no feet at all, it moves nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `animation` or a foot's node is not one of the model's.
     pub fn planted(
         model: &Model,
         animation: usize,
@@ -72,16 +78,19 @@ impl RootMotion {
                 .zip(&pair[1])
                 .filter(|(before, _)| before.y <= lowest + contact)
                 .map(|(before, after)| -(*after - *before).dot(forward))
-                .fold(f32::NEG_INFINITY, f32::max);
+                .reduce(f32::max)
+                .unwrap_or(0.0);
             let last = *distances.last().expect("begins with 0");
             distances.push(last + swept);
         }
         Self { step, distances }
     }
 
-    /// The distance at `time` seconds into the clip, holding its ends.
+    /// The distance at `time` seconds into the clip, holding its ends; none for a table without distances.
     pub fn at(&self, time: f32) -> f32 {
-        let last = self.distances.len() - 1;
+        let Some(last) = self.distances.len().checked_sub(1) else {
+            return 0.0;
+        };
         let at = (time / self.step).clamp(0.0, last as f32);
         let index = (at as usize).min(last.saturating_sub(1));
         let next = (index + 1).min(last);
@@ -89,9 +98,9 @@ impl RootMotion {
         self.distances[index] + (self.distances[next] - self.distances[index]) * fraction
     }
 
-    /// The distance over the whole clip.
+    /// The distance over the whole clip; none for a table without distances.
     pub fn total(&self) -> f32 {
-        *self.distances.last().expect("never empty")
+        self.distances.last().copied().unwrap_or(0.0)
     }
 }
 
@@ -197,6 +206,7 @@ impl Clip {
 
 /// A parameter's value.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     Bool(bool),
     Float(f32),
@@ -310,29 +320,48 @@ impl Builder {
         self
     }
 
-    /// The graph, or why it is not one: a state or parameter named twice, or one that a transition or condition names
-    /// but the graph does not have, of another kind, a clip that is empty or plays at no speed, or no states at all.
-    pub fn build(self) -> Result<Graph, String> {
+    /// The graph, or why it is not one, an [`Error`] of kind [`crate::ErrorKind::Invalid`]: a state or parameter named
+    /// twice, or one that a transition or condition names but the graph does not have, of another kind, a clip that is
+    /// empty, endless or plays at no speed, an event outside its clip, a fade that never ends, or no states at all.
+    pub fn build(self) -> Result<Graph, Error> {
         let state = |name: &str| {
             self.states
                 .iter()
                 .position(|(state, _)| *state == name)
-                .ok_or_else(|| format!("there is no state {name}"))
+                .ok_or_else(|| Error::invalid(format!("there is no state {name}")))
         };
         if self.states.is_empty() {
-            return Err("an animator needs a state".to_owned());
+            return Err(Error::invalid("an animator needs a state"));
         }
         for (index, (name, clip)) in self.states.iter().enumerate() {
             if self.states.iter().position(|(state, _)| state == name) != Some(index) {
-                return Err(format!("the state {name} is named twice"));
+                return Err(Error::invalid(format!("the state {name} is named twice")));
             }
-            if !(clip.length() > 0.0 && clip.speed > 0.0 && clip.speed.is_finite()) {
-                return Err(format!("the state {name}'s clip does not play"));
+            if !(clip.length() > 0.0
+                && clip.length().is_finite()
+                && clip.speed > 0.0
+                && clip.speed.is_finite())
+            {
+                return Err(Error::invalid(format!(
+                    "the state {name}'s clip does not play"
+                )));
+            }
+            // Within the clip, so that each fires once on each loop.
+            if clip
+                .events
+                .iter()
+                .any(|(offset, _)| !(0.0..=clip.length()).contains(offset))
+            {
+                return Err(Error::invalid(format!(
+                    "the state {name}'s clip has an event outside it"
+                )));
             }
         }
         for (index, (name, _)) in self.parameters.iter().enumerate() {
             if self.parameters.iter().position(|(other, _)| other == name) != Some(index) {
-                return Err(format!("the parameter {name} is named twice"));
+                return Err(Error::invalid(format!(
+                    "the parameter {name} is named twice"
+                )));
             }
         }
         let kind = |name: &str, wanted: fn(&Value) -> bool| {
@@ -343,11 +372,19 @@ impl Builder {
             {
                 Ok(())
             } else {
-                Err(format!("there is no parameter {name} of that kind"))
+                Err(Error::invalid(format!(
+                    "there is no parameter {name} of that kind"
+                )))
             }
         };
         let mut transitions = Vec::new();
         for (from, to, conditions, fade) in &self.transitions {
+            // A fade that never ends would hold the animator in it, as nothing is taken during one.
+            if fade.is_infinite() {
+                return Err(Error::invalid(format!(
+                    "the transition to {to} fades for ever"
+                )));
+            }
             for condition in conditions {
                 match condition {
                     Condition::Is(name, _) => kind(name, |value| matches!(value, Value::Bool(_)))?,
@@ -414,6 +451,9 @@ pub struct Advance {
 
 /// The most transitions an animator takes at one moment, so that transitions that lead back to each other cannot loop.
 const HOPS: usize = 8;
+
+/// The most events one advance reports: the latest, as those before them passed long since, as for a client that joins late and advances a long way in one step, which costs no more however far it goes.
+pub const EVENT_LIMIT: usize = 64;
 
 /// An animator: where it is in its graph, from a moment on, with its parameters as they were set.
 #[derive(Clone, Debug)]
@@ -579,9 +619,13 @@ impl Animator {
     }
 
     /// Advance to moment `to`, in steps that end at every change of parameter, every clip's end and every cross-fade's,
-    /// so that where it is at a moment never depends on how its time was divided. A moment before now changes nothing.
+    /// so that where it is at a moment never depends on how its time was divided. A moment before now, or one that is not
+    /// finite, changes nothing. It reports at most the latest [`EVENT_LIMIT`] events it passed.
     pub fn advance(&mut self, to: f64) -> Advance {
         let mut advance = Advance::default();
+        if !to.is_finite() {
+            return advance;
+        }
         while self.now < to {
             let next = [
                 Some(to),
@@ -599,26 +643,31 @@ impl Animator {
             let (played, playing) = (clip.played(from), clip.played(until));
             advance.moved += clip.moved(playing) - clip.moved(played);
             // Each event once: those after where the playhead was, and up to where it is, on every loop between; an event
-            // at the clip's start also as the state is entered.
+            // at the clip's start also as the state is entered. Each loop's moment of an event is computed the same way in
+            // every step, so that it falls in exactly one however time is divided, and only the latest loops are looked
+            // at, so that a long advance costs no more than a short one.
             let length = f64::from(clip.length());
             let state = self.state();
             let mut passed: Vec<(f64, &'static str)> = Vec::new();
             for (offset, name) in &clip.events {
                 let offset = f64::from(*offset);
-                let mut loop_start = if clip.looping {
-                    (played / length).floor() * length
+                let loops = if clip.looping {
+                    // From the loop before the first whose moment is past where the playhead was, to the one after the last
+                    // up to where it is, so that rounding cannot leave one out.
+                    let last = ((playing - offset) / length).floor() + 1.0;
+                    let first = ((played - offset) / length)
+                        .floor()
+                        .max(last - EVENT_LIMIT as f64 - 1.0)
+                        .max(0.0);
+                    first as u64..=last.max(first) as u64
                 } else {
-                    0.0
+                    0..=0
                 };
-                while loop_start + offset <= playing {
-                    let at = loop_start + offset;
-                    if at > played || (from == 0.0 && at == 0.0) {
+                for each in loops {
+                    let at = each as f64 * length + offset;
+                    if at <= playing && (at > played || (from == 0.0 && at == 0.0)) {
                         passed.push((self.entered + at / f64::from(clip.speed), name));
                     }
-                    if !clip.looping {
-                        break;
-                    }
-                    loop_start += length;
                 }
             }
             passed.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -627,6 +676,8 @@ impl Animator {
                     .into_iter()
                     .map(|(at, name)| Event { name, state, at }),
             );
+            let excess = advance.events.len().saturating_sub(EVENT_LIMIT);
+            advance.events.drain(..excess);
             self.now = next;
             self.apply(next);
             if self
@@ -643,6 +694,10 @@ impl Animator {
 
     /// Its pose now, of `model`, whose animations its clips play: the state's clip where it is, blended from the pose
     /// it is fading from.
+    ///
+    /// # Panics
+    ///
+    /// If a clip's animation is not one of the model's.
     pub fn pose(&self, model: &Model) -> Pose {
         let clip = self.clip();
         let pose = Pose::sampled(model, clip.animation, clip.start + self.position());
