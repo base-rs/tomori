@@ -354,6 +354,8 @@ struct ConnectionRecord {
     cards: bool,
     /// Whether the client said in Hello that it reads environments' state and events. See `design/environments.md`.
     environment_state: bool,
+    /// Whether the client said in Hello that it reads what is projected in its space. See `design/projection.md`.
+    projection: bool,
 }
 
 impl ConnectionRecord {
@@ -438,6 +440,9 @@ struct ParticipantRecord {
     engagement: Option<Engagement>,
     /// The environment intents they may still send, kept across their connections, so that reconnecting does not refill the burst. See `design/environments.md`.
     intents: crate::channel::Intents,
+    /// Where their head last was in the space they are in, from their presence, which decides the wall the agent projects
+    /// onto in answer to them. See `design/projection.md`.
+    head: Option<[f32; 3]>,
 }
 
 struct SpaceRecord {
@@ -468,6 +473,8 @@ struct SpaceRecord {
     restoring: bool,
     /// What the server side of the space's environment keeps for it, for its current binding only. See `design/environments.md`.
     channel: Option<crate::channel::Channel>,
+    /// The space's projection walls and the panels on them. See `design/projection.md`.
+    stage: crate::stage::Stage,
 }
 
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
@@ -560,6 +567,9 @@ struct UtteranceRecord {
     /// What the participant attended to as the utterance began, as the space knew it then. Their client names only
     /// identities. See `design/spaces.md`.
     attention: Vec<crate::space::Attended>,
+    /// Where the participant's head was as the utterance began, so that what the agent projects in answer goes onto the
+    /// wall nearest them. See `design/projection.md`.
+    origin: Option<[f32; 3]>,
     /// The connection whose client asked for [`ServerMessage::TranscriptProgress`] as it began the utterance, if it did. Progress is sent only there, as the participant may reconnect with an older client, which would refuse it.
     progress: Option<ConnectionId>,
     /// When its end arrived, and with it the last of its audio, from which the time it takes to transcribe is logged.
@@ -787,6 +797,26 @@ impl HubState {
         }
     }
 
+    /// Send what is projected in `space` again to everyone in it whose client reads it, participants and visitors alike.
+    /// See `design/projection.md`.
+    fn touch_projection(&self, space: &str) {
+        for member in self
+            .space(space)
+            .into_iter()
+            .flat_map(|record| record.model.members())
+        {
+            if let Some(connection) = self
+                .participants
+                .get(member)
+                .and_then(|participant| participant.connection)
+                .and_then(|connection| self.connections.get(&connection))
+                .filter(|connection| connection.projection)
+            {
+                connection.outbox.projection();
+            }
+        }
+    }
+
     /// Tell everyone in the space, and the lobby, that the space changed.
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
@@ -853,6 +883,7 @@ impl HubState {
                         .map(str::to_owned),
                     closed_order: space.closed.filter(|_| !space.kept_open),
                     placements: space.placements.clone(),
+                    stage: space.stage.clone(),
                 }
             })
             .collect()
@@ -1011,6 +1042,8 @@ impl HubState {
         };
         record.space = Some(space.to_owned());
         record.last_space = Some(space.to_owned());
+        // Where they stood in another space means nothing in this one.
+        record.head = None;
         outbox.clear_audio();
         self.update_role(participant);
         if participates {
@@ -1019,6 +1052,16 @@ impl HubState {
         }
         self.forget_closed();
         self.touch_space(space);
+        // After the space's state, what is projected in it, for a client that reads it.
+        if self
+            .participants
+            .get(participant)
+            .and_then(|record| record.connection)
+            .and_then(|connection| self.connections.get(&connection))
+            .is_some_and(|connection| connection.projection)
+        {
+            outbox.projection();
+        }
         // After the space's state, the state its environment's side keeps for it, so that the client knows which space and environment it is for.
         let record = self.space(space).expect("joined above");
         if let Some((channel, state)) = record
@@ -2033,6 +2076,7 @@ impl Hub {
                 },
                 cards: false,
                 environment_state: false,
+                projection: false,
             },
         );
         Some((id, outbox, received, output))
@@ -2253,11 +2297,13 @@ impl Hub {
                 names,
                 environments,
                 environment_state,
+                projection,
             } = message
             {
-                // Before Hello rejoins the space they were in, so that they are sent its environment's state.
+                // Before Hello rejoins the space they were in, so that they are sent its environment's state and what is projected in it.
                 if let Some(record) = state.connections.get_mut(&connection) {
                     record.environment_state = environment_state;
+                    record.projection = projection;
                 }
                 self.hello(
                     &mut state,
@@ -2378,6 +2424,7 @@ impl Hub {
                     departed: None,
                     engagement: None,
                     intents: crate::channel::Intents::new(Instant::now()),
+                    head: None,
                 },
             );
         }
@@ -2672,13 +2719,20 @@ impl Hub {
                 // space that shows them. An answer goes to the question presented, and a name to the participant, so
                 // either is about nothing attended to.
                 let attention = match state.space(&space) {
-                    Some(record) if answer.is_none() && !naming => record.model.resolve(
-                        &attention,
-                        state.cards_of(&space),
-                        record.channel.as_ref(),
-                    ),
+                    Some(record) if answer.is_none() && !naming => {
+                        let environments = self.environments();
+                        let walls = environments.walls(&record.model.environment);
+                        let now = crate::cards::unix_now();
+                        record.model.resolve_with(
+                            &attention,
+                            state.cards_of(&space),
+                            record.channel.as_ref(),
+                            &|panel| record.stage.describe(&walls, panel, now),
+                        )
+                    }
                     _ => Vec::new(),
                 };
+                let origin = state.participants[participant].head;
                 state.next_utterance += 1;
                 let id = UtteranceId(state.next_utterance);
                 state.utterances.insert(
@@ -2692,6 +2746,7 @@ impl Hub {
                         answer,
                         naming,
                         attention,
+                        origin,
                         progress: progress.then_some(connection),
                         ended: None,
                         waiting: None,
@@ -2749,10 +2804,14 @@ impl Hub {
                         })
                         .and_then(|record| {
                             state.space(&record.space).map(|space| {
-                                space.model.resolve(
+                                let environments = self.environments();
+                                let walls = environments.walls(&space.model.environment);
+                                let now = crate::cards::unix_now();
+                                space.model.resolve_with(
                                     &[resource],
                                     state.cards_of(&record.space),
                                     space.channel.as_ref(),
+                                    &|panel| space.stage.describe(&walls, panel, now),
                                 )
                             })
                         })
@@ -2871,6 +2930,8 @@ impl Hub {
                     return;
                 };
                 let source = state.participants[participant].source;
+                let at = head.position;
+                let head_at = at.iter().all(|axis| axis.is_finite()).then_some(at);
                 for other in space.model.members() {
                     if other != participant {
                         state.send(
@@ -2885,6 +2946,11 @@ impl Hub {
                         );
                     }
                 }
+                state
+                    .participants
+                    .get_mut(participant)
+                    .expect("a member is a participant")
+                    .head = head_at;
             }
             ClientMessage::SetAttribution { enabled } => {
                 let Some(space) = in_space(state) else {
@@ -3229,9 +3295,93 @@ impl Hub {
                         self.reconcile_server_sides(state);
                         // Everyone in the space, and the lobby's listing, see the change; it is kept across a restart.
                         state.touch_space(&space);
+                        // The Tomori wall moves to where the new environment puts it, and that environment's walls show.
+                        state.touch_projection(&space);
                         deferred.push(Deferred::Keep);
                     }
                     Ok(false) => {}
+                    Err(error) => state.error(participant, error),
+                }
+            }
+            ClientMessage::AddWall { pose } => {
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.stage.add_wall(&record.model.environment, &pose) {
+                    Ok(_) => {
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    Err(error) => state.error(participant, error),
+                }
+            }
+            ClientMessage::RemoveWall { wall } => {
+                if let Err(error) = limits::check(&wall, limits::IDENTIFIER_BYTES, "wall") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.stage.remove_wall(&record.model.environment, &wall) {
+                    Ok(()) => {
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    Err(error) => state.error(participant, error),
+                }
+            }
+            ClientMessage::PlacePanel { panel, wall, pose } => {
+                let checked =
+                    limits::check(&panel, limits::IDENTIFIER_BYTES, "panel").and_then(|()| {
+                        wall.as_deref().map_or(Ok(()), |wall| {
+                            limits::check(wall, limits::IDENTIFIER_BYTES, "wall")
+                        })
+                    });
+                if let Err(error) = checked {
+                    state.error(participant, error);
+                    return;
+                }
+                let target = match (wall, pose) {
+                    (Some(wall), _) => crate::stage::Target::Wall(wall),
+                    (None, Some(pose)) => crate::stage::Target::Free(pose),
+                    (None, None) => {
+                        state.error(participant, "Say where to put the panel.");
+                        return;
+                    }
+                };
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let environments = self.environments();
+                let record = state.space_mut(&space).expect("checked above");
+                let walls = environments.walls(&record.model.environment);
+                match record.stage.place(&walls, &panel, target) {
+                    Ok(true) => {
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
+                    // Already there, it is sent again, so that a client showing it elsewhere meanwhile puts it back.
+                    Ok(false) => state.touch_projection(&space),
+                    Err(error) => state.error(participant, error),
+                }
+            }
+            ClientMessage::DismissPanel { panel } => {
+                if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let record = state.space_mut(&space).expect("checked above");
+                match record.stage.dismiss(&record.model.environment, &panel) {
+                    Ok(()) => {
+                        state.touch_projection(&space);
+                        deferred.push(Deferred::Keep);
+                    }
                     Err(error) => state.error(participant, error),
                 }
             }
@@ -3607,13 +3757,16 @@ impl Hub {
             unreachable!("checked listed above");
         };
         let queued = space.model.enqueue_attending(
-            key,
+            key.clone(),
             record.source,
             speaker,
             text.to_owned(),
             record.attention,
         );
         debug_assert!(queued, "repeats are acknowledged above");
+        if let Some(origin) = record.origin {
+            space.model.originate(&key, origin);
+        }
         state.send(
             &record.participant,
             ServerMessage::Transcript {
@@ -3701,6 +3854,7 @@ impl Hub {
             placements: std::collections::BTreeMap::new(),
             restoring: false,
             channel: None,
+            stage: crate::stage::Stage::default(),
         });
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
@@ -3817,6 +3971,7 @@ impl Hub {
                     placements: kept.placements,
                     restoring: true,
                     channel: None,
+                    stage: kept.stage,
                 });
             }
             // Listed in the order they were created, as before the restart.
@@ -3929,6 +4084,18 @@ impl Hub {
         let resynchronized = matches!(event, Event::Resynchronized { .. });
         let was_open = !record.model.is_closed();
         record.model.apply(event);
+        // The panels of a reply it completed go onto the wall nearest whoever asked, or else the Tomori wall.
+        let panels = record.model.take_projected();
+        let projected = !panels.is_empty();
+        if projected {
+            let environments = self.environments();
+            let walls = environments.walls(&record.model.environment);
+            let now = crate::cards::unix_now();
+            for (content, origin) in panels {
+                let id = record.stage.project(&walls, content, origin, now);
+                log::info!("Space {space} projected {id}.");
+            }
+        }
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
             record.instruct(true);
@@ -3951,6 +4118,11 @@ impl Hub {
         }
         // The space's attention may have changed.
         self.recount(&mut state);
+        if projected {
+            state.touch_projection(space);
+            drop(state);
+            self.keep();
+        }
     }
 
     /// When the earliest deferred snapshot is due, if any.
@@ -4339,8 +4511,10 @@ impl Hub {
                     participants,
                     environments.instructions(&space.model.environment),
                 );
-                // Named before the state is fitted to its budget, which counts it.
+                // Named before the state is fitted to its budget, which counts them.
                 state.environment_version = environments.version(&space.model.environment);
+                // Every space projects. See `design/projection.md`.
+                state.projection = true;
                 limits::fit_state(&mut state);
                 state.cards = cards;
                 Some(ServerMessage::Space {
@@ -4367,6 +4541,29 @@ impl Hub {
                     board.cards(&space.model.id, &space.placements, crate::cards::unix_now());
                 Some(ServerMessage::Cards {
                     cards: Box::new(cards),
+                })
+            }
+            Outgoing::Projection => {
+                let state = self.lock();
+                // Nothing for a connection that does not read it, or that has left its space since it was queued.
+                let space = state
+                    .member(connection)
+                    .and_then(|(_, space)| space)
+                    .filter(|_| {
+                        state
+                            .connections
+                            .get(&connection)
+                            .is_some_and(|record| record.projection)
+                    })
+                    .and_then(|space| state.space(&space))?;
+                let environments = self.environments();
+                let walls = environments.walls(&space.model.environment);
+                let projection =
+                    space
+                        .stage
+                        .view(&space.model.id, &walls, crate::cards::unix_now());
+                Some(ServerMessage::Projection {
+                    projection: Box::new(projection),
                 })
             }
             Outgoing::Spaces => {
@@ -4460,6 +4657,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -4557,6 +4755,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             },
         );
         connection
@@ -4624,6 +4823,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -4658,6 +4858,7 @@ mod tests {
                     names: false,
                     environments: None,
                     environment_state: false,
+                    projection: false,
                 },
             );
             connection
@@ -4855,6 +5056,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             },
         );
         hub.handle(

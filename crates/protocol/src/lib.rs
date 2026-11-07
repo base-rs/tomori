@@ -14,6 +14,7 @@ mod frame;
 mod keepalive;
 mod message;
 mod presence;
+mod projection;
 mod space;
 pub mod text;
 
@@ -27,6 +28,7 @@ pub use message::{
     Resource, ServerMessage, TranscriptPart, TranscriptStage,
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
+pub use projection::{Meta, Panel, Place, Projection, TOMORI_WALL, WALL_SLOTS, Wall, WallKind};
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,
     Engagement, EnvironmentInfo, EnvironmentVersion, KnockRequest, KnockState, Message, Mode,

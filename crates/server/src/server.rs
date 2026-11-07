@@ -1989,6 +1989,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             },
             tomori_protocol::ClientMessage::Join { space: id },
             tomori_protocol::ClientMessage::WatchCards,
@@ -2368,6 +2369,7 @@ mod tests {
                         closed: None,
                         closed_order: None,
                         placements: Default::default(),
+                        stage: Default::default(),
                     }])
                 })
                 .unwrap();

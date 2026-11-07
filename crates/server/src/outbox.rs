@@ -32,6 +32,9 @@ pub enum Outgoing {
     /// The cards of the participant's space, rendered when sent, so that a burst of changes, such as several cards
     /// placed, sends one. See `design/github.md`.
     Cards,
+    /// What is projected in the participant's space, rendered when sent, so that a burst of changes sends one. See
+    /// `design/projection.md`.
+    Projection,
 }
 
 #[derive(Debug)]
@@ -70,6 +73,7 @@ struct Inner {
     space_pending: bool,
     spaces_pending: bool,
     cards_pending: bool,
+    projection_pending: bool,
     /// Queued [`ServerMessage::Error`] replies.
     errors: usize,
     closed: bool,
@@ -222,6 +226,18 @@ impl Outbox {
         });
     }
 
+    /// Send what is projected in the participant's space soon. Repeated changes before it is sent produce one message.
+    pub fn projection(&self) {
+        self.update(|inner| {
+            if inner.projection_pending {
+                return false;
+            }
+            inner.projection_pending = true;
+            inner.control.push_back(Outgoing::Projection);
+            true
+        });
+    }
+
     /// A participant's audio frame.
     pub fn audio(&self, frame: Vec<u8>) {
         self.update(|inner| {
@@ -284,6 +300,7 @@ impl Outbox {
                 Outgoing::Space => inner.space_pending = false,
                 Outgoing::Spaces => inner.spaces_pending = false,
                 Outgoing::Cards => inner.cards_pending = false,
+                Outgoing::Projection => inner.projection_pending = false,
                 Outgoing::Message(ServerMessage::Error { .. }) => inner.errors -= 1,
                 Outgoing::Message(_) => {}
             }
@@ -397,6 +414,19 @@ mod tests {
         outbox.cards();
         let Popped::Control(Outgoing::Cards) = outbox.pop() else {
             unreachable!("expected Popped::Control(Outgoing::Cards)");
+        };
+        // And so does what is projected.
+        outbox.projection();
+        outbox.projection();
+        let Popped::Control(Outgoing::Projection) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Projection)");
+        };
+        let Popped::Empty = outbox.pop() else {
+            unreachable!("expected Popped::Empty");
+        };
+        outbox.projection();
+        let Popped::Control(Outgoing::Projection) = outbox.pop() else {
+            unreachable!("expected Popped::Control(Outgoing::Projection)");
         };
         outbox.close();
         let Popped::Closed = outbox.pop() else {

@@ -81,6 +81,7 @@ impl Client {
             names: false,
             environments: None,
             environment_state: false,
+            projection: false,
         });
     }
 
@@ -224,6 +225,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         names: false,
         environments: None,
         environment_state: false,
+        projection: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -1459,6 +1461,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         names,
         environments: None,
         environment_state: false,
+        projection: false,
     });
     client.read()
 }
@@ -2645,6 +2648,7 @@ fn presenting(
         names: false,
         environments: presents,
         environment_state: reads,
+        projection: false,
     });
     client.read();
     client
@@ -3056,4 +3060,591 @@ fn a_binding_s_first_update_reaches_those_in_the_space_as_its_state() {
             ("event", serde_json::json!({"by": 2})),
         ]
     );
+}
+
+impl Client {
+    /// Connected and greeted as `participant`, by a client that reads what is projected, with what that sent read.
+    fn projecting(hub: &Arc<Hub>, access: Access, participant: &str) -> Self {
+        let client = Self::connect(hub, access);
+        client.send(ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            participant: participant.to_owned(),
+            name: participant.to_owned(),
+            names: false,
+            environments: None,
+            environment_state: false,
+            projection: true,
+        });
+        client.read();
+        client
+    }
+
+    /// The projections sent since.
+    fn projections(&self) -> Vec<tomori_protocol::Projection> {
+        self.read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Projection { projection } => Some(*projection),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The projection as it would be sent now.
+    fn projection(&self) -> tomori_protocol::Projection {
+        match self.hub.render(self.connection, Outgoing::Projection) {
+            Some(ServerMessage::Projection { projection }) => *projection,
+            other => unreachable!("expected a projection, not {other:?}"),
+        }
+    }
+}
+
+/// Where a participant stands, as their presence says.
+fn standing(at: [f32; 3]) -> ClientMessage {
+    ClientMessage::Presence {
+        head: tomori_protocol::Pose {
+            position: at,
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        },
+        left: None,
+        right: None,
+        hands: None,
+    }
+}
+
+fn upright(position: [f32; 3]) -> tomori_protocol::Pose {
+    tomori_protocol::Pose {
+        position,
+        orientation: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+/// The agent replies `text`, as message `id`, in `space`.
+fn reply(hub: &Hub, space: &str, id: &str, text: &str) {
+    hub.space_event(
+        space,
+        Event::MessageStarted {
+            message: id.to_owned(),
+            role: tomori_backend::Role::Assistant,
+        },
+    );
+    hub.space_event(
+        space,
+        Event::TextDelta {
+            message: id.to_owned(),
+            text: text.to_owned(),
+        },
+    );
+    hub.space_event(
+        space,
+        Event::MessageCompleted {
+            message: id.to_owned(),
+        },
+    );
+}
+
+const PANEL_REPLY: &str =
+    "Here it is.\n\n```panel\ntitle: Build status\nsource: CI\n---\n**3 crates** failed.\n```\n";
+
+/// An idle space whose driver's commands are returned, so that words are handed to the agent at once.
+fn idle(hub: &Hub) -> (String, async_channel::Receiver<SpaceCommand>) {
+    running(
+        hub,
+        &request("nobody"),
+        Snapshot {
+            busy: Some(false),
+            ..Snapshot::default()
+        },
+    )
+}
+
+/// `client` says `words`, attending to `attention`, and the agent is handed them: what it is told.
+fn said(
+    hub: &Hub,
+    client: &Client,
+    commands: &async_channel::Receiver<SpaceCommand>,
+    attention: Vec<tomori_protocol::Resource>,
+    pointed: Option<tomori_protocol::Resource>,
+) -> tomori_backend::Prompt {
+    let utterance = format!("u{}", hub.lock().next_utterance);
+    client.send(ClientMessage::UtteranceBegin {
+        utterance: utterance.clone(),
+        answer: None,
+        progress: false,
+        naming: false,
+        attention,
+    });
+    client.send(ClientMessage::UtteranceEnd { utterance, pointed });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(utterance, "what's this?");
+    std::iter::from_fn(|| commands.try_recv().ok())
+        .find_map(|command| match command {
+            SpaceCommand::Send(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("the words are handed to the agent")
+}
+
+#[test]
+fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    let old = Client::greeted(&hub, Access::open(), "old");
+    // In the lobby, nothing is projected for anyone.
+    assert_eq!(hub.render(ada.connection, Outgoing::Projection), None);
+    for client in [&ada, &vic, &old] {
+        client.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+    }
+    // Every space projects, and says so in its state; the Tomori wall stands beside the swarm, empty.
+    let messages = ada.read();
+    assert!(messages.iter().any(|message| matches!(
+        message,
+        ServerMessage::Space { state } if state.projection
+    )));
+    let projection = messages
+        .into_iter()
+        .find_map(|message| match message {
+            ServerMessage::Projection { projection } => Some(*projection),
+            _ => None,
+        })
+        .expect("sent on joining");
+    assert_eq!(projection.space, space);
+    assert_eq!(projection.environment, "sky");
+    assert_eq!(
+        projection.walls,
+        [tomori_protocol::Wall::new(
+            tomori_protocol::TOMORI_WALL,
+            tomori_protocol::WallKind::Tomori,
+            crate::stage::default_stage()
+        )]
+    );
+    assert_eq!(vic.projections().len(), 1);
+    // A client from before projection is sent none, even were it asked to render one.
+    assert!(old.projections().is_empty());
+    assert_eq!(hub.render(old.connection, Outgoing::Projection), None);
+    // A reply's panel reaches everyone who reads it.
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    for client in [&ada, &vic] {
+        let projected = client.projections();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].panels[0].title, "Build status");
+    }
+    assert!(old.projections().is_empty());
+}
+
+#[test]
+fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    // Without anyone asking, the Tomori wall.
+    reply(&hub, &space, "m0", PANEL_REPLY);
+    let panel = &ada.projection().panels[0];
+    assert!(matches!(
+        &panel.place,
+        tomori_protocol::Place::Wall { wall, slot: 0 } if wall == tomori_protocol::TOMORI_WALL
+    ));
+    assert_eq!(panel.body, "**3 crates** failed.");
+    assert_eq!(panel.meta, [tomori_protocol::Meta::new("source", "CI")]);
+    // The block stays in the transcript as the agent wrote it.
+    let state = hub.render(ada.connection, Outgoing::Space);
+    assert!(matches!(
+        state,
+        Some(ServerMessage::Space { state }) if state.messages.iter().any(|message| message.text == PANEL_REPLY.trim_end_matches('\n') || message.text == PANEL_REPLY)
+    ));
+    // An owner adds a wall behind home; asked from beside it, the agent's panel goes onto it.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let wall = ada.projection().walls[1].id.clone();
+    ada.send(standing([0.2, 1.6, 2.5]));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    // Where they move after they began speaking changes nothing.
+    ada.send(standing([1.9, 1.6, -2.0]));
+    hub.space_event(&space, Event::Delivered { key: prompt.key });
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    ada.read();
+    let projection = ada.projection();
+    let on_wall: Vec<&str> = projection
+        .panels
+        .iter()
+        .filter(|panel| matches!(&panel.place, tomori_protocol::Place::Wall { wall: on, .. } if *on == wall))
+        .map(|panel| panel.id.as_str())
+        .collect();
+    assert_eq!(on_wall.len(), 1);
+    // A reply completed again, or one without panels, projects nothing more.
+    hub.space_event(
+        &space,
+        Event::MessageCompleted {
+            message: "m1".to_owned(),
+        },
+    );
+    reply(&hub, &space, "m2", "No panel here.");
+    assert_eq!(ada.projection().panels.len(), 2);
+    // A presence that is not finite does not move them.
+    ada.send(standing([f32::NAN, 1.6, 0.0]));
+    assert!(
+        hub.lock()
+            .participants
+            .values()
+            .any(|record| record.name == "ada" && record.head.is_none())
+    );
+}
+
+#[test]
+fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_visitor() {
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let bob = Client::projecting(&hub, Access::open(), "bob");
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    for client in [&ada, &bob, &vic] {
+        client.join(&space);
+    }
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    let panel = ada.projection().panels[0].id.clone();
+    for client in [&ada, &bob, &vic] {
+        client.read();
+    }
+    // Pulled off by one, it floats for everyone.
+    let free = upright([0.5, 1.4, -1.0]);
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.clone(),
+        wall: None,
+        pose: Some(free),
+    });
+    for client in [&bob, &vic] {
+        let projected = client.projections();
+        assert_eq!(
+            projected[0].panels[0].place,
+            tomori_protocol::Place::Free { pose: free }
+        );
+    }
+    // Snapped back by another, it is in the wall's layout again for everyone; put where it already is, it is sent again.
+    for _ in 0..2 {
+        bob.send(ClientMessage::PlacePanel {
+            panel: panel.clone(),
+            wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
+            pose: None,
+        });
+        assert_eq!(
+            ada.projections()[0].panels[0].place,
+            tomori_protocol::Place::Wall {
+                wall: tomori_protocol::TOMORI_WALL.to_owned(),
+                slot: 0
+            }
+        );
+    }
+    // A visitor moves and dismisses nothing.
+    vic.send(ClientMessage::DismissPanel {
+        panel: panel.clone(),
+    });
+    vic.send(ClientMessage::PlacePanel {
+        panel: panel.clone(),
+        wall: None,
+        pose: Some(free),
+    });
+    assert_eq!(
+        vic.errors(),
+        [
+            "Visitors can watch, but not act in a space.",
+            "Visitors can watch, but not act in a space."
+        ]
+    );
+    // Dismissed, it is gone for everyone.
+    bob.send(ClientMessage::DismissPanel {
+        panel: panel.clone(),
+    });
+    for client in [&ada, &vic] {
+        assert!(client.projections()[0].panels.is_empty());
+    }
+    // What cannot be done is refused with why.
+    for message in [
+        ClientMessage::DismissPanel {
+            panel: panel.clone(),
+        },
+        ClientMessage::DismissPanel {
+            panel: "x".repeat(limits::IDENTIFIER_BYTES + 1),
+        },
+        ClientMessage::PlacePanel {
+            panel: panel.clone(),
+            wall: None,
+            pose: None,
+        },
+        ClientMessage::PlacePanel {
+            panel: panel.clone(),
+            wall: Some("x".repeat(limits::IDENTIFIER_BYTES + 1)),
+            pose: None,
+        },
+        ClientMessage::PlacePanel {
+            panel: panel.clone(),
+            wall: Some("wall-99".to_owned()),
+            pose: None,
+        },
+    ] {
+        ada.send(message);
+    }
+    assert_eq!(
+        ada.errors(),
+        [
+            "That panel is not here.".to_owned(),
+            format!(
+                "The panel is too long; the limit is {} bytes.",
+                limits::IDENTIFIER_BYTES
+            ),
+            "Say where to put the panel.".to_owned(),
+            format!(
+                "The wall is too long; the limit is {} bytes.",
+                limits::IDENTIFIER_BYTES
+            ),
+            "That wall is not here.".to_owned(),
+        ]
+    );
+    // Outside a space, there is nothing to change.
+    ada.send(ClientMessage::Leave);
+    ada.read();
+    for message in [
+        ClientMessage::AddWall {
+            pose: upright([0.0, 1.5, 3.0]),
+        },
+        ClientMessage::RemoveWall {
+            wall: "wall-1".to_owned(),
+        },
+        ClientMessage::PlacePanel {
+            panel: panel.clone(),
+            wall: None,
+            pose: Some(free),
+        },
+        ClientMessage::DismissPanel { panel },
+    ] {
+        ada.send(message);
+    }
+    assert_eq!(ada.errors(), ["Join a space first."; 4]);
+}
+
+#[test]
+fn only_owners_add_and_remove_walls() {
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    let cy = Client::projecting(
+        &hub,
+        Access {
+            principal: Some("token:cy".to_owned()),
+            name: None,
+            grant: Grant::Collaborator {
+                space: space.clone(),
+            },
+        },
+        "cy",
+    );
+    for client in [&ada, &cy] {
+        client.join(&space);
+    }
+    cy.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    assert_eq!(cy.errors(), ["Only owners can do that."]);
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let wall = cy.projections()[0].walls[1].clone();
+    assert_eq!(wall.kind, tomori_protocol::WallKind::Added);
+    cy.send(ClientMessage::RemoveWall {
+        wall: wall.id.clone(),
+    });
+    assert_eq!(cy.errors(), ["Only owners can do that."]);
+    // Owners are told why a wall cannot be added or removed.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([50.0, 1.5, 3.0]),
+    });
+    ada.send(ClientMessage::RemoveWall {
+        wall: tomori_protocol::TOMORI_WALL.to_owned(),
+    });
+    ada.send(ClientMessage::RemoveWall {
+        wall: "x".repeat(limits::IDENTIFIER_BYTES + 1),
+    });
+    assert_eq!(
+        ada.errors(),
+        [
+            "A wall must stand within 20 m of the space's middle.".to_owned(),
+            "Only a wall an owner added can be removed.".to_owned(),
+            format!(
+                "The wall is too long; the limit is {} bytes.",
+                limits::IDENTIFIER_BYTES
+            ),
+        ]
+    );
+    ada.send(ClientMessage::RemoveWall { wall: wall.id });
+    assert_eq!(cy.projections()[0].walls.len(), 1);
+}
+
+#[test]
+fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tomori_wall_moves() {
+    let (hub, _jobs) = hub_waiting();
+    let stage = upright([0.0, 1.5, -4.0]);
+    let board = upright([3.0, 1.4, -4.0]);
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("farmyard", "Farmyard")
+            .with_stage(stage)
+            .with_walls([board]),
+    ]));
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    reply(
+        &hub,
+        &space,
+        "m2",
+        "```panel\ntitle: Floating\n---\nAway.\n```",
+    );
+    let floating = ada.projection().panels[1].id.clone();
+    ada.send(ClientMessage::PlacePanel {
+        panel: floating.clone(),
+        wall: None,
+        pose: Some(upright([0.5, 1.4, -1.0])),
+    });
+    let in_sky = ada.projection();
+    assert_eq!(in_sky.walls.len(), 2);
+    // In the farmyard, the Tomori wall stands at its stage with what was on it, beside the farmyard's own wall.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "farmyard".to_owned(),
+    });
+    let farmyard = ada
+        .projections()
+        .pop()
+        .expect("sent as the environment changes");
+    assert_eq!(farmyard.environment, "farmyard");
+    assert_eq!(
+        farmyard
+            .walls
+            .iter()
+            .map(|wall| (wall.kind, wall.pose))
+            .collect::<Vec<_>>(),
+        [
+            (tomori_protocol::WallKind::Tomori, stage),
+            (tomori_protocol::WallKind::Environment, board),
+        ]
+    );
+    assert_eq!(farmyard.panels.len(), 1);
+    assert_eq!(farmyard.panels[0].title, "Build status");
+    // Asked beside the farmyard's wall, the agent projects onto it.
+    ada.send(standing([3.0, 1.6, -3.5]));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.space_event(&space, Event::Delivered { key: prompt.key });
+    reply(&hub, &space, "m3", PANEL_REPLY);
+    assert!(ada.projection().panels.iter().any(|panel| matches!(
+        &panel.place,
+        tomori_protocol::Place::Wall { wall, .. } if wall == "environment-0"
+    )));
+    // Back in Sky, its walls and floating panel are where they were.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".to_owned(),
+    });
+    ada.read();
+    assert_eq!(ada.projection(), in_sky);
+}
+
+#[test]
+fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
+    let directory = std::env::temp_dir().join(format!("tomori-hub-stage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let shown = {
+        let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+        let (hub, _jobs) = hub();
+        assert!(hub.restore(store).is_empty());
+        let space = stopped(&hub, Snapshot::default());
+        let ada = Client::projecting(&hub, Access::open(), "ada");
+        ada.join(&space);
+        reply(&hub, &space, "m1", PANEL_REPLY);
+        ada.send(ClientMessage::AddWall {
+            pose: upright([0.0, 1.5, 3.0]),
+        });
+        let panel = ada.projection().panels[0].id.clone();
+        ada.send(ClientMessage::PlacePanel {
+            panel,
+            wall: None,
+            pose: Some(upright([0.5, 1.4, -1.0])),
+        });
+        (space, ada.projection())
+    };
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    let (hub, _jobs) = hub();
+    assert_eq!(hub.restore(store).len(), 1);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&shown.0);
+    let mut restored = ada.projection();
+    // Only its age has moved on.
+    for (panel, before) in restored.panels.iter_mut().zip(&shown.1.panels) {
+        panel.age = before.age;
+    }
+    assert_eq!(restored, shown.1);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_panel_pointed_at_as_the_words_begin_is_described_from_the_stage_before_them() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    reply(&hub, &space, "m1", PANEL_REPLY);
+    let panel = ada.projection().panels[0].id.clone();
+    let deliver = |prompt: &tomori_backend::Prompt| {
+        hub.lock()
+            .space_mut(&space)
+            .unwrap()
+            .model
+            .sent(&prompt.key, Err("test".to_owned()));
+    };
+    let prompt = said(
+        &hub,
+        &ada,
+        &commands,
+        vec![tomori_protocol::Resource::panel(panel.clone())],
+        None,
+    );
+    assert_eq!(
+        prompt.text,
+        "ada: [Pointing at panel \"Build status\" (on the Tomori wall, projected just now; source: CI)] what's this?"
+    );
+    deliver(&prompt);
+    // An older client names it as the words end, and it is resolved in the same way.
+    let prompt = said(
+        &hub,
+        &ada,
+        &commands,
+        Vec::new(),
+        Some(tomori_protocol::Resource::panel(panel.clone())),
+    );
+    assert!(
+        prompt
+            .text
+            .starts_with("ada: [Pointing at panel \"Build status\""),
+        "{}",
+        prompt.text
+    );
+    deliver(&prompt);
+    // One the stage does not have, or an oversized identity, is dropped, keeping the words.
+    let prompt = said(
+        &hub,
+        &ada,
+        &commands,
+        vec![
+            tomori_protocol::Resource::panel("panel-99"),
+            tomori_protocol::Resource::panel("x".repeat(limits::IDENTIFIER_BYTES + 1)),
+        ],
+        None,
+    );
+    assert_eq!(prompt.text, "ada: what's this?");
 }

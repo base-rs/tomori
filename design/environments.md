@@ -58,6 +58,8 @@ Arrival, outside any space, uses the Minimal grid as its waiting area (see `arri
 
 An environment may allow travel beyond the room, declaring a locomotion profile with walkable surfaces (see `locomotion.md`). Until environments have server sides (#75), a headset build declares it beside the environment's scenery; Sky and the Minimal grid declare none, and the farmyard declares teleport about its yard (see `farmyard.md`).
 
+An environment may say, in its registration, where Tomori's own projection wall stands in it, its `stage` anchor, with `Environment::with_stage`, and declare projection walls of its own, with `Environment::with_walls`, general hooks that name no particular environment; the farmyard declares one, its noticeboard, and Sky and the grid neither. The Tomori wall and what is on it belong to the space and move with it; an environment's walls and the panels left floating in it are kept for the space and that environment, hidden while the space is in another (see `projection.md`).
+
 An environment may contribute a layer of the instructions Tomori gives a space's agent, about what it presents and which tools and data sources to use (see `spaces.md`), given with the environment when it is offered. Sky and the Minimal grid contribute none yet; an environment the server no longer offers contributes none. A space keeps only its environment's identifier, not its layer: the server looks the layer up in the environments it offers whenever it shows the space's instructions or gives them to the agent, so that a space restored after a restart is given the same layer as one just created or changed to that environment, whatever order the server was configured in.
 
 Long-term direction, not yet requirements:

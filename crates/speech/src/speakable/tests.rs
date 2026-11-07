@@ -117,6 +117,20 @@ An image ![alt text](image.png) is skipped. Dr. Smith agreed[^1].
 ";
 
 #[test]
+fn a_panel_block_is_never_spoken_and_kept_whole_for_the_transcript() {
+    // The server projects a reply's `panel` blocks as panels; speech says only what is around them.
+    let reply = "Here is the status.\n\n```panel\ntitle: Build status\n---\n**3 crates** failed. Read them.\n```\n\nAsk me about any.";
+    assert_eq!(speak(reply), ["Here is the status.", "Ask me about any."]);
+    let blocks = one_shot_blocks(reply, &SpeakableOptions::default());
+    let panel = blocks
+        .iter()
+        .find(|block| block.kind == BlockKind::Code)
+        .expect("the panel is a code block");
+    assert!(panel.source(reply).contains("title: Build status"));
+    assert!(panel.sentences.is_empty());
+}
+
+#[test]
 fn speaks_only_speakable_text() {
     assert_eq!(
         speak(DOCUMENT),

@@ -215,6 +215,7 @@ mod tests {
             names: false,
             environments: None,
             environment_state: false,
+            projection: false,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,
