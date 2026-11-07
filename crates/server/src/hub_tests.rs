@@ -2859,6 +2859,7 @@ fn an_environment_s_side_shares_its_state_with_those_who_present_it_and_takes_pa
         naming: false,
         attention: vec![
             tomori_protocol::Resource::object("thing-1"),
+            tomori_protocol::Resource::object("thing-1"),
             tomori_protocol::Resource::object("thing-2"),
             tomori_protocol::Resource::object("x".repeat(crate::channel::OBJECT_BYTES + 1)),
         ],
@@ -2931,6 +2932,11 @@ fn a_side_whose_binding_or_space_has_moved_on_keeps_and_sends_nothing() {
     // Another binding's side, a space that has gone, and a side of another environment keep nothing.
     assert_eq!(
         outlet(&id, binding + 1, "counter").share("1".into()),
+        Ok(())
+    );
+    assert_eq!(
+        outlet(&id, binding + 1, "counter")
+            .describe(vec![tomori_environment::Object::new("a", "b")]),
         Ok(())
     );
     assert_eq!(outlet("gone", binding, "counter").share("1".into()), Ok(()));

@@ -718,13 +718,11 @@ impl HubState {
     }
 
     /// The outboxes of everyone in `space` whose client reads environments' state and presents the space's environment at the version its side runs for, participants and visitors alike. See `design/environments.md`.
-    fn channel_outboxes(&self, space: &str) -> Vec<Arc<Outbox>> {
-        let Some((record, channel)) = self
-            .space(space)
-            .and_then(|record| record.channel.as_ref().map(|channel| (record, channel)))
-        else {
-            return Vec::new();
-        };
+    fn channel_outboxes(
+        &self,
+        record: &SpaceRecord,
+        channel: &crate::channel::Channel,
+    ) -> Vec<Arc<Outbox>> {
         let presented = EnvironmentVersion::new(channel.environment.clone(), channel.version);
         record
             .model
@@ -1022,19 +1020,21 @@ impl HubState {
         self.forget_closed();
         self.touch_space(space);
         // After the space's state, the state its environment's side keeps for it, so that the client knows which space and environment it is for.
-        if let Some(message) = self.space(space).and_then(|record| {
-            let channel = record.channel.as_ref()?;
-            Some(ServerMessage::EnvironmentState {
+        let record = self.space(space).expect("joined above");
+        if let Some((channel, state)) = record
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.state.clone().map(|state| (channel, state)))
+            && self
+                .channel_outboxes(record, channel)
+                .iter()
+                .any(|joined| Arc::ptr_eq(joined, &outbox))
+        {
+            outbox.message(ServerMessage::EnvironmentState {
                 environment: channel.environment.clone(),
                 version: channel.version,
-                state: channel.state.clone()?,
-            })
-        }) && self
-            .channel_outboxes(space)
-            .iter()
-            .any(|joined| Arc::ptr_eq(joined, &outbox))
-        {
-            outbox.message(message);
+                state,
+            });
         }
         true
     }
@@ -1453,7 +1453,9 @@ impl Hub {
                 state: kept,
             },
         };
-        for outbox in state.channel_outboxes(&outlet.space) {
+        let record = state.space(&outlet.space).expect("found above");
+        let channel = record.channel.as_ref().expect("kept above");
+        for outbox in state.channel_outboxes(record, channel) {
             outbox.message(message.clone());
         }
         Ok(())
@@ -1479,13 +1481,10 @@ impl Hub {
         state: &'a mut HubState,
         outlet: &SpaceOutlet,
     ) -> Option<&'a mut crate::channel::Channel> {
-        if self.server_sides.binding(&outlet.space) != Some(outlet.binding) {
-            return None;
-        }
-        let record = state.space_mut(&outlet.space)?;
-        if record.model.environment != outlet.environment {
-            return None;
-        }
+        let current = self.server_sides.binding(&outlet.space) == Some(outlet.binding);
+        let record = state
+            .space_mut(&outlet.space)
+            .filter(|record| current && record.model.environment == outlet.environment)?;
         let channel = record.channel.get_or_insert_with(|| {
             crate::channel::Channel::new(outlet.binding, &outlet.environment, outlet.version)
         });
