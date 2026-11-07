@@ -11,7 +11,16 @@ use tomori_security::Grant;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
 use tomori_server::test_support::{TIMEOUT, TestClient, TestServer};
 
-const KEYS: [&str; 3] = ["tomori", "tomori-environment", "tomori-space"];
+/// The entries Tomori removes from a forgotten space's session: its layers, and the one about its tools, which a server without an MCP endpoint, as this one, does not give.
+const KEYS: [&str; 4] = [
+    "tomori",
+    "tomori-environment",
+    "tomori-space",
+    "tomori-tools",
+];
+
+/// How many entries the agent is given with every layer.
+const LAYERS: usize = 3;
 
 /// Create a space whose own instructions are `instructions`, and wait for it.
 fn create(client: &mut TestClient, title: &str, instructions: Option<&str>) -> SpaceState {
@@ -74,7 +83,7 @@ fn the_layers_are_given_on_creation_shown_to_everyone_and_changed_by_an_owner() 
     until(&session, "the prompt was never delivered", |session| {
         !session.log().prompts.is_empty()
     });
-    assert_eq!(session.log().instructed_at_prompts, [KEYS.len()]);
+    assert_eq!(session.log().instructed_at_prompts, [LAYERS]);
 
     // Everyone in the space sees them, and an owner's change reaches the agent and them.
     let mut bob = server.connect("bob", "Bob");
@@ -155,7 +164,7 @@ fn the_layers_are_given_again_after_the_agent_is_read_again() {
         },
     });
     until(&session, "the layers were never given again", |session| {
-        session.log().instructions.len() == given + KEYS.len()
+        session.log().instructions.len() == given + LAYERS
     });
     assert_eq!(session.instructions(), entries(Some("Mind the docs.")));
 }

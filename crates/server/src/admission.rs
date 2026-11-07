@@ -15,7 +15,7 @@ use base_http::{InterimHandler, InterimResponses, Method, Request, Response};
 use base_http_server::Handler;
 use base_scheduler::Cancellation;
 
-use crate::application::{Application, ResponseBody};
+use crate::application::Application;
 
 /// The default request timeout.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -113,15 +113,15 @@ impl Admission {
     }
 }
 
-/// The application, serving one watched connection.
-pub struct Admitted<'a> {
-    pub application: &'a Application,
+/// The application, or another handler such as Tomori's MCP endpoint, serving one watched connection.
+pub struct Admitted<'a, H = Application> {
+    pub application: &'a H,
     pub watch: Arc<Watch>,
 }
 
-impl Handler for Admitted<'_> {
+impl<H: Handler<Error = Infallible>> Handler for Admitted<'_, H> {
     type Error = Infallible;
-    type Body<B: ReadableBody> = Tracked<ResponseBody<B>>;
+    type Body<B: ReadableBody> = Tracked<H::Body<B>>;
 
     async fn call<B: ReadableBody, I: InterimHandler>(
         &self,

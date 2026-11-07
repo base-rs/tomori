@@ -288,7 +288,7 @@ pub enum ResponseBody<B: ReadableBody> {
 }
 
 impl<B: ReadableBody> ResponseBody<B> {
-    fn fixed(data: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn fixed(data: impl Into<Vec<u8>>) -> Self {
         let data = data.into();
         let length = data.len() as u64;
         Self::Fixed(Some(data), length)
@@ -339,7 +339,7 @@ impl<B: ReadableBody> ReadableBody for ResponseBody<B> {
     }
 }
 
-fn response<B: ReadableBody>(
+pub(crate) fn response<B: ReadableBody>(
     status: Status,
     content_type: &str,
     body: ResponseBody<B>,

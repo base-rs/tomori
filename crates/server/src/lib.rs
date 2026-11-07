@@ -26,6 +26,7 @@ pub mod kept;
 mod server_sides;
 
 mod limits;
+mod mcp;
 #[cfg(feature = "speech")]
 pub mod offline;
 mod option;

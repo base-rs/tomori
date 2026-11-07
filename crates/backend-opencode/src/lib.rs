@@ -13,7 +13,7 @@
 use std::sync::Mutex;
 
 use tomori_backend::{
-    Backend, Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummary,
+    Backend, Capabilities, Error, ErrorKind, Result, SessionSpec, SessionSummary, ToolServer,
 };
 
 mod api;
@@ -116,6 +116,7 @@ impl Backend for OpenCode {
             questions: true,
             workers: true,
             instructions: true,
+            tools: true,
         }
     }
 
@@ -149,6 +150,32 @@ impl Backend for OpenCode {
         let id = id.to_owned();
         commands
             .reply_with(move |reply| connection::Command::ForgetInstructions { id, keys, reply })
+            .await
+    }
+
+    async fn register_tools(&self, directory: &str, server: &ToolServer) -> Result<()> {
+        let commands = self.connection()?;
+        let directory = directory.to_owned();
+        let server = server.clone();
+        commands
+            .reply_with(move |reply| connection::Command::RegisterTools {
+                directory,
+                server,
+                reply,
+            })
+            .await
+    }
+
+    async fn unregister_tools(&self, directory: &str, name: &str) -> Result<()> {
+        let commands = self.connection()?;
+        let directory = directory.to_owned();
+        let name = name.to_owned();
+        commands
+            .reply_with(move |reply| connection::Command::UnregisterTools {
+                directory,
+                name,
+                reply,
+            })
             .await
     }
 

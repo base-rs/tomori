@@ -734,6 +734,75 @@ pub async fn put_instruction<'scope>(
     Ok(())
 }
 
+/// The path of the MCP server `name` registered at runtime for `directory`.
+fn mcp_path(directory: &str, name: &str) -> String {
+    format!(
+        "/api/experimental/mcp/{}?location%5Bdirectory%5D={}",
+        urlencoding(name),
+        urlencoding(directory)
+    )
+}
+
+/// `PUT /api/experimental/mcp/:server?location[directory]=`: add the remote MCP server `server` for `directory`, or
+/// replace one of its name, connecting it at once. OpenCode keeps it until it restarts. Tomori's own server never needs
+/// OAuth, so OpenCode is told not to look for it.
+pub async fn put_mcp<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    directory: &str,
+    server: &tomori_backend::ToolServer,
+    cancellation: &Cancellation,
+) -> Result<(), Failure> {
+    let headers: serde_json::Map<String, Value> = server
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+        .collect();
+    let payload = serde_json::json!({
+        "config": {
+            "type": "remote",
+            "url": server.url,
+            "headers": headers,
+            "oauth": false,
+        }
+    });
+    let request = with_json(Method::PUT, &mcp_path(directory, &server.name), &payload);
+    let response = exchange(
+        client,
+        request,
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    read_json(response, cancellation).await?;
+    Ok(())
+}
+
+/// `DELETE /api/experimental/mcp/:server?location[directory]=`: stop the MCP server `name` for `directory` and remove
+/// it until OpenCode restarts. OpenCode answers not found for one it does not have.
+pub async fn delete_mcp<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    directory: &str,
+    name: &str,
+    cancellation: &Cancellation,
+) -> Result<(), Failure> {
+    let request = Request::new(
+        Method::DELETE,
+        Path::from(mcp_path(directory, name)),
+        EmptyBody,
+    );
+    let response = exchange(
+        client,
+        request,
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    read_json(response, cancellation).await?;
+    Ok(())
+}
+
 /// `DELETE /api/experimental/session/:id/instructions/entries/:key`: remove one instruction entry, which OpenCode
 /// announces to the model at its next step boundary.
 pub async fn delete_instruction<'scope>(
@@ -1931,6 +2000,15 @@ pub(crate) mod tests {
                 );
                 assert_eq!(
                     failed(delete_instruction(client, resolved, "s1", "k", cancellation).await).0,
+                    None
+                );
+                let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:1/mcp");
+                assert_eq!(
+                    failed(put_mcp(client, resolved, "/tmp", &server, cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(delete_mcp(client, resolved, "/tmp", "tomori", cancellation).await).0,
                     None
                 );
                 assert_eq!(

@@ -47,6 +47,8 @@ The server says in `Welcome` the name it knows the participant by. A client offe
 
 **Protocol version.** These changes raise the protocol version. A participant's handle replaces their identity in shared state, and Hello and `Welcome` change; an older client could not recognize its own queue entries.
 
+**Tomori's MCP endpoint.** The tools Tomori offers agents are served on a listener of their own, on a loopback address by default, never on the clients' port, so headsets and visitors cannot reach them. It serves plain HTTP, since only processes on the server's machine use it, to requests carrying a bearer token of 256 bits made for each run and kept only in memory, which the server gives the agent's service when it registers the endpoint, and refuses requests from web pages. A tool that acts on a space acts on the space bound to the session that called it, which OpenCode names in each call's `_meta`: OpenCode sets it, not the model, and only OpenCode is given the token, so naming another session needs the token. A call naming no session, or one no open space is bound to, does nothing. The agent acts for the space's owners: it may change its own space's speech setting and environment, as an owner may, and nothing beyond its own space; each change is shown to everyone in the space, announced by the agent and logged. See `mcp.md`.
+
 **Data source credentials.** A token a server is given for a data source, such as the GitHub environment's (see `github.md`), stays on the server: it is used only in the server's own requests to that source, and never sent to a client, put in a space's state or kept spaces, told to the agent or logged.
 
 **Repository text is untrusted.** Anyone can open an issue or pull request on a public repository, so the titles, authors and labels the GitHub environment tells the agent are marked as untrusted repository content, quoted so that they cannot end their quotation or the context block or forge another, and the environment's layer of the agent's instructions says they are data, never instructions (see `github.md`).
@@ -63,7 +65,7 @@ Checking credentials on the HTTP request means a refused or unauthenticated clie
 
 ## Scope
 
-The server's HTTP handling of `/connect` and its web pages, its role checks, token store, display names, state directory and command-line options; `crates/security`; the protocol's Hello, `Welcome`, role, knock, participant handle and display name; the Bonjour TXT record; and how clients store credentials, pin certificates, pair and knock.
+The server's HTTP handling of `/connect` and its web pages, its MCP endpoint's authentication and how a tool call is scoped to the calling session's space (see `mcp.md`), its role checks, token store, display names, state directory and command-line options; `crates/security`; the protocol's Hello, `Welcome`, role, knock, participant handle and display name; the Bonjour TXT record; and how clients store credentials, pin certificates, pair and knock.
 
 ## Validation
 

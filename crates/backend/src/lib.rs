@@ -26,6 +26,10 @@ pub struct Capabilities {
     /// space is bound to through [`Backend::forget_instructions`]. See `design/agent-backends.md`.
     #[serde(default)]
     pub instructions: bool,
+    /// Tomori's MCP server can be registered with the agent for a directory through [`Backend::register_tools`], so
+    /// that its sessions there can use Tomori's tools. See `design/mcp.md`.
+    #[serde(default)]
+    pub tools: bool,
 }
 
 /// Whether `key` can name an instruction entry: lowercase letters, digits, `.`, `_` and `-`, starting with a letter or
@@ -40,6 +44,55 @@ pub fn valid_instruction_key(key: &str) -> bool {
                 || character.is_ascii_digit()
                 || matches!(character, '.' | '_' | '-')
         })
+}
+
+/// An MCP server that Tomori hosts for agents, to register with an agent for a directory: its name, the URL of its
+/// streamable HTTP endpoint, and the headers a request to it carries, such as its bearer token. See `design/mcp.md`.
+///
+/// The headers are secret, so they are never printed: [`fmt::Debug`] names them without their values.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ToolServer {
+    /// The name the agent knows the server by, which prefixes its tools' names, such as `tomori`.
+    pub name: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+impl ToolServer {
+    /// The server named `name` at `url`, with no headers.
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// The same server, with every request carrying the header `name` with `value`.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+impl fmt::Debug for ToolServer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        formatter
+            .debug_struct("ToolServer")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .finish()
+    }
+}
+
+fn unsupported_tools() -> Error {
+    Error::new(
+        ErrorKind::Unsupported,
+        "the backend does not take Tomori's tools",
+    )
 }
 
 fn unsupported_instructions() -> Error {
@@ -460,6 +513,30 @@ pub trait Backend: Send + Sync {
         std::future::ready(Err(unsupported_instructions()))
     }
 
+    /// Register `server` with the agent for `directory`, so that its sessions there can use its tools, replacing any
+    /// server registered there under the same name. Registering it again is harmless. The agent may forget it when it
+    /// restarts, so the server registers it again whenever it binds a session there and after a resynchronization.
+    /// Fails with [`ErrorKind::Unsupported`] unless the backend has [`Capabilities::tools`]. See `design/mcp.md`.
+    fn register_tools(
+        &self,
+        directory: &str,
+        server: &ToolServer,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let _ = (directory, server);
+        std::future::ready(Err(unsupported_tools()))
+    }
+
+    /// Remove the server named `name` from the agent for `directory`. One the agent does not have is not an error.
+    /// Fails with [`ErrorKind::Unsupported`] unless the backend has [`Capabilities::tools`].
+    fn unregister_tools(
+        &self,
+        directory: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let _ = (directory, name);
+        std::future::ready(Err(unsupported_tools()))
+    }
+
     /// The server is shutting down: stop waiting for the agent. Requests still waiting for it, such as for a
     /// connection to return, fail at once, and so do later ones, so that shutdown never waits on the agent. Sessions
     /// are closed separately. Must not block.
@@ -547,5 +624,25 @@ mod tests {
         }))
         .unwrap();
         assert!(!capabilities.instructions);
+        assert!(!capabilities.tools);
+    }
+
+    #[test]
+    fn a_tool_server_never_shows_its_headers() {
+        let server = ToolServer::new("tomori", "http://127.0.0.1:1/mcp")
+            .with_header("Authorization", "Bearer tomori_secret");
+        assert_eq!(
+            server.headers,
+            [(
+                "Authorization".to_owned(),
+                "Bearer tomori_secret".to_owned()
+            )]
+        );
+        let shown = format!("{server:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert_eq!(
+            shown,
+            r#"ToolServer { name: "tomori", url: "http://127.0.0.1:1/mcp", headers: ["Authorization"] }"#
+        );
     }
 }

@@ -30,6 +30,8 @@ use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
+pub(crate) mod tools;
+
 pub type ConnectionId = u64;
 
 /// A registered connection: its identifier, its outbox, the flag it sets when data arrives, and where it reports its writes. See [`Hub::connect`].
@@ -286,6 +288,8 @@ pub struct Hub {
     pairing_prompt: RwLock<Option<PairingPrompt>>,
     pairing_timeout: RwLock<Duration>,
     knock_timeout: RwLock<Duration>,
+    /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
+    tools: tools::Tools,
     this: Weak<Hub>,
 }
 
@@ -1449,6 +1453,7 @@ impl Hub {
             pairing_prompt: RwLock::new(None),
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
+            tools: tools::Tools::default(),
             this: this.clone(),
         });
         let this = Arc::downgrade(&hub);
@@ -3859,6 +3864,8 @@ impl Hub {
             channel: None,
             stage: crate::stage::Stage::default(),
         });
+        // Tomori's tools are registered for its directory, if they are not already.
+        self.tools_due(state.shutting_down, &request.backend, &request.directory);
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
         // The environment's server side, if it has one, runs for the space from when it is bound.
@@ -4012,6 +4019,8 @@ impl Hub {
         // Its directory has been resolved within the workspace roots again, so its environment's server side runs for it as for a space just created.
         record.restoring = false;
         self.reconcile_server_sides(&mut state);
+        let model = &state.space(id).expect("found above").model;
+        self.tools_due(state.shutting_down, &model.backend, &model.directory);
         state.pump(id);
         state.touch_space(id);
         drop(state);
@@ -4081,6 +4090,7 @@ impl Hub {
 
     pub(crate) fn space_event(&self, space: &str, event: Event) {
         let mut state = self.lock();
+        let shutting_down = state.shutting_down;
         let Some(record) = state.space_mut(space) else {
             return;
         };
@@ -4102,6 +4112,12 @@ impl Hub {
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
             record.instruct(true);
+            // It forgets Tomori's tools when it restarts, too.
+            self.tools_due(
+                shutting_down,
+                &record.model.backend,
+                &record.model.directory,
+            );
         }
         // Stamped now rather than when the snapshot is sent, so a level that ends and starts again within one
         // snapshot interval starts its age again.
@@ -4351,6 +4367,10 @@ impl Hub {
         let mut entries = record
             .model
             .instruction_entries(self.environments().instructions(&record.model.environment));
+        // Only with the other layers, which a closed space or a backend without instructions is not given.
+        if !entries.is_empty() {
+            entries.extend(self.tools_entry(&record.model.backend));
+        }
         if !all {
             entries.retain(|(key, _)| key == crate::instructions::SPACE_KEY);
         }
@@ -4378,6 +4398,9 @@ impl Hub {
         record.waker = None;
         // A closed space no longer runs its environment's server side.
         self.reconcile_server_sides(&mut state);
+        // Nor needs Tomori's tools, unless another space in its directory does.
+        let model = &state.space(space).expect("found above").model;
+        self.tools_due(state.shutting_down, &model.backend, &model.directory);
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
         state.touch_space(space);

@@ -124,6 +124,9 @@ pub struct TestServer {
     pub tokens: Option<Arc<tomori_security::TokenStore>>,
     /// The token store's temporary directory, removed when the server is dropped.
     state: Option<std::path::PathBuf>,
+    /// Where Tomori's MCP endpoint listens, for a server that serves it; see [`TestServer::with_tools`].
+    pub tools: Option<SocketAddr>,
+    hub: Arc<crate::hub::Hub>,
     cancellation: Cancellation,
     thread: Option<JoinHandle<()>>,
 }
@@ -238,6 +241,34 @@ impl TestServer {
         backend: FakeBackend,
         build: impl FnOnce(Backends) -> Server + Send + 'static,
     ) -> Self {
+        Self::launch(backend, build, false)
+    }
+
+    /// A server as [`TestServer::with_server`] makes, also serving Tomori's MCP endpoint on another ephemeral loopback port, at [`TestServer::tools`]. See `design/mcp.md`.
+    pub fn with_tools(
+        backend: FakeBackend,
+        build: impl FnOnce(Backends) -> Server + Send + 'static,
+    ) -> Self {
+        Self::launch(backend, build, true)
+    }
+
+    /// The bearer token of the MCP endpoint of a server made by [`TestServer::with_tools`], once it serves it, as its registration with backends carries it, so that a test can call the endpoint before anything is registered.
+    pub fn tools_token(&self) -> Option<String> {
+        self.hub.served_tools().and_then(|server| {
+            server
+                .headers
+                .iter()
+                .find(|(name, _)| name == "Authorization")
+                .and_then(|(_, value)| value.strip_prefix("Bearer "))
+                .map(str::to_owned)
+        })
+    }
+
+    fn launch(
+        backend: FakeBackend,
+        build: impl FnOnce(Backends) -> Server + Send + 'static,
+        tools: bool,
+    ) -> Self {
         let cancellation = Cancellation::new();
         let (sender, receiver) = channel();
         let thread = {
@@ -257,28 +288,39 @@ impl TestServer {
                 let server = build(Backends::new().with(backend))
                     .with_default_workspace_roots(roots)
                     .with_default_environments(environments());
+                let hub = server.hub.clone();
                 block_on(async {
                     let address = "127.0.0.1:0".parse().unwrap();
                     let listener = crate::bind(&scheduler, address, &cancellation)
                         .await
                         .expect("the listener binds");
-                    sender
-                        .send(scheduler.socket_local_address(&listener).unwrap())
-                        .unwrap();
-                    server
-                        .run(&scheduler, listener, &cancellation)
-                        .await
-                        .expect("the server runs until it is cancelled");
+                    let local = scheduler.socket_local_address(&listener).unwrap();
+                    let served = if tools {
+                        let tools = crate::bind(&scheduler, address, &cancellation)
+                            .await
+                            .expect("the tools' listener binds");
+                        let at = scheduler.socket_local_address(&tools).unwrap();
+                        sender.send((local, Some(at), hub)).unwrap();
+                        server
+                            .run_with_tools(&scheduler, listener, tools, &cancellation)
+                            .await
+                    } else {
+                        sender.send((local, None, hub)).unwrap();
+                        server.run(&scheduler, listener, &cancellation).await
+                    };
+                    served.expect("the server runs until it is cancelled");
                 });
                 block_on(scheduler.shutdown());
             })
         };
-        let address = receiver.recv().expect("the server starts");
+        let (address, tools, hub) = receiver.recv().expect("the server starts");
         Self {
             address,
             backend,
             tokens: None,
             state: None,
+            tools,
+            hub,
             cancellation,
             thread: Some(thread),
         }

@@ -45,7 +45,8 @@ pub(crate) fn usage(backends: &str, options: &[CommandOption]) -> String {
                      [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
                                           [--auth MODE] [--no-visitors]
-                     [--max-visitors COUNT] [--state-directory PATH]{synopsis}
+                     [--max-visitors COUNT] [--state-directory PATH] [--mcp-bind ADDRESS]
+                     [--no-mcp]{synopsis}
        tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
 
 Options:
@@ -101,6 +102,10 @@ Options:
                                                                      Where the token store, the certificate and the spaces kept across restarts
                        are (default $XDG_STATE_HOME/tomori, or ~/.local/state/tomori). One server
                        at a time uses a state directory, so give each server its own.
+  --mcp-bind ADDRESS   Where Tomori's MCP endpoint, which gives agents Tomori's tools, listens
+                       (default 127.0.0.1:0, a free loopback port). It serves plain HTTP to holders
+                       of a token made for each run, so keep it on a loopback address.
+  --no-mcp             Serve no MCP endpoint, so agents have no Tomori tools.
 {described}  --help               Show this help."
     )
 }
@@ -133,6 +138,8 @@ pub(crate) struct Arguments {
     visitors: bool,
     max_visitors: usize,
     state_directory: Option<PathBuf>,
+    /// Where Tomori's MCP endpoint listens, or `None` for none. See `design/mcp.md`.
+    mcp: Option<SocketAddr>,
     /// The application's own options that were given, each by its place among the builder's options, with its value, the last given of each.
     options: Vec<(usize, String)>,
 }
@@ -183,6 +190,7 @@ pub(crate) fn parse(
         visitors: true,
         max_visitors: crate::DEFAULT_MAX_VISITORS,
         state_directory: None,
+        mcp: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
         options: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
@@ -267,6 +275,15 @@ pub(crate) fn parse(
             }
             "--name" => parsed.name = Some(arguments.next().ok_or("--name needs a name")?),
             "--no-advertise" => parsed.advertise = false,
+            "--mcp-bind" => {
+                let value = arguments.next().ok_or("--mcp-bind needs an address")?;
+                parsed.mcp = Some(
+                    value
+                        .parse()
+                        .map_err(|error| format!("invalid address {value:?}: {error}"))?,
+                );
+            }
+            "--no-mcp" => parsed.mcp = None,
             "--no-advertise-attention" => parsed.advertise_attention = false,
             "--keepalive-interval" => {
                 parsed.keepalive.interval = seconds(&argument, arguments.next())?
@@ -965,6 +982,13 @@ pub(crate) async fn serve(
     let address = scheduler
         .socket_local_address(&listener)
         .expect("a bound listener has an address");
+    let tools =
+        match arguments.mcp {
+            Some(tools) => Some(crate::bind(scheduler, tools, cancellation).await.map_err(
+                |error| format!("Could not listen for Tomori's tools on {tools}: {error}"),
+            )?),
+            None => None,
+        };
     let scheme = if fingerprint.is_some() {
         "https"
     } else {
@@ -978,7 +1002,14 @@ pub(crate) async fn serve(
         .lock()
         .expect("the advertisement is never left poisoned") =
         advertise(arguments, address, server.counts(), fingerprint, start);
-    let served = server.run(scheduler, listener, cancellation).await;
+    let served = match tools {
+        Some(tools) => {
+            server
+                .run_with_tools(scheduler, listener, tools, cancellation)
+                .await
+        }
+        None => server.run(scheduler, listener, cancellation).await,
+    };
     // Withdraw the advertisement as soon as serving ends.
     drop(
         advertised
@@ -1102,6 +1133,25 @@ mod tests {
         ] {
             assert_eq!(arguments(list).err().as_deref(), Some(error), "{list:?}");
         }
+        assert_eq!(
+            arguments(&["--mcp-bind"]).err().as_deref(),
+            Some("--mcp-bind needs an address")
+        );
+        let error = arguments(&["--mcp-bind", "nowhere"]).err().unwrap();
+        assert!(
+            error.starts_with("invalid address \"nowhere\": "),
+            "{error}"
+        );
+        // Tomori's tools are served on a free loopback port, unless asked elsewhere or not at all.
+        assert_eq!(
+            arguments(&[]).unwrap().mcp,
+            Some("127.0.0.1:0".parse().unwrap())
+        );
+        assert_eq!(
+            arguments(&["--mcp-bind", "127.0.0.1:8766"]).unwrap().mcp,
+            Some("127.0.0.1:8766".parse().unwrap())
+        );
+        assert_eq!(arguments(&["--no-mcp"]).unwrap().mcp, None);
         let error = arguments(&["--bind", "nowhere"]).err().unwrap();
         assert!(
             error.starts_with("invalid address \"nowhere\": "),
@@ -1672,6 +1722,35 @@ mod tests {
             asked.recv_timeout(Duration::from_secs(10)).unwrap().3,
             fingerprint
         );
+        cancellation.cancel();
+        assert_eq!(serving.join().unwrap(), Ok(()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_address_the_server_cannot_listen_for_tools_on_is_reported() {
+        let directory = directory("tools-unbound");
+        // An address of the documentation range, which is on no interface here.
+        let arguments = local(&directory, &["--auth", "open", "--mcp-bind", "192.0.2.1:0"]);
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        let (_, _cancellation, serving) = serving(server, arguments, fingerprint);
+        let error = serving.join().unwrap().err().unwrap();
+        assert!(
+            error.starts_with("Could not listen for Tomori's tools on 192.0.2.1:0: "),
+            "{error}"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_server_without_tools_serves_until_cancelled() {
+        let directory = directory("no-tools");
+        let mut arguments = local(&directory, &["--auth", "open", "--no-mcp"]);
+        // Asked to advertise once it listens.
+        arguments.advertise = true;
+        let (server, fingerprint) = configured(&arguments).unwrap();
+        let (asked, cancellation, serving) = serving(server, arguments, fingerprint);
+        asked.recv_timeout(Duration::from_secs(10)).unwrap();
         cancellation.cancel();
         assert_eq!(serving.join().unwrap(), Ok(()));
         std::fs::remove_dir_all(directory).unwrap();
