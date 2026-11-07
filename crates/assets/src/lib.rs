@@ -3,7 +3,7 @@
 
 //! Assets for Tomori's environments, loaded at runtime: content-addressed references to them, the sources and library
 //! that load them, a reader of binary glTF that treats every file as untrusted, the models it reads, instances of them
-//! with poses, and, with the `gpu` feature, drawing them skinned with wgpu.
+//! with poses, a small deterministic animator, and, with the `gpu` feature, drawing them skinned with wgpu.
 //!
 //! The layers, each usable without the ones after it:
 //!
