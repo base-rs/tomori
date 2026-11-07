@@ -75,6 +75,12 @@ fn attention_pulse(attention: Attention, time: f32) -> [f32; 3] {
     attention_colour(attention).map(|value| value * pulse)
 }
 
+/// `color` glowing at `time`: its brightness breathes gently, about once every three seconds, so that a cue is noticed without flashing.
+fn glow(color: [f32; 3], time: f32) -> [f32; 3] {
+    let breath = 0.85 + 0.15 * (time * TAU / 3.0).sin();
+    color.map(|value| value * breath)
+}
+
 fn hsv(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
     let h = hue.rem_euclid(1.0) * 6.0;
     let c = value * saturation;
@@ -261,11 +267,12 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
                 MenuKind::Person(color) => {
                     out.push(cube(p, Vec3::splat(s * 0.9), color, face));
                 }
+                // A wrist's cue is a small glow, of a steady size, breathing slowly rather than flashing.
                 MenuKind::Cue => {
-                    out.push(cube(p, Vec3::splat(s * pulse), [1.0, 0.6, 0.2], face));
+                    out.push(cube(p, Vec3::splat(s), glow([1.0, 0.6, 0.2], time), face))
                 }
                 MenuKind::ProblemCue => {
-                    out.push(cube(p, Vec3::splat(s * pulse), [1.0, 0.2, 0.15], face));
+                    out.push(cube(p, Vec3::splat(s), glow([1.0, 0.2, 0.15], time), face))
                 }
             }
         }
@@ -983,6 +990,31 @@ mod tests {
             (MenuKind::ProblemCue, 1),
         ] {
             assert_eq!(drawn(Kind::Menu(kind), 0.25).len(), cubes);
+        }
+    }
+
+    #[test]
+    fn a_wrist_cue_glows_steadily_rather_than_flashing() {
+        for kind in [MenuKind::Cue, MenuKind::ProblemCue] {
+            let frames: Vec<Cube> = (0..60)
+                .flat_map(|step| drawn(Kind::Menu(kind), step as f32 * 0.05))
+                .collect();
+            assert_eq!(frames.len(), 60);
+            // Its size never changes, and it never dims far, so it does not blink.
+            assert!(frames.iter().all(|cube| cube.scale == frames[0].scale));
+            // Both are at full red at their brightest.
+            let brightness: Vec<f32> = frames.iter().map(|cube| cube.color[0]).collect();
+            assert!(
+                brightness
+                    .iter()
+                    .all(|&value| (0.69..=1.0).contains(&value))
+            );
+            // Over three seconds it changes by little from one frame to the next.
+            assert!(
+                brightness
+                    .windows(2)
+                    .all(|pair| (pair[0] - pair[1]).abs() < 0.03)
+            );
         }
     }
 

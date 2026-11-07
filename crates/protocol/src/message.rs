@@ -410,6 +410,9 @@ pub enum ClientMessage {
     },
 }
 
+/// The error of a [`ServerMessage::TranscriptFailed`] for a recording with no speech in it, as when X was pressed by accident: nothing the participant said was lost, so a client shows it only briefly, where the words were spoken, and not as a problem. See `design/speech.md`.
+pub const NO_SPEECH: &str = "no speech heard";
+
 /// Control messages sent by the server.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

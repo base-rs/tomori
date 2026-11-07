@@ -3536,7 +3536,7 @@ impl Hub {
         {
             Some("The agent session has ended, so nothing was sent.")
         } else if text.is_empty() {
-            Some("no speech heard")
+            Some(tomori_protocol::NO_SPEECH)
         } else if text.len()
             > if record.answer.is_some() {
                 limits::ANSWER_BYTES

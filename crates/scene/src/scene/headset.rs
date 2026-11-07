@@ -1449,6 +1449,182 @@ mod tests {
         }
     }
 
+    /// The utterance X began, from the actions the frame queued.
+    fn begun(conversation: &mut Conversation) -> String {
+        conversation
+            .take_actions()
+            .into_iter()
+            .find_map(|action| match action {
+                tomori_client::connection::Action::BeginUtterance(begun) => Some(begun.id),
+                _ => None,
+            })
+            .expect("recording begins")
+    }
+
+    /// The right controller in its neutral grip, palm inwards, so that the transcript does not show, holding X when `talk`.
+    fn neutral(talk: bool) -> Controls {
+        Controls {
+            talk,
+            ..right_grip(palm_up_by(90.0))
+        }
+    }
+
+    /// What a frame shows of the participant's words and what waits for them: the recording card, the pill's second row, and the right wrist's cue, `Some(true)` for a problem.
+    fn shown(drawn: &Drawn) -> (Option<String>, Option<String>, Option<bool>) {
+        let card = drawn.frame.panels.indicator[0]
+            .canvas
+            .as_ref()
+            .map(|canvas| canvas.plain());
+        let need = drawn
+            .frame
+            .panels
+            .pill
+            .canvas
+            .as_ref()
+            .and_then(|canvas| canvas.rows.get(1))
+            .map(|row| row.plain());
+        let cue = drawn.frame.arrival.as_ref().and_then(|arrival| {
+            arrival.scene.objects.iter().find_map(|object| {
+                (object.key == crate::arrival::Key::Menu(hand_menu::MenuKey::WristCue)).then_some(
+                    object.kind == crate::arrival::Kind::Menu(hand_menu::MenuKind::ProblemCue),
+                )
+            })
+        });
+        (card, need, cue)
+    }
+
+    #[test]
+    fn words_with_no_speech_fade_from_the_card_and_the_next_words_replace_words_not_sent() {
+        use tomori_protocol::ServerMessage;
+        let mut rig = Rig::new(joined());
+        let at = Duration::from_millis;
+        // Press X, release it at `released`, and have the server say `failed`, or transcribe `words`.
+        let say = |rig: &mut Rig, pressed: u64, failed: Option<&str>, words: &str| {
+            rig.frame(&neutral(true), [None, None], at(pressed));
+            let utterance = begun(&mut rig.conversation);
+            rig.frame(&neutral(false), [None, None], at(pressed + 2000));
+            let message = match failed {
+                Some(error) => ServerMessage::TranscriptFailed {
+                    utterance,
+                    error: error.into(),
+                },
+                None => ServerMessage::Transcript {
+                    utterance,
+                    text: words.into(),
+                    finished: true,
+                },
+            };
+            rig.conversation
+                .apply(tomori_client::Event::Message(message));
+        };
+        // An accidental press of X, with no speech in it: the card says so, and nothing else does, as nothing was lost.
+        say(&mut rig, 0, Some(tomori_protocol::NO_SPEECH), "");
+        let (card, need, cue) = shown(&rig.frame(&neutral(false), [None, None], at(2500)));
+        assert!(card.unwrap().starts_with("Not sent: no speech heard"));
+        assert_eq!((need, cue), (None, None));
+        // After a few seconds the card fades, and nothing of it is left, even sixteen minutes on.
+        for later in [8000, 16 * 60_000] {
+            let drawn = rig.frame(&neutral(false), [None, None], at(later));
+            assert_eq!(shown(&drawn), (None, None, None), "at {later} ms");
+        }
+        // Words that were lost are a problem on the pill too, which talking again does not wipe before the next words have an outcome. The card's outcomes fade by the clock, so a new rig starts its frames from it again.
+        let mut rig = Rig::new(joined());
+        let start = 0;
+        say(&mut rig, start, Some("Speech recognition failed."), "");
+        let (card, need, cue) = shown(&rig.frame(&neutral(false), [None, None], at(start + 2500)));
+        assert!(card.unwrap().starts_with("Not sent: Speech"));
+        assert!(need.unwrap().contains("Speech recognition failed."));
+        // The card showed it, so the wrist does not cue it.
+        assert_eq!(cue, None);
+        let (card, need, _) = shown(&rig.frame(&neutral(true), [None, None], at(start + 10_000)));
+        assert!(card.unwrap().contains("REC"));
+        assert!(need.unwrap().contains("Speech recognition failed."));
+        rig.frame(&neutral(false), [None, None], at(start + 10_500));
+        // The next words, and the two after them, are sent: each one's outcome replaces the last.
+        rig.conversation.take_actions();
+        for (index, words) in ["Run the tests.", "Then the lints.", "And merge it."]
+            .into_iter()
+            .enumerate()
+        {
+            let pressed = start + 20_000 + 10_000 * index as u64;
+            say(&mut rig, pressed, None, words);
+            let (card, need, cue) =
+                shown(&rig.frame(&neutral(false), [None, None], at(pressed + 2100)));
+            // The card's outcomes are timed by the clock, which the rig's frames run well ahead of, so "Queued" has already faded here, as the conversation's tests show it doing; nothing of the failure is left.
+            assert_eq!((card, need, cue), (None, None, None), "{words}");
+        }
+    }
+
+    #[test]
+    fn the_right_wrist_cues_a_problem_until_the_transcript_shows_it_and_a_request_until_it_is_decided()
+     {
+        let mut rig = Rig::new(joined());
+        let at = Duration::from_millis;
+        let lost =
+            |state: &mut tomori_protocol::SpaceState| state.error = Some("Lost the agent".into());
+        // A problem arriving while the participant looks elsewhere is cued on the right wrist, in red.
+        rig.conversation.apply(space(lost));
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(0))).2,
+            Some(true)
+        );
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(500))).2,
+            Some(true)
+        );
+        // Palm up, the transcript shows it, and the cue is hidden.
+        let up = right_grip(palm_up_by(0.0));
+        rig.frame(&up, [None, None], at(1000));
+        let drawn = rig.frame(&up, [None, None], at(1000) + HOLD);
+        assert!(drawn.frame.panels.wrist.model.is_some());
+        assert_eq!(shown(&drawn).2, None);
+        // It has been seen, so turning the palm back does not cue it again, however long it lasts.
+        for later in [2000, 3000, 60_000] {
+            let drawn = rig.frame(&neutral(false), [None, None], at(later));
+            assert!(drawn.frame.panels.wrist.model.is_none());
+            assert_eq!(shown(&drawn).2, None, "at {later} ms");
+        }
+        // A newer problem is news again.
+        rig.conversation.apply(space(|state| {
+            state.error = Some("The agent stopped.".into())
+        }));
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(61_000))).2,
+            Some(true)
+        );
+        // So is the first one, once it has gone and come back.
+        rig.conversation.apply(space(|_| {}));
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(62_000))).2,
+            None
+        );
+        rig.conversation.apply(space(lost));
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(63_000))).2,
+            Some(true)
+        );
+        // A request genuinely waits: it is cued in amber, before and after the transcript shows it, until it is decided.
+        let mut rig = Rig::new(approval_waiting());
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(0))).2,
+            Some(false)
+        );
+        rig.frame(&up, [None, None], at(1000));
+        assert_eq!(
+            shown(&rig.frame(&up, [None, None], at(1000) + HOLD)).2,
+            None
+        );
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(3000))).2,
+            Some(false)
+        );
+        rig.conversation.apply(space(|_| {}));
+        assert_eq!(
+            shown(&rig.frame(&neutral(false), [None, None], at(4000))).2,
+            None
+        );
+    }
+
     #[test]
     fn the_transcript_faces_the_middle_of_the_head() {
         let mut rig = Rig::new(joined());

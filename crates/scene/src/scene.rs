@@ -515,6 +515,7 @@ impl Step {
         }
         let wrist_shown = self.wrist.state().on_hand();
         let wrist_active = self.wrist.state().active();
+        let wrist_waiting = conversation.wrist_waiting();
         // What the ray pointed at last frame, so that the description of the mode pointed at shows beneath the modes, in rows that are there whatever is pointed at, so that the rows do not move under the ray.
         let pointed = match &self.highlighted {
             Some(arrival::Key::Menu(key)) => Some(key.clone()),
@@ -533,12 +534,9 @@ impl Step {
                 _ => Vec::new(),
             };
             // A cue on the right wrist while the transcript is closed and something waits on it.
-            if let (true, Some(palm), Some(problem), false) = (
-                senses.cues,
-                senses.right_palm,
-                conversation.wrist_waiting(),
-                wrist_active,
-            ) {
+            if let (true, Some(palm), Some(problem), false) =
+                (senses.cues, senses.right_palm, wrist_waiting, wrist_active)
+            {
                 objects.push(hand_menu::wrist_cue(&palm, problem));
             }
             objects

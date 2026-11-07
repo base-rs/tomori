@@ -55,6 +55,20 @@ fn plays_received_participants_and_agent_speech_together() {
 }
 
 #[test]
+fn a_replay_stops_being_reported_once_it_has_been_quiet_for_a_pause() {
+    let (sender, mut player, control) = player();
+    sender.send(frame(REPLAY_SOURCE, 0, 7)).unwrap();
+    render(&mut player, FRAME);
+    assert!(control.is_replaying());
+    // A breath between its segments is still the replay.
+    render(&mut player, 400);
+    assert!(control.is_replaying());
+    // Past the pause it has ended, so the pill's `Replaying` clears.
+    render(&mut player, 400);
+    assert!(!control.is_replaying());
+}
+
+#[test]
 fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
     let (sender, mut player, control) = player();
     control.set_agent_muted(true);
