@@ -35,17 +35,19 @@ impl RootMotion {
     }
 
     /// How far the clip carries what it animates, from `start` to `end` seconds of animation `animation` of `model`,
-    /// sampled `rate` times a second, along `forward` in the model's space, by its planted feet, the nodes `feet`: from
-    /// each sample to the next, it moves as far as the foot on the ground sweeps back, the feet near the lowest counting
-    /// as on the ground, and of those the one sweeping back the most. So a walk moves as its planted foot carries it,
-    /// unevenly, and a scrambling sprint as its pushing foot does, and neither foot slides.
+    /// sampled `rate` times a second, along `forward` in the model's space, by its planted feet: each foot a point in its
+    /// node's space, such as its sole. From each sample to the next, it moves as far as the foot on the ground sweeps
+    /// back, the feet within `contact` of the lowest counting as on the ground, and of those the one sweeping back the
+    /// most. So a walk, with a small `contact`, moves as its planted foot carries it, unevenly, and a scrambling sprint,
+    /// with a large one, as its pushing foot does, and neither foot slides.
     pub fn planted(
         model: &Model,
         animation: usize,
         (start, end): (f32, f32),
-        feet: &[usize],
+        feet: &[(usize, Vec3)],
         forward: Vec3,
         rate: f32,
+        contact: f32,
     ) -> Self {
         let step = 1.0 / rate;
         let samples = ((end - start) * rate).round().max(1.0) as usize;
@@ -54,7 +56,7 @@ impl RootMotion {
                 let time = start + sample as f32 * step;
                 let globals = Pose::sampled(model, animation, time).globals(model);
                 feet.iter()
-                    .map(|foot| globals[*foot].w_axis.truncate())
+                    .map(|(foot, point)| globals[*foot].transform_point3(*point))
                     .collect()
             })
             .collect();
@@ -65,16 +67,10 @@ impl RootMotion {
                 .iter()
                 .map(|foot| foot.y)
                 .fold(f32::INFINITY, f32::min);
-            let tallest = pair[0]
-                .iter()
-                .map(|foot| foot.y)
-                .fold(f32::NEG_INFINITY, f32::max);
-            // Within a tenth of the feet's spread of the lowest, or both, when they are level.
-            let contact = lowest + (tallest - lowest) * 0.1 + 1e-6;
             let swept = pair[0]
                 .iter()
                 .zip(&pair[1])
-                .filter(|(before, _)| before.y <= contact)
+                .filter(|(before, _)| before.y <= lowest + contact)
                 .map(|(before, after)| -(*after - *before).dot(forward))
                 .fold(f32::NEG_INFINITY, f32::max);
             let last = *distances.last().expect("begins with 0");

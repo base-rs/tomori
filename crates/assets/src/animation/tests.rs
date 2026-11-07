@@ -366,9 +366,24 @@ fn planted_feet_carry_what_they_animate_as_far_as_they_sweep_back() {
     }
     .checked(&Limits::default())
     .unwrap();
-    let motion = RootMotion::planted(&model, 0, (0.0, 2.0), &[0, 1], Vec3::X, 2.0);
+    let feet = [(0, Vec3::ZERO), (1, Vec3::ZERO)];
+    let motion = RootMotion::planted(&model, 0, (0.0, 2.0), &feet, Vec3::X, 2.0, 0.01);
     assert_eq!(motion.step, 0.5);
     assert_eq!(motion.distances.len(), 5);
     assert!((motion.at(1.0) - 1.0).abs() < 1e-5);
     assert!((motion.total() - 2.0).abs() < 1e-5);
+    // Taking every foot as on the ground, the one sweeping back the most carries it, here as far.
+    let scrambling = RootMotion::planted(&model, 0, (0.0, 2.0), &feet, Vec3::X, 2.0, f32::INFINITY);
+    assert!((scrambling.total() - 2.0).abs() < 1e-5);
+    // A point on a foot moves with it, wherever on the foot it is.
+    let soles = RootMotion::planted(
+        &model,
+        0,
+        (0.0, 2.0),
+        &[(0, Vec3::X), (1, Vec3::X)],
+        Vec3::X,
+        2.0,
+        0.01,
+    );
+    assert!((soles.total() - 2.0).abs() < 1e-5);
 }
