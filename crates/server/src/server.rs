@@ -261,21 +261,27 @@ impl Server {
     /// someone watches them, and never sends the token to clients, the agent or the logs. Call it after
     /// [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
     pub fn with_github(self, github: crate::github::GitHub) -> Self {
-        self.with_cards(crate::github::ENVIRONMENT, "GitHub", Arc::new(github))
+        self.with_cards(
+            tomori_protocol::environments::GITHUB,
+            "GitHub",
+            Arc::new(github),
+        )
     }
 
-    /// Offer the environment `id`, labelled `label`, whose spaces show the cards `source` reads.
+    /// Offer `environment`, one of Tomori's own, labelled `label`, whose spaces show the cards `source` reads.
     pub(crate) fn with_cards(
         mut self,
-        id: &str,
+        environment: tomori_protocol::environments::BuiltIn,
         label: &str,
         source: Arc<dyn crate::cards::CardSource>,
     ) -> Self {
         let name = source.source();
         self.hub.offer_environment(
-            Environment::new(id, label).with_instructions(crate::github::instructions(&name)),
+            Environment::built_in(environment, label)
+                .with_instructions(crate::github::instructions(&name)),
         );
-        self.hub.set_board(crate::cards::Board::new(id, name));
+        self.hub
+            .set_board(crate::cards::Board::new(environment.id, name));
         self.cards = Some(source);
         self
     }
@@ -1944,7 +1950,7 @@ mod tests {
 
     /// A server showing `source`'s cards, with an owner watching them in a space that shows them.
     fn server_with_watcher(source: Arc<dyn crate::cards::CardSource>) -> Server {
-        let server = server().with_cards("github", "GitHub", source);
+        let server = server().with_cards(tomori_protocol::environments::GITHUB, "GitHub", source);
         let (commands, _receiver) = async_channel::unbounded();
         let request = crate::hub::CreateRequest {
             title: "Cards".to_owned(),
@@ -1995,7 +2001,11 @@ mod tests {
         let live = Cancellation::new();
         // A server without cards reads none.
         block_on(server().refresh_cards(&scheduler, &live));
-        let server = server().with_cards("github", "GitHub", scripted(Vec::new()));
+        let server = server().with_cards(
+            tomori_protocol::environments::GITHUB,
+            "GitHub",
+            scripted(Vec::new()),
+        );
         assert!(
             server
                 .environments()

@@ -1674,7 +1674,7 @@ impl Conversation {
             .map_or(NONE, |(_, locomotion)| locomotion)
     }
 
-    /// The environments this build presents, each at its version, as its Hello lists them, each once: the grid first, always at version 1 since it is built in, then those it draws, at the versions their sceneries are registered at, and the GitHub environment's prototype, whose cards the scene presents over the grid, at version 1 unless a scenery is registered for it. See `design/environments.md`.
+    /// The environments this build presents, each at its version, as its Hello lists them, each once: the grid first, always at its built-in version, then those it draws, at the versions their sceneries are registered at, and the GitHub environment's prototype, whose cards the scene presents over the grid, at its built-in version unless a scenery is registered for it. Tomori's own are at the versions `tomori_protocol::environments` gives them, which the server offers them at. See `design/environments.md`.
     pub fn presented(&self) -> Vec<tomori_protocol::EnvironmentVersion> {
         let mut presented: Vec<Environment> = Vec::new();
         for environment in std::iter::once(Environment::MINIMAL)

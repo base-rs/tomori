@@ -9,6 +9,7 @@
 //! `design/server.md`.
 mod audio;
 mod cards;
+pub mod environments;
 mod frame;
 mod keepalive;
 mod message;

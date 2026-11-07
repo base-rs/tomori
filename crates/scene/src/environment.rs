@@ -37,18 +37,26 @@ impl Default for Environment {
 }
 
 impl Environment {
-    /// The grid, which every client draws.
-    pub const MINIMAL: Self = Self::new("minimal");
-    /// Tomori's moonlit sky.
-    pub const SKY: Self = Self::new("sky");
-    /// The GitHub environment's prototype, whose cards every client built on this crate presents over the grid, since the scene draws them rather than a scenery; see `design/github.md`.
-    pub const GITHUB: Self = Self::new("github");
+    /// The grid, which every client draws, at the identifier and version [`tomori_protocol::environments::MINIMAL`] gives the server and client alike.
+    pub const MINIMAL: Self = Self::built_in(tomori_protocol::environments::MINIMAL);
+    /// Tomori's moonlit sky, as [`tomori_protocol::environments::SKY`] gives it.
+    pub const SKY: Self = Self::built_in(tomori_protocol::environments::SKY);
+    /// The GitHub environment's prototype, as [`tomori_protocol::environments::GITHUB`] gives it, whose cards every client built on this crate presents over the grid, since the scene draws them rather than a scenery; see `design/github.md`.
+    pub const GITHUB: Self = Self::built_in(tomori_protocol::environments::GITHUB);
     /// What Tomori's own build draws: the grid and Sky.
     pub const BUILT_IN: [Self; 2] = [Self::MINIMAL, Self::SKY];
 
     /// The environment with the identifier `id`, as a scenery is registered under it, at protocol version 1.
     pub const fn new(id: &'static str) -> Self {
         Self { id, version: 1 }
+    }
+
+    /// One of Tomori's own environments, at the identifier and version the server offers it by.
+    pub const fn built_in(environment: tomori_protocol::environments::BuiltIn) -> Self {
+        Self {
+            id: environment.id,
+            version: environment.version,
+        }
     }
 
     /// The environment, presented at protocol `version`.
@@ -95,7 +103,7 @@ impl Environment {
         }
     }
 
-    /// The environment a space names by its identifier, as offered by the server, among those `drawable`, or `None` when this build cannot draw it. The grid is always drawable, at version 1, since it is built in, whatever version a scenery drawn with it is registered at; any other is at the version it is registered at.
+    /// The environment a space names by its identifier, as offered by the server, among those `drawable`, or `None` when this build cannot draw it. The grid is always drawable, at its own version, since it is built in, whatever version a scenery drawn with it is registered at; any other is at the version it is registered at.
     pub fn for_space(id: &str, drawable: &[Self]) -> Option<Self> {
         std::iter::once(Self::MINIMAL)
             .chain(drawable.iter().copied())
@@ -228,6 +236,21 @@ mod tests {
         );
         assert_eq!(Environment::for_space("floor", &[FLOOR]), Some(FLOOR));
         assert_eq!(Environment::id(FLOOR), "floor");
+    }
+
+    #[test]
+    fn tomoris_own_are_at_the_identifiers_and_versions_the_server_offers_them_by() {
+        // Called here, at run time, as well as in the constants, so that its coverage does not depend on them alone.
+        let built_in: Vec<(&str, u32)> = tomori_protocol::environments::ALL
+            .into_iter()
+            .map(Environment::built_in)
+            .map(|environment| (environment.id(), environment.version()))
+            .collect();
+        let own: Vec<(&str, u32)> = [Environment::MINIMAL, Environment::SKY, Environment::GITHUB]
+            .into_iter()
+            .map(|environment| (environment.id(), environment.version()))
+            .collect();
+        assert_eq!(built_in, own);
     }
 
     #[test]

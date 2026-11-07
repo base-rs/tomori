@@ -6,13 +6,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use tomori_environment::ServerSide;
+use tomori_protocol::environments::{BuiltIn, MINIMAL, SKY};
 use tomori_protocol::{EnvironmentInfo, EnvironmentVersion};
-
-/// The moonlit sky, rendered by `crates/environment-sky`. The identifier is the one clients map to that renderer.
-pub const SKY: &str = "sky";
-
-/// The plain floor grid, which clients also show outside any space. The identifier is the one clients map to that scenery.
-pub const MINIMAL: &str = "minimal";
 
 /// An environment a server offers for spaces: its identifier, which clients map to what they present, the label they show, its protocol version, which a client must present it at, and its layer of the instructions a space's agent is given.
 ///
@@ -76,6 +71,18 @@ impl Environment {
             instructions: String::new(),
             side: None,
         }
+    }
+
+    /// One of Tomori's own environments, `environment`, which clients show as `label`, at the identifier and version that Tomori's own clients present it by, contributing no instructions. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_server::Environment;
+    ///
+    /// let sky = Environment::built_in(tomori_protocol::environments::SKY, "Sky");
+    /// assert_eq!((sky.id(), sky.version()), ("sky", 1));
+    /// ```
+    pub fn built_in(environment: BuiltIn, label: impl Into<String>) -> Self {
+        Self::new(environment.id, label).with_version(environment.version)
     }
 
     /// The environment, running `side` for each space bound to it, from when the space is bound until it is bound to another environment or closes, or the server stops. See `design/environments.md`.
@@ -155,11 +162,11 @@ impl Environment {
 pub struct Environments(Vec<Environment>);
 
 impl Default for Environments {
-    /// Tomori's own: Sky, first, so that a space whose creator names none is bound to it, and the Minimal grid. Every environment, Sky included, contributes no instructions yet.
+    /// Tomori's own: Sky, first, so that a space whose creator names none is bound to it, and the Minimal grid, at the versions `tomori_protocol::environments` gives them. Every environment, Sky included, contributes no instructions yet.
     fn default() -> Self {
         Self(vec![
-            Environment::new(SKY, "Sky"),
-            Environment::new(MINIMAL, "Grid"),
+            Environment::built_in(SKY, "Sky"),
+            Environment::built_in(MINIMAL, "Grid"),
         ])
     }
 }
@@ -295,6 +302,9 @@ fn presented(presents: &[EnvironmentVersion], environment: &Environment) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SKY: &str = super::SKY.id;
+    const MINIMAL: &str = super::MINIMAL.id;
     use tomori_environment::Space;
 
     struct Idle;

@@ -551,7 +551,7 @@ impl TestClient {
             backend: FAKE_BACKEND_NAME.to_owned(),
             directory: "/tmp".to_owned(),
             session: None,
-            environment: Some(crate::environments::SKY.to_owned()),
+            environment: Some(tomori_protocol::environments::SKY.id.to_owned()),
             instructions: None,
         });
         let title = title.to_owned();

@@ -185,6 +185,40 @@ mod tests {
     }
 
     #[test]
+    fn tomoris_own_server_offers_tomoris_own_build_every_built_in_environment() {
+        use std::sync::Arc;
+        use tomori_client::connection::Session;
+        use tomori_server::github::{GitHub, Token};
+        use tomori_server::test_support::{TestClient, TestServer, TextTranscriber};
+        // Tomori's own server, offering every environment it can by default: Sky and the grid, and GitHub, given a
+        // repository, whose cards it reads only once someone watches them.
+        let server = TestServer::with_server(tomori_server::fake::FakeBackend::new(), |backends| {
+            let token = Token::new("not-a-real-token").unwrap();
+            tomori_server::Server::new(backends, Arc::new(TextTranscriber::default()))
+                .with_github(GitHub::new("ioquatix/tomori".parse().unwrap(), token))
+        });
+        let offered = |presents| {
+            let mut client = TestClient::open(server.address);
+            let offered: Vec<(String, u32)> = client
+                .hello_presenting("ada", "Ada", presents)
+                .into_iter()
+                .map(|info| (info.id, info.version))
+                .collect();
+            offered
+        };
+        // A client that lists nothing is offered every one, at the server's versions.
+        let everything = offered(None);
+        let mut ids: Vec<&str> = everything.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort_unstable();
+        let mut built_in = tomori_protocol::environments::ALL.map(|environment| environment.id);
+        built_in.sort_unstable();
+        assert_eq!(ids, built_in);
+        // Tomori's own build presents each, at the same identifier and version, so it is offered every one too.
+        let (tomori, _connection) = Builder::default().participant(crate::Overrides::default());
+        assert_eq!(offered(tomori.environments()), everything);
+    }
+
+    #[test]
     fn a_build_declares_how_its_environments_travel() {
         use tomori_scene::locomotion::Surface;
         assert!(Builder::default().sceneries().locomotion().is_empty());
