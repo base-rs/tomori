@@ -1709,7 +1709,7 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     let mut connection = connection(&mut session, Scripted::default(), Nowhere);
     connection.feedback().set_haptics(true);
     // Presence goes nowhere, and no voice is placed.
-    connection.send_presence(pose(0.0), None, None, [None, None]);
+    connection.send_presence(pose(0.0), None, None, [None, None], None);
     let mut placed = false;
     connection.listen([2], |_, _| placed = true);
     assert!(!placed);
@@ -2297,6 +2297,7 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
         left: None,
         right: None,
         hands: None,
+        rig: None,
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(*watched.lock().unwrap(), [2]);
@@ -2307,13 +2308,71 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
             scene.sources.clear();
             let mut heads: Vec<_> = placed.heads.keys().copied().collect();
             heads.sort_unstable();
-            voices = Some((placed.others.to_vec(), heads, placed.mono));
+            let mut rigs: Vec<_> = placed
+                .rigs
+                .iter()
+                .map(|(source, rig)| (*source, *rig))
+                .collect();
+            rigs.sort_unstable_by_key(|(source, _)| *source);
+            voices = Some((placed.others.to_vec(), heads, rigs, placed.mono));
         });
         voices.expect("placed")
     };
-    assert_eq!(placed(&mut connection), (vec![2, 3], vec![2], false));
+    assert_eq!(
+        placed(&mut connection),
+        (vec![2, 3], vec![2], vec![], false)
+    );
+    // A participant whose client says where their room is: the rig is kept with their head, and the latest presence without one forgets it.
+    let rig = tomori_protocol::Rig::new([4.0, 3.0, -11.0], 0.5);
+    for source in [3, 4] {
+        peer.say(
+            ServerMessage::Presence {
+                source,
+                head: pose(1.0),
+                left: None,
+                right: None,
+                hands: None,
+                rig: Some(rig),
+            },
+            &mut connection,
+            &mut session,
+        );
+    }
+    // The participant listened as is no source, so their rig is not among the others'.
+    assert_eq!(
+        placed(&mut connection),
+        (vec![2, 3], vec![2, 3], vec![(3, rig)], false)
+    );
+    peer.say(
+        ServerMessage::Presence {
+            source: 3,
+            head: pose(1.0),
+            left: None,
+            right: None,
+            hands: None,
+            rig: None,
+        },
+        &mut connection,
+        &mut session,
+    );
+    assert_eq!(
+        placed(&mut connection),
+        (vec![2, 3], vec![2, 3], vec![], false)
+    );
+    peer.say(
+        ServerMessage::Presence {
+            source: 2,
+            head: pose(1.0),
+            left: None,
+            right: None,
+            hands: None,
+            rig: Some(rig),
+        },
+        &mut connection,
+        &mut session,
+    );
     peer.say(ServerMessage::Left, &mut connection, &mut session);
-    assert_eq!(placed(&mut connection), (vec![2, 3], vec![], false));
+    assert_eq!(placed(&mut connection), (vec![2, 3], vec![], vec![], false));
 }
 
 #[test]
@@ -2354,6 +2413,7 @@ fn a_microphone_failure_is_reported_whenever_it_happens() {
         left: None,
         right: None,
         hands: None,
+        rig: None,
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(
@@ -3096,16 +3156,27 @@ mod served {
         let server = Server::start();
         let mut session = Script::default();
         let (bea, mut connection) = in_space(&server, &mut session, Scripted::default());
-        connection.send_presence(pose(0.0), Some(pose(-0.2)), Some(pose(0.2)), [None, None]);
-        let (left, right) = bea.wait_for(
+        let rig = tomori_protocol::Rig::new([4.0, 3.0, -11.0], 0.5);
+        connection.send_presence(
+            pose(0.0),
+            Some(pose(-0.2)),
+            Some(pose(0.2)),
+            [None, None],
+            Some(rig),
+        );
+        let (left, right, relayed) = bea.wait_for(
             || connection.poll(true, &mut session),
             |message| match message {
-                ServerMessage::Presence { left, right, .. } => Some((*left, *right)),
+                ServerMessage::Presence {
+                    left, right, rig, ..
+                } => Some((*left, *right, *rig)),
                 _ => None,
             },
         );
         assert_eq!(left.map(|pose| pose.position[0]), Some(-0.2));
         assert_eq!(right.map(|pose| pose.position[0]), Some(0.2));
+        // The rig reaches the others with the poses.
+        assert_eq!(relayed, Some(rig));
     }
 
     #[test]

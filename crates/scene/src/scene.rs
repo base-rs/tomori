@@ -117,13 +117,15 @@ pub struct Arrival {
     pub time: f32,
 }
 
-/// This participant's head, controllers and hands, for the others in the space.
+/// This participant's head, controllers and hands, for the others in the space, in the space's scene, and where their room is, which the poses already have applied.
 #[derive(Clone, Copy, Debug)]
 pub struct Presence {
     pub head: Pose,
     pub left: Option<Pose>,
     pub right: Option<Pose>,
     pub hands: [Option<Hand>; 2],
+    /// Where the participant's room is in the scene, as the poses were placed, so that the others can tell their travel from their walking; see `design/spaces.md`.
+    pub rig: Rig,
 }
 
 impl Presence {
@@ -134,6 +136,7 @@ impl Presence {
             self.left.map(Into::into),
             self.right.map(Into::into),
             self.hands,
+            Some(self.rig.into()),
         );
     }
 }
@@ -716,7 +719,7 @@ impl Step {
         });
         // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
         let agent = crate::spatial_audio::centre(&self.coordinator_samples);
-        // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates. Visitors send no presence; see `design/security.md`.
+        // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates, with the rig they were placed with. Visitors send no presence; see `design/security.md`.
         let presence = senses
             .head_pose
             .filter(|_| conversation.role().participates())
@@ -725,6 +728,7 @@ impl Step {
                 left: senses.controllers[crate::controller::LEFT],
                 right: senses.controllers[crate::controller::RIGHT],
                 hands: senses.hands,
+                rig,
             });
         // Arrival hides the panel; entering a space places it in front of the participant again.
         if in_arrival {

@@ -1677,6 +1677,10 @@ mod tests {
         assert_eq!(drawn.frame.blink, 1.0);
         assert_eq!(drawn.frame.rig, crate::locomotion::Rig::default());
         assert_eq!(
+            drawn.frame.presence.unwrap().rig,
+            crate::locomotion::Rig::default()
+        );
+        assert_eq!(
             rig.headset
                 .haptics(&mut rig.feedback, rig.start + HOLD)
                 .len(),
@@ -1707,6 +1711,9 @@ mod tests {
                 < 1e-4
         );
         let presence = drawn.frame.presence.unwrap();
+        // Presence carries the rig its poses were placed with, so that the others can tell this travel from walking.
+        assert_eq!(presence.rig, drawn.frame.rig);
+        assert_ne!(presence.rig, crate::locomotion::Rig::default());
         let hand = presence.hands[controller::LEFT].unwrap().joints[1].unwrap();
         assert!(Vec3::from_array(hand.position).distance(wrist + Vec3::new(0.2, 0.0, -1.5)) < 1e-4);
         assert!(Vec3::from_array(presence.head.position).distance(travelled) < 1e-4);

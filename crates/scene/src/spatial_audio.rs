@@ -1,9 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Where each voice comes from in this client's scene: the agent from the swarm, and each other participant from a seat on a circle at the edge of the space, around where this participant has travelled, moved by their head. Pure, so that the layout is tested; the player pans and attenuates from it. See `design/spatial-audio.md`.
+//! Where each voice comes from in this client's scene: the agent from the swarm, and each other participant from a seat on a circle at the edge of the space, moved by their head: around where they travelled, for one whose rig presence carries, and otherwise around where this participant has travelled. Pure, so that the layout is tested; the player pans and attenuates from it. See `design/spatial-audio.md`.
 use std::collections::HashMap;
 
+use glam::Vec3;
 use tomori_client::{
     connection::Connection,
     playback::spatial::{Listener, Position, Scene},
@@ -30,7 +31,7 @@ pub fn seat(index: usize, count: usize) -> (Position, f32) {
     (position, angle)
 }
 
-/// Where a participant seated at `seat`, at `angle`, speaks from, in this participant's room: their head's movement from their own home, turned so that their forward faces the centre of the circle and kept within [`REACH`], at their head's height less [`MOUTH`], kept within [`REACH`] of standing height. Their head is where they travelled, which this client cannot tell from where they walk, so a long walk, a teleport or a flight moves the voice no further than that.
+/// Where a participant seated at `seat`, at `angle`, speaks from, in this participant's room, for one whose rig this client does not know: their head's movement from their own home, turned so that their forward faces the centre of the circle and kept within [`REACH`], at their head's height less [`MOUTH`], kept within [`REACH`] of standing height. Their head is where they travelled, which this client cannot tell from where they walk, so a long walk, a teleport or a flight moves the voice no further than that.
 pub fn voice(seat: Position, angle: f32, head: Option<&Pose>) -> Position {
     let Some(head) = head.filter(|head| head.position.iter().all(|axis| axis.is_finite())) else {
         return [seat[0], HOME.y - MOUTH, seat[2]];
@@ -49,6 +50,21 @@ pub fn voice(seat: Position, angle: f32, head: Option<&Pose>) -> Position {
     [seat[0] + x, height - MOUTH, seat[2] + z]
 }
 
+/// Where a participant seated at `seat` speaks from, in the space's scene, for one whose rig, `rig`, presence carries: where they travelled, kept apart from the others by their seat. Their room is taken into the scene by their rig, then moved by the seat's offset from home, a translation in the scene, so that participants who arrived at the same home are not heard inside each other, and turning, which turns their rig about their head, does not move their voice. Within their room, their head's movement from home is kept within [`REACH`] across, and its height within [`REACH`] of standing height, at the mouth, [`MOUTH`] below it, as for a seat; but their travel is known, so a teleport or a flight moves the voice all the way, unturned: they are heard where they stand, beside it by their seat's offset. Until their head is known, they speak from their seat moved by their rig, at the mouth's standing height.
+pub fn travelled(seat: Position, rig: Rig, head: Option<&Pose>) -> Position {
+    let room = rig.matrix();
+    let offset = Vec3::new(seat[0] - HOME.x, 0.0, seat[2] - HOME.z);
+    let walked = head
+        .map(|head| Vec3::from_array(head.position))
+        .filter(|head| head.is_finite())
+        .map_or(HOME, |head| {
+            let walked = room.inverse().transform_point3(head) - HOME;
+            let across = glam::Vec2::new(walked.x, walked.z).clamp_length_max(REACH);
+            HOME + Vec3::new(across.x, walked.y.clamp(-REACH, REACH), across.y)
+        });
+    (room.transform_point3(walked - Vec3::Y * MOUTH) + offset).to_array()
+}
+
 /// The middle of the swarm's agents, where the agent's voice comes from, or the swarm's resting centre while it has none.
 pub fn centre(agents: &[[f32; 3]]) -> Position {
     if agents.is_empty() {
@@ -60,7 +76,7 @@ pub fn centre(agents: &[[f32; 3]]) -> Position {
     sum.map(|axis| axis / agents.len() as f32)
 }
 
-/// Place the voices `connection` plays, once a frame: this participant hears from `listener`, in the space's scene coordinates, having travelled as `rig` says, and the agent is at `agent`, typically the swarm's centre. Every other participant in the joined space sits as [`fill`] says. Without a listener, every source plays centred.
+/// Place the voices `connection` plays, once a frame: this participant hears from `listener`, in the space's scene coordinates, having travelled as `rig` says, and the agent is at `agent`, typically the swarm's centre. Every other participant in the joined space sits as [`fill`] says, by the rig their presence carries where it does. Without a listener, every source plays centred.
 pub fn listen(
     connection: &mut Connection,
     listener: Option<controller::Pose>,
@@ -89,12 +105,14 @@ pub fn listen(
             agent,
             voices.others,
             voices.heads,
+            voices.rigs,
             voices.mono,
         )
     });
 }
 
-/// Fill `scene` for `listener`, in the space's scene: the agent at `agent`, and each of `others`, the other participants by number, on their seats and moved by their latest `heads`, with the seats carried by `rig`, where the listener has travelled, so that they stay around the listener however far they travel. Participants share no physical space with each other yet, each standing at their own home, and presence does not carry where the others travelled, so every other participant is remote and seated. Reuses the scene's storage.
+/// Fill `scene` for `listener`, in the space's scene: the agent at `agent`, and each of `others`, the other participants by number, on their seats and moved by their latest `heads`. Participants share no physical space with each other yet, each arriving at their own home, so every other participant is remote and seated. One whose rig is among `rigs`, from their presence, is heard where they travelled, beside it by their seat, as [`travelled`] says, in the same scene as the listener. The others' seats are carried by `rig`, where the listener has travelled, so that they stay around the listener however far they travel, since where they travelled cannot be told from where they walk. Reuses the scene's storage.
+#[allow(clippy::too_many_arguments)]
 pub fn fill(
     scene: &mut Scene,
     listener: Option<Listener>,
@@ -102,6 +120,7 @@ pub fn fill(
     agent: Position,
     others: &[u32],
     heads: &HashMap<u32, Pose>,
+    rigs: &HashMap<u32, tomori_protocol::Rig>,
     mono: bool,
 ) {
     scene.listener = listener;
@@ -111,12 +130,14 @@ pub fn fill(
     let room = rig.matrix();
     for (index, &source) in others.iter().enumerate() {
         let (seat, angle) = seat(index, others.len());
-        let voice = voice(seat, angle, heads.get(&source));
-        scene.sources.push((
-            source,
-            room.transform_point3(glam::Vec3::from_array(voice))
+        let head = heads.get(&source);
+        let voice = match rigs.get(&source) {
+            Some(theirs) => travelled(seat, Rig::from(*theirs), head),
+            None => room
+                .transform_point3(Vec3::from_array(voice(seat, angle, head)))
                 .to_array(),
-        ));
+        };
+        scene.sources.push((source, voice));
     }
 }
 
@@ -211,6 +232,7 @@ mod tests {
             agent,
             &[3, 7],
             &heads,
+            &HashMap::new(),
             false,
         );
         // Teleported 12 m away onto a ledge 3 m up, and turned twice.
@@ -232,6 +254,7 @@ mod tests {
             agent,
             &[3, 7],
             &heads,
+            &HashMap::new(),
             false,
         );
         // Each voice is where it was relative to the listener's head, so none drifts as they travel.
@@ -270,6 +293,124 @@ mod tests {
         assert!(close(far, [seat[0], 1.5, seat[2] - REACH]));
     }
 
+    /// A rig teleported 12 m away onto a ledge 3 m up, and turned twice about the head.
+    fn ledge() -> Rig {
+        use crate::locomotion::SNAP_TURN;
+        let mut rig = Rig::default();
+        rig.teleport(Vec3::new(4.0, 3.0, -11.0), HOME);
+        rig.turn(SNAP_TURN, rig.matrix().transform_point3(HOME));
+        rig.turn(SNAP_TURN, rig.matrix().transform_point3(HOME));
+        rig
+    }
+
+    fn listener(rig: Rig) -> Listener {
+        let head = rig.matrix() * glam::Mat4::from_translation(HOME);
+        let (_, rotation, position) = head.to_scale_rotation_translation();
+        Listener {
+            position: position.to_array(),
+            orientation: rotation.to_array(),
+        }
+    }
+
+    #[test]
+    fn a_participant_whose_rig_is_known_is_heard_where_they_travelled_and_others_around_the_listener()
+     {
+        let agent = [0.0, 1.4, -2.3];
+        // Participant 3 teleported onto the ledge and stepped 0.3 m to their right there; participant 7, whose client does not say where their room is, stepped as far at home.
+        let theirs = ledge();
+        let step = Vec3::new(0.3, 0.0, 0.0);
+        let stands = theirs.matrix().transform_point3(HOME + step);
+        let mut heads = HashMap::new();
+        heads.insert(3, pose(stands.to_array()));
+        heads.insert(7, pose((HOME + step).to_array()));
+        let mut rigs = HashMap::new();
+        rigs.insert(3, tomori_protocol::Rig::from(theirs));
+        let (seat3, _) = seat(0, 2);
+        let (seat7, angle7) = seat(1, 2);
+        let offset = Vec3::new(seat3[0] - HOME.x, 0.0, seat3[2] - HOME.z);
+        let heard = |rig: Rig| {
+            let mut scene = Scene::default();
+            fill(
+                &mut scene,
+                Some(listener(rig)),
+                rig,
+                agent,
+                &[3, 7],
+                &heads,
+                &rigs,
+                false,
+            );
+            scene
+        };
+        for rig in [Rig::default(), ledge()] {
+            let scene = heard(rig);
+            // Where they stand on the ledge, at the mouth, kept apart by their seat's offset, wherever the listener is.
+            let at = Vec3::from_array(scene.position(3).unwrap());
+            assert!(
+                at.distance(stands - Vec3::Y * MOUTH + offset) < 1e-4,
+                "{at}"
+            );
+            assert!(at.y > 4.0);
+            // The other, whose rig is unknown, is on their seat around the listener.
+            let seated = rig.matrix().transform_point3(Vec3::from_array(voice(
+                seat7,
+                angle7,
+                heads.get(&7),
+            )));
+            assert!(Vec3::from_array(scene.position(7).unwrap()).distance(seated) < 1e-4);
+            assert_eq!(scene.position(AGENT_SOURCE), Some(agent));
+        }
+        // Heard from the listener at home, they are far ahead, up on the ledge.
+        let scene = heard(Rig::default());
+        let away = Vec3::from_array(scene.position(3).unwrap()) - HOME;
+        assert!(away.z < -8.0 && away.length() > 10.0);
+    }
+
+    #[test]
+    fn a_known_rig_moves_the_voice_by_travel_but_not_by_turning() {
+        let (seat, angle) = seat(0, 1);
+        // At home, a participant whose rig is known speaks from their seat as one whose rig is not.
+        for head in [
+            None,
+            Some(pose(HOME.to_array())),
+            Some(pose([f32::NAN, 1.0, 0.0])),
+        ] {
+            assert!(close(
+                travelled(seat, Rig::default(), head.as_ref()),
+                voice(seat, angle, head.as_ref())
+            ));
+        }
+        // Turning on the spot turns the rig about the head, which does not move the voice.
+        let step = Vec3::new(0.4, 0.0, -0.3);
+        let mut rig = Rig::default();
+        let before = travelled(seat, rig, Some(&pose((HOME + step).to_array())));
+        rig.turn(crate::locomotion::SNAP_TURN, HOME + step);
+        let head = rig.matrix().transform_point3(HOME + step);
+        assert!(head.distance(HOME + step) < 1e-4);
+        assert!(close(
+            travelled(seat, rig, Some(&pose(head.to_array()))),
+            before
+        ));
+        // Their walking in their room is kept within reach, across and up or down, while their travel is not.
+        let rig = ledge();
+        let floor = rig.floor();
+        let far = rig
+            .matrix()
+            .transform_point3(HOME + Vec3::new(0.0, 5.0, -9.0));
+        let heard = Vec3::from_array(travelled(seat, rig, Some(&pose(far.to_array()))));
+        let reach = rig
+            .matrix()
+            .transform_point3(HOME + Vec3::new(0.0, REACH - MOUTH, -REACH))
+            + Vec3::new(seat[0] - HOME.x, 0.0, seat[2] - HOME.z);
+        assert!(heard.distance(reach) < 1e-4, "{heard}");
+        assert!((heard.y - (floor + HOME.y + REACH - MOUTH)).abs() < 1e-4);
+        // Until their head is known, they speak from their seat moved by their rig.
+        let unknown = Vec3::from_array(travelled(seat, rig, None));
+        let expected = rig.matrix().transform_point3(HOME - Vec3::Y * MOUTH)
+            + Vec3::new(seat[0] - HOME.x, 0.0, seat[2] - HOME.z);
+        assert!(unknown.distance(expected) < 1e-4);
+    }
+
     #[test]
     fn the_agent_speaks_from_the_middle_of_the_swarm() {
         assert_eq!(centre(&[]), crate::swarm::CENTER.to_array());
@@ -296,6 +437,7 @@ mod tests {
             agent,
             &[3, 7],
             &heads,
+            &HashMap::new(),
             false,
         );
         assert_eq!(scene.listener, listener);
@@ -313,7 +455,16 @@ mod tests {
             voice(seat7, angle7, heads.get(&7))
         ));
         // Filled again in place, for one participant, in mono.
-        fill(&mut scene, None, Rig::default(), agent, &[7], &heads, true);
+        fill(
+            &mut scene,
+            None,
+            Rig::default(),
+            agent,
+            &[7],
+            &heads,
+            &HashMap::new(),
+            true,
+        );
         assert!(scene.mono);
         assert_eq!(scene.listener, None);
         assert_eq!(scene.sources.len(), 2);

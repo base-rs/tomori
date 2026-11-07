@@ -37,6 +37,8 @@ struct ParticipantPresence {
     left: Option<tomori_protocol::Pose>,
     right: Option<tomori_protocol::Pose>,
     hands: Option<[Option<Hand>; 2]>,
+    /// Where their room is in the scene, from a client that says.
+    rig: Option<tomori_protocol::Rig>,
 }
 
 /// Animate the coordinator from the space's observed activity, as the headset
@@ -162,6 +164,7 @@ impl Feed {
                 left,
                 right,
                 hands,
+                rig,
             } => {
                 hook.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -172,6 +175,7 @@ impl Feed {
                             left: *left,
                             right: *right,
                             hands: hands.as_deref().copied(),
+                            rig: *rig,
                         },
                     );
             }
@@ -217,22 +221,12 @@ impl Feed {
         // Build the frame.
         let frame = self.build_frame(&presence, aspect, dt);
 
-        // The audience hears as the participant it follows, from their head, or from the neutral view; see `design/spatial-audio.md`. Presence does not carry where they travelled, so the others stay seated around the space's home.
-        let listener = match self.following.and_then(|source| presence.get(&source)) {
-            Some(followed) => Pose {
-                position: followed.head.position,
-                orientation: followed.head.orientation,
-            },
-            None => Pose {
-                position: (CENTER + Vec3::new(0.0, 0.0, 3.0)).to_array(),
-                orientation: [0.0, 0.0, 0.0, 1.0],
-            },
-        };
+        let (listener, rig) = self.hearing(&presence);
         self.connection.listen_as(self.following);
         crate::spatial_audio::listen(
             &mut self.connection,
             Some(listener),
-            tomori_scene::locomotion::Rig::default(),
+            rig,
             crate::spatial_audio::centre(&frame.agents),
             &self.conversation,
         );
@@ -243,6 +237,29 @@ impl Feed {
             self.last_caption = Some(frame.caption.clone());
         }
         frame
+    }
+
+    /// Where the audience hears from, as the participant it follows does: from their head, with the others seated around where they travelled, by the rig their presence carries, or around the space's home from a client that does not say; or, with nobody to follow, from the neutral view. See `design/spatial-audio.md`.
+    fn hearing(
+        &self,
+        presence: &BTreeMap<u32, ParticipantPresence>,
+    ) -> (Pose, tomori_scene::locomotion::Rig) {
+        match self.following.and_then(|source| presence.get(&source)) {
+            Some(followed) => (
+                Pose {
+                    position: followed.head.position,
+                    orientation: followed.head.orientation,
+                },
+                followed.rig.map(Into::into).unwrap_or_default(),
+            ),
+            None => (
+                Pose {
+                    position: (CENTER + Vec3::new(0.0, 0.0, 3.0)).to_array(),
+                    orientation: [0.0, 0.0, 0.0, 1.0],
+                },
+                Default::default(),
+            ),
+        }
     }
 
     /// Pick the participant to follow: by name if given, else the first
@@ -435,6 +452,7 @@ mod tests {
             left: None,
             right,
             hands: Some(Box::new([None, None])),
+            rig: None,
         }
     }
 
@@ -460,6 +478,9 @@ mod tests {
         let frame = until(&mut feed, |feed, _| feed.following.is_some());
         assert_eq!(frame.caption, "SPECTATOR\nFollowing Bea");
         assert_eq!(frame.head[12], 0.5);
+        // Her client does not say where her room is, so the others are seated around the space's home.
+        let presence = feed.presence.lock().unwrap().clone();
+        assert_eq!(feed.hearing(&presence).1, Default::default());
         assert!(frame.controllers[crate::controller::RIGHT].is_some());
         // The followed participant's right controller stands in for the spectator's marker.
         tomori_render::test_gpu::with(|gpu| {
@@ -495,6 +516,73 @@ mod tests {
                 },
             );
         });
+    }
+
+    #[test]
+    fn the_spectator_hears_the_others_seated_around_the_participant_it_follows_after_they_travel() {
+        use tomori_client::playback::spatial::{Listener, Scene};
+        use tomori_scene::{arrival::HOME, locomotion::Rig, spatial_audio};
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space),
+            follow: Some("Bea".into()),
+            token: None,
+        });
+        until(&mut feed, |feed, _| {
+            feed.conversation.joined_space().is_some()
+        });
+        // Bea teleported 12 m away onto a ledge 3 m up, and turned, and says so.
+        let travelled = tomori_protocol::Rig::new([4.0, 3.0, -11.0], 1.0);
+        let room = Rig::from(travelled).matrix();
+        let head = room.transform_point3(HOME);
+        bea.send(ClientMessage::Presence {
+            head: tomori_protocol::Pose {
+                position: head.to_array(),
+                orientation: Quat::from_rotation_y(1.0).to_array(),
+            },
+            left: None,
+            right: None,
+            hands: None,
+            rig: Some(travelled),
+        });
+        let frame = until(&mut feed, |feed, _| feed.following.is_some());
+        // The audience sees and hears from where she stands.
+        assert!(Vec3::new(frame.head[12], frame.head[13], frame.head[14]).distance(head) < 1e-4);
+        let presence = feed.presence.lock().unwrap().clone();
+        let (listener, rig) = feed.hearing(&presence);
+        assert_eq!(rig, Rig::from(travelled));
+        assert_eq!(listener.position, head.to_array());
+        // Someone whose client does not say where their room is, is seated around her, where she travelled, rather than around the space's home.
+        let mut scene = Scene::default();
+        spatial_audio::fill(
+            &mut scene,
+            Some(Listener {
+                position: listener.position,
+                orientation: listener.orientation,
+            }),
+            rig,
+            [0.0; 3],
+            &[7],
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
+        let (seat, angle) = spatial_audio::seat(0, 1);
+        let seated =
+            room.transform_point3(Vec3::from_array(spatial_audio::voice(seat, angle, None)));
+        let heard = Vec3::from_array(scene.position(7).unwrap());
+        assert!(heard.distance(seated) < 1e-4);
+        let across = (heard - head) * Vec3::new(1.0, 0.0, 1.0);
+        assert!((across.length() - spatial_audio::RING).abs() < 1e-3);
+        // Seated behind her, as she faces after turning.
+        let behind = room.transform_vector3(Vec3::Z);
+        assert!(across.normalize().dot(behind) > 0.999);
+        // With nobody to follow, the audience hears from the neutral view, with the others around home.
+        feed.following = None;
+        assert_eq!(feed.hearing(&presence).1, Rig::default());
     }
 
     #[test]

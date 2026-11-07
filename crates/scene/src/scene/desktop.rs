@@ -843,6 +843,15 @@ mod tests {
         let travelled = Vec3::new(landing.x, arrival::HOME.y, landing.z);
         assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
         assert_eq!(drawn.frame.listener, Some(head));
+        // Presence carries the rig, as the headset's does.
+        let rig = drawn.frame.presence.unwrap().rig;
+        assert_eq!(rig, drawn.frame.rig);
+        assert!(
+            rig.matrix()
+                .transform_point3(arrival::HOME)
+                .distance(travelled)
+                < 1e-4
+        );
         // The pill stands in the participant's room, so it came along.
         assert_eq!(drawn.frame.panels.pill.model, Some(pill));
         // The window looks from there.

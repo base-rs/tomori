@@ -187,6 +187,7 @@ mod tests {
                 left: None,
                 right: None,
                 hands: None,
+                rig: None,
             },
             ClientMessage::SetAttribution { enabled: true },
             ClientMessage::SetMode {

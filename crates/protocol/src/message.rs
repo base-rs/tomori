@@ -258,6 +258,14 @@ pub enum ClientMessage {
         /// Tracked hand skeletons, left then right. Absent from older clients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hands: Option<Box<[Option<crate::presence::Hand>; 2]>>,
+        /// Where the participant's room is in the scene, which the poses above already have applied. Absent from older
+        /// clients; one out of bounds, or that cannot be read, is read as absent. See [`crate::Rig`].
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::presence::readable_rig"
+        )]
+        rig: Option<crate::Rig>,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -425,6 +433,15 @@ pub enum ServerMessage {
         /// The participant's tracked hand skeletons, left then right. Absent from older servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hands: Option<Box<[Option<crate::presence::Hand>; 2]>>,
+        /// Where the participant's room is in the scene, which the poses above already have applied. Absent from older
+        /// servers and for a participant whose client does not say; one out of bounds, or that cannot be read, is read
+        /// as absent. See [`crate::Rig`].
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::presence::readable_rig"
+        )]
+        rig: Option<crate::Rig>,
     },
     /// A request could not be completed. The connection stays open.
     Error {
@@ -1019,6 +1036,7 @@ mod tests {
             left: None,
             right: None,
             hands: Some(Box::new(hands)),
+            rig: None,
         };
         let client_json =
             serde_json::json!({"type": "presence", "head": head_json, "hands": hands_json});
@@ -1034,6 +1052,7 @@ mod tests {
             left: None,
             right: None,
             hands: Some(Box::new(hands)),
+            rig: None,
         };
         let server_json = serde_json::json!({"type": "presence", "source": 3, "head": head_json, "hands": hands_json});
         assert_eq!(serde_json::to_value(&server).unwrap(), server_json);
@@ -1048,11 +1067,115 @@ mod tests {
             left: None,
             right: None,
             hands: None,
+            rig: None,
         };
         assert_eq!(
             serde_json::to_value(&bare).unwrap(),
             serde_json::json!({"type": "presence", "head": head_json})
         );
+    }
+
+    #[test]
+    fn presence_carries_the_rig_compactly_and_parses_without_one() {
+        use crate::Rig;
+
+        let head = Pose {
+            position: [12.0, 4.5, -3.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let head_json =
+            serde_json::json!({"position": [12.0, 4.5, -3.0], "orientation": [0.0, 0.0, 0.0, 1.0]});
+        let rig = Rig::new([12.0, 3.0, -3.0], -0.5);
+        let client = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            rig: Some(rig),
+        };
+        // The rig is four numbers, the translation then the yaw.
+        let client_json = serde_json::json!({"type": "presence", "head": head_json, "rig": [12.0, 3.0, -3.0, -0.5]});
+        assert_eq!(serde_json::to_value(&client).unwrap(), client_json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(client_json).unwrap(),
+            client
+        );
+        let server = ServerMessage::Presence {
+            source: 3,
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            rig: Some(Rig::default()),
+        };
+        // Home is sent too, so that a receiver knows the participant has not travelled.
+        let server_json = serde_json::json!({"type": "presence", "source": 3, "head": head_json, "rig": [0.0, 0.0, 0.0, 0.0]});
+        assert_eq!(serde_json::to_value(&server).unwrap(), server_json);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(server_json).unwrap(),
+            server
+        );
+        // Presence from an older client or server, without a rig, still parses, with no rig.
+        for older in [
+            serde_json::json!({"type": "presence", "head": head_json}),
+            serde_json::json!({"type": "presence", "head": head_json, "rig": null}),
+        ] {
+            let ClientMessage::Presence { rig, .. } = serde_json::from_value(older).unwrap() else {
+                unreachable!("read as presence");
+            };
+            assert_eq!(rig, None);
+        }
+        let ServerMessage::Presence { rig, .. } = serde_json::from_value(
+            serde_json::json!({"type": "presence", "source": 3, "head": head_json}),
+        )
+        .unwrap() else {
+            unreachable!("read as presence");
+        };
+        assert_eq!(rig, None);
+    }
+
+    #[test]
+    fn a_rig_that_cannot_be_used_is_dropped_and_the_presence_kept() {
+        let head_json =
+            serde_json::json!({"position": [0.0, 1.6, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]});
+        // Too far, turned too far, too large for a number, the wrong shape, not numbers, or not a list.
+        for rig in [
+            serde_json::json!([10_000.5, 0.0, 0.0, 0.0]),
+            serde_json::json!([0.0, -20_000.0, 0.0, 0.0]),
+            serde_json::json!([0.0, 0.0, 0.0, 7.0]),
+            serde_json::json!([1e39, 0.0, 0.0, 0.0]),
+            serde_json::json!([0.0, 0.0, 0.0]),
+            serde_json::json!([0.0, 0.0, 0.0, 0.0, 0.0]),
+            serde_json::json!([null, 0.0, 0.0, 0.0]),
+            serde_json::json!(["0", 0.0, 0.0, 0.0]),
+            serde_json::json!({"translation": [0.0, 0.0, 0.0], "yaw": 0.0}),
+            serde_json::json!(0.0),
+        ] {
+            let client = serde_json::json!({"type": "presence", "head": head_json, "rig": rig});
+            let ClientMessage::Presence {
+                head, rig: read, ..
+            } = serde_json::from_value(client).unwrap()
+            else {
+                unreachable!("read as presence");
+            };
+            assert_eq!((head.position, read), ([0.0, 1.6, 0.0], None), "{rig}");
+            let server =
+                serde_json::json!({"type": "presence", "source": 1, "head": head_json, "rig": rig});
+            let ServerMessage::Presence { rig: read, .. } = serde_json::from_value(server).unwrap()
+            else {
+                unreachable!("read as presence");
+            };
+            assert_eq!(read, None, "{rig}");
+        }
+        // At the bounds, a rig is kept.
+        let edge = [-10_000.0, 10_000.0, 0.0, -std::f32::consts::TAU];
+        let ClientMessage::Presence { rig, .. } = serde_json::from_value(
+            serde_json::json!({"type": "presence", "head": head_json, "rig": edge}),
+        )
+        .unwrap() else {
+            unreachable!("read as presence");
+        };
+        assert_eq!(rig, Some(crate::Rig::from(edge)));
     }
 
     #[test]

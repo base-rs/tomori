@@ -1,8 +1,93 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Hand joint positions carried in a participant's presence update.
+//! Hand joint positions, and where the participant's room is, carried in a participant's presence update.
 use serde::{Deserialize, Serialize};
+
+/// The furthest a rig's translation may take a room from home along any axis, in metres; a rig beyond it is out of
+/// bounds.
+pub const RIG_REACH: f32 = 10_000.0;
+
+/// Where a participant's room is in the space's scene, as their travel has taken it (see `design/locomotion.md`): a
+/// translation, then a turn of `yaw` radians about the vertical, anticlockwise seen from above, so that a point in the
+/// room is turned, then translated. Presence's poses are already in the scene, with the rig applied, so a receiver
+/// that ignores it sees each participant where they travelled; one that reads it can tell their travel from their
+/// walking. Sent compactly, as `[x, y, z, yaw]`, with every presence, home included as `[0, 0, 0, 0]`, since a rig
+/// that is absent means only that the sender does not say, as an older client does not. A rig is in bounds when
+/// every value is finite, each axis of its translation is within [`RIG_REACH`], and its yaw within a full turn
+/// either way; one that is not, or cannot be read, is dropped as the presence is read, keeping the presence. More
+/// may be added, so this is non-exhaustive: make one with [`Rig::new`]. See `design/spaces.md`.
+///
+/// ```
+/// let rig = tomori_protocol::Rig::new([4.0, 3.0, -11.0], std::f32::consts::FRAC_PI_6);
+/// assert!(rig.valid());
+/// ```
+///
+/// A rig cannot be given its fields directly outside this crate:
+///
+/// ```compile_fail
+/// let rig = tomori_protocol::Rig { translation: [0.0; 3], yaw: 0.0 };
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "[f32; 4]", into = "[f32; 4]")]
+#[non_exhaustive]
+pub struct Rig {
+    /// Where the room's origin is in the scene, its floor at the translation's height.
+    pub translation: [f32; 3],
+    /// How far the room is turned about the vertical, in radians, anticlockwise seen from above.
+    pub yaw: f32,
+}
+
+impl Rig {
+    /// A rig translating the room by `translation` after turning it by `yaw`.
+    pub fn new(translation: [f32; 3], yaw: f32) -> Self {
+        Self { translation, yaw }
+    }
+
+    /// Whether the rig is in bounds: finite, its translation within [`RIG_REACH`] along each axis, and its yaw within
+    /// a full turn either way.
+    pub fn valid(&self) -> bool {
+        self.translation
+            .iter()
+            .all(|axis| axis.is_finite() && axis.abs() <= RIG_REACH)
+            && self.yaw.is_finite()
+            && self.yaw.abs() <= std::f32::consts::TAU
+    }
+}
+
+impl From<[f32; 4]> for Rig {
+    fn from([x, y, z, yaw]: [f32; 4]) -> Self {
+        Self::new([x, y, z], yaw)
+    }
+}
+
+impl From<Rig> for [f32; 4] {
+    fn from(rig: Rig) -> Self {
+        let [x, y, z] = rig.translation;
+        [x, y, z, rig.yaw]
+    }
+}
+
+/// A presence's rig as it is read: the rig when it can be read and is in bounds, and otherwise none, logged at debug
+/// level, so that a rig that cannot be used never costs the poses it came with.
+pub(crate) fn readable_rig<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Rig>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(|field| match field {
+        serde_json::Value::Null => None,
+        field => match Rig::deserialize(field) {
+            Ok(rig) if rig.valid() => Some(rig),
+            Ok(_) => {
+                log::debug!("Dropped a rig out of bounds.");
+                None
+            }
+            Err(error) => {
+                log::debug!("Dropped a rig that could not be read: {error}.");
+                None
+            }
+        },
+    })
+}
 
 /// The number of hand joints in the OpenXR EXT hand-joint order.
 pub const JOINT_COUNT: usize = 26;
@@ -97,6 +182,26 @@ mod tests {
             }
             .valid()
         );
+    }
+
+    #[test]
+    fn a_rig_is_in_bounds_only_when_finite_and_within_reach() {
+        assert!(Rig::default().valid());
+        assert!(Rig::new([RIG_REACH, -RIG_REACH, 3.0], std::f32::consts::TAU).valid());
+        assert!(Rig::new([0.0; 3], -std::f32::consts::TAU).valid());
+        for rig in [
+            Rig::new([f32::NAN, 0.0, 0.0], 0.0),
+            Rig::new([0.0, f32::INFINITY, 0.0], 0.0),
+            Rig::new([0.0, 0.0, RIG_REACH * 2.0], 0.0),
+            Rig::new([0.0; 3], f32::NAN),
+            Rig::new([0.0; 3], 7.0),
+            Rig::new([0.0; 3], -7.0),
+        ] {
+            assert!(!rig.valid(), "{rig:?}");
+        }
+        let rig = Rig::new([1.0, 2.0, 3.0], 0.5);
+        assert_eq!(<[f32; 4]>::from(rig), [1.0, 2.0, 3.0, 0.5]);
+        assert_eq!(Rig::from([1.0, 2.0, 3.0, 0.5]), rig);
     }
 
     #[test]

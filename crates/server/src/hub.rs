@@ -2662,7 +2662,10 @@ impl Hub {
                 left,
                 right,
                 hands,
+                rig,
             } => {
+                // A rig is read only in bounds, and relayed only so, so that nobody can send the others one they cannot use; see `design/spaces.md`.
+                let rig = rig.filter(tomori_protocol::Rig::valid);
                 let Some(space) = space.and_then(|space| state.space(space)) else {
                     return;
                 };
@@ -2677,6 +2680,7 @@ impl Hub {
                                 left,
                                 right,
                                 hands: hands.clone(),
+                                rig,
                             },
                         );
                     }

@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
-use tomori_protocol::{ClientMessage, Gate, Pose, ServerMessage};
+use tomori_protocol::{ClientMessage, Gate, Pose, Rig, ServerMessage};
 
 /// What a [`Session`] asks its [`Connection`] to do, in order. The connection carries out every action in every state: one that needs a connection it does not have fails as [`Report`]s say, or, where nothing failed that the participant should see, is ignored and logged.
 ///
@@ -173,6 +173,8 @@ pub struct Voices<'a> {
     pub others: &'a [u32],
     /// Where each participant's head last was, from their presence.
     pub heads: &'a HashMap<u32, Pose>,
+    /// Where each participant's room last was in the scene, from their presence, for those whose clients say; see `design/spatial-audio.md`.
+    pub rigs: &'a HashMap<u32, Rig>,
     /// Whether the participant hears in mono, as their Feedback setting says.
     pub mono: bool,
 }
@@ -234,6 +236,8 @@ pub struct Connection {
     replay: Replay,
     /// Where each voice comes from: the other participants' latest heads, from relayed presence. See `design/spatial-audio.md`.
     heads: HashMap<u32, Pose>,
+    /// Where the other participants' rooms are, from the latest presence of those whose clients say.
+    rigs: HashMap<u32, Rig>,
     /// This client's own participant number on the current connection, which is never placed.
     local_source: Option<u32>,
     /// The participant whose head the spectator hears from, who is the listener rather than a source.
@@ -969,6 +973,7 @@ impl Connection {
             recording: None,
             replay: Replay::default(),
             heads: HashMap::new(),
+            rigs: HashMap::new(),
             local_source: None,
             listening_as: None,
             others: Vec::new(),
@@ -1064,9 +1069,11 @@ impl Connection {
         self.others.dedup();
         let others = &self.others;
         self.heads.retain(|source, _| others.contains(source));
+        self.rigs.retain(|source, _| others.contains(source));
         let voices = Voices {
             others,
             heads: &self.heads,
+            rigs: &self.rigs,
             mono: self.feedback.settings().mono,
         };
         control.set_scene(|scene| place(scene, voices));
@@ -1091,13 +1098,14 @@ impl Connection {
         self.voice.request_permission()
     }
 
-    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays them to the other participants. Without a connection, nothing is sent.
+    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them, with `rig`, where their travel has taken their room. The poses are in the space's scene coordinates, with the rig already applied. The client coalesces these to the latest, and the server relays them to the other participants. Without a connection, nothing is sent. See `design/spaces.md`.
     pub fn send_presence(
         &mut self,
         head: Pose,
         left: Option<Pose>,
         right: Option<Pose>,
         hands: [Option<tomori_protocol::Hand>; 2],
+        rig: Option<Rig>,
     ) {
         let Some(client) = &self.client else {
             return;
@@ -1107,6 +1115,7 @@ impl Connection {
             left,
             right,
             hands: Some(Box::new(hands)),
+            rig,
         };
         // The client is open while it is kept, and the server relays only the latest presence, so nothing is lost by a send that fails.
         let _ = client.send(message);
@@ -1170,14 +1179,25 @@ impl Connection {
             });
             self.observe(&event);
             match &event {
-                Event::Message(ServerMessage::Presence { source, head, .. }) => {
+                Event::Message(ServerMessage::Presence {
+                    source, head, rig, ..
+                }) => {
                     self.heads.insert(*source, *head);
+                    // The latest presence says whether the rig is known; one that cannot be used was read as none.
+                    match rig {
+                        Some(rig) => self.rigs.insert(*source, *rig),
+                        None => self.rigs.remove(source),
+                    };
                 }
                 Event::State(ConnectionState::Connected { source, .. }) => {
                     self.local_source = Some(*source);
                     self.heads.clear();
+                    self.rigs.clear();
                 }
-                Event::Message(ServerMessage::Left) => self.heads.clear(),
+                Event::Message(ServerMessage::Left) => {
+                    self.heads.clear();
+                    self.rigs.clear();
+                }
                 Event::Message(ServerMessage::Name { name }) => {
                     let link = self.link.as_ref().expect("a client is kept with its link");
                     self.names.insert(link.key.clone(), name.clone());

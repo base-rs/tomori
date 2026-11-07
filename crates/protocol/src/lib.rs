@@ -24,7 +24,7 @@ pub use message::{
     ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, Pose, Resource, ServerMessage,
     TranscriptPart, TranscriptStage,
 };
-pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
+pub use presence::{BONES, Hand, JOINT_COUNT, Joint, RIG_REACH, Rig};
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,
     Engagement, EnvironmentInfo, KnockRequest, KnockState, Message, Mode, Participant,

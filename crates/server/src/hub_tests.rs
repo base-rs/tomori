@@ -515,6 +515,7 @@ fn what_needs_a_space_is_refused_in_the_lobby() {
         left: None,
         right: None,
         hands: None,
+        rig: None,
     });
     client.send(ClientMessage::StopReplay);
     assert!(client.read().is_empty());
@@ -2553,4 +2554,39 @@ fn a_restored_space_runs_its_server_side_only_once_bound_to_its_session_again() 
     assert!(!hub.server_sides.is_current(&unbound, 1));
     hub.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn presence_relays_a_rig_only_in_bounds() {
+    let (hub, _jobs) = hub();
+    let id = stopped(&hub, Snapshot::default());
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    let bob = Client::greeted(&hub, Access::open(), "bob");
+    ada.join(&id);
+    bob.join(&id);
+    ada.read();
+    let relayed = |rig| {
+        ada.send(ClientMessage::Presence {
+            head: Default::default(),
+            left: None,
+            right: None,
+            hands: None,
+            rig,
+        });
+        let Some(ServerMessage::Presence { rig, .. }) = bob.read().into_iter().next() else {
+            unreachable!("the presence is relayed");
+        };
+        rig
+    };
+    let rig = tomori_protocol::Rig::new([4.0, 3.0, -11.0], 1.0);
+    assert_eq!(relayed(Some(rig)), Some(rig));
+    assert_eq!(relayed(None), None);
+    // One out of bounds, which reading the frame never gives, is still dropped, with the presence kept.
+    for wild in [
+        tomori_protocol::Rig::new([f32::NAN, 0.0, 0.0], 0.0),
+        tomori_protocol::Rig::new([0.0, 1e30, 0.0], 0.0),
+        tomori_protocol::Rig::new([0.0; 3], f32::INFINITY),
+    ] {
+        assert_eq!(relayed(Some(wild)), None);
+    }
 }

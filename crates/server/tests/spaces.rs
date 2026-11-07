@@ -70,6 +70,7 @@ fn participant_identities_are_never_sent_to_other_clients() {
             left: None,
             right: None,
             hands: None,
+            rig: None,
         });
     }
 
@@ -2140,6 +2141,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         left: Some(head),
         right: None,
         hands: Some(Box::new([Some(left_hand), None])),
+        rig: Some(tomori_protocol::Rig::new([4.0, 3.0, -11.0], 0.5)),
     });
 
     bob.wait_for(|message| match message {
@@ -2149,16 +2151,38 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
             left,
             right,
             hands,
+            rig,
         } => {
             assert_eq!(*source, ada_source);
             assert_eq!(*relayed_head, head);
             assert_eq!(*left, Some(head));
             assert_eq!(*right, None);
             assert_eq!(hands.as_deref(), Some(&[Some(left_hand), None]));
+            assert_eq!(
+                *rig,
+                Some(tomori_protocol::Rig::new([4.0, 3.0, -11.0], 0.5))
+            );
             Some(())
         }
         _ => None,
     });
+
+    // A rig out of bounds is dropped as the server reads it, and the presence still relayed.
+    ada.send(&ClientMessage::Presence {
+        head,
+        left: None,
+        right: None,
+        hands: None,
+        rig: Some(tomori_protocol::Rig::new([20_000.0, 0.0, 0.0], 0.0)),
+    });
+    // Nothing else is sent to Bob meanwhile, so the next message is this presence.
+    let (left, rig) = bob.wait_for(|message| {
+        let ServerMessage::Presence { left, rig, .. } = message else {
+            unreachable!("only presence is relayed meanwhile");
+        };
+        Some((*left, *rig))
+    });
+    assert_eq!((left, rig), (None, None));
 
     // A lobby participant does not receive presence from the space.
     let carol = server.connect("carol", "Carol");
@@ -2167,6 +2191,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         left: None,
         right: None,
         hands: None,
+        rig: None,
     });
     bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {

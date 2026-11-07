@@ -200,6 +200,23 @@ impl Rig {
     }
 }
 
+/// The rig as presence carries it, for the others; see `design/spaces.md`.
+impl From<Rig> for tomori_protocol::Rig {
+    fn from(rig: Rig) -> Self {
+        Self::new(rig.translation.to_array(), rig.yaw)
+    }
+}
+
+/// Another participant's rig, from their presence, which reading it has kept in bounds.
+impl From<tomori_protocol::Rig> for Rig {
+    fn from(rig: tomori_protocol::Rig) -> Self {
+        Self {
+            translation: Vec3::from_array(rig.translation),
+            yaw: rig.yaw,
+        }
+    }
+}
+
 /// Where travel applies: the space the participant is in, by its identifier, and its environment.
 pub(crate) type Place<'a> = Option<(&'a str, Environment)>;
 
