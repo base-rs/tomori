@@ -525,22 +525,21 @@ fn interpret(repository: &Repository, answer: Answer, now: u64) -> Result<Fetche
     let rate = data
         .and_then(|data| data.get("rateLimit"))
         .and_then(|rate| {
-            Some(Rate {
-                remaining: rate.get("remaining").and_then(Value::as_u64)?,
-                reset: rate
-                    .get("resetAt")
+            Some(Rate::new(
+                rate.get("remaining").and_then(Value::as_u64)?,
+                rate.get("resetAt")
                     .and_then(Value::as_str)
                     .and_then(timestamp)
                     .map_or(Duration::ZERO, |reset| wait(reset.saturating_sub(now))),
-            })
+            ))
         })
         .or_else(|| {
-            Some(Rate {
-                remaining: answer.remaining?,
-                reset: answer
+            Some(Rate::new(
+                answer.remaining?,
+                answer
                     .reset
                     .map_or(Duration::ZERO, |reset| wait(reset.saturating_sub(now))),
-            })
+            ))
         });
     let nodes = |key: &str| {
         repo.pointer(&format!("/{key}/nodes"))
@@ -560,10 +559,10 @@ fn interpret(repository: &Repository, answer: Answer, now: u64) -> Result<Fetche
             .then_with(|| second.card.number.cmp(&first.card.number))
     });
     cards.truncate(MAX_CARDS);
-    Ok(Fetched {
-        cards: cards.into_iter().map(|(_, card)| card).collect(),
+    Ok(Fetched::new(
+        cards.into_iter().map(|(_, card)| card).collect(),
         rate,
-    })
+    ))
 }
 
 /// How long to wait, if GitHub's `answer`, without a repository and whose body is `value`, says it is limiting requests:
@@ -661,8 +660,8 @@ fn card(repository: &Repository, node: &Value, pull: bool, now: u64) -> Option<(
         .unwrap_or("ghost");
     Some((
         updated,
-        FetchedCard {
-            card: Card {
+        FetchedCard::new(
+            Card {
                 id: format!("github://{repository}/{segment}/{number}"),
                 number,
                 kind,
@@ -674,8 +673,8 @@ fn card(repository: &Repository, node: &Value, pull: bool, now: u64) -> Option<(
                 placement: None,
             },
             opened,
-            url: format!("https://github.com/{repository}/{segment}/{number}"),
-        },
+            format!("https://github.com/{repository}/{segment}/{number}"),
+        ),
     ))
 }
 

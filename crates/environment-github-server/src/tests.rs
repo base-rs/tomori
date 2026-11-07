@@ -262,10 +262,7 @@ fn issues_and_pull_requests_become_cards_most_recently_updated_first() {
     assert_eq!(card(170).card.checks, Checks::None);
     assert_eq!(
         fetched.rate,
-        Some(Rate {
-            remaining: 4_990,
-            reset: Duration::from_secs(3_600),
-        })
+        Some(Rate::new(4_990, Duration::from_secs(3_600)))
     );
 }
 
@@ -286,13 +283,7 @@ fn at_most_the_card_limit_is_kept_and_a_missing_list_is_empty() {
     let bare = serde_json::json!({"data": {"rateLimit": {"remaining": 1, "resetAt": "soon"}, "repository": {}}});
     let fetched = interpret(&repository(), answer(200, &bare.to_string()), NOW).unwrap();
     assert!(fetched.cards.is_empty());
-    assert_eq!(
-        fetched.rate,
-        Some(Rate {
-            remaining: 1,
-            reset: Duration::ZERO,
-        })
-    );
+    assert_eq!(fetched.rate, Some(Rate::new(1, Duration::ZERO)));
     // Without a rate limit, or one without what remains of it, there is none.
     for unlimited in [
         serde_json::json!({"data": {"repository": {}}}),
@@ -428,13 +419,7 @@ fn a_rate_limit_is_recognised_whatever_the_status_and_waited_for_until_it_resets
         NOW,
     )
     .unwrap();
-    assert_eq!(
-        fetched.rate,
-        Some(Rate {
-            remaining: 0,
-            reset: Duration::from_secs(900),
-        })
-    );
+    assert_eq!(fetched.rate, Some(Rate::new(0, Duration::from_secs(900))));
     let fetched = interpret(
         &repository(),
         Answer {
@@ -444,13 +429,7 @@ fn a_rate_limit_is_recognised_whatever_the_status_and_waited_for_until_it_resets
         NOW,
     )
     .unwrap();
-    assert_eq!(
-        fetched.rate,
-        Some(Rate {
-            remaining: 7,
-            reset: Duration::ZERO,
-        })
-    );
+    assert_eq!(fetched.rate, Some(Rate::new(7, Duration::ZERO)));
     // Errors that are not limits are reported as they were.
     let other =
         serde_json::json!({"data": null, "errors": [{"type": "NOT_FOUND", "message": "Gone."}]});

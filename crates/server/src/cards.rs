@@ -65,8 +65,9 @@ pub trait CardSource: Send + Sync {
     fn fetch(&self) -> Result<Fetched, Failure>;
 }
 
-/// What a source read.
+/// What a source read. It may gain fields, so make it with [`Fetched::new`].
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Fetched {
     /// At most [`tomori_protocol::MAX_CARDS`], in the order to show them, without placements or ages.
     pub cards: Vec<FetchedCard>,
@@ -74,8 +75,16 @@ pub struct Fetched {
     pub rate: Option<Rate>,
 }
 
-/// One card as read, with what the server keeps about it beyond what clients are sent.
+impl Fetched {
+    /// The `cards` a source read, in the order to show them, and its `rate` limit, if it has one.
+    pub fn new(cards: Vec<FetchedCard>, rate: Option<Rate>) -> Self {
+        Self { cards, rate }
+    }
+}
+
+/// One card as read, with what the server keeps about it beyond what clients are sent. It may gain fields, so make it with [`FetchedCard::new`].
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct FetchedCard {
     pub card: Card,
     /// When it was opened, in seconds since the epoch, from which its age is worked out when it is sent.
@@ -84,16 +93,36 @@ pub struct FetchedCard {
     pub url: String,
 }
 
-/// A source's rate limit after a read.
+impl FetchedCard {
+    /// `card`, opened at `opened`, in seconds since the epoch, and read by a person at `url`.
+    pub fn new(card: Card, opened: u64, url: impl Into<String>) -> Self {
+        Self {
+            card,
+            opened,
+            url: url.into(),
+        }
+    }
+}
+
+/// A source's rate limit after a read. It may gain fields, so make it with [`Rate::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rate {
     pub remaining: u64,
     /// How long until it resets.
     pub reset: Duration,
 }
 
-/// Why a read failed, which may be shown to participants, so it never includes a credential.
+impl Rate {
+    /// `remaining` requests left, until the limit resets in `reset`.
+    pub fn new(remaining: u64, reset: Duration) -> Self {
+        Self { remaining, reset }
+    }
+}
+
+/// Why a read failed, which may be shown to participants, so it never includes a credential. It may gain fields, so make it with [`Failure::new`] or [`Failure::limited`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Failure {
     pub message: String,
     /// How long the source asked to be left alone, if it did.
@@ -103,6 +132,7 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// The read failed, as `message` says.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -423,8 +453,8 @@ pub(crate) mod tests {
 
     /// Card `number` of `o/r`, of `kind`, opened at 1,000 seconds after the epoch.
     pub(crate) fn card(number: u64, kind: CardKind) -> FetchedCard {
-        FetchedCard {
-            card: Card {
+        FetchedCard::new(
+            Card {
                 id: format!("github://o/r/issues/{number}"),
                 number,
                 kind,
@@ -435,9 +465,9 @@ pub(crate) mod tests {
                 age: 0,
                 placement: None,
             },
-            opened: 1_000,
-            url: format!("https://github.com/o/r/issues/{number}"),
-        }
+            1_000,
+            format!("https://github.com/o/r/issues/{number}"),
+        )
     }
 
     fn pose(x: f32) -> Pose {
@@ -465,10 +495,8 @@ pub(crate) mod tests {
     fn a_low_rate_limit_waits_for_its_reset_and_failures_back_off() {
         let start = Instant::now();
         let mut refresh = Refresh::default();
-        let plenty = Rate {
-            remaining: RATE_RESERVE,
-            reset: Duration::from_secs(3_000),
-        };
+        // Made as a source in another crate makes it, so that the constructor's coverage does not depend on whether that crate inlines it.
+        let plenty = Rate::new(RATE_RESERVE, Duration::from_secs(3_000));
         refresh.succeeded(start, Some(plenty));
         assert_eq!(refresh.next(start, true), Next::At(start + REFRESH));
         let low = Rate {
@@ -704,7 +732,7 @@ pub(crate) mod tests {
             card.card.checks = checks;
             cards.push(card);
         }
-        board.fetched(Ok(Fetched { cards, rate: None }), Instant::now());
+        board.fetched(Ok(Fetched::new(cards, None)), Instant::now());
         let day = 1_000 + 86_400 * 3;
         assert_eq!(
             board.describe("github://o/r/issues/7", day).unwrap(),
@@ -795,7 +823,7 @@ pub(crate) mod tests {
                 card
             })
             .collect();
-        board.fetched(Ok(Fetched { cards, rate: None }), Instant::now());
+        board.fetched(Ok(Fetched::new(cards, None)), Instant::now());
         for (index, text) in hostile.iter().enumerate() {
             let number = index + 1;
             let line = board
