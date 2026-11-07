@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(kept[1].1.chars().count(), DESCRIPTION_CHARS + 1);
         assert!(kept[1].1.ends_with('…'));
         assert_eq!(kept.last().unwrap().0, format!("more-{}", OBJECTS - 3));
-        let mut channel = Channel::new(1, "farmyard", 1);
+        let mut channel = Channel::new(1, "garden", 1);
         channel.objects = kept;
         assert_eq!(
             channel.describe("lamp-1"),

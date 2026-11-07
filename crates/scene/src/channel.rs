@@ -95,49 +95,46 @@ mod tests {
     fn a_state_begins_anew_and_events_follow_it() {
         let mut replica = Replica::default();
         // An event before any state changes nothing the client has.
-        replica.receive("s", "farmyard", 1, Update::Event(payload(0)));
-        assert!(!replica.has("s", "farmyard", 1));
-        replica.receive("s", "farmyard", 1, Update::State(payload(1)));
-        replica.receive("s", "farmyard", 1, Update::Event(payload(2)));
+        replica.receive("s", "garden", 1, Update::Event(payload(0)));
+        assert!(!replica.has("s", "garden", 1));
+        replica.receive("s", "garden", 1, Update::State(payload(1)));
+        replica.receive("s", "garden", 1, Update::Event(payload(2)));
         // An event of another space, environment or version is not this one's.
-        replica.receive("t", "farmyard", 1, Update::Event(payload(3)));
+        replica.receive("t", "garden", 1, Update::Event(payload(3)));
         replica.receive("s", "sky", 1, Update::Event(payload(3)));
-        replica.receive("s", "farmyard", 2, Update::Event(payload(3)));
-        assert!(replica.take("s", "farmyard", 2).is_empty());
+        replica.receive("s", "garden", 2, Update::Event(payload(3)));
+        assert!(replica.take("s", "garden", 2).is_empty());
         assert_eq!(
-            replica.take("s", "farmyard", 1),
+            replica.take("s", "garden", 1),
             [Update::State(payload(1)), Update::Event(payload(2))]
         );
-        assert!(replica.take("s", "farmyard", 1).is_empty());
-        assert!(replica.has("s", "farmyard", 1));
+        assert!(replica.take("s", "garden", 1).is_empty());
+        assert!(replica.has("s", "garden", 1));
         // A state for another space begins anew.
-        replica.receive("t", "farmyard", 1, Update::Event(payload(4)));
-        replica.receive("t", "farmyard", 1, Update::State(payload(5)));
-        assert!(!replica.has("s", "farmyard", 1));
-        assert_eq!(
-            replica.take("t", "farmyard", 1),
-            [Update::State(payload(5))]
-        );
+        replica.receive("t", "garden", 1, Update::Event(payload(4)));
+        replica.receive("t", "garden", 1, Update::State(payload(5)));
+        assert!(!replica.has("s", "garden", 1));
+        assert_eq!(replica.take("t", "garden", 1), [Update::State(payload(5))]);
         replica.clear();
-        assert!(!replica.has("t", "farmyard", 1));
+        assert!(!replica.has("t", "garden", 1));
     }
 
     #[test]
     fn untaken_updates_keep_the_state_and_the_latest_events() {
         let mut replica = Replica::default();
-        replica.receive("s", "farmyard", 1, Update::State(payload(0)));
+        replica.receive("s", "garden", 1, Update::State(payload(0)));
         for event in 1..=KEPT as u32 + 5 {
-            replica.receive("s", "farmyard", 1, Update::Event(payload(event)));
+            replica.receive("s", "garden", 1, Update::Event(payload(event)));
         }
-        let updates = replica.take("s", "farmyard", 1);
+        let updates = replica.take("s", "garden", 1);
         assert_eq!(updates.len(), KEPT);
         assert_eq!(updates[0], Update::State(payload(0)));
         assert_eq!(updates[1], Update::Event(payload(7)));
         // Taken, only events wait, and the oldest goes first.
         for event in 0..=KEPT as u32 {
-            replica.receive("s", "farmyard", 1, Update::Event(payload(event)));
+            replica.receive("s", "garden", 1, Update::Event(payload(event)));
         }
-        let updates = replica.take("s", "farmyard", 1);
+        let updates = replica.take("s", "garden", 1);
         assert_eq!(updates.len(), KEPT);
         assert_eq!(updates[0], Update::Event(payload(1)));
     }
