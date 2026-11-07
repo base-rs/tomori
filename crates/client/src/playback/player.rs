@@ -1,12 +1,12 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use tomori_protocol::{AudioFrame, REPLAY_SOURCE};
+use tomori_protocol::{AGENT_SOURCE, AudioFrame, REPLAY_SOURCE};
 
 use super::spatial::{Position, Scene};
 use super::{Direction, Earcon, Layout, Mixer, MixerOptions, PlaybackStatistics, Sound};
@@ -35,6 +35,10 @@ struct Shared {
     silenced: AtomicBool,
     /// Whether agent speech played again for this participant was playing at the last render.
     replaying: AtomicBool,
+    /// Whether agent speech, live or played again, was playing at the last render.
+    speaking: AtomicBool,
+    /// The level of agent speech at the last render, as the bits of an `f32`.
+    level: AtomicU32,
     statistics: Mutex<PlaybackStatistics>,
     scene: Mutex<SceneSlot>,
 }
@@ -165,6 +169,18 @@ impl Player {
             mixer.is_source_recent(REPLAY_SOURCE, REPLAY_PAUSE),
             Ordering::Relaxed,
         );
+        // Muted or silenced speech is still consumed and measured, so it still plays here.
+        self.shared.speaking.store(
+            mixer.is_source_playing(AGENT_SOURCE) || mixer.is_source_playing(REPLAY_SOURCE),
+            Ordering::Relaxed,
+        );
+        self.shared.level.store(
+            mixer
+                .source_level(AGENT_SOURCE)
+                .max(mixer.source_level(REPLAY_SOURCE))
+                .to_bits(),
+            Ordering::Relaxed,
+        );
         // Only the application reads the statistics, rarely, so the callback skips publishing them rather than wait.
         if let Ok(mut statistics) = self.shared.statistics.try_lock() {
             *statistics = mixer.statistics();
@@ -192,6 +208,14 @@ impl PlayerControl {
     /// Whether agent speech played again for this participant, a replay or catch-up, was playing at the last render, including the breaths between its segments.
     pub fn is_replaying(&self) -> bool {
         self.shared.replaying.load(Ordering::Relaxed)
+    }
+
+    /// Whether agent speech, live or played again, was playing at the last render, rather than buffering or absent, and its level then, from 0 to 1. Speech muted locally, or silenced while push-to-talk records, is still consumed in real time, so it still plays. Unlike [`Self::is_replaying`], a pause or a buffer running dry stops it at once; the swarm holds across them. See `design/speech.md`.
+    pub fn agent_speech(&self) -> (bool, f32) {
+        (
+            self.shared.speaking.load(Ordering::Relaxed),
+            f32::from_bits(self.shared.level.load(Ordering::Relaxed)),
+        )
     }
 
     /// Play a sound cue, once, from `direction`. It is local: never sent and never a source, and [`Self::clear`] does not stop it.

@@ -8,7 +8,7 @@ use crate::{
     arrival,
     caption::{COLUMNS, ROWS, wrapped_lines},
     environment::Environment,
-    interaction::SessionActivity,
+    interaction::{SessionActivity, SpeechActivity},
     locomotion::Locomotion,
 };
 #[cfg(any(not(target_os = "android"), test))]
@@ -299,6 +299,8 @@ pub struct Conversation {
     muted: bool,
     /// Whether a replay or catch-up was playing at the last frame.
     replaying: bool,
+    /// Agent speech playing on this device at the last frame, live or played again, which the swarm speaks with.
+    speech: SpeechActivity,
     /// This device's Feedback setting, which the hand menu and console change.
     feedback: feedback::Settings,
     /// Whether the last [`Self::accept`] refused, saying why, rather than acting or having nothing to do.
@@ -422,6 +424,7 @@ impl Conversation {
             reports_engagement: true,
             muted: false,
             replaying: false,
+            speech: SpeechActivity::default(),
             feedback: feedback::Settings::default(),
             refused: false,
             problem_seen: None,
@@ -1146,6 +1149,11 @@ impl Conversation {
     /// Whether a replay or catch-up is playing, from the player, once per frame.
     pub fn set_replaying(&mut self, replaying: bool) {
         self.replaying = replaying;
+    }
+
+    /// Agent speech playing on this device, from the player, once per frame: live or played again, and even while muted here, since the others still hear it. The swarm speaks while it plays; see `design/speech.md`.
+    pub fn speech(&self) -> SpeechActivity {
+        self.speech
     }
 
     /// Finish a jump with the first listing: join the space that most needs attention, even one the server already put this participant in, since joining is what says it has been seen. If someone dealt with it meanwhile, stay in the lobby and say so.
@@ -4315,6 +4323,13 @@ impl Session for Conversation {
         if let Report::Replaying(replaying) = report {
             self.set_replaying(replaying);
         }
+        if let Report::AgentSpeech { playing, level } = report {
+            self.speech = SpeechActivity {
+                playing,
+                level,
+                ..SpeechActivity::default()
+            };
+        }
         match report {
             Report::Connecting(choice) => self.connect(choice),
             Report::Feedback(settings) => self.set_feedback(settings),
@@ -4334,7 +4349,7 @@ impl Session for Conversation {
             Report::MicrophoneFailed(error) => self.microphone_failed(error),
             Report::NotSent(error) => self.utterance_not_sent(error),
             Report::SecurityNotice(notice) => self.security_notice(notice),
-            // Replaying, applied above, and anything a later connection reports that this conversation does not know, which needs nothing of it.
+            // Replaying and agent speech, applied above, and anything a later connection reports that this conversation does not know, which needs nothing of it.
             _ => {}
         }
     }
@@ -10299,6 +10314,31 @@ mod tests {
         // What plays again is shown.
         Session::report(&mut conversation, Report::Replaying(true));
         assert!(conversation.text().contains("Replaying"));
+        // Agent speech playing on this device is kept for the swarm, until it stops.
+        assert_eq!(conversation.speech(), SpeechActivity::default());
+        Session::report(
+            &mut conversation,
+            Report::AgentSpeech {
+                playing: true,
+                level: 0.25,
+            },
+        );
+        assert_eq!(
+            conversation.speech(),
+            SpeechActivity {
+                playing: true,
+                level: 0.25,
+                ..SpeechActivity::default()
+            }
+        );
+        Session::report(
+            &mut conversation,
+            Report::AgentSpeech {
+                playing: false,
+                level: 0.0,
+            },
+        );
+        assert!(!conversation.speech().playing);
         // At the server list, the remembered server is connected to once it has been listed a while, but only while the list is seen.
         let start = Instant::now();
         let mut conversation = crate::test_support::conversation("Ada");

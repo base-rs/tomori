@@ -1443,7 +1443,10 @@ fn until(
             session
                 .reports
                 .iter()
-                .filter(|report| !matches!(report, Report::Tick { .. } | Report::Replaying(_)))
+                .filter(|report| !matches!(
+                    report,
+                    Report::Tick { .. } | Report::Replaying(_) | Report::AgentSpeech { .. }
+                ))
                 .collect::<Vec<_>>()
         );
         std::thread::sleep(Duration::from_millis(2));
@@ -1757,23 +1760,19 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     connection.poll(true, &mut session);
     assert!(session.heard().is_empty());
     assert!(felt(&mut connection).is_empty());
-    assert!(
-        session
-            .reports
-            .iter()
-            .all(|report| matches!(report, Report::Tick { .. } | Report::Replaying(false)))
-    );
+    assert!(session.reports.iter().all(|report| matches!(
+        report,
+        Report::Tick { .. } | Report::Replaying(false) | Report::AgentSpeech { playing: false, .. }
+    )));
     // Words never begun end as X is released, felt, and nothing is sent or reported.
     session.push(Action::EndUtterance);
     connection.poll(true, &mut session);
     assert!(session.heard().is_empty());
     assert_eq!(felt(&mut connection), [Hand::Left]);
-    assert!(
-        session
-            .reports
-            .iter()
-            .all(|report| matches!(report, Report::Tick { .. } | Report::Replaying(false)))
-    );
+    assert!(session.reports.iter().all(|report| matches!(
+        report,
+        Report::Tick { .. } | Report::Replaying(false) | Report::AgentSpeech { playing: false, .. }
+    )));
     // Without a speaker, cues and ambient sounds have nowhere to play, and are dropped.
     session.listening = false;
     connection.feedback().emit(Feedback::Choose, Instant::now());
@@ -2574,7 +2573,10 @@ fn a_server_that_is_not_there_is_retried_without_a_report() {
     assert!(
         session.reports.iter().all(|report| matches!(
             report,
-            Report::Feedback(_) | Report::Tick { .. } | Report::Replaying(false)
+            Report::Feedback(_)
+                | Report::Tick { .. }
+                | Report::Replaying(false)
+                | Report::AgentSpeech { playing: false, .. }
         )),
         "{:?}",
         session.reports
@@ -2744,12 +2746,10 @@ fn a_token_is_ignored_without_a_connection_over_tls_to_keep_it_for() {
     assert_eq!(credential(), Default::default());
     assert!(connection.client.is_some());
     assert_eq!(peer.ended.load(Ordering::Relaxed), 0);
-    assert!(
-        session
-            .reports
-            .iter()
-            .all(|report| matches!(report, Report::Tick { .. } | Report::Replaying(_)))
-    );
+    assert!(session.reports.iter().all(|report| matches!(
+        report,
+        Report::Tick { .. } | Report::Replaying(_) | Report::AgentSpeech { .. }
+    )));
     // Nor while connecting, before the server has presented anything.
     session.push(Action::Connect(peer.choice()));
     session.actions.extend(tokens());

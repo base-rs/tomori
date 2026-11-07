@@ -139,6 +139,8 @@ pub enum Report {
     SecurityNotice(String),
     /// Whether speech played again for this participant is playing. Reported once a frame.
     Replaying(bool),
+    /// Whether agent speech is playing on this device, live or played again, and even while muted locally, and how loud, from 0 to 1, as [`crate::playback::PlayerControl::agent_speech`] says. Reported once a frame, after [`Self::Replaying`], so that the agent can be seen speaking for as long as it is heard.
+    AgentSpeech { playing: bool, level: f32 },
 }
 
 /// The client's side of its conversation with a server, which a [`Connection`] carries out and reports to. `tomori-scene`'s `Conversation` is Tomori's.
@@ -834,6 +836,12 @@ impl Speaker {
         self.control().is_some_and(PlayerControl::is_replaying)
     }
 
+    /// Whether agent speech is playing, live or played again, and how loud: silent without a player.
+    fn agent_speech(&self) -> (bool, f32) {
+        self.control()
+            .map_or((false, 0.0), PlayerControl::agent_speech)
+    }
+
     /// The client is going away: stop playing and forget its audio.
     fn detach(&mut self) {
         self.output = None;
@@ -1241,6 +1249,8 @@ impl Connection {
             control.set_silenced(self.voice.talking());
         }
         session.report(Report::Replaying(self.speaker.is_replaying()));
+        let (playing, level) = self.speaker.agent_speech();
+        session.report(Report::AgentSpeech { playing, level });
         self.listen_live();
         self.cue(session);
     }
