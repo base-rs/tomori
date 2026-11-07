@@ -126,6 +126,8 @@ enum Outcome {
     Named(String),
     /// Not sent, with why, which is also the problem shown.
     Failed(String),
+    /// Not sent, as no speech was heard in it: nothing was lost, so the recording card shows it briefly, and it is no problem. See `design/speech.md`.
+    Unheard,
     /// Words that said a new name did not change it, with why; the problem shown says so, and X says the name again until B cancels. See `design/hand-menu.md`.
     NameFailed(String),
 }
@@ -298,6 +300,10 @@ pub struct Conversation {
     problem_seen: Option<(String, Instant)>,
     /// The space's ongoing problem, as dismissed on this headset; it shows again if it changes.
     dismissed: Option<String>,
+    /// The problem saying that this participant's words were not sent, or their name not changed, which what becomes of their next words replaces. See `design/interaction.md`.
+    unsent: Option<String>,
+    /// The problem last seen: shown on the right wrist's transcript, or on the recording card for the participant's own words, so that it no longer cues the right wrist. See `design/wrist-transcript.md`.
+    problem_noticed: Option<String>,
     /// The open list of the space's modes and speech setting, and the selected item.
     space_menu: Option<usize>,
     /// The queued entry selected with the right stick, by id.
@@ -410,6 +416,8 @@ impl Conversation {
             refused: false,
             problem_seen: None,
             dismissed: None,
+            unsent: None,
+            problem_noticed: None,
             space_menu: None,
             queue_selected: None,
             cancelling: None,
@@ -855,7 +863,7 @@ impl Conversation {
             } => {
                 let ours = self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str());
                 if ours && finished {
-                    // The queue entry now shows the words. An earlier utterance's failure stays shown.
+                    // The queue entry now shows the words, and replaces an earlier utterance's failure.
                     let talk = self.talk.take();
                     let outcome = if talk.as_ref().is_some_and(Talk::naming) {
                         // The words were the name the server now uses.
@@ -866,6 +874,7 @@ impl Conversation {
                         Outcome::Sent { answered, text }
                     };
                     self.outcome = Some((outcome, Instant::now()));
+                    self.replace_unsent();
                 } else if ours
                     && let Some(Talk::Recording { heard, .. } | Talk::Sending { heard, .. }) =
                         self.talk.as_mut()
@@ -900,8 +909,13 @@ impl Conversation {
                         self.actions.push(Action::AbandonUtterance);
                     }
                 }
-                // Also shown for an earlier utterance, whose words were not sent either.
-                self.failed(error, naming);
+                if error == tomori_protocol::NO_SPEECH && !naming {
+                    // Nothing said was lost: the card says so for a moment, and the problem line, the pill and the right wrist are not troubled.
+                    self.outcome = Some((Outcome::Unheard, Instant::now()));
+                } else {
+                    // Also shown for an earlier utterance, whose words were not sent either.
+                    self.failed(error, naming);
+                }
             }
             // Agent speech is heard rather than shown: its audio plays through the speaker.
             ServerMessage::Speech { segment, text, .. } => {
@@ -2257,6 +2271,10 @@ impl Conversation {
     pub fn transcript(&mut self, columns: usize, hands_only: bool) -> Vec<crate::ui_text::Row> {
         let now = Instant::now();
         self.observe_problem(now);
+        // The problem line shows it, so it has been seen and no longer cues the wrist.
+        if let Some(problem) = self.problem() {
+            self.problem_noticed = Some(problem);
+        }
         let problem = self.problem_text(now);
         let answerable = self.answerable().is_some();
         let Some(space) = self.space.as_ref().filter(|_| self.mode == Mode::Space) else {
@@ -2437,13 +2455,20 @@ impl Conversation {
         false
     }
 
-    /// What waits for this participant on the right wrist, for its cue: `Some(false)` for a request, `Some(true)` for a problem.
-    pub fn wrist_waiting(&self) -> Option<bool> {
+    /// What waits for this participant on the right wrist, for its cue at each frame: `Some(false)` for a request, until it is decided or answered, and `Some(true)` for a problem not yet seen. See `design/wrist-transcript.md`.
+    pub fn wrist_waiting(&mut self) -> Option<bool> {
+        let problem = self.problem();
+        // A problem seen stays seen only while it lasts; shown again later, it is news again.
+        if self.problem_noticed != problem {
+            self.problem_noticed = None;
+        }
         let space = self.space.as_ref().filter(|_| self.mode == Mode::Space)?;
         if self.approval().is_some() || space.question.is_some() {
             Some(false)
         } else {
-            self.problem().map(|_| true)
+            problem
+                .filter(|problem| self.problem_noticed.as_ref() != Some(problem))
+                .map(|_| true)
         }
     }
 
@@ -2541,6 +2566,13 @@ impl Conversation {
                     if matches!(self.outcome, Some((Outcome::NameFailed(_), _))) {
                         self.error = None;
                     }
+                    return;
+                }
+                // The card saying that no speech was heard, which is no problem.
+                if let Some((Outcome::Unheard, at)) = self.outcome
+                    && self.unheard_shown(Instant::now(), at)
+                {
+                    self.outcome = None;
                     return;
                 }
                 if self.error.take().is_some() {
@@ -2905,6 +2937,8 @@ impl Conversation {
     /// The microphone could not record, so the recording is abandoned.
     pub fn microphone_failed(&mut self, error: impl Into<String>) {
         let naming = self.talk.as_ref().is_some_and(Talk::naming);
+        // Words being recorded are lost with the capture.
+        let recording = matches!(self.talk, Some(Talk::Recording { .. }));
         self.stop_live();
         // X may have been released while capture failed, before the queued end
         // was sent. Cancel instead of finalizing an incomplete utterance.
@@ -2935,17 +2969,38 @@ impl Conversation {
             self.talk = None;
         }
         self.failed(error.into(), naming);
+        // Words already with the server are still transcribed, and the live microphone failing loses none, so what becomes of the next words does not answer it.
+        if !recording && !cancelled {
+            self.unsent = None;
+        }
     }
 
     /// Show `error` as the problem, and on the recording indicator, as words that were not sent, or, if they were `naming` the participant, as a name not changed, which X then says again. See `design/hand-menu.md`.
     fn failed(&mut self, error: String, naming: bool) {
-        if naming {
+        let problem = if naming {
             self.naming = self.renames();
-            self.error = Some(name_not_changed(&error));
+            let problem = name_not_changed(&error);
             self.outcome = Some((Outcome::NameFailed(error), Instant::now()));
+            problem
         } else {
             self.outcome = Some((Outcome::Failed(error.clone()), Instant::now()));
-            self.error = Some(error);
+            error
+        };
+        // Unless later words are on their way, the recording card shows it where the words were spoken, with the not-sent cue, so the right wrist does not cue it too.
+        if self.talk.is_none() {
+            self.problem_noticed = Some(problem.clone());
+        }
+        // What becomes of the next words replaces it.
+        self.unsent = Some(problem.clone());
+        self.error = Some(problem);
+    }
+
+    /// What became of this participant's newest words replaces the problem saying that earlier words were not sent, which is no longer news.
+    fn replace_unsent(&mut self) {
+        if let Some(unsent) = self.unsent.take()
+            && self.error.as_ref() == Some(&unsent)
+        {
+            self.error = None;
         }
     }
 
@@ -3048,12 +3103,18 @@ impl Conversation {
             {
                 Some(Phase::Named { name: name.clone() })
             }
-            // Until B dismisses the problem, or another recording starts.
-            Some((Outcome::Failed(reason), _)) if self.error.as_ref() == Some(reason) => {
+            // For a few seconds, unless B dismisses the problem or another recording starts first.
+            Some((Outcome::Failed(reason), at))
+                if self.error.as_ref() == Some(reason)
+                    && now.saturating_duration_since(*at) < crate::recording::NOT_SENT =>
+            {
                 Some(Phase::Failed {
                     reason: reason.clone(),
                 })
             }
+            Some((Outcome::Unheard, at)) if self.unheard_shown(now, *at) => Some(Phase::Failed {
+                reason: tomori_protocol::NO_SPEECH.into(),
+            }),
             Some((Outcome::NameFailed(reason), _))
                 if self.error.as_deref() == Some(name_not_changed(reason).as_str()) =>
             {
@@ -3063,6 +3124,11 @@ impl Conversation {
             }
             _ => None,
         }
+    }
+
+    /// Whether the card still says, at `now`, that no speech was heard in words that ended `at`.
+    fn unheard_shown(&self, now: Instant, at: Instant) -> bool {
+        self.talk.is_none() && now.saturating_duration_since(at) < crate::recording::NOT_SENT
     }
 
     /// The longest utterance the server's recognition takes, when it says.
@@ -8644,11 +8710,20 @@ mod tests {
             reason: "Nothing was sent: longer than 5 minutes.".into(),
         });
         assert_eq!(conversation.recording_phase(Instant::now()), failed);
+        // It is shown for a few seconds, longer than other outcomes, so that why can be read, then fades while the problem stays.
+        assert!(crate::recording::NOT_SENT > crate::recording::OUTCOME);
+        let now = Instant::now();
         assert_eq!(
-            conversation.recording_phase(Instant::now() + Duration::from_secs(60)),
+            conversation.recording_phase(now + crate::recording::OUTCOME),
             failed
         );
-        // B dismisses it with the problem.
+        assert_eq!(
+            conversation.recording_phase(now + crate::recording::NOT_SENT),
+            None
+        );
+        assert!(conversation.problem().is_some());
+        // B dismisses it sooner, with the problem.
+        assert_eq!(conversation.recording_phase(Instant::now()), failed);
         conversation.back();
         assert_eq!(conversation.recording_phase(Instant::now()), None);
         // Pressing X again replaces it.
@@ -8663,6 +8738,131 @@ mod tests {
         let Some(Phase::Recording { .. }) = conversation.recording_phase(Instant::now()) else {
             unreachable!("Some")
         };
+    }
+
+    #[test]
+    fn a_recording_with_no_speech_is_shown_only_briefly_on_the_card() {
+        use crate::recording::Phase;
+        let mut conversation = joined(|_| {});
+        let silent = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: silent,
+            error: tomori_protocol::NO_SPEECH.into(),
+        }));
+        let unheard = Some(Phase::Failed {
+            reason: "no speech heard".into(),
+        });
+        let now = Instant::now();
+        assert_eq!(conversation.recording_phase(now), unheard);
+        assert_eq!(
+            conversation.recording_phase(now + crate::recording::OUTCOME),
+            unheard
+        );
+        assert_eq!(
+            conversation.recording_phase(now + crate::recording::NOT_SENT),
+            None
+        );
+        // Nothing said was lost, so it is no problem: not on the problem line, the pill or the right wrist.
+        assert_eq!(conversation.problem(), None);
+        assert!(!conversation.text().contains("no speech heard"));
+        assert_eq!(conversation.pill_status(now).unwrap().need, None);
+        assert_eq!(conversation.wrist_waiting(), None);
+        // B dismisses it from the card sooner, and then has nothing more to dismiss.
+        conversation.back();
+        assert_eq!(conversation.recording_phase(Instant::now()), None);
+        conversation.back();
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Hold B to leave the space.")
+        );
+        // The next words' outcome replaces it on the card.
+        let silent = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: silent,
+            error: tomori_protocol::NO_SPEECH.into(),
+        }));
+        let utterance = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(transcript(&utterance, "Run the tests.", true));
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Sent {
+                answered: false,
+                position: None
+            })
+        );
+    }
+
+    #[test]
+    fn the_next_words_replace_words_that_were_not_sent_on_the_card_the_problem_line_and_the_wrist()
+    {
+        use crate::recording::Phase;
+        const FAILED: &str = "Speech recognition failed.";
+        let mut conversation = joined(|_| {});
+        let lost = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: lost,
+            error: FAILED.into(),
+        }));
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Failed {
+                reason: FAILED.into()
+            })
+        );
+        assert_eq!(conversation.problem().as_deref(), Some(FAILED));
+        // The card showed it, with the not-sent cue, so the right wrist does not cue it.
+        assert_eq!(conversation.wrist_waiting(), None);
+        for words in ["Run the tests.", "Then the lints."] {
+            let utterance = press(&mut conversation);
+            conversation.talk(false);
+            conversation.take_actions();
+            conversation.apply(transcript(&utterance, words, true));
+            let now = Instant::now();
+            assert_eq!(
+                conversation.recording_phase(now),
+                Some(Phase::Sent {
+                    answered: false,
+                    position: None
+                })
+            );
+            assert_eq!(
+                conversation.recording_phase(now + crate::recording::OUTCOME),
+                None
+            );
+            assert_eq!(conversation.problem(), None);
+            assert!(!conversation.text().contains(FAILED));
+            assert_eq!(conversation.wrist_waiting(), None);
+        }
+        // A failure of earlier words, arriving while later words are recorded, is not on the card, so the wrist cues it until the later words replace it.
+        let earlier = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        let later = press(&mut conversation);
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance: earlier,
+            error: FAILED.into(),
+        }));
+        assert_eq!(conversation.wrist_waiting(), Some(true));
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(transcript(&later, "Merge it.", true));
+        assert_eq!(conversation.problem(), None);
+        assert_eq!(conversation.wrist_waiting(), None);
+        // Another problem than the words' is not replaced by them.
+        conversation.fail("Lost the agent.");
+        let utterance = press(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(transcript(&utterance, "Are you there?", true));
+        assert_eq!(conversation.problem().as_deref(), Some("Lost the agent."));
     }
 
     #[test]
@@ -8710,19 +8910,23 @@ mod tests {
         conversation.take_actions();
         conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
             utterance,
-            error: "no speech heard".into(),
+            error: "Speech recognition failed.".into(),
         }));
-        assert!(conversation.text().contains("! 0s no speech heard"));
+        assert!(
+            conversation
+                .text()
+                .contains("! 0s Speech recognition failed.")
+        );
         // Talking again does not wipe it before it is read.
         press(&mut conversation);
         let text = conversation.text();
         assert!(text.contains("MIC AGENT"), "{text}");
-        assert!(text.contains("! 0s no speech heard"), "{text}");
+        assert!(text.contains("! 0s Speech recognition failed."), "{text}");
         conversation.talk(false);
         conversation.take_actions();
         // B dismisses it.
         conversation.back();
-        assert!(!conversation.text().contains("no speech heard"));
+        assert!(!conversation.text().contains("Speech recognition failed."));
         assert!(conversation.take_actions().is_empty());
     }
 
@@ -8841,18 +9045,20 @@ mod tests {
         let second = press(&mut conversation);
         conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
             utterance: first,
-            error: "no speech heard".into(),
+            error: "Speech recognition failed.".into(),
         }));
         let text = conversation.text();
         assert!(text.contains("MIC AGENT"), "{text}");
-        assert!(text.contains("no speech heard"), "{text}");
+        assert!(text.contains("Speech recognition failed."), "{text}");
         conversation.talk(false);
         let text = conversation.text();
         assert!(text.contains("Sending: "), "{text}");
-        assert!(text.contains("no speech heard"), "{text}");
+        assert!(text.contains("Speech recognition failed."), "{text}");
         assert_fits(&mut conversation);
+        // The newer words' outcome replaces it.
         conversation.apply(transcript(&second, "Run the tests.", true));
-        assert!(conversation.text().contains("no speech heard"));
+        assert!(!conversation.text().contains("Speech recognition failed."));
+        assert_eq!(conversation.problem(), None);
     }
 
     #[test]

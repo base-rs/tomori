@@ -24,8 +24,8 @@ pub use channel::{MESSAGE_LIMIT, Payload, STATE_LIMIT};
 pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{
-    ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, Pose, Resource,
-    ServerMessage, TranscriptPart, TranscriptStage,
+    ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, NO_SPEECH, Pose,
+    Resource, ServerMessage, TranscriptPart, TranscriptStage,
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use space::{

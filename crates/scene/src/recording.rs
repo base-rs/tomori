@@ -28,6 +28,8 @@ pub const SMOOTHING: f32 = 0.06;
 pub const GROW: f32 = 0.12;
 /// How long what became of the words stays shown.
 pub const OUTCOME: Duration = Duration::from_millis(1500);
+/// How long words that were not sent stay shown, longer than other outcomes so that why can be read, unless X is pressed again or B dismisses them first.
+pub const NOT_SENT: Duration = Duration::from_secs(5);
 /// How long the words heard may stay empty before the indicator says they come when X is released, as from a recognizer that streams none.
 pub const QUIET: Duration = Duration::from_secs(3);
 /// How far from the limit the time turns amber, and then red, as its nearing the limit is felt.
@@ -69,7 +71,7 @@ pub enum Phase {
         answered: bool,
         position: Option<usize>,
     },
-    /// The words were not sent, with why. Shown until X is pressed again or B dismisses the problem.
+    /// The words were not sent, with why. Shown for [`NOT_SENT`], until X is pressed again or B dismisses the problem.
     Failed { reason: String },
     /// X is held to say the participant's new display name, as chosen in the hand menu. See `design/security.md`.
     Naming { elapsed: Duration, heard: String },
