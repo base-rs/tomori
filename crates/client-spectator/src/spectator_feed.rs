@@ -520,11 +520,16 @@ mod tests {
 
     #[test]
     fn the_spectator_hears_the_others_seated_around_the_participant_it_follows_after_they_travel() {
-        use tomori_client::playback::spatial::{Listener, Scene};
         use tomori_scene::{arrival::HOME, locomotion::Rig, spatial_audio};
         let server = Server::start();
         let bea = server.remote("Bea", Some(server.owner("Bea")));
         let space = bea.create_space("Studio", || {}).id;
+        // Cy, whose client does not say where their room is, is in the space too.
+        let cy = server.remote("Cy", Some(server.owner("Cy")));
+        cy.send(ClientMessage::Join {
+            space: space.clone(),
+        });
+        cy.space(|| {}, |state| (state.id == space).then_some(()));
         let mut feed = feed(SpectatorOptions {
             server: Some(server.address()),
             space: Some(space),
@@ -532,54 +537,58 @@ mod tests {
             token: None,
         });
         until(&mut feed, |feed, _| {
-            feed.conversation.joined_space().is_some()
+            feed.conversation.joined_space().is_some_and(|(space, _)| {
+                space
+                    .participants
+                    .iter()
+                    .any(|participant| participant.name == "Cy")
+            })
         });
+        let (space, _) = feed.conversation.joined_space().unwrap();
+        let cy = space
+            .participants
+            .iter()
+            .find(|participant| participant.name == "Cy")
+            .unwrap()
+            .source;
         // Bea teleported 12 m away onto a ledge 3 m up, and turned, and says so.
         let travelled = tomori_protocol::Rig::new([4.0, 3.0, -11.0], 1.0);
         let room = Rig::from(travelled).matrix();
         let head = room.transform_point3(HOME);
+        let orientation = Quat::from_rotation_y(1.0).to_array();
         bea.send(ClientMessage::Presence {
             head: tomori_protocol::Pose {
                 position: head.to_array(),
-                orientation: Quat::from_rotation_y(1.0).to_array(),
+                orientation,
             },
             left: None,
             right: None,
             hands: None,
             rig: Some(travelled),
         });
-        let frame = until(&mut feed, |feed, _| feed.following.is_some());
+        let frame = until(&mut feed, |feed, _| {
+            feed.following.is_some() && feed.connection.placed().position(cy).is_some()
+        });
         // The audience sees and hears from where she stands.
         assert!(Vec3::new(frame.head[12], frame.head[13], frame.head[14]).distance(head) < 1e-4);
         let presence = feed.presence.lock().unwrap().clone();
-        let (listener, rig) = feed.hearing(&presence);
-        assert_eq!(rig, Rig::from(travelled));
+        assert_eq!(feed.hearing(&presence).1, Rig::from(travelled));
+        let placed = feed.connection.placed().clone();
+        let listener = placed.listener.expect("the audience hears from her head");
         assert_eq!(listener.position, head.to_array());
-        // Someone whose client does not say where their room is, is seated around her, where she travelled, rather than around the space's home.
-        let mut scene = Scene::default();
-        spatial_audio::fill(
-            &mut scene,
-            Some(Listener {
-                position: listener.position,
-                orientation: listener.orientation,
-            }),
-            rig,
-            [0.0; 3],
-            &[7],
-            &Default::default(),
-            &Default::default(),
-            false,
-        );
+        assert_eq!(listener.orientation, orientation);
+        // What the feed plays seats Cy around her, where she travelled, rather than around the space's home: behind her as she faces after turning, at the mouth's standing height, since Cy's head is not known.
         let (seat, angle) = spatial_audio::seat(0, 1);
         let seated =
             room.transform_point3(Vec3::from_array(spatial_audio::voice(seat, angle, None)));
-        let heard = Vec3::from_array(scene.position(7).unwrap());
-        assert!(heard.distance(seated) < 1e-4);
+        let heard = Vec3::from_array(placed.position(cy).unwrap());
+        assert!(heard.distance(seated) < 1e-4, "{heard}");
         let across = (heard - head) * Vec3::new(1.0, 0.0, 1.0);
         assert!((across.length() - spatial_audio::RING).abs() < 1e-3);
-        // Seated behind her, as she faces after turning.
         let behind = room.transform_vector3(Vec3::Z);
         assert!(across.normalize().dot(behind) > 0.999);
+        // Bea is the listener, so she is not also a voice.
+        assert_eq!(placed.sources.len(), 2);
         // With nobody to follow, the audience hears from the neutral view, with the others around home.
         feed.following = None;
         assert_eq!(feed.hearing(&presence).1, Rig::default());

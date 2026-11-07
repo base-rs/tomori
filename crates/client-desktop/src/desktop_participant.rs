@@ -396,11 +396,15 @@ mod tests {
                 server.participant("Ada", Some(server.owner("Ada")));
             conversation.join_space(space.clone());
             let mut window = Participant::new(gpu, conversation, connection);
-            // The others see where this participant's head is.
-            bea.wait_for(
+            // The others see where this participant's head is, and that their room is at home.
+            let rig = bea.wait_for(
                 || window.redraw(&mut surface).unwrap(),
-                |message| matches!(message, ServerMessage::Presence { .. }).then_some(()),
+                |message| match message {
+                    ServerMessage::Presence { rig, .. } => Some(*rig),
+                    _ => None,
+                },
             );
+            assert_eq!(rig, Some(tomori_protocol::Rig::default()));
             // Space held is push-to-talk, which opens the microphone.
             window.input(Input::Focused(true), &mut surface).unwrap();
             window
@@ -491,6 +495,22 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            // The presence the window sends carries the rig it travelled with, so Bea can tell this travel from walking.
+            let (_, scene_to_space) = window.step(&mut surface);
+            let sent = bea.wait_for(
+                || window.redraw(&mut surface).unwrap(),
+                |message| match message {
+                    ServerMessage::Presence { rig: Some(rig), .. }
+                        if (tomori_scene::locomotion::Rig::from(*rig).matrix()
+                            * scene_to_space)
+                            .abs_diff_eq(Mat4::IDENTITY, 1e-4) =>
+                    {
+                        Some(*rig)
+                    }
+                    _ => None,
+                },
+            );
+            assert!(sent.yaw != 0.0 && sent.translation != [0.0; 3]);
             // The transcript shows on the right wrist, a panel in the scene, where the participant now is.
             input(&mut window, &mut surface, press(KeyCode::KeyT, true));
             input(&mut window, &mut surface, press(KeyCode::KeyT, false));

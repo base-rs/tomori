@@ -244,6 +244,8 @@ pub struct Connection {
     listening_as: Option<u32>,
     /// The other participants in the space, kept between frames to avoid allocating.
     others: Vec<u32>,
+    /// Where [`Self::listen`] last placed the voices, kept so that it can be read back.
+    placed: Scene,
     /// Measures how much of the speaker the live microphone hears, when started with it.
     echo_test: Option<EchoTest>,
     /// The name each server, by its link's key, last called this participant, which a new connection to it suggests in place of the device's for the rest of this run: so that a name it does not keep, such as a visitor's, survives connecting again. Never written down. See `design/security.md`.
@@ -977,6 +979,7 @@ impl Connection {
             local_source: None,
             listening_as: None,
             others: Vec::new(),
+            placed: Scene::default(),
             echo_test: None,
             names: HashMap::new(),
         }
@@ -1076,7 +1079,19 @@ impl Connection {
             rigs: &self.rigs,
             mono: self.feedback.settings().mono,
         };
-        control.set_scene(|scene| place(scene, voices));
+        let placed = &mut self.placed;
+        control.set_scene(|scene| {
+            place(scene, voices);
+            // Copied into storage kept between frames, so that this allocates only as the space grows.
+            placed.listener = scene.listener;
+            placed.sources.clone_from(&scene.sources);
+            placed.mono = scene.mono;
+        });
+    }
+
+    /// Where [`Self::listen`] last placed the listener and the voices, as the player was given them, or an empty scene before it first has; kept from one connection to the next, until it places them again.
+    pub fn placed(&self) -> &Scene {
+        &self.placed
     }
 
     /// What the participant hears and feels as things change, for the frame loop to report pointing and choosing to, and to take vibrations from.

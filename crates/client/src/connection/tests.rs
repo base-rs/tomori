@@ -2301,11 +2301,17 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(*watched.lock().unwrap(), [2]);
+    // Nothing is placed until the first listen.
+    assert_eq!(*connection.placed(), Scene::default());
     let placed = |connection: &mut Connection| {
         let mut voices = None;
         // This client is participant 1, as the peer welcomed it.
         connection.listen([4, 3, 2, 1, 3], |scene, placed| {
             scene.sources.clear();
+            scene
+                .sources
+                .extend(placed.others.iter().map(|source| (*source, [1.0; 3])));
+            scene.mono = true;
             let mut heads: Vec<_> = placed.heads.keys().copied().collect();
             heads.sort_unstable();
             let mut rigs: Vec<_> = placed
@@ -2322,6 +2328,9 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
         placed(&mut connection),
         (vec![2, 3], vec![2], vec![], false)
     );
+    // What was placed can be read back, as the player was given it.
+    assert_eq!(connection.placed().sources, [(2, [1.0; 3]), (3, [1.0; 3])]);
+    assert!(connection.placed().mono && connection.placed().listener.is_none());
     // A participant whose client says where their room is: the rig is kept with their head, and the latest presence without one forgets it.
     let rig = tomori_protocol::Rig::new([4.0, 3.0, -11.0], 0.5);
     for source in [3, 4] {

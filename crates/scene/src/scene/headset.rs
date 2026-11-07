@@ -1625,6 +1625,26 @@ mod tests {
         );
     }
 
+    /// Send `presence` to a server, as the headset's frame loop does, from a participant in a space, and return the rig another participant in the space receives with it.
+    fn relayed(presence: crate::scene::Presence) -> Option<tomori_protocol::Rig> {
+        let server = crate::test_support::Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let (mut conversation, mut connection) =
+            server.participant("Ada", Some(server.owner("Ada")));
+        conversation.join_space(space);
+        bea.wait_for(
+            || {
+                connection.poll(true, &mut conversation);
+                presence.send(&mut connection);
+            },
+            |message| match message {
+                tomori_protocol::ServerMessage::Presence { rig, .. } => Some(*rig),
+                _ => None,
+            },
+        )
+    }
+
     /// A space in Sky, declared for this test to teleport onto a floor 20 m across.
     fn travelling() -> Conversation {
         let mut conversation = joined();
@@ -1714,6 +1734,8 @@ mod tests {
         // Presence carries the rig its poses were placed with, so that the others can tell this travel from walking.
         assert_eq!(presence.rig, drawn.frame.rig);
         assert_ne!(presence.rig, crate::locomotion::Rig::default());
+        // The headset's frame loop sends that presence as it is, so another participant in the space receives it with the rig.
+        assert_eq!(relayed(presence), Some(presence.rig.into()));
         let hand = presence.hands[controller::LEFT].unwrap().joints[1].unwrap();
         assert!(Vec3::from_array(hand.position).distance(wrist + Vec3::new(0.2, 0.0, -1.5)) < 1e-4);
         assert!(Vec3::from_array(presence.head.position).distance(travelled) < 1e-4);
