@@ -36,7 +36,7 @@ type Hook = Box<dyn FnOnce(Server) -> Server>;
 /// }
 /// ```
 ///
-/// Environments here are what the server knows of them today: an identifier and label offered to clients, and their layer of a space's instructions. Their server halves, data sources and tools, planned in [#75](https://github.com/ioquatix/tomori/issues/75), [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
+/// Environments here are what the server knows of them today: an identifier and label offered to clients, and their layer of a space's instructions. Their server sides, data sources and tools, planned in [#75](https://github.com/ioquatix/tomori/issues/75), [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
 pub struct Builder {
     /// Each backend's name and how to make it, in the order `--help` lists them.
     backends: Vec<(String, Constructor)>,
@@ -263,6 +263,45 @@ mod tests {
         assert!(Server::builder().usage().contains(
             "--backend NAME       Offer a backend; repeat for several. Available: fake, opencode.\n"
         ));
+    }
+
+    #[test]
+    fn an_environment_registered_again_has_the_server_side_of_the_last() {
+        struct Idle;
+        impl tomori_environment::ServerSide for Idle {
+            fn run(&self, _: &tomori_environment::Space) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let first = Environment::new("observe", "Observe").with_server_side(Idle);
+        let second = Environment::new("observe", "Observe").with_server_side(Idle);
+        let (environments, _) = Server::builder()
+            .environment(first)
+            .environment(second.clone())
+            .into_parts();
+        let offered = environments.last().expect("offered");
+        assert!(std::sync::Arc::ptr_eq(
+            offered.server_side().expect("it has a side"),
+            second.server_side().expect("it has a side")
+        ));
+        let space = tomori_environment::Space::new("space-1", "Fleet", "/");
+        assert_eq!(
+            offered.server_side().expect("it has a side").run(&space),
+            Ok(())
+        );
+
+        // Registered again without one, it has none.
+        let (environments, _) = Server::builder()
+            .environment(second)
+            .environment(Environment::new("observe", "Observe"))
+            .into_parts();
+        assert!(
+            environments
+                .last()
+                .expect("offered")
+                .server_side()
+                .is_none()
+        );
     }
 
     #[test]

@@ -374,6 +374,12 @@ impl Server {
         self
     }
 
+    /// Change how long cancelled connections, and the server sides of environments, may take to finish once serving ends, before they are abandoned, five seconds unless changed.
+    pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
     /// Change how long a connection may go without a complete request head, or a `/connect` exchange without Hello, before it is closed. The default is 10 seconds. See `design/server.md`.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
@@ -416,6 +422,8 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
+        // Environments' server sides may run now, including for the kept spaces listed while the server was configured.
+        self.hub.serving();
         // The counts when serving starts, taken before any connection is accepted: the publisher is polled after serving begins, and a client served before then would otherwise be counted as the starting point, so its arrival would never be published.
         let counts = self.counts();
         // Ends the spaces, the sweep and the pacing once serving has ended for any reason.
@@ -899,6 +907,25 @@ impl Server {
         }
         self.hub.shutdown();
         while spaces.next().await.is_some() {}
+        // The environments' server sides were cancelled with the spaces: give them the drain timeout to stop, then leave those that have not.
+        let never = Cancellation::never();
+        let mut timer = scheduler.timer();
+        let deadline = scheduler.now() + self.drain_timeout;
+        let abandoned = self
+            .hub
+            .server_sides_stopped(async {
+                // Whether the deadline passes or the timer fails, the wait is over.
+                let _ = scheduler
+                    .timer_wait_until(&mut timer, deadline, &never)
+                    .await;
+            })
+            .await;
+        if abandoned > 0 {
+            log::warn!(
+                "Stopped waiting for {abandoned} environment server sides that had not stopped {:?} after being cancelled.",
+                self.drain_timeout
+            );
+        }
     }
 }
 
@@ -1770,6 +1797,14 @@ mod tests {
             response.extend_from_slice(&buffer[..count]);
         }
         String::from_utf8(response).unwrap()
+    }
+
+    #[test]
+    fn the_drain_timeout_can_be_changed() {
+        let server = server();
+        assert_eq!(server.drain_timeout, DEFAULT_DRAIN_TIMEOUT);
+        let server = server.with_drain_timeout(Duration::from_millis(250));
+        assert_eq!(server.drain_timeout, Duration::from_millis(250));
     }
 
     fn server() -> Server {

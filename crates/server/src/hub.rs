@@ -236,6 +236,8 @@ pub struct Hub {
     roots: RwLock<Vec<WorkspaceRoot>>,
     /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
     environments: RwLock<Environments>,
+    /// The server sides of the environments, run for the spaces bound to them. See `design/environments.md`.
+    server_sides: crate::server_sides::ServerSides,
     /// Notified when a space defers a snapshot, so that the server's snapshot timer can wake for it.
     deferred_snapshot: Notify,
     /// Notified when [`Hub::counts`] changes, so that the server can advertise the new counts.
@@ -277,6 +279,8 @@ struct HubState {
     utterances: HashMap<UtteranceId, UtteranceRecord>,
     /// Set once shutdown has begun: no further spaces are registered.
     shutting_down: bool,
+    /// Whether the server is serving, which is when environments' server sides may run: not while it is still being configured, as when kept spaces are listed again.
+    serving: bool,
     /// Set when a space was forgotten, so that the kept spaces are written once the lock is released.
     unkept: bool,
     /// The backends and sessions of spaces forgotten since the supervisor was last asked to remove their instruction entries; see [`Hub::recount`].
@@ -1291,7 +1295,7 @@ impl Hub {
         roots: Vec<WorkspaceRoot>,
         slots: Arc<SpaceSlots>,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|this| Self {
+        let hub = Arc::new_cyclic(|this| Self {
             state: Mutex::new(HubState {
                 run: run_token(),
                 ..HubState::default()
@@ -1302,6 +1306,7 @@ impl Hub {
             slots,
             roots: RwLock::new(roots),
             environments: RwLock::new(Environments::default()),
+            server_sides: crate::server_sides::ServerSides::default(),
             deferred_snapshot: Notify::new(),
             counts_changed: Notify::new(),
             cards_watched: Notify::new(),
@@ -1314,7 +1319,63 @@ impl Hub {
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             this: this.clone(),
-        })
+        });
+        let this = Arc::downgrade(&hub);
+        // A failure after the hub is gone has no space to show it in.
+        hub.server_sides.on_failure(move |failure| {
+            let _ = this.upgrade().map(|hub| hub.side_failed(failure));
+        });
+        hub
+    }
+
+    /// Start and stop the server sides of the environments to match the spaces that are open and the environments they are bound to. Called whenever a space is bound, closes or changes environment, the environments offered change, or the hub shuts down, so that each is run for as it should be whichever came first. See `design/environments.md`.
+    fn reconcile_server_sides(&self, state: &mut HubState) {
+        let wanted: Vec<crate::server_sides::Wanted> = if state.shutting_down || !state.serving {
+            Vec::new()
+        } else {
+            state
+                .spaces
+                .iter()
+                .filter(|record| !record.model.is_closed())
+                .map(|record| crate::server_sides::Wanted {
+                    id: record.model.id.clone(),
+                    title: record.model.title.clone(),
+                    directory: record.model.directory.clone(),
+                    environment: record.model.environment.clone(),
+                })
+                .collect()
+        };
+        let failures = self.server_sides.reconcile(&self.environments(), &wanted);
+        for failure in failures {
+            self.show_side_failure(state, failure);
+        }
+    }
+
+    /// The server has begun serving: run the server sides of the spaces that were bound while it was being configured, such as the kept spaces, and of those bound from now on.
+    pub(crate) fn serving(&self) {
+        let mut state = self.lock();
+        state.serving = true;
+        self.reconcile_server_sides(&mut state);
+    }
+
+    /// A server side failed after it started: show it in its space, if the space is still bound to the environment it ran for.
+    fn side_failed(&self, failure: crate::server_sides::Failure) {
+        let mut state = self.lock();
+        self.show_side_failure(&mut state, failure);
+    }
+
+    fn show_side_failure(&self, state: &mut HubState, failure: crate::server_sides::Failure) {
+        if !self
+            .server_sides
+            .is_current(&failure.space, failure.binding)
+        {
+            return;
+        }
+        let Some(record) = state.space_mut(&failure.space) else {
+            return;
+        };
+        record.model.fail_environment(failure.message);
+        state.touch_space(&failure.space);
     }
 
     /// Offer `environments` for spaces, as in [`crate::Server::with_environments`].
@@ -1323,6 +1384,9 @@ impl Hub {
             .environments
             .write()
             .expect("environments are never left poisoned") = environments;
+        // Spaces bound to an environment that was not offered before, or whose side has changed, are run for now.
+        let mut state = self.lock();
+        self.reconcile_server_sides(&mut state);
     }
 
     /// The environments offered for spaces.
@@ -2951,6 +3015,8 @@ impl Hub {
                         );
                         // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
                         record.instruct(true);
+                        // Its server side, if it has one, runs for the space, and the previous environment's stops.
+                        self.reconcile_server_sides(state);
                         // Everyone in the space, and the lobby's listing, see the change; it is kept across a restart.
                         state.touch_space(&space);
                         deferred.push(Deferred::Keep);
@@ -3394,6 +3460,8 @@ impl Hub {
         });
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
+        // The environment's server side, if it has one, runs for the space from when it is bound.
+        self.reconcile_server_sides(&mut state);
         // Kept before anyone is told of it, so that no client holds an identifier a crash would lose.
         drop(state);
         self.keep();
@@ -3505,6 +3573,8 @@ impl Hub {
                     placements: kept.placements,
                 });
             }
+            // Spaces restored in an environment with a server side run it as one just created does.
+            self.reconcile_server_sides(&mut state);
             // Listed in the order they were created, as before the restart.
             state.spaces.sort_by_key(|space| {
                 order
@@ -3610,6 +3680,7 @@ impl Hub {
             return;
         };
         let resynchronized = matches!(event, Event::Resynchronized { .. });
+        let was_open = !record.model.is_closed();
         record.model.apply(event);
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
@@ -3619,6 +3690,14 @@ impl Hub {
         // snapshot interval starts its age again.
         record.stamp_attention(Instant::now());
         state.stamp_closed();
+        // A space that closed no longer runs its environment's server side.
+        if was_open
+            && state
+                .space(space)
+                .is_some_and(|record| record.closed.is_some())
+        {
+            self.reconcile_server_sides(&mut state);
+        }
         state.pump(space);
         if state.touch_space_paced(space, Instant::now()) {
             self.deferred_snapshot.notify(usize::MAX);
@@ -3875,6 +3954,8 @@ impl Hub {
         // A closed space keeps no speech, so that up to [`CLOSED_SPACES`] closed spaces hold no audio, and its pacer stops once what is still queued has been spoken.
         record.speech.close();
         record.waker = None;
+        // A closed space no longer runs its environment's server side.
+        self.reconcile_server_sides(&mut state);
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
         state.touch_space(space);
@@ -4055,11 +4136,21 @@ impl Hub {
         }
     }
 
+    /// Wait until the server sides cancelled by [`Hub::shutdown`] have stopped, or `expiry` is ready, and so abandon those that have not, which are counted.
+    pub(crate) async fn server_sides_stopped(&self, expiry: impl Future<Output = ()>) -> usize {
+        self.server_sides.stopped(expiry).await
+    }
+
     /// Ask every space driver to close its session, and end every connection.
     pub fn shutdown(&self) {
         self.jobs.close();
         // Spaces still being created are closed as soon as their session starts; see `register_space`. Set first, so that nothing the spaces closing cause is kept: closing their sessions does not close them.
-        self.lock().shutting_down = true;
+        {
+            let mut state = self.lock();
+            state.shutting_down = true;
+            // Every server side is cancelled with the spaces, and waited for by [`Hub::server_sides_stopped`].
+            self.reconcile_server_sides(&mut state);
+        }
         // Requests waiting on an agent, such as for its connection to return, fail at once rather than hold up the
         // spaces closing.
         self.backends.shutdown();

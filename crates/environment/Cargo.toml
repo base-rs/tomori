@@ -1,0 +1,14 @@
+[package]
+name = "tomori-environment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The interface of a Tomori environment's server side"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "environment", "xr", "agents"]
+categories = ["development-tools"]
+
+[dependencies]
+base-scheduler = "0.3.0"

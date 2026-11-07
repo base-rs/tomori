@@ -20,6 +20,7 @@ These crates are published to crates.io, and every one of them can be packaged a
 | `tomori-security` | Needed by `tomori-client` and the server. |
 | `tomori-backend` | The interface other projects implement to add an agent backend. |
 | `tomori-backend-opencode` | The default backend, needed by the server's `opencode` feature. |
+| `tomori-environment` | The interface of an environment's server side, which the server runs and another project's environment crate implements, without depending on the server. |
 | `tomori-speech` | Needed by the server's default `speech` feature. |
 | `tomori-server` | `cargo install tomori-server`, and the library that downstream servers build on through its builder; see `builders.md`. |
 | `tomori-text` | The bundled fonts and the glyph atlas, which `tomori-scene` lays text out with and `tomori-render` draws. |
