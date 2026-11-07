@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, and no core crate depends on an environment's crate, so that environments register themselves with the apps rather than the core knowing them.
+//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate, or builds one with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them.
 use std::path::Path;
 use std::process::Command;
 
@@ -127,25 +127,9 @@ fn an_environments_common_and_server_crates_build_no_renderer() {
             continue;
         }
         checked += 1;
-        let tree = cargo(&[
-            "tree",
-            "--locked",
-            "--package",
-            name,
-            "--edges",
-            "normal,build",
-            "--target",
-            "all",
-            "--all-features",
-            "--prefix",
-            "none",
-            "--format",
-            "{p}",
-        ]);
-        let rendering: std::collections::BTreeSet<&str> = tree
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
-            .filter(|dependency| RENDERING.contains(dependency))
+        let rendering: Vec<String> = tree(name, "normal,build", &["--all-features"])
+            .into_iter()
+            .filter(|dependency| RENDERING.contains(&dependency.as_str()))
             .collect();
         assert!(
             rendering.is_empty(),
@@ -212,32 +196,100 @@ fn no_core_crate_depends_on_an_environment_or_an_app() {
     assert!(checked > 0, "no core crate was found");
 }
 
+/// The packages `name` builds, as `cargo tree` lists them, with `edges` and `options`, for every target.
+fn tree(name: &str, edges: &str, options: &[&str]) -> std::collections::BTreeSet<String> {
+    let mut arguments = vec![
+        "tree",
+        "--locked",
+        "--package",
+        name,
+        "--edges",
+        edges,
+        "--target",
+        "all",
+    ];
+    arguments.extend_from_slice(options);
+    arguments.extend_from_slice(&["--prefix", "none", "--format", "{p}"]);
+    cargo(&arguments)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `package`'s features that do not turn on its `app` feature, directly or through another of its features: every feature but Tomori's own app.
+fn features_without_app(package: &Value) -> Vec<String> {
+    let features = package["features"].as_object().unwrap();
+    // Whether `feature` turns on `app`, following the package's own features it turns on, which Cargo keeps free of cycles.
+    fn enables_app(features: &serde_json::Map<String, Value>, feature: &str) -> bool {
+        feature == "app"
+            || features[feature]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|enabled| features.contains_key(*enabled))
+                .any(|enabled| enables_app(features, enabled))
+    }
+    features
+        .keys()
+        .filter(|feature| !enables_app(features, feature))
+        .cloned()
+        .collect()
+}
+
 #[test]
-fn with_the_app_feature_off_no_core_crate_builds_an_environment() {
-    for name in ["tomori-client-quest", "tomori-client-spectator"] {
-        let tree = cargo(&[
-            "tree",
-            "--locked",
-            "--package",
-            name,
-            "--no-default-features",
-            "--edges",
-            "normal,build",
-            "--target",
-            "all",
-            "--prefix",
-            "none",
-            "--format",
-            "{p}",
-        ]);
-        let environments: std::collections::BTreeSet<&str> = tree
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
+fn without_their_app_no_core_crate_builds_an_environment() {
+    let mut checked = 0;
+    for package in packages() {
+        let name = package["name"].as_str().unwrap();
+        if role(name) != Role::Core {
+            continue;
+        }
+        checked += 1;
+        // Every feature but `app`, so that a core crate reaching an environment through another crate, such as another core crate's own `app`, fails too.
+        let features = features_without_app(&package).join(",");
+        let mut options = vec!["--no-default-features"];
+        if !features.is_empty() {
+            options.extend_from_slice(&["--features", &features]);
+        }
+        let environments: Vec<String> = tree(name, "normal,build", &options)
+            .into_iter()
             .filter(|dependency| matches!(role(dependency), Role::Environment(_)))
             .collect();
         assert!(
             environments.is_empty(),
-            "{name} without its app depends on {environments:?}"
+            "{name} without its app builds {environments:?}; register environments in an app, not in the core"
         );
     }
+    assert!(checked > 0, "no core crate was found");
+}
+
+#[test]
+fn an_environments_server_crate_is_built_only_by_servers() {
+    let mut checked = 0;
+    for package in packages() {
+        let name = package["name"].as_str().unwrap();
+        let Role::Environment(half @ (Half::Common | Half::Client)) = role(name) else {
+            continue;
+        };
+        checked += 1;
+        // A server crate holds what never reaches a client, such as credentials, and a common crate is shared by both halves, so neither builds a server crate, nor a common crate a client's.
+        let halves: Vec<String> = tree(name, "normal,build", &["--all-features"])
+            .into_iter()
+            .filter(|dependency| match role(dependency) {
+                Role::Environment(Half::Server) => true,
+                Role::Environment(Half::Client) => half == Half::Common,
+                _ => false,
+            })
+            .collect();
+        assert!(
+            halves.is_empty(),
+            "{name} builds {halves:?}; an environment's server half stays in servers, and its client half in clients"
+        );
+    }
+    assert!(
+        checked > 0,
+        "no environment's common or client crate was found"
+    );
 }
