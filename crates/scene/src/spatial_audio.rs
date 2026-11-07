@@ -197,12 +197,14 @@ mod tests {
         // Ada hears her 1 m in front.
         let heard = relative(&scene, 2);
         assert!(heard.distance(Vec3::new(0.0, 0.0, -1.0)) < 1e-4, "{heard}");
-        // After Ada turns about her head, Bea is still where she stands: now to Ada's side.
+        // After Ada snap-turns right three times about her head, as pushing the stick right does, Bea is still where she stands: now 1 m to Ada's left, and louder in her left ear.
         let mut turned = ada;
-        turned.turn(
-            crate::locomotion::SNAP_TURN * 3.0,
-            ada.matrix().transform_point3(HOME),
-        );
+        for _ in 0..3 {
+            turned.turn(
+                -crate::locomotion::SNAP_TURN,
+                turned.matrix().transform_point3(HOME),
+            );
+        }
         fill(
             &mut scene,
             Some(listener(turned)),
@@ -212,9 +214,14 @@ mod tests {
             false,
         );
         let heard = relative(&scene, 2);
-        assert!(
-            heard.z.abs() < 1e-4 && (heard.x.abs() - 1.0).abs() < 1e-4,
-            "{heard}"
+        assert!(heard.distance(Vec3::new(-1.0, 0.0, 0.0)) < 1e-4, "{heard}");
+        let placed = tomori_client::playback::spatial::place(
+            &scene.listener.unwrap(),
+            scene.position(2).unwrap(),
+            tomori_client::playback::spatial::PERSON_FLOOR,
+            48_000,
+            false,
         );
+        assert!(placed.gain[0] > 2.0 * placed.gain[1], "{placed:?}");
     }
 }
