@@ -51,6 +51,33 @@ pub struct Lighting {
     pub lamps: Vec<Lamp>,
 }
 
+impl Lighting {
+    /// Light from the sun or moon, `sun`, coming from `sun_direction`, and ambient light from the sky above, `sky`, and
+    /// the ground below, `ground`, without haze or lamps.
+    pub fn new(sun_direction: Vec3, sun: Vec3, sky: Vec3, ground: Vec3) -> Self {
+        Self {
+            sun_direction,
+            sun,
+            sky,
+            ground,
+            ..Self::default()
+        }
+    }
+
+    /// This light, with haze of `color`, `density` thick.
+    pub fn with_haze(mut self, color: Vec3, density: f32) -> Self {
+        self.haze = color;
+        self.haze_density = density;
+        self
+    }
+
+    /// This light, with `lamp` too; past [`LAMPS`], lamps are not drawn.
+    pub fn with_lamp(mut self, lamp: Lamp) -> Self {
+        self.lamps.push(lamp);
+        self
+    }
+}
+
 impl Default for Lighting {
     /// A plain, even light from above, without haze or lamps.
     fn default() -> Self {

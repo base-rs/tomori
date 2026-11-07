@@ -172,12 +172,7 @@ fn camera() -> Mat4 {
 }
 
 fn even() -> Lighting {
-    Lighting {
-        sky: Vec3::ONE,
-        ground: Vec3::ONE,
-        sun: Vec3::ZERO,
-        ..Lighting::default()
-    }
+    Lighting::new(Vec3::Y, Vec3::ZERO, Vec3::ONE, Vec3::ONE)
 }
 
 #[test]
@@ -276,11 +271,10 @@ fn instances_are_drawn_together_and_hidden_nodes_and_what_lies_outside_the_revea
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 4);
         // A lamp, haze and an emissive, textured material, as a scenery lights its models.
-        let mut lighting = even();
-        lighting.lamps =
-            vec![Lamp::new(Vec3::new(1.0, 1.0, 1.0), 3.0, Vec3::new(1.0, 0.6, 0.2)); 6];
-        lighting.haze = Vec3::new(0.1, 0.1, 0.2);
-        lighting.haze_density = 0.001;
+        let lamp = Lamp::new(Vec3::new(1.0, 1.0, 1.0), 3.0, Vec3::new(1.0, 0.6, 0.2));
+        let lighting = (0..6)
+            .fold(even(), |lighting, _| lighting.with_lamp(lamp))
+            .with_haze(Vec3::new(0.1, 0.1, 0.2), 0.001);
         renderer.set_lighting(&queue, &lighting);
         // A square that is not skinned, with no normals, so that each triangle is lit by its own, and two materials.
         let square = Model::built(
