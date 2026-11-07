@@ -59,6 +59,10 @@ name = "github"
 required-features = ["fake"]
 
 [[test]]
+name = "server_sides"
+required-features = ["fake"]
+
+[[test]]
 name = "github_token"
 
 [[test]]
@@ -79,6 +83,7 @@ speech-shared = ["speech", "tomori-speech/shared"]
 [dependencies]
 async-channel = "2"
 tomori-backend = { version = "0.2.0", path = "../backend" }
+tomori-environment = { version = "0.2.0", path = "../environment" }
 tomori-backend-opencode = { version = "0.2.0", path = "../backend-opencode", optional = true }
 base-http = "0.2.0"
 base-http-client = { version = "0.2.0", features = ["rustls"] }

@@ -328,6 +328,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-discovery`](crates/discovery/readme.md): Bonjour advertising and browsing of servers.
 - [`tomori-security`](crates/security/readme.md): tokens, pairing and certificate pinning.
 - [`tomori-backend`](crates/backend/readme.md) and [`tomori-backend-opencode`](crates/backend-opencode/readme.md): the agent backend interface, and its OpenCode implementation.
+- [`tomori-environment`](crates/environment/readme.md): the interface of an environment's server side, which the server runs for the spaces bound to its environment.
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-environment-sky`](crates/environment-sky/readme.md): the Sky environment's renderer, which Tomori's clients draw.
 - [`tomori-server`](crates/server/readme.md): the server, installed with `cargo install tomori-server`, and the library another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
@@ -365,7 +366,7 @@ A release APK cannot update a locally built one, or the other way round: they ar
 
 No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
 
-1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment-sky` and `tomori-text`;
+1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment`, `tomori-environment-sky` and `tomori-text`;
 2. `tomori-discovery`, `tomori-speech` and `tomori-backend-opencode`;
 3. `tomori-client`;
 4. `tomori-server`;

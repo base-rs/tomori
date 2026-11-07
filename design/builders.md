@@ -7,10 +7,10 @@ This describes how other projects build their own Tomori server and headset from
 Another project builds a server of its own on the `tomori-server` library, without forking Tomori or changing its source: it registers backends and environments through the library's builder, `tomori_server::Server::builder()`, which starts with Tomori's own. What it can register is what Tomori supports today:
 
 - **Backends:** any implementation of `tomori-backend`'s `Backend`, from any crate, registered under the name `--backend` and clients name it by, which must be its `Backend::name`. The server treats it as it treats OpenCode's; nothing in the server names a concrete backend. Registering a name already registered replaces that backend.
-- **Environments:** an identifier, a label and the environment's layer of a space's instructions (see `spaces.md`), offered to clients after those already registered unless it replaces one with the same identifier. The first offered is the default, as `environments.md` requires.
+- **Environments:** an identifier, a label and the environment's layer of a space's instructions (see `spaces.md`), offered to clients after those already registered unless it replaces one with the same identifier. The first offered is the default, as `environments.md` requires. An environment may also bring a server side, which the server runs for each space bound to it, as `environments.md` requires; registering an environment again replaces its server side with the new one's, or removes it when the new one has none.
 - **Configuration:** hooks that change the configured server before it serves, through its public settings.
 
-Environments' server halves (#75), data sources (#83) and tools (#82) will be registered through the same builder once Tomori has them; until then the builder offers nothing for them.
+Environments' client sides and state synchronization (#75, #76), data sources (#83) and tools (#82) will be registered through the same builder once Tomori has them; until then the builder offers nothing for them.
 
 A server built this way takes the same command line as `tomori-server`, including `auth`, and serves the same way: admission, TLS, pairing, advertising, speech, kept spaces and shutdown follow `server.md`, `security.md` and `spaces.md` unchanged. `--help` lists the backends registered.
 

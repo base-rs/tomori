@@ -2369,3 +2369,188 @@ fn a_card_attended_to_as_the_words_begin_is_described_from_the_board_before_them
         "ada: what's this about?"
     );
 }
+
+/// A server side that runs until it is cancelled.
+struct Idle;
+
+impl tomori_environment::ServerSide for Idle {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        while !space.cancellation().is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_failure_of_a_side_that_is_no_longer_current_or_has_no_space_shows_nowhere() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let observe =
+        crate::environments::Environment::new("observe", "Observe").with_server_side(Idle);
+    hub.set_environments(Environments::new([observe]));
+    let failure = |space: &str, binding: u64| crate::server_sides::Failure {
+        space: space.to_owned(),
+        binding,
+        message: "The Observe environment failed.".to_owned(),
+    };
+
+    // A failure of a space that never ran a side is ignored.
+    hub.side_failed(failure("space-0-1", 0));
+
+    // So is one of a side whose space the hub no longer lists, which can only be a race with the space leaving.
+    let environments = hub.environments().clone();
+    let wanted = [crate::server_sides::Wanted {
+        id: "ghost".to_owned(),
+        title: "Ghost".to_owned(),
+        directory: "/tmp".to_owned(),
+        environment: "observe".to_owned(),
+    }];
+    assert!(
+        hub.server_sides
+            .reconcile(&environments, &wanted)
+            .is_empty()
+    );
+    hub.side_failed(failure("ghost", 0));
+    // And one of an earlier binding, once the space has moved on to a later one.
+    hub.side_failed(failure("ghost", 1));
+    hub.server_sides.reconcile(&environments, &[]);
+}
+
+#[test]
+fn a_space_in_an_environment_with_a_server_side_shows_its_failure() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let observe =
+        crate::environments::Environment::new("observe", "Observe").with_server_side(Idle);
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        observe,
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "observe".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    // The side runs for the space, so its failure is current; shown, it reaches the space's state.
+    let binding = 0;
+    assert!(hub.server_sides.is_current(&id, binding));
+    hub.side_failed(crate::server_sides::Failure {
+        space: id.clone(),
+        binding,
+        message: "The Observe environment failed.".to_owned(),
+    });
+    let shown = hub
+        .lock()
+        .space(&id)
+        .unwrap()
+        .model
+        .state(Vec::new(), "")
+        .error;
+    assert_eq!(shown.as_deref(), Some("The Observe environment failed."));
+    hub.shutdown();
+}
+
+#[test]
+fn a_space_shows_that_its_environment_s_server_side_could_not_be_started() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let observe =
+        crate::environments::Environment::new("observe", "Observe").with_server_side(Idle);
+    hub.set_environments(Environments::new([observe]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "observe".to_owned();
+    // The system is out of threads when the space is bound.
+    crate::system::refuse("tomori-environment");
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let shown = hub
+        .lock()
+        .space(&id)
+        .unwrap()
+        .model
+        .state(Vec::new(), "")
+        .error;
+    assert_eq!(
+        shown.as_deref(),
+        Some("The Observe environment could not be started.")
+    );
+    // The error belonged to the environment, so binding another ends it.
+    let mut state = hub.lock();
+    let record = state.space_mut(&id).unwrap();
+    record.model.set_environment("sky".to_owned()).unwrap();
+    assert_eq!(record.model.state(Vec::new(), "").error, None);
+    drop(state);
+    hub.shutdown();
+}
+
+#[test]
+fn a_server_side_runs_only_once_the_server_is_serving_and_stops_when_its_space_ends() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let observe =
+        crate::environments::Environment::new("observe", "Observe").with_server_side(Idle);
+    hub.set_environments(Environments::new([observe]));
+    let mut bound = request("ada");
+    bound.environment = "observe".to_owned();
+    // Bound while the server is still being configured, as a kept space is, the space waits.
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    assert!(!hub.server_sides.is_current(&id, 0));
+    assert_eq!(hub.server_sides.alive(), 0);
+
+    // Serving begins, and its side runs for the space.
+    hub.serving();
+    assert!(hub.server_sides.is_current(&id, 0));
+    assert_eq!(hub.server_sides.alive(), 1);
+
+    // The space ends without a closing event from its session, as a space that could not be bound again does; its side is cancelled.
+    hub.space_ended(&id, Some("The directory is not available.".to_owned()));
+    assert!(!hub.server_sides.is_current(&id, 0));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while hub.server_sides.alive() > 0 {
+        assert!(std::time::Instant::now() < deadline, "the side never ended");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    hub.shutdown();
+}
+
+#[test]
+fn a_restored_space_runs_its_server_side_only_once_bound_to_its_session_again() {
+    let directory = std::env::temp_dir().join(format!("tomori-hub-sides-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    let observe = || {
+        Environments::new([
+            crate::environments::Environment::new("sky", "Sky"),
+            crate::environments::Environment::new("observe", "Observe").with_server_side(Idle),
+        ])
+    };
+    let mut bound = request("ada");
+    bound.environment = "observe".to_owned();
+    let (kept, unbound) = {
+        let (hub, _jobs) = hub_with(FakeBackend::new());
+        hub.set_environments(observe());
+        assert!(hub.restore(store.clone()).is_empty());
+        let (kept, _commands) = running(&hub, &bound, Snapshot::default());
+        let (unbound, _commands) = running(&hub, &bound, Snapshot::default());
+        (kept, unbound)
+    };
+
+    // After a restart, the spaces are listed again while serving, but their directories are not yet resolved within the workspace roots again, so no side runs for them.
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(observe());
+    hub.serving();
+    assert_eq!(hub.restore(store.clone()).len(), 2);
+    assert_eq!(hub.server_sides.alive(), 0);
+
+    // Bound to its session again, a space runs its side.
+    assert!(hub.bound(&kept, "session".to_owned(), Snapshot::default()));
+    assert_eq!(hub.server_sides.alive(), 1);
+    assert!(hub.server_sides.is_current(&kept, 0));
+
+    // One that cannot be bound again, as when its directory is no longer in the workspace roots, never runs one.
+    hub.restore_failed(
+        &unbound,
+        "The directory is not available.".to_owned(),
+        false,
+    );
+    assert_eq!(hub.server_sides.alive(), 1);
+    assert!(!hub.server_sides.is_current(&unbound, 1));
+    hub.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}

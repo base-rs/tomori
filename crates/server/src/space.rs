@@ -61,6 +61,8 @@ pub struct SpaceModel {
     error: Option<String>,
     /// Worker observation failures are separate from unrelated space errors.
     worker_error: Option<String>,
+    /// Why the environment's server side failed, until the space is bound to another environment. See `design/environments.md`.
+    environment_error: Option<String>,
     /// The backend reported a lost connection and has not yet read the session again, with the reason it gave. The
     /// space's state may be stale meanwhile, so no input is released.
     reconnecting: Option<String>,
@@ -386,6 +388,7 @@ impl SpaceModel {
             modes: snapshot.modes,
             error: None,
             worker_error: snapshot.workers_incomplete,
+            environment_error: None,
             reconnecting: None,
             settled: HashSet::new(),
             unattended: None,
@@ -714,7 +717,14 @@ impl SpaceModel {
             return Ok(false);
         }
         self.environment = environment;
+        // The failure was of the environment it left.
+        self.environment_error = None;
         Ok(true)
+    }
+
+    /// Show that the environment's server side failed, for as long as the space stays in the environment.
+    pub fn fail_environment(&mut self, message: String) {
+        self.environment_error = Some(message);
     }
 
     /// Change how much of each reply is spoken, from the next reply on. An unknown setting is refused.
@@ -1327,11 +1337,14 @@ impl SpaceModel {
             environment_changes: true,
             // Set by the hub, which knows the board.
             cards: false,
-            error: match (&self.error, &self.worker_error) {
-                (Some(error), Some(worker_error)) => Some(format!("{error} {worker_error}")),
-                (Some(error), None) => Some(error.clone()),
-                (None, Some(worker_error)) => Some(worker_error.clone()),
-                (None, None) => None,
+            error: {
+                let problems: Vec<&str> =
+                    [&self.error, &self.worker_error, &self.environment_error]
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                (!problems.is_empty()).then(|| problems.join(" "))
             },
             mode: self
                 .modes
@@ -1392,6 +1405,32 @@ mod tests {
             Err("The agent session has stopped.")
         );
         assert_eq!(space.environment, "observe");
+    }
+
+    #[test]
+    fn a_failed_environment_is_shown_with_the_space_s_other_problems_until_it_is_left() {
+        let mut space = model();
+        space.set_environment("observe".into()).unwrap();
+        assert_eq!(space.state(Vec::new(), "").error, None);
+        space.fail_environment("The Observe environment failed.".into());
+        assert_eq!(
+            space.state(Vec::new(), "").error.as_deref(),
+            Some("The Observe environment failed.")
+        );
+        // Shown beside the agent's own problems, none of which it replaces.
+        space.apply(Event::Error {
+            message: "The agent stopped.".into(),
+        });
+        assert_eq!(
+            space.state(Vec::new(), "").error.as_deref(),
+            Some("The agent stopped. The Observe environment failed.")
+        );
+        // The failure was of the environment, so binding another ends it.
+        space.set_environment("sky".into()).unwrap();
+        assert_eq!(
+            space.state(Vec::new(), "").error.as_deref(),
+            Some("The agent stopped.")
+        );
     }
 
     #[test]

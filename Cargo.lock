@@ -3609,6 +3609,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tomori-environment"
+version = "0.2.0"
+dependencies = [
+ "base-scheduler",
+]
+
+[[package]]
 name = "tomori-environment-sky"
 version = "0.2.0"
 dependencies = [
@@ -3735,6 +3742,7 @@ dependencies = [
  "tomori-backend-opencode",
  "tomori-client",
  "tomori-discovery",
+ "tomori-environment",
  "tomori-protocol",
  "tomori-security",
  "tomori-speech",

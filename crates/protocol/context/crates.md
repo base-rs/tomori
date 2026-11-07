@@ -14,6 +14,7 @@ The crates share one version and are released together, so depend on the same ve
 | `tomori-security` | Tokens, pairing codes and certificate pinning, shared by clients and the server. The `issue` feature adds the server's token store and certificate. |
 | `tomori-backend` | The backend-neutral interface between the server and coding agents: implement `Backend` and `Session` to drive another agent. |
 | `tomori-backend-opencode` | The backend that drives OpenCode sessions on a running `opencode serve`. |
+| `tomori-environment` | The interface of an environment's server side: implement `ServerSide` to run a program in the server for each space bound to the environment. |
 | `tomori-speech` | Streaming speech recognition, speakable text selection and synthesis, through prebuilt sherpa-onnx libraries. |
 | `tomori-environment-sky` | The renderer of the Sky environment, a moonlit sky, clouds, a platform and a shrine, drawn with wgpu. Tomori's clients draw it; its interface changes when environments get a shared interface. |
 | `tomori-server` | The server, as the `tomori-server` executable and the library it is built from, whose builder registers backends and environments of another project's own. See its Building a Tomori Server guide. |

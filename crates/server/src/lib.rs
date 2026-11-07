@@ -23,6 +23,7 @@ pub mod github;
 mod hub;
 mod instructions;
 pub mod kept;
+mod server_sides;
 
 mod limits;
 #[cfg(feature = "speech")]
