@@ -3,7 +3,7 @@
 
 //! Scenery drawn natively in each eye's pass, as Sky is, and the sceneries a client can draw, by the identifiers that spaces name their environments by. See `design/environments.md`.
 //!
-//! The contract is Sky's existing hooks, named for what they do. The Minimal grid is built into the [`Renderer`](crate::graphics::Renderer), and is what a client shows for an environment it cannot draw. An environment's client half, which #75 defines, will register its scenery through the same [`Sceneries`].
+//! The contract is Sky's existing hooks, named for what they do. The Minimal grid is built into the [`Renderer`](crate::graphics::Renderer), and is what a client shows for an environment it cannot draw. An environment's client side, which #75 defines, will register its scenery through the same [`Sceneries`].
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
@@ -102,13 +102,23 @@ impl Sceneries {
         }
     }
 
-    /// Draw `create`'s scenery for the environment `id`, in place of any registered before under the same identifier.
+    /// Draw `create`'s scenery for the environment `id`, at protocol version 1, in place of any registered before under the same identifier.
     pub fn register(
         &mut self,
         id: &'static str,
         create: impl Fn(&Target) -> Box<dyn Scenery> + Send + Sync + 'static,
     ) {
-        let environment = Environment::new(id);
+        self.register_versioned(id, 1, create);
+    }
+
+    /// Draw `create`'s scenery for the environment `id` at protocol `version`, in place of any registered before under the same identifier, whatever its version. The grid, `minimal`, is built in at version 1: a scenery registered for it is drawn with it, at version 1 whatever version it is registered at. A client presents the environment only for a space whose environment is at the same version, and shows the grid for one at another; see `design/environments.md`.
+    pub fn register_versioned(
+        &mut self,
+        id: &'static str,
+        version: u32,
+        create: impl Fn(&Target) -> Box<dyn Scenery> + Send + Sync + 'static,
+    ) {
+        let environment = Environment::new(id).with_version(version);
         self.entries
             .retain(|(registered, _)| *registered != environment);
         self.entries.push((environment, Arc::new(create)));
@@ -136,7 +146,7 @@ impl Sceneries {
             .any(|environment| environment.id() == id)
     }
 
-    /// Every environment a client with these sceneries can draw: the grid, then the registered ones in order.
+    /// Every environment a client with these sceneries can draw, each at the version it was registered at: the grid, always at version 1 since it is built in, then the registered ones in order.
     pub fn environments(&self) -> Vec<Environment> {
         std::iter::once(Environment::MINIMAL)
             .chain(
@@ -252,6 +262,24 @@ mod tests {
         sceneries.register("minimal", sky);
         assert_eq!(sceneries.environments().len(), 3);
         assert_eq!(Sceneries::default().environments(), Environment::BUILT_IN);
+        // Each is at version 1 unless registered at another, which registering again replaces.
+        assert!(
+            Sceneries::default()
+                .environments()
+                .iter()
+                .all(|environment| environment.version() == 1)
+        );
+        sceneries.register_versioned("floor", 2, sky);
+        // The grid is built in at version 1, whatever version a scenery drawn with it is registered at.
+        sceneries.register_versioned("minimal", 3, sky);
+        let versions: Vec<(&str, u32)> = sceneries
+            .environments()
+            .into_iter()
+            .map(|environment| (environment.id(), environment.version()))
+            .collect();
+        assert_eq!(versions, [("minimal", 1), ("sky", 1), ("floor", 2)]);
+        sceneries.register("floor", sky);
+        assert_eq!(sceneries.environments()[2].version(), 1);
     }
 
     #[test]

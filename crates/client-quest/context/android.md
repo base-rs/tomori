@@ -22,7 +22,7 @@ fn android_main(app: tomori::AndroidApp) {
 }
 ```
 
-`tomori::AndroidApp` is `android-activity`'s, re-exported so that the build's version matches Tomori's. The `rlib` is for the build's tests and any desktop executable, which runs the same builder with `tomori::main(builder)`.
+A scenery registered with `scenery` presents its environment at protocol version 1; `versioned_scenery("observe", 2, my_scenery)` presents it at another, which must match the version the server offers it at (see `design/environments.md`). `tomori::AndroidApp` is `android-activity`'s, re-exported so that the build's version matches Tomori's. The `rlib` is for the build's tests and any desktop executable, which runs the same builder with `tomori::main(builder)`.
 
 ## The manifest
 

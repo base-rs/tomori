@@ -263,6 +263,26 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 }
 
 #[test]
+fn hello_lists_the_environments_the_client_presents_on_every_connection() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let mut options = options(server.address);
+    let presents = vec![tomori_protocol::EnvironmentVersion::new("observe", 2)];
+    options.environments = Some(presents.clone());
+    assert!(format!("{options:?}").contains("observe"));
+    let client = Client::connect(options).unwrap();
+    assert_eq!(wait_connected(&client), 1);
+    client.send(kick()).unwrap();
+    assert_eq!(wait_disconnected(&client), Disconnect::Closed);
+    assert_eq!(wait_connected(&client), 2);
+    for connection in [1, 2] {
+        assert!(matches!(
+            server.received(connection).first(),
+            Some(Received::Message(ClientMessage::Hello { environments: Some(listed), .. })) if *listed == presents
+        ));
+    }
+}
+
+#[test]
 fn opted_in_microphone_does_not_resume_while_the_application_is_stalled() {
     let server = MiniServer::start(localhost(), Mode::Normal);
     let mut options = options(server.address);

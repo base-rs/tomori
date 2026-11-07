@@ -1306,6 +1306,8 @@ impl SpaceModel {
             backend: self.backend.clone(),
             directory: self.directory.clone(),
             environment: self.environment.clone(),
+            // Set by the hub, which knows the environments offered.
+            environment_version: None,
             activity: self.activity(),
             messages: self
                 .messages

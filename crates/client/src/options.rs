@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use tomori_protocol::Keepalive;
+use tomori_protocol::{EnvironmentVersion, Keepalive};
 
 use crate::Backoff;
 
@@ -55,6 +55,10 @@ pub struct Options {
     /// Require a new explicit microphone activation after a connection ends.
     /// Disabled by default for clients that restore their microphone gate.
     pub microphone_rearm_on_disconnect: bool,
+    /// The environments this client presents, each at its protocol version, listed in Hello so that the server offers
+    /// it only those. `None`, the default, lists nothing, and the server offers every environment, as to a client from
+    /// before versions. See `design/environments.md`.
+    pub environments: Option<Vec<EnvironmentVersion>>,
 }
 
 /// Written without the participant identity or the token, which are secrets, so that logging options cannot reveal them.
@@ -79,6 +83,7 @@ impl std::fmt::Debug for Options {
                 "microphone_rearm_on_disconnect",
                 &self.microphone_rearm_on_disconnect,
             )
+            .field("environments", &self.environments)
             .finish()
     }
 }
@@ -104,6 +109,7 @@ impl Options {
             outgoing_utterance_limit: 1500,
             incoming_audio_limit: 256,
             microphone_rearm_on_disconnect: false,
+            environments: None,
         }
     }
 }

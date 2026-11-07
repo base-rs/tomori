@@ -1970,6 +1970,7 @@ mod tests {
                 participant: "ada".to_owned(),
                 name: "Ada".to_owned(),
                 names: false,
+                environments: None,
             },
             tomori_protocol::ClientMessage::Join { space: id },
             tomori_protocol::ClientMessage::WatchCards,

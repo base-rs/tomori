@@ -63,6 +63,10 @@ name = "server_sides"
 required-features = ["fake"]
 
 [[test]]
+name = "environment_versions"
+required-features = ["fake"]
+
+[[test]]
 name = "github_token"
 
 [[test]]

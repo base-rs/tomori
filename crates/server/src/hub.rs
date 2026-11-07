@@ -15,8 +15,9 @@ use event_listener::{Event as Notify, EventListener};
 use tomori_backend::{AnswerValue, Backend, ErrorKind, Event, Prompt, Snapshot};
 use tomori_discovery::{AttentionCounts, Counts};
 use tomori_protocol::{
-    Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, Frame, FrameKind, Gate,
-    Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting, WorkspaceRoot,
+    Attention, AudioFrame, ClientMessage, ConnectionRole, Engagement, EnvironmentVersion, Frame,
+    FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting,
+    WorkspaceRoot,
 };
 
 use crate::access::{self, Access, Grant};
@@ -309,6 +310,8 @@ struct ConnectionRecord {
     role: Option<ConnectionRole>,
     /// Whether the client said in Hello that it reads [`ServerMessage::Name`].
     names: bool,
+    /// The environments the client listed in Hello, at most [`tomori_protocol::ENVIRONMENT_LIMIT`], or `None` when it listed none, as one from before versions. See `design/environments.md`.
+    presents: Option<Vec<EnvironmentVersion>>,
     participant: Option<String>,
     utterance: Option<OpenUtterance>,
     /// The client's id for the utterance the server last closed by failing it, so that an end or cancel already on its way is ignored rather than refused.
@@ -677,6 +680,13 @@ impl HubState {
 
     fn error(&self, participant: &str, error: impl Into<String>) {
         self.send(participant, error_message(error));
+    }
+
+    /// The environments `connection` listed in Hello, or `None` when it listed none.
+    fn presents(&self, connection: ConnectionId) -> Option<&[EnvironmentVersion]> {
+        self.connections
+            .get(&connection)
+            .and_then(|record| record.presents.as_deref())
     }
 
     fn space(&self, id: &str) -> Option<&SpaceRecord> {
@@ -1840,6 +1850,7 @@ impl Hub {
                 access,
                 role: None,
                 names: false,
+                presents: None,
                 participant: None,
                 utterance: None,
                 failed: None,
@@ -2075,13 +2086,14 @@ impl Hub {
                 participant,
                 name,
                 names,
+                environments,
             } = message
             {
                 self.hello(
                     &mut state,
                     connection,
                     protocol,
-                    (participant, name, names),
+                    (participant, name, names, environments),
                     &mut deferred,
                 );
             } else if let Some((participant, space)) = state.member(connection) {
@@ -2114,7 +2126,12 @@ impl Hub {
         state: &mut HubState,
         connection: ConnectionId,
         protocol: u32,
-        (participant, name, names): (String, String, bool),
+        (participant, name, names, mut presents): (
+            String,
+            String,
+            bool,
+            Option<Vec<EnvironmentVersion>>,
+        ),
         deferred: &mut Vec<Deferred>,
     ) {
         let Some(outbox) = state
@@ -2219,6 +2236,15 @@ impl Hub {
             .expect("checked above");
         record.participant = Some(participant.clone());
         record.names = names;
+        // An identifier no environment could have, empty or longer than any the server takes, is skipped before the list is bounded.
+        if let Some(presents) = &mut presents {
+            presents.retain(|presented| {
+                !presented.id.is_empty() && presented.id.len() <= limits::IDENTIFIER_BYTES
+            });
+            presents.truncate(tomori_protocol::ENVIRONMENT_LIMIT);
+        }
+        let environments = self.environments().presentable(presents.as_deref()).info();
+        record.presents = presents;
         record.liveness.greeted = true;
         let role = access.role(None);
         record.role = Some(role);
@@ -2240,7 +2266,7 @@ impl Hub {
             role,
             backends,
             roots,
-            environments: self.environments().info(),
+            environments,
             utterance_limit: self
                 .transcriber
                 .utterance_limit()
@@ -2323,7 +2349,10 @@ impl Hub {
                     );
                     return;
                 }
-                let environment = match self.environments().choose(environment.as_deref()) {
+                let environment = match self
+                    .environments()
+                    .choose_for(environment.as_deref(), state.presents(connection))
+                {
                     Ok(environment) => environment,
                     Err(error) => {
                         state.error(participant, error);
@@ -2998,7 +3027,11 @@ impl Hub {
                     state.error(participant, error);
                     return;
                 }
-                let environment = match self.environments().choose(Some(&environment)) {
+                // Only an environment offered to the requester: anyone else in the space who cannot present it shows the grid and says what it lacks. See `design/environments.md`.
+                let chosen = self
+                    .environments()
+                    .choose_for(Some(&environment), state.presents(connection));
+                let environment = match chosen {
                     Ok(environment) => environment,
                     Err(error) => {
                         state.error(participant, error);
@@ -4092,10 +4125,13 @@ impl Hub {
                     .and_then(|space| state.space(&space))?;
                 let participants = state.participants(&space.model);
                 let cards = state.shows_cards(&space.model.id);
+                let environments = self.environments();
                 let mut state = space.model.state(
                     participants,
-                    self.environments().instructions(&space.model.environment),
+                    environments.instructions(&space.model.environment),
                 );
+                // Named before the state is fitted to its budget, which counts it.
+                state.environment_version = environments.version(&space.model.environment);
                 limits::fit_state(&mut state);
                 state.cards = cards;
                 Some(ServerMessage::Space {
@@ -4216,6 +4252,7 @@ mod tests {
                 participant: "ada".into(),
                 name: "Ada".into(),
                 names: false,
+                environments: None,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -4311,6 +4348,7 @@ mod tests {
                 participant: participant.to_owned(),
                 name: participant.to_owned(),
                 names: false,
+                environments: None,
             },
         );
         connection
@@ -4376,6 +4414,7 @@ mod tests {
                 participant: "vic".to_owned(),
                 name: "Vic".to_owned(),
                 names: false,
+                environments: None,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -4408,6 +4447,7 @@ mod tests {
                     participant: identity.to_owned(),
                     name: identity.to_owned(),
                     names: false,
+                    environments: None,
                 },
             );
             connection
@@ -4603,6 +4643,7 @@ mod tests {
                 participant: "vic".to_owned(),
                 name: "Vic".to_owned(),
                 names: false,
+                environments: None,
             },
         );
         hub.handle(

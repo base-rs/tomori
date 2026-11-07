@@ -1,9 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Building a headset of your own on Tomori's: the sceneries it draws, by the identifiers that spaces name their environments by, and running it on the headset, a desktop OpenXR runtime or the desktop window. [`Builder::default`] is Tomori's own build, which the `tomori` executable and APK run.
+//! Building a headset of your own on Tomori's: the sceneries it draws, by the identifiers that spaces name their environments by and at the environments' protocol versions, and running it on the headset, a desktop OpenXR runtime or the desktop window. [`Builder::default`] is Tomori's own build, which the `tomori` executable and APK run.
 //!
-//! An environment's client half, which [#75](https://github.com/ioquatix/tomori/issues/75) defines, will be registered here too, once it exists. Until then a build registers sceneries: what it draws for an environment that its server offers.
+//! A scenery and its version are all of an environment's client side that a build registers until state synchronization ([#76](https://github.com/ioquatix/tomori/issues/76)) gives a client side more to present. A build's `Hello` lists the environments it registers, with their versions, so that its server offers it only those; see `design/environments.md`.
 use tomori_render::scenery::{Sceneries, Scenery, Target};
 use tomori_scene::{environment::Environment, locomotion::Locomotion};
 
@@ -21,13 +21,24 @@ impl Builder {
         }
     }
 
-    /// Draw `create`'s scenery for a space bound to the environment `id`, in place of any registered under the same identifier.
+    /// Draw `create`'s scenery for a space bound to the environment `id`, at protocol version 1, in place of any registered under the same identifier.
     pub fn scenery(
         mut self,
         id: &'static str,
         create: impl Fn(&Target) -> Box<dyn Scenery> + Send + Sync + 'static,
     ) -> Self {
         self.sceneries.register(id, create);
+        self
+    }
+
+    /// Draw `create`'s scenery for a space bound to the environment `id` at protocol `version`, in place of any registered under the same identifier. The build lists the environment at that version in its `Hello`, so that its server offers it only when it offers the environment at the same version; a space in it at another version shows the grid and names the version it needs. See `design/environments.md`.
+    pub fn versioned_scenery(
+        mut self,
+        id: &'static str,
+        version: u32,
+        create: impl Fn(&Target) -> Box<dyn Scenery> + Send + Sync + 'static,
+    ) -> Self {
+        self.sceneries.register_versioned(id, version, create);
         self
     }
 
@@ -44,7 +55,7 @@ impl Builder {
         &mut self.sceneries
     }
 
-    /// The environments this build draws: the grid, then each registered scenery's.
+    /// The environments this build draws, each at its version: the grid, then each registered scenery's.
     pub fn environments(&self) -> Vec<Environment> {
         self.sceneries.environments()
     }
@@ -127,6 +138,11 @@ mod tests {
             builder.environments(),
             [Environment::MINIMAL, Environment::new("floor")]
         );
+        assert_eq!(builder.environments()[1].version(), 1);
+        let versioned = builder
+            .clone()
+            .versioned_scenery("floor", 2, tomori_render::scenery::sky);
+        assert_eq!(versioned.environments()[1].version(), 2);
         builder
             .sceneries()
             .register("sky", tomori_render::scenery::sky);
@@ -139,6 +155,33 @@ mod tests {
         let builder = Builder::empty().scenery("floor", tomori_render::scenery::sky);
         let (conversation, _connection) = builder.participant(crate::Overrides::default());
         assert_eq!(conversation.drawable(), builder.environments());
+    }
+
+    #[test]
+    fn a_participant_lists_the_builds_environments_at_their_versions() {
+        use tomori_client::connection::Session;
+        use tomori_protocol::EnvironmentVersion;
+        // Tomori's own: the grid and Sky, and the GitHub prototype the scene presents, at version 1.
+        let (tomori, _connection) = Builder::default().participant(crate::Overrides::default());
+        assert_eq!(
+            tomori.environments(),
+            Some(vec![
+                EnvironmentVersion::new("minimal", 1),
+                EnvironmentVersion::new("sky", 1),
+                EnvironmentVersion::new("github", 1),
+            ])
+        );
+        // Another build's, at the version it registers.
+        let builder = Builder::empty().versioned_scenery("floor", 2, tomori_render::scenery::sky);
+        let (conversation, _connection) = builder.participant(crate::Overrides::default());
+        assert_eq!(
+            conversation.environments(),
+            Some(vec![
+                EnvironmentVersion::new("minimal", 1),
+                EnvironmentVersion::new("floor", 2),
+                EnvironmentVersion::new("github", 1),
+            ])
+        );
     }
 
     #[test]

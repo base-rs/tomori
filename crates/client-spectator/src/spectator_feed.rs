@@ -384,12 +384,11 @@ impl Feed {
 }
 
 impl Feed {
-    /// The scenery to show: the joined space's environment, as everyone in it sees it, or the grid when this build cannot draw that one. See `design/environments.md`.
+    /// The scenery to show: the joined space's environment, as everyone in it sees it, or the grid when this build cannot draw that one at the version the space's state names, by the rule the headset follows; the spectator's conversation draws Tomori's own, which its Hello lists. See `design/environments.md`.
     fn environment(&self) -> Environment {
         match self.conversation.joined_space() {
             Some((space, _)) if !space.environment.is_empty() => {
-                Environment::for_space(&space.environment, &Environment::BUILT_IN)
-                    .unwrap_or(Environment::MINIMAL)
+                self.conversation.environment_of(space)
             }
             _ => self.environment,
         }
@@ -663,24 +662,50 @@ mod tests {
                 utterance_limit: None,
                 name: None,
             }));
-        let frame = |feed: &mut Feed, environment: &str| {
+        let versioned = |feed: &mut Feed, environment: &str, version: Option<u32>| {
             feed.conversation
                 .apply(Event::Message(ServerMessage::Space {
                     state: Box::new(SpaceState {
                         id: "space".into(),
                         environment: environment.into(),
+                        environment_version: version,
                         ..Default::default()
                     }),
                 }));
             feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0)
                 .environment
         };
+        let frame = |feed: &mut Feed, environment: &str| versioned(feed, environment, None);
         // An owner's change reaches the spectator as it does everyone in the space.
         assert_eq!(frame(&mut feed, "minimal"), Environment::MINIMAL);
         assert_eq!(frame(&mut feed, "sky"), Environment::SKY);
         // One this build cannot draw shows the grid, and a server that names none keeps the spectator's own.
         assert_eq!(frame(&mut feed, "observe"), Environment::MINIMAL);
         assert_eq!(frame(&mut feed, ""), Environment::SKY);
+        // At the version the spectator draws it at, Sky is drawn, and at another the grid, never its own version.
+        assert_eq!(versioned(&mut feed, "sky", Some(1)), Environment::SKY);
+        assert_eq!(versioned(&mut feed, "sky", Some(2)), Environment::MINIMAL);
+    }
+
+    #[test]
+    fn hello_lists_the_environments_the_spectator_draws() {
+        use tomori_client::connection::Session;
+        let feed = feed(SpectatorOptions::default());
+        let listed: Vec<(String, u32)> = feed
+            .conversation
+            .environments()
+            .unwrap()
+            .into_iter()
+            .map(|presented| (presented.id, presented.version))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("minimal".to_owned(), 1),
+                ("sky".to_owned(), 1),
+                ("github".to_owned(), 1)
+            ]
+        );
     }
 
     #[test]

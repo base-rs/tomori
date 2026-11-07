@@ -791,6 +791,7 @@ pub mod fixtures {
             environments: vec![EnvironmentInfo {
                 id: "sky".into(),
                 label: "Sky".into(),
+                version: 1,
             }],
             utterance_limit: None,
             name: None,
@@ -2348,6 +2349,7 @@ mod tests {
                 .map(|(id, label)| EnvironmentInfo {
                     id: id.into(),
                     label: label.into(),
+                    version: 1,
                 })
                 .to_vec(),
             utterance_limit: None,

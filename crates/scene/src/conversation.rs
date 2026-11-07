@@ -168,7 +168,7 @@ enum LobbyStep {
     Directory,
     /// Creating a space with a backend that can attach: a new session, or one of the backend's existing sessions in the directory.
     Session,
-    /// Creating a space: choose the environment it is bound to. Only when the server offers more than one.
+    /// Creating a space: choose the environment it is bound to. Only when the server offers this client more than one.
     Environment,
 }
 
@@ -253,7 +253,7 @@ pub struct Conversation {
     roots: Vec<WorkspaceRoot>,
     /// The answer to [`ClientMessage::ListSessions`], shown on the session ring after "New session".
     sessions: Vec<SessionSummary>,
-    /// The environments a space may be bound to, offered on the environment ring when there are several.
+    /// The environments a space may be bound to that the server offers this client, offered on the environment ring when there are several.
     environments: Vec<EnvironmentInfo>,
     /// The environments this build draws; a space bound to another shows the grid, and says so.
     drawable: Vec<Environment>,
@@ -1247,8 +1247,7 @@ impl Conversation {
                     .map(|mode| mode.name.clone())
                     .or_else(|| space.mode.clone().filter(|_| !space.modes.is_empty())),
                 speech: space.speech,
-                environment: (!space.environment.is_empty())
-                    .then(|| self.environment_name(&space.environment)),
+                environment: (!space.environment.is_empty()).then(|| self.shown_environment(space)),
                 environments: self.changeable_environments(space),
                 here: here(space),
             }),
@@ -1325,11 +1324,13 @@ impl Conversation {
             .environments
             .iter()
             .map(|offered| {
-                (
-                    offered.id.clone(),
-                    offered.label.clone(),
-                    offered.id == space.environment,
-                )
+                let current = offered.id == space.environment;
+                let name = if current {
+                    self.shown_environment(space)
+                } else {
+                    offered.label.clone()
+                };
+                (offered.id.clone(), name, current)
             })
             .collect();
         if !offered.iter().any(|(_, _, current)| *current) {
@@ -1337,7 +1338,7 @@ impl Conversation {
                 0,
                 (
                     space.environment.clone(),
-                    self.environment_name(&space.environment),
+                    self.shown_environment(space),
                     true,
                 ),
             );
@@ -1361,6 +1362,11 @@ impl Conversation {
             return;
         }
         let name = self.environment_name(id);
+        // Choosing the environment it is in, as the menu lists it even when this client cannot present it, changes nothing, and the server would refuse it as one not offered to this client.
+        if space.environment == id {
+            self.notice = Some(format!("The space is already in {name}."));
+            return;
+        }
         self.send(ClientMessage::SetEnvironment {
             environment: id.to_owned(),
         });
@@ -1657,8 +1663,9 @@ impl Conversation {
     /// How the joined space's environment lets the participant travel, as declared, whether or not it is turned off here.
     fn declared_locomotion(&self) -> &Locomotion {
         const NONE: &Locomotion = &Locomotion::None;
+        // The environment the space is shown in: one this build cannot draw at the space's version is the grid, which declares none.
         self.joined_space()
-            .and_then(|(space, _)| Environment::for_space(&space.environment, &self.drawable))
+            .map(|(space, _)| self.environment_of(space))
             .and_then(|environment| {
                 self.locomotion
                     .iter()
@@ -1667,24 +1674,73 @@ impl Conversation {
             .map_or(NONE, |(_, locomotion)| locomotion)
     }
 
-    /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment. See `design/environments.md`.
+    /// The environments this build presents, each at its version, as its Hello lists them, each once: the grid first, always at version 1 since it is built in, then those it draws, at the versions their sceneries are registered at, and the GitHub environment's prototype, whose cards the scene presents over the grid, at version 1 unless a scenery is registered for it. See `design/environments.md`.
+    pub fn presented(&self) -> Vec<tomori_protocol::EnvironmentVersion> {
+        let mut presented: Vec<Environment> = Vec::new();
+        for environment in std::iter::once(Environment::MINIMAL)
+            .chain(self.drawable.iter().copied())
+            .chain(std::iter::once(Environment::GITHUB))
+        {
+            if !presented.contains(&environment) {
+                presented.push(environment);
+            }
+        }
+        presented
+            .into_iter()
+            .map(|environment| {
+                tomori_protocol::EnvironmentVersion::new(environment.id(), environment.version())
+            })
+            .collect()
+    }
+
+    /// What this build presents of the environment `id`: the environment it draws, or the GitHub prototype, which it presents over the grid, or `None` when it cannot present it at all.
+    fn presents(&self, id: &str) -> Option<Environment> {
+        Environment::for_space(id, &self.drawable)
+            .or_else(|| (id == Environment::GITHUB.id()).then_some(Environment::GITHUB))
+    }
+
+    /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment, or draws it at another version than the space's. See `design/environments.md`.
     pub fn environment(&self) -> Environment {
         match &self.space {
-            Some(space) if self.mode == Mode::Space => {
-                Environment::for_space(&space.environment, &self.drawable)
-                    .unwrap_or(Environment::MINIMAL)
-            }
+            Some(space) if self.mode == Mode::Space => self.environment_of(space),
             _ => Environment::MINIMAL,
         }
     }
 
-    /// The joined space's environment, when this build cannot draw it and shows the grid instead.
-    #[cfg(any(not(target_os = "android"), test))]
-    fn missing_environment(&self) -> Option<&str> {
-        self.space
-            .as_ref()
-            .filter(|space| Environment::for_space(&space.environment, &self.drawable).is_none())
-            .map(|space| space.environment.as_str())
+    /// The scenery to draw for `space`: its environment, when this build draws it at the version the space's state names, or names none, as from an older server; otherwise the grid. See `design/environments.md`.
+    pub fn environment_of(&self, space: &SpaceState) -> Environment {
+        Environment::for_space(&space.environment, &self.drawable)
+            .filter(|environment| {
+                space
+                    .environment_version
+                    .is_none_or(|version| version == environment.version())
+            })
+            .unwrap_or(Environment::MINIMAL)
+    }
+
+    /// What `space`'s environment needs that this build lacks, when it shows the grid instead: the environment, or the version it needs, as the space's state names it. `None` when it presents the environment at that version, or names none to compare. See `design/environments.md`.
+    fn environment_notice(&self, space: &SpaceState) -> Option<String> {
+        let id = space.environment.as_str();
+        if id.is_empty() {
+            return Some("The server named no environment.".into());
+        }
+        match (self.presents(id), space.environment_version) {
+            // Says which side has which version. A server that agrees on versions does not offer this client the environment, so it is named by its label only when known, and otherwise by its identifier.
+            (Some(presented), Some(version)) if presented.version() != version => Some(format!(
+                "{} needs version {version}; this app has {}",
+                self.environment_name(id),
+                presented.version()
+            )),
+            (Some(_), _) => None,
+            (None, Some(version)) => Some(format!("Unknown environment: {id} version {version}")),
+            (None, None) => Some(format!("Unknown environment: {id}")),
+        }
+    }
+
+    /// How the hand menu names the joined space's environment: what this build lacks of it, or else its name.
+    fn shown_environment(&self, space: &SpaceState) -> String {
+        self.environment_notice(space)
+            .unwrap_or_else(|| self.environment_name(&space.environment))
     }
 
     /// Open the first creation ring.
@@ -1746,7 +1802,7 @@ impl Conversation {
         format!("{backend} in {label}")
     }
 
-    /// Create the space chosen on the rings, bound to `session` if one was chosen, then choose its environment if the server offers more than one.
+    /// Create the space chosen on the rings, bound to `session` if one was chosen, then choose its environment if the server offers this client more than one.
     fn create(&mut self, session: Option<SessionSummary>) {
         let (Some(backend), Some(directory)) =
             (self.menu_backend.clone(), self.menu_directory.clone())
@@ -3695,12 +3751,9 @@ impl Conversation {
             .unwrap_or_else(|| {
                 if self.replaying {
                     "Replaying... R-stick click stops".into()
-                } else if let Some(missing) = self.missing_environment() {
+                } else if let Some(notice) = self.environment_notice(space) {
                     // The grid is shown instead, never another environment.
-                    match missing {
-                        "" => "The server named no environment.".into(),
-                        missing => format!("Unknown environment: {missing}"),
-                    }
+                    notice
                 } else {
                     let mut parts = Vec::new();
                     if !self.live {
@@ -4051,6 +4104,10 @@ impl Session for Conversation {
         Conversation::apply(self, event);
     }
 
+    fn environments(&self) -> Option<Vec<tomori_protocol::EnvironmentVersion>> {
+        Some(self.presented())
+    }
+
     fn report(&mut self, report: Report) {
         // Reported every frame, and needing nothing more of the match below.
         if let Report::Replaying(replaying) = report {
@@ -4139,6 +4196,7 @@ mod tests {
         vec![EnvironmentInfo {
             id: "sky".into(),
             label: "Sky".into(),
+            version: 1,
         }]
     }
 
@@ -5433,10 +5491,12 @@ mod tests {
                 EnvironmentInfo {
                     id: "sky".into(),
                     label: "Sky".into(),
+                    version: 1,
                 },
                 EnvironmentInfo {
                     id: "observe".into(),
                     label: "Observe".into(),
+                    version: 1,
                 },
             ],
             utterance_limit: None,
@@ -5635,6 +5695,227 @@ mod tests {
     }
 
     #[test]
+    fn a_space_at_another_version_shows_the_grid_and_names_the_version() {
+        // The space's state names the version; this build presents Sky at version 1.
+        let mut conversation = joined(|state| state.environment_version = Some(1));
+        assert_eq!(conversation.environment(), Environment::SKY);
+        assert!(!conversation.text().contains("version"));
+        conversation.apply(space(|state| state.environment_version = Some(2)));
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
+        let text = conversation.text();
+        assert!(
+            text.contains("Sky needs version 2; this app has 1"),
+            "{text}"
+        );
+        assert_fits(&mut conversation);
+        assert_eq!(
+            conversation
+                .menu_model()
+                .space
+                .unwrap()
+                .environment
+                .as_deref(),
+            Some("Sky needs version 2; this app has 1")
+        );
+        // One it lacks names the version the space needs.
+        conversation.apply(space(|state| {
+            state.environment = "observe".into();
+            state.environment_version = Some(3);
+        }));
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
+        assert!(
+            conversation
+                .text()
+                .contains("Unknown environment: observe version 3")
+        );
+        // A build that registers it at that version draws it.
+        const OBSERVE: Environment = Environment::new("observe").with_version(3);
+        conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
+        assert_eq!(conversation.environment(), OBSERVE);
+        assert!(!conversation.text().contains("observe"));
+    }
+
+    #[test]
+    fn a_change_the_build_cannot_present_falls_back_to_the_grid_with_a_warning_and_back() {
+        // In Sky, as an owner elsewhere changes the space for everyone.
+        let mut conversation = joined(|state| state.environment_version = Some(1));
+        assert_eq!(conversation.mode(), Mode::Space);
+        assert_eq!(conversation.environment(), Environment::SKY);
+        let warned = |conversation: &mut Conversation| {
+            (
+                conversation.environment(),
+                conversation.text(),
+                conversation.menu_model().space.unwrap().environment,
+            )
+        };
+        // To one this build lacks: the grid, with a warning on the panel and in the hand menu.
+        conversation.apply(space(|state| {
+            state.environment = "observe".into();
+            state.environment_version = Some(2);
+        }));
+        let (environment, text, menu) = warned(&mut conversation);
+        assert_eq!(environment, Environment::MINIMAL);
+        assert!(
+            text.contains("Unknown environment: observe version 2"),
+            "{text}"
+        );
+        assert_eq!(
+            menu.as_deref(),
+            Some("Unknown environment: observe version 2")
+        );
+        // To Sky at a version this build does not present: the grid, naming the version.
+        conversation.apply(space(|state| state.environment_version = Some(2)));
+        let (environment, text, menu) = warned(&mut conversation);
+        assert_eq!(environment, Environment::MINIMAL);
+        assert!(
+            text.contains("Sky needs version 2; this app has 1"),
+            "{text}"
+        );
+        assert_eq!(menu.as_deref(), Some("Sky needs version 2; this app has 1"));
+        // Back to what it presents: Sky again, and the warning goes.
+        conversation.apply(space(|state| state.environment_version = Some(1)));
+        let (environment, text, menu) = warned(&mut conversation);
+        assert_eq!(environment, Environment::SKY);
+        assert!(!text.contains("version"), "{text}");
+        assert_eq!(menu.as_deref(), Some("Sky"));
+    }
+
+    #[test]
+    fn the_github_prototype_is_presented_over_the_grid_without_a_notice() {
+        let mut conversation = joined(|state| {
+            state.environment = "github".into();
+            state.environment_version = Some(1);
+        });
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
+        assert!(!conversation.text().contains("environment"));
+        assert_eq!(
+            conversation
+                .menu_model()
+                .space
+                .unwrap()
+                .environment
+                .as_deref(),
+            Some("github")
+        );
+        // At a version this build does not present, it says so.
+        conversation.apply(space(|state| {
+            state.environment = "github".into();
+            state.environment_version = Some(2);
+        }));
+        assert!(
+            conversation
+                .text()
+                .contains("github needs version 2; this app has 1")
+        );
+    }
+
+    #[test]
+    fn hello_lists_what_this_build_presents_once_each_at_its_version() {
+        use tomori_client::connection::Session;
+        let mut conversation = Conversation::new("Ada");
+        let listed = |conversation: &Conversation| -> Vec<(String, u32)> {
+            conversation
+                .environments()
+                .unwrap()
+                .into_iter()
+                .map(|presented| (presented.id, presented.version))
+                .collect()
+        };
+        assert_eq!(
+            listed(&conversation),
+            [
+                ("minimal".to_owned(), 1),
+                ("sky".to_owned(), 1),
+                ("github".to_owned(), 1)
+            ]
+        );
+        // A build that draws the GitHub prototype itself, or lists the grid again, lists each once.
+        conversation.set_drawable(vec![
+            Environment::GITHUB.with_version(2),
+            Environment::MINIMAL,
+            Environment::new("floor"),
+        ]);
+        assert_eq!(
+            listed(&conversation),
+            [
+                ("minimal".to_owned(), 1),
+                ("github".to_owned(), 2),
+                ("floor".to_owned(), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_grid_is_always_at_version_1_and_others_at_the_version_registered() {
+        use tomori_client::connection::Session;
+        let mut conversation = joined(|state| {
+            state.environment = "minimal".into();
+            state.environment_version = Some(1);
+        });
+        // A scenery registered for the grid at another version is drawn with it, at version 1; Sky and the GitHub
+        // prototype are at the versions registered.
+        conversation.set_drawable(vec![
+            Environment::MINIMAL.with_version(3),
+            Environment::SKY.with_version(2),
+            Environment::GITHUB.with_version(2),
+        ]);
+        let listed: Vec<(String, u32)> = conversation
+            .environments()
+            .unwrap()
+            .into_iter()
+            .map(|presented| (presented.id, presented.version))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("minimal".to_owned(), 1),
+                ("sky".to_owned(), 2),
+                ("github".to_owned(), 2)
+            ]
+        );
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
+        assert!(!conversation.text().contains("version"));
+        // So a space at the grid's other version, as Hello never lists, says so, as one at Sky's version 1 does.
+        conversation.apply(space(|state| {
+            state.environment = "minimal".into();
+            state.environment_version = Some(3);
+        }));
+        assert!(
+            conversation
+                .text()
+                .contains("minimal needs version 3; this app has 1")
+        );
+        conversation.apply(space(|state| state.environment_version = Some(1)));
+        assert!(
+            conversation
+                .text()
+                .contains("Sky needs version 1; this app has 2")
+        );
+        conversation.apply(space(|state| state.environment_version = Some(2)));
+        assert_eq!(conversation.environment().version(), 2);
+        assert_eq!(conversation.environment(), Environment::SKY);
+        conversation.apply(space(|state| {
+            state.environment = "github".into();
+            state.environment_version = Some(2);
+        }));
+        assert!(!conversation.text().contains("version"));
+    }
+
+    #[test]
+    fn the_lobby_lists_every_space_whatever_its_environment() {
+        // Offered only Sky, the lobby still lists a space in an environment this build cannot present.
+        let mut conversation = in_lobby(Vec::new(), Vec::new());
+        let mut topology = summary("b", "Topology");
+        topology.environment = "observe".into();
+        listed(&mut conversation, vec![summary("a", "Night"), topology]);
+        let text = conversation.text();
+        assert!(
+            text.contains("Night") && text.contains("Topology"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_build_that_draws_its_own_environment_shows_it() {
         const OBSERVE: Environment = Environment::new("observe");
         let mut conversation = joined(|state| state.environment = "observe".into());
@@ -5670,6 +5951,14 @@ mod tests {
         assert_eq!(conversation.locomotion(), &teleport);
         // Sky, which declares none, and the lobby have none.
         conversation.apply(space(|state| state.environment = "sky".into()));
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        conversation.apply(space(|state| state.environment = "observe".into()));
+        assert_eq!(conversation.locomotion(), &teleport);
+        // At a version this build does not have, the space is shown as the grid, which declares none.
+        conversation.apply(space(|state| {
+            state.environment = "observe".into();
+            state.environment_version = Some(2);
+        }));
         assert_eq!(conversation.locomotion(), &Locomotion::None);
         conversation.apply(space(|state| state.environment = "observe".into()));
         assert_eq!(conversation.locomotion(), &teleport);
@@ -8012,6 +8301,7 @@ mod tests {
         conversation.environments.push(EnvironmentInfo {
             id: "minimal".into(),
             label: "Grid".into(),
+            version: 1,
         });
         let offered = |conversation: &Conversation| {
             let model = conversation.menu_model();
@@ -8039,6 +8329,13 @@ mod tests {
             conversation.notice.as_deref(),
             Some("Changing the environment to Grid for everyone.")
         );
+        // Choosing the one the space is in, as the menu lists it even when this client cannot present it, asks the server for nothing.
+        conversation.choose_menu(crate::hand_menu::Choice::Environment("sky".into()));
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("The space is already in Sky.")
+        );
         // The scenery changes only when the server says the space has, for everyone alike.
         assert_eq!(conversation.environment(), Environment::SKY);
         conversation.apply(space(|space| {
@@ -8050,15 +8347,43 @@ mod tests {
             offered(&conversation).1[1],
             ("minimal".into(), "Grid".into(), true)
         );
-        // A space in an environment the server no longer offers shows it first, as the current one.
+        // A space in an environment the server no longer offers shows it first, as the current one, saying that this
+        // build cannot present it.
         conversation.apply(space(|space| {
             space.environment = "observe".into();
             space.environment_changes = true;
         }));
         let (name, environments) = offered(&conversation);
-        assert_eq!(name.as_deref(), Some("observe"));
-        assert_eq!(environments[0], ("observe".into(), "observe".into(), true));
+        assert_eq!(name.as_deref(), Some("Unknown environment: observe"));
+        assert_eq!(
+            environments[0],
+            (
+                "observe".into(),
+                "Unknown environment: observe".into(),
+                true
+            )
+        );
         assert_eq!(environments.len(), 3);
+        // As does an offered one this build has at another version, from a server that offers it anyway.
+        conversation.apply(space(|space| {
+            space.environment = "minimal".into();
+            space.environment_version = Some(2);
+            space.environment_changes = true;
+        }));
+        assert_eq!(conversation.environment(), Environment::MINIMAL);
+        let (name, environments) = offered(&conversation);
+        assert_eq!(
+            name.as_deref(),
+            Some("Grid needs version 2; this app has 1")
+        );
+        assert_eq!(
+            environments[1],
+            (
+                "minimal".into(),
+                "Grid needs version 2; this app has 1".into(),
+                true
+            )
+        );
     }
 
     #[test]
@@ -8622,10 +8947,12 @@ mod tests {
                     EnvironmentInfo {
                         id: "sky".into(),
                         label: "Sky".into(),
+                        version: 1,
                     },
                     EnvironmentInfo {
                         id: "grid".into(),
                         label: "Grid".into(),
+                        version: 1,
                     },
                 ],
                 utterance_limit: None,

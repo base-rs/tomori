@@ -361,6 +361,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         participant: "p".into(),
         name: "n".into(),
         names: false,
+        environments: None,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();

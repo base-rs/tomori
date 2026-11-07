@@ -126,7 +126,7 @@ pub enum Step {
     Directory,
     /// Only for backends that can attach to an existing session.
     Session,
-    /// Only when the server offers more than one environment.
+    /// Only when the server offers this client more than one environment.
     Environment,
 }
 

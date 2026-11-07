@@ -10,7 +10,7 @@ Its executable takes the same command line as `tomori`; the server-less window's
 cargo run -p tomori-example-headset
 ```
 
-With the example server running, `--desktop` or `--xr` shows the floor in a space created in the Placeholder environment, where Tomori's own build shows the grid and names the environment it cannot draw:
+With the example server running, `--desktop` or `--xr` shows the floor in a space created in the Placeholder environment, which the example server offers only to clients that present it, such as this build; Tomori's own build is not offered it, and in a space someone else created in it shows the grid and names the environment and the version it lacks:
 
 ```sh
 cargo run -p tomori-example-server -- --backend placeholder --auth open --no-advertise

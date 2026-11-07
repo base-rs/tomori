@@ -13,7 +13,7 @@ tomori --desktop --server 192.168.1.10:8765  # take part in a server's spaces
 tomori --xr --server 192.168.1.10:8765       # a desktop OpenXR runtime
 ```
 
-`tomori --help` lists every mode. A headset of your own registers its sceneries on Tomori's own build:
+`tomori --help` lists every mode. A headset of your own registers its sceneries on Tomori's own build, at version 1 with `Builder::scenery`, or at the environment's protocol version with `Builder::versioned_scenery`. The build's `Hello` lists them with their versions, so that a server offers it only environments it presents at the same version:
 
 ```rust
 fn builder() -> tomori::Builder {

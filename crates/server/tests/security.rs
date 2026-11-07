@@ -52,6 +52,7 @@ fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
         participant: participant.into(),
         name: participant.into(),
         names: false,
+        environments: None,
     });
     client.wait_for(|message| {
         matches!(message, ServerMessage::Welcome { .. }).then(|| message.clone())
@@ -317,6 +318,7 @@ fn a_token_renamed_elsewhere_renames_its_holders_within_a_sweep() {
         participant: "ada".to_owned(),
         name: "Quest 3".to_owned(),
         names: true,
+        environments: None,
     });
     let welcomed = ada.wait_for(|message| match message {
         ServerMessage::Welcome { name, .. } => Some(name.clone()),

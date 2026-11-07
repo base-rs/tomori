@@ -213,6 +213,7 @@ mod tests {
             participant: "quest-1".into(),
             name: "Samuel".into(),
             names: false,
+            environments: None,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,

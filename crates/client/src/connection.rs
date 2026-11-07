@@ -159,6 +159,11 @@ pub trait Session {
         false
     }
 
+    /// The environments the session presents, each at its protocol version, which each connection lists in its Hello so that the server offers only those; see [`crate::Options::environments`]. A session that presents no environments of its own lists none, and is offered every one, as a client from before versions is.
+    fn environments(&self) -> Option<Vec<tomori_protocol::EnvironmentVersion>> {
+        None
+    }
+
     /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`]. A session that shows the participant nothing observes nothing.
     fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
         let _ = (feedback, now);
@@ -1506,6 +1511,7 @@ impl Connection {
         options.transport = link.transport;
         options.token = link.token.clone();
         options.pairing = link.pairing;
+        options.environments = session.environments();
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {

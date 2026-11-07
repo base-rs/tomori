@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tomori_environment::ServerSide;
-use tomori_protocol::EnvironmentInfo;
+use tomori_protocol::{EnvironmentInfo, EnvironmentVersion};
 
 /// The moonlit sky, rendered by `crates/environment-sky`. The identifier is the one clients map to that renderer.
 pub const SKY: &str = "sky";
@@ -14,9 +14,9 @@ pub const SKY: &str = "sky";
 /// The plain floor grid, which clients also show outside any space. The identifier is the one clients map to that scenery.
 pub const MINIMAL: &str = "minimal";
 
-/// An environment a server offers for spaces: its identifier, which clients map to what they present, the label they show, and its layer of the instructions a space's agent is given.
+/// An environment a server offers for spaces: its identifier, which clients map to what they present, the label they show, its protocol version, which a client must present it at, and its layer of the instructions a space's agent is given.
 ///
-/// It may have a server side, which the server runs for each space bound to it; see [`ServerSide`] and `design/environments.md`. Its client side, data sources and tools are planned in [#75](https://github.com/ioquatix/tomori/issues/75), [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82). A client that does not know an environment's identifier shows the Minimal grid and names it, so a headset needs the environment's client side to present it.
+/// It may have a server side, which the server runs for each space bound to it; see [`ServerSide`] and `design/environments.md`. Its client side, data sources and tools are planned in [#75](https://github.com/ioquatix/tomori/issues/75), [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82). The server offers it only to clients that present it at its version, and a client that joins a space in it without presenting it at that version shows the Minimal grid and names the version, so a headset needs the environment's client side, at that version, to present it.
 ///
 /// ```
 /// use tomori_server::Environment;
@@ -31,6 +31,7 @@ pub const MINIMAL: &str = "minimal";
 pub struct Environment {
     id: String,
     label: String,
+    version: u32,
     instructions: String,
     side: Option<Arc<dyn ServerSide>>,
 }
@@ -41,17 +42,19 @@ impl fmt::Debug for Environment {
             .debug_struct("Environment")
             .field("id", &self.id)
             .field("label", &self.label)
+            .field("version", &self.version)
             .field("instructions", &self.instructions)
             .field("server_side", &self.side.is_some())
             .finish()
     }
 }
 
-/// Equal when they offer the same identifier, label and instructions, and the same server side, which is the same one rather than one like it.
+/// Equal when they offer the same identifier, label, version and instructions, and the same server side, which is the same one rather than one like it.
 impl PartialEq for Environment {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.label == other.label
+            && self.version == other.version
             && self.instructions == other.instructions
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
@@ -64,11 +67,12 @@ impl PartialEq for Environment {
 impl Eq for Environment {}
 
 impl Environment {
-    /// The environment `id`, which clients show as `label`, contributing no instructions.
+    /// The environment `id`, which clients show as `label`, at protocol version 1, contributing no instructions.
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
+            version: 1,
             instructions: String::new(),
             side: None,
         }
@@ -108,6 +112,26 @@ impl Environment {
     pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
         self.instructions = instructions.into();
         self
+    }
+
+    /// The environment, at protocol `version`, which a client must present it at to be offered it. Raise it when a
+    /// client side of an earlier version could not present the environment; a change it can ignore keeps it. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_server::Environment;
+    ///
+    /// assert_eq!(Environment::new("observe", "Observe").version(), 1);
+    /// assert_eq!(Environment::new("observe", "Observe").with_version(2).version(), 2);
+    /// ```
+    pub fn with_version(mut self, version: u32) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Its protocol version, 1 unless it was given another.
+    pub fn version(&self) -> u32 {
+        self.version
     }
 
     /// The identifier clients name it by, in a space's state and in creating or changing a space.
@@ -169,14 +193,67 @@ impl Environments {
         self.0
     }
 
-    /// The environments offered to clients in `Welcome`.
+    /// The environments offered to clients in `Welcome`, with their versions.
     pub fn info(&self) -> Vec<EnvironmentInfo> {
         self.0
             .iter()
             .map(|environment| EnvironmentInfo {
                 id: environment.id.clone(),
                 label: environment.label.clone(),
+                version: environment.version,
             })
+            .collect()
+    }
+
+    /// The protocol version of the environment `id`, or `None` when it is not offered.
+    pub fn version(&self, id: &str) -> Option<u32> {
+        self.get(id).map(Environment::version)
+    }
+
+    /// The environments offered to a client that `presents` these, in order: those it lists with the same identifier and version, or every one for a client that lists none, as one from before versions. See `design/environments.md`.
+    pub fn presentable(&self, presents: Option<&[EnvironmentVersion]>) -> Self {
+        match presents {
+            None => self.clone(),
+            Some(presents) => Self(
+                self.0
+                    .iter()
+                    .filter(|environment| presented(presents, environment))
+                    .cloned()
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The environment to bind a new space to, or change one to, for a client that `presents` these: as [`Self::choose`] among those offered to it, saying so when the server offers it none, and naming the version of one the server offers that the client does not present at it.
+    pub fn choose_for(
+        &self,
+        requested: Option<&str>,
+        presents: Option<&[EnvironmentVersion]>,
+    ) -> Result<String, String> {
+        let offered = self.presentable(presents);
+        if offered.0.is_empty() && !self.0.is_empty() {
+            return Err("The server offers no environment this client can present.".to_owned());
+        }
+        // The server's own identifier and version, never the request's text, so that the refusal says why.
+        if let Some(environment) = requested
+            .and_then(|requested| self.get(requested))
+            .filter(|environment| offered.get(&environment.id).is_none())
+        {
+            return Err(format!(
+                "This client cannot present {} at version {}; available: {}.",
+                environment.id,
+                environment.version,
+                offered.ids().join(", ")
+            ));
+        }
+        offered.choose(requested)
+    }
+
+    /// The identifiers offered, in order.
+    fn ids(&self) -> Vec<&str> {
+        self.0
+            .iter()
+            .map(|environment| environment.id.as_str())
             .collect()
     }
 
@@ -200,19 +277,19 @@ impl Environments {
         match found {
             Some(environment) => Ok(environment.id.clone()),
             None if self.0.is_empty() => Err("The server offers no environments.".to_owned()),
-            None => {
-                let ids: Vec<&str> = self
-                    .0
-                    .iter()
-                    .map(|environment| environment.id.as_str())
-                    .collect();
-                Err(format!(
-                    "Unknown environment; available: {}.",
-                    ids.join(", ")
-                ))
-            }
+            None => Err(format!(
+                "Unknown environment; available: {}.",
+                self.ids().join(", ")
+            )),
         }
     }
+}
+
+/// Whether a client that `presents` these presents `environment` at its version.
+fn presented(presents: &[EnvironmentVersion], environment: &Environment) -> bool {
+    presents
+        .iter()
+        .any(|presented| presented.id == environment.id && presented.version == environment.version)
 }
 
 #[cfg(test)]
@@ -276,6 +353,64 @@ mod tests {
         assert!(offered.choose(Some("Minimal")).is_err());
         assert_eq!(
             Environments::new([]).choose(None),
+            Err("The server offers no environments.".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_client_is_offered_the_environments_it_presents_at_their_versions() {
+        let offered =
+            Environments::default().with(Environment::new("observe", "Observe").with_version(2));
+        assert_eq!(offered.version("observe"), Some(2));
+        assert_eq!(offered.version(SKY), Some(1));
+        assert_eq!(offered.version("unknown"), None);
+        let versions: Vec<u32> = offered.info().iter().map(|info| info.version).collect();
+        assert_eq!(versions, [1, 1, 2]);
+        // Versions tell environments apart, as offering them again would.
+        assert_ne!(
+            Environment::new("observe", "Observe"),
+            Environment::new("observe", "Observe").with_version(2)
+        );
+        assert!(format!("{:?}", offered.get("observe").unwrap()).contains("version: 2"));
+
+        // A client from before versions lists nothing, and is offered every one.
+        assert_eq!(offered.presentable(None), offered);
+        let presents = [
+            EnvironmentVersion::new("observe", 1),
+            EnvironmentVersion::new(MINIMAL, 1),
+        ];
+        let ids: Vec<String> = offered
+            .presentable(Some(&presents))
+            .info()
+            .into_iter()
+            .map(|info| info.id)
+            .collect();
+        assert_eq!(ids, [MINIMAL]);
+        // The first offered to it is its default, and one not offered to it is refused, naming the version the server
+        // offers it at and those offered to the client, while one the server does not offer is unknown.
+        assert_eq!(
+            offered.choose_for(None, Some(&presents)),
+            Ok(MINIMAL.to_owned())
+        );
+        assert_eq!(
+            offered.choose_for(Some("observe"), Some(&presents)),
+            Err("This client cannot present observe at version 2; available: minimal.".to_owned())
+        );
+        assert_eq!(
+            offered.choose_for(Some("floor"), Some(&presents)),
+            Err("Unknown environment; available: minimal.".to_owned())
+        );
+        assert_eq!(
+            offered.choose_for(Some("observe"), None),
+            Ok("observe".to_owned())
+        );
+        // Offered none, it is told so, while a server offering none says that as before.
+        assert_eq!(
+            offered.choose_for(None, Some(&[])),
+            Err("The server offers no environment this client can present.".to_owned())
+        );
+        assert_eq!(
+            Environments::new([]).choose_for(None, Some(&[])),
             Err("The server offers no environments.".to_owned())
         );
     }
