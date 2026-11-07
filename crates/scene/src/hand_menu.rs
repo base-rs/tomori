@@ -209,6 +209,8 @@ pub enum MenuKey {
     Mute,
     /// Turn the status pill on or off on this headset.
     Pill,
+    /// Turn travel off on this headset, staying room scale, or on again.
+    Travel,
     /// Ask whether to leave the space.
     Leave,
     /// Leave the space, once asked.
@@ -271,6 +273,8 @@ pub struct Model {
     pub muted: bool,
     /// Whether the status pill shows on this headset.
     pub pill: bool,
+    /// Whether the participant travels on this headset, where the space's environment allows travel; `None` where it does not, which offers no setting. See `design/locomotion.md`.
+    pub travel: Option<bool>,
     /// The item the ray points at, so that the description of the mode pointed at shows beneath the modes. It changes what the rows say, never how many there are, so that the menu's layout does not follow the ray.
     pub pointed: Option<MenuKey>,
     /// This device's Feedback setting.
@@ -336,6 +340,8 @@ pub enum Choice {
     Mute,
     /// Turn the status pill on or off here.
     Pill,
+    /// Turn travel off here, or on again.
+    Travel,
     /// Leave the space.
     Leave,
     /// Step the sounds, or the vibration, to the next level.
@@ -597,6 +603,18 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                         "Status pill: off".into()
                     },
                 );
+                // Only where the environment allows travel.
+                if let Some(travel) = model.travel {
+                    button(
+                        &mut items,
+                        MenuKey::Travel,
+                        if travel {
+                            "Travel: on".into()
+                        } else {
+                            "Travel: off, room scale".into()
+                        },
+                    );
+                }
                 button(&mut items, MenuKey::Leave, "Leave space".into());
             }
         }
@@ -872,6 +890,7 @@ impl HandMenu {
             MenuKey::Environment(id) => Some(Choice::Environment(id.clone())),
             MenuKey::Mute => Some(Choice::Mute),
             MenuKey::Pill => Some(Choice::Pill),
+            MenuKey::Travel => Some(Choice::Travel),
             MenuKey::Layer(layer) => {
                 self.section = Some(Section::Layer(*layer));
                 None
@@ -1601,6 +1620,20 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(shown.contains(&"Spoken replies: muted".to_owned()));
         assert!(shown.contains(&"Status pill: off".to_owned()));
+        // Where the environment allows travel, this headset can turn it off, beneath the pill.
+        assert!(!rows.iter().any(|row| row.key == MenuKey::Travel));
+        for (travel, said) in [(true, "Travel: on"), (false, "Travel: off, room scale")] {
+            model.travel = Some(travel);
+            let rows = items(Some(Section::Space), &model);
+            let pill = rows
+                .iter()
+                .position(|row| row.key == MenuKey::Pill)
+                .unwrap();
+            assert_eq!(rows[pill + 1].key, MenuKey::Travel);
+            assert_eq!(rows[pill + 1].text, said);
+            assert_eq!(rows[pill + 2].key, MenuKey::Leave);
+        }
+        assert_eq!(menu.choose(&MenuKey::Travel), Some(Choice::Travel));
         // A visitor reads the mode and speech, and cannot switch them.
         let visitor = in_space(ConnectionRole::Visitor);
         let rows = items(Some(Section::Space), &visitor);

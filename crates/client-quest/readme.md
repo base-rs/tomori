@@ -19,7 +19,7 @@ tomori --xr --server 192.168.1.10:8765       # a desktop OpenXR runtime
 fn builder() -> tomori::Builder {
     tomori::Builder::default()
         .scenery("observe", my_scenery)
-        // Teleport onto a floor 40 m across, and turn in snaps of 30°; Tomori's own environments declare none.
+        // Teleport onto a floor 40 m across, and turn in snaps of 30°; Tomori's own environments declare none. Provisional, until environments have server sides to declare it.
         .locomotion(
             "observe",
             tomori::Locomotion::teleport(vec![tomori::Surface::rectangle(

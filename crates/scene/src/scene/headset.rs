@@ -1673,6 +1673,9 @@ mod tests {
         assert_eq!(drawn.frame.landing, None);
         let head = drawn.frame.presence.unwrap().head;
         assert!(Vec3::from_array(head.position).distance(Vec3::new(0.0, 1.6, 0.0)) < 1e-4);
+        // That frame is drawn dark, from where the poses were placed, so that the view does not jump.
+        assert_eq!(drawn.frame.blink, 1.0);
+        assert_eq!(drawn.frame.rig, crate::locomotion::Rig::default());
         assert_eq!(
             rig.headset
                 .haptics(&mut rig.feedback, rig.start + HOLD)
@@ -1692,6 +1695,17 @@ mod tests {
         joints[1].position = wrist;
         let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [Some(joints), None], HOLD * 2);
         let travelled = Vec3::new(0.2, 1.6, -1.5);
+        // It comes back from dark, and the frame says where the room now is, for the voices around it.
+        assert!(drawn.frame.blink > 0.0 && drawn.frame.blink < 1.0);
+        assert!(
+            drawn
+                .frame
+                .rig
+                .matrix()
+                .transform_point3(Vec3::new(0.0, 1.6, 0.0))
+                .distance(travelled)
+                < 1e-4
+        );
         let presence = drawn.frame.presence.unwrap();
         let hand = presence.hands[controller::LEFT].unwrap().joints[1].unwrap();
         assert!(Vec3::from_array(hand.position).distance(wrist + Vec3::new(0.2, 0.0, -1.5)) < 1e-4);

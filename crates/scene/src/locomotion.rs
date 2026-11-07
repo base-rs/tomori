@@ -14,20 +14,41 @@ pub const ASCENT_SPEED: f32 = 0.6;
 pub const REACH: f32 = 15.0;
 /// The nearest a landing can be along the ray, in metres.
 pub const NEAREST: f32 = 0.25;
-/// How far the stick moves from the middle before a push counts.
-const STICK: f32 = 0.6;
-/// How near the middle the stick returns before it turns again.
-const RECENTRED: f32 = 0.3;
+/// How far forward the stick goes before it aims a teleport, and how far back before it rises.
+const PUSH: f32 = 0.7;
+/// How far sideways the stick goes before it turns.
+const TURN: f32 = 0.6;
+/// How near the middle the stick returns to end a gesture: a teleport aimed lands, and the next push counts.
+const CENTRE: f32 = 0.2;
+/// How long the view takes to come back from dark after a teleport, in seconds.
+pub const BLINK: f32 = 0.2;
 /// How far below the horizontal a ray must point to land anywhere, as the sine of the angle.
 const DOWNWARDS: f32 = 0.02;
 
-/// A horizontal surface a participant may land on, in the space's scene coordinates.
+/// A horizontal surface a participant may land on, in the space's scene coordinates. Made with [`Surface::rectangle`] and [`Surface::disc`], so that it can grow, as with colliders or rotated surfaces, without breaking:
+///
+/// ```
+/// use glam::{Vec2, Vec3};
+/// use tomori_scene::locomotion::{Locomotion, Surface};
+///
+/// let deck = Surface::rectangle(Vec3::new(0.0, 3.0, 0.0), Vec2::new(4.0, 2.0));
+/// let profile = Locomotion::fly(vec![deck, Surface::disc(Vec3::ZERO, 10.0)], 12.0);
+/// assert_eq!(profile.ceiling(), Some(12.0));
+/// ```
+///
+/// A variant's fields cannot be given directly outside this crate:
+///
+/// ```compile_fail
+/// let _ = tomori_scene::locomotion::Surface::Disc { centre: glam::Vec3::ZERO, radius: 1.0 };
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Surface {
-    /// A rectangle aligned with the scene's axes, centred at `centre`, `half` its size along X and Z.
+    /// A rectangle aligned with the scene's axes, centred at `centre`, `half` its size along X and Z. Made with [`Surface::rectangle`].
+    #[non_exhaustive]
     Rectangle { centre: Vec3, half: Vec2 },
-    /// A disc centred at `centre`.
+    /// A disc centred at `centre`. Made with [`Surface::disc`].
+    #[non_exhaustive]
     Disc { centre: Vec3, radius: f32 },
 }
 
@@ -68,16 +89,22 @@ impl Surface {
     }
 }
 
-/// How an environment lets its participants travel beyond the room.
+/// How an environment lets its participants travel beyond the room. Made with [`Locomotion::teleport`] and [`Locomotion::fly`], so that it can grow, as with a fly speed, without breaking; a variant's fields cannot be given directly outside this crate:
+///
+/// ```compile_fail
+/// let _ = tomori_scene::locomotion::Locomotion::Teleport { surfaces: Vec::new() };
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub enum Locomotion {
     /// Room scale, as before: no artificial travel.
     #[default]
     None,
-    /// Teleport onto the walkable `surfaces`, and turn in snaps.
+    /// Teleport onto the walkable `surfaces`, and turn in snaps. Made with [`Locomotion::teleport`].
+    #[non_exhaustive]
     Teleport { surfaces: Vec<Surface> },
-    /// Teleport and turn, and rise as well, never above `ceiling`, the highest the room's floor goes.
+    /// Teleport and turn, and rise as well, never above `ceiling`, the highest the room's floor goes. Made with [`Locomotion::fly`].
+    #[non_exhaustive]
     Fly {
         surfaces: Vec<Surface>,
         ceiling: f32,
@@ -205,31 +232,46 @@ pub(crate) struct Outcome {
     pub teleported: bool,
     /// The rig turned this frame.
     pub turned: bool,
+    /// How dark the view is, from 1, as a teleport lands, back to 0 over [`BLINK`] seconds.
+    pub blink: f32,
 }
 
-/// The participant's rig, and the teleport being aimed, between frames.
+/// What the left stick is doing: each push is one gesture, owned by the axis that passed its threshold first, until the stick returns to the middle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Gesture {
+    /// At the middle: the next push starts a gesture.
+    #[default]
+    Ready,
+    /// Forward came first: a teleport is aimed, and lands when the stick returns to the middle.
+    Aiming,
+    /// Back came first, where the environment flies: it rises while the stick is held back.
+    Rising,
+    /// The push has done what it does, as a turn does, or was cancelled: nothing more until the middle.
+    Spent,
+}
+
+/// The participant's rig, and the gesture the left stick is making, between frames.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Travel {
     rig: Rig,
     /// The space and environment the rig belongs to.
     place: Option<(String, Environment)>,
-    aiming: bool,
+    gesture: Gesture,
     landing: Option<Vec3>,
-    turned: bool,
+    /// How dark the view is after a teleport.
+    blink: f32,
 }
 
 impl Travel {
     /// Where the participant's room is in the scene, as it was last settled.
-    #[cfg(test)]
     pub fn rig(&self) -> Rig {
         self.rig
     }
 
-    /// Drop a teleport being aimed, as on losing focus; the next turn needs the stick back near the middle.
+    /// Drop a teleport being aimed, as on losing focus; the next push needs the stick back at the middle first.
     pub fn cancel(&mut self) {
-        self.aiming = false;
+        self.gesture = Gesture::Spent;
         self.landing = None;
-        self.turned = true;
     }
 
     /// Where the participant's room is in the scene at `place`, where the profile is `locomotion`: travel belongs to one environment of one space, so anywhere else, or without travel, the room is back home.
@@ -250,55 +292,72 @@ impl Travel {
     /// Move on a frame, as `input` finds things.
     pub fn update(&mut self, input: Input) -> Outcome {
         self.settle(input.place, input.locomotion);
+        let dt = if input.dt.is_finite() {
+            input.dt.max(0.0)
+        } else {
+            0.0
+        };
+        self.blink = (self.blink - dt / BLINK).max(0.0);
         if !input.locomotion.travels() || !input.active {
             self.cancel();
-            return Outcome::default();
+            return Outcome {
+                blink: self.blink,
+                ..Outcome::default()
+            };
         }
+        // A stick that reads nonsense is at the middle, but lands nothing.
         let stick = if input.stick.is_finite() {
             input.stick
         } else {
+            self.landing = None;
             Vec2::ZERO
         };
         let mut outcome = Outcome::default();
-        // Left or right turns once per push.
-        if stick.x.abs() < RECENTRED {
-            self.turned = false;
-        }
-        if stick.x.abs() > STICK && stick.x.abs() > stick.y.abs() && !self.turned {
-            self.turned = true;
-            if let Some(head) = input.head {
-                self.rig.turn(-stick.x.signum() * SNAP_TURN, head);
-                outcome.turned = true;
+        if stick.length() < CENTRE {
+            // Back at the middle: a teleport aimed lands where it aimed, if the ray is still there. Losing it, as a controller does that stops being tracked, cancels.
+            if let (Gesture::Aiming, Some(landing), Some(head), Some(_)) =
+                (self.gesture, self.landing, input.head, input.ray)
+            {
+                self.rig.teleport(landing, head);
+                self.blink = 1.0;
+                outcome.teleported = true;
             }
-        }
-        // Forward aims while the ray points, and releasing it lands where it aimed, if the ray is still there: losing it, as a controller does that stops being tracked, cancels.
-        let forward = stick.y > STICK && stick.y >= stick.x.abs();
-        match input.ray.filter(|_| forward) {
-            Some(ray) => {
-                self.aiming = true;
-                self.landing = input.locomotion.landing(&ray);
-            }
-            None => {
-                if let (true, false, Some(landing), Some(head), Some(_)) =
-                    (self.aiming, forward, self.landing, input.head, input.ray)
-                {
-                    self.rig.teleport(landing, head);
-                    outcome.teleported = true;
+            self.gesture = Gesture::Ready;
+            self.landing = None;
+        } else if self.gesture == Gesture::Ready {
+            // The first axis pushed past its threshold owns the push, so that easing off, or rolling the thumb to another side, neither lands nor turns.
+            let (across, along) = (stick.x.abs(), stick.y);
+            if along > PUSH && along >= across {
+                self.gesture = Gesture::Aiming;
+            } else if across > TURN && across > along.abs() {
+                self.gesture = Gesture::Spent;
+                if let Some(head) = input.head {
+                    self.rig.turn(-stick.x.signum() * SNAP_TURN, head);
+                    outcome.turned = true;
                 }
-                self.aiming = false;
-                self.landing = None;
+            } else if input.locomotion.ceiling().is_some() && -along > PUSH && -along >= across {
+                self.gesture = Gesture::Rising;
             }
         }
-        // Back rises, where the environment flies.
-        if let Some(ceiling) = input.locomotion.ceiling()
-            && stick.y < -STICK
-            && -stick.y >= stick.x.abs()
-            && input.dt.is_finite()
-        {
-            self.rig.ascend(ASCENT_SPEED * input.dt.max(0.0), ceiling);
+        match self.gesture {
+            // While aiming, the ray finds where it would land; losing it cancels.
+            Gesture::Aiming => match input.ray {
+                Some(ray) => self.landing = input.locomotion.landing(&ray),
+                None => self.cancel(),
+            },
+            // Rising, while the stick is still held back, never above the ceiling.
+            Gesture::Rising => {
+                if let Some(ceiling) = input.locomotion.ceiling()
+                    && stick.y < -CENTRE
+                {
+                    self.rig.ascend(ASCENT_SPEED * dt, ceiling);
+                }
+            }
+            Gesture::Ready | Gesture::Spent => {}
         }
-        outcome.aiming = self.aiming;
+        outcome.aiming = self.gesture == Gesture::Aiming;
         outcome.landing = self.landing;
+        outcome.blink = self.blink;
         outcome
     }
 }
@@ -608,12 +667,188 @@ mod tests {
             ..input(&fly, Vec2::NEG_Y, None)
         };
         travel.update(nonsense);
-        travel.update(input(&fly, Vec2::new(0.9, -0.7), None));
+        travel.update(input(&fly, Vec2::ZERO, None));
+        assert!(
+            travel
+                .update(input(&fly, Vec2::new(0.9, -0.7), None))
+                .turned
+        );
         assert!((travel.rig().floor() - 0.3).abs() < 1e-5);
+        travel.update(input(&fly, Vec2::ZERO, None));
         for _ in 0..10 {
             travel.update(input(&fly, Vec2::NEG_Y, None));
         }
         assert_eq!(travel.rig().floor(), 1.0);
+    }
+
+    /// Aim a teleport at the floor 4 m ahead, as the reviewer's cases start.
+    fn aimed(floors: &Locomotion, travel: &mut Travel) -> Option<Ray> {
+        let aim = Some(ray(Vec3::new(0.3, 1.2, -0.4), Vec3::new(0.0, 0.0, -4.0)));
+        let outcome = travel.update(input(floors, Vec2::new(0.0, 0.9), aim));
+        assert!(outcome.aiming && outcome.landing.is_some());
+        aim
+    }
+
+    #[test]
+    fn easing_off_while_aiming_does_not_land_until_the_stick_is_back_at_the_middle() {
+        let floors = floors();
+        let mut travel = Travel::default();
+        let aim = aimed(&floors, &mut travel);
+        // Eased from 0.9 to 0.55, below where a push starts, and further, it still aims.
+        for eased in [0.55, 0.3, 0.21] {
+            let outcome = travel.update(input(&floors, Vec2::new(0.0, eased), aim));
+            assert!(outcome.aiming && !outcome.teleported, "{eased}");
+        }
+        assert_eq!(travel.rig(), Rig::default());
+        // Back at the middle, it lands, once.
+        let outcome = travel.update(input(&floors, Vec2::new(0.1, 0.1), aim));
+        assert!(outcome.teleported && !outcome.aiming);
+        assert!(close(
+            travel.rig().matrix().transform_point3(HEAD),
+            Vec3::new(0.0, HEAD.y, -4.0)
+        ));
+        assert!(!travel.update(input(&floors, Vec2::ZERO, aim)).teleported);
+    }
+
+    #[test]
+    fn rolling_the_thumb_sideways_while_aiming_neither_lands_nor_turns() {
+        let floors = floors();
+        let mut travel = Travel::default();
+        let aim = aimed(&floors, &mut travel);
+        // The reviewer's roll, from forward to (0.8, 0.5), then all the way to the side and back.
+        for rolled in [
+            Vec2::new(0.8, 0.5),
+            Vec2::new(0.95, 0.0),
+            Vec2::new(-0.9, 0.1),
+            Vec2::new(0.0, -0.9),
+        ] {
+            let outcome = travel.update(input(&floors, rolled, aim));
+            assert!(outcome.aiming, "{rolled}");
+            assert!(!outcome.teleported && !outcome.turned, "{rolled}");
+        }
+        assert_eq!(travel.rig(), Rig::default());
+        let outcome = travel.update(input(&floors, Vec2::ZERO, aim));
+        assert!(outcome.teleported && !outcome.turned);
+        assert_eq!(travel.rig().yaw, 0.0);
+    }
+
+    #[test]
+    fn whichever_axis_passes_its_threshold_first_owns_the_push_until_the_middle() {
+        let floors = floors();
+        let mut travel = Travel::default();
+        let aim = Some(ray(HEAD, Vec3::new(0.0, 0.0, -3.0)));
+        // Short of each threshold, nothing starts: forward needs 0.7, sideways 0.6.
+        for short in [
+            Vec2::new(0.0, 0.65),
+            Vec2::new(0.55, 0.0),
+            Vec2::new(-0.55, 0.3),
+        ] {
+            assert_eq!(
+                travel.update(input(&floors, short, aim)),
+                Outcome::default(),
+                "{short}"
+            );
+        }
+        // Sideways first turns, and rolling forward then aims nothing.
+        assert!(
+            travel
+                .update(input(&floors, Vec2::new(0.9, 0.1), aim))
+                .turned
+        );
+        for rolled in [Vec2::new(0.5, 0.8), Vec2::new(0.0, 0.95)] {
+            let outcome = travel.update(input(&floors, rolled, aim));
+            assert!(!outcome.aiming && !outcome.turned, "{rolled}");
+        }
+        // Part of the way back is not the middle: neither a turn nor an aim starts.
+        travel.update(input(&floors, Vec2::new(0.25, 0.0), aim));
+        assert!(
+            !travel
+                .update(input(&floors, Vec2::new(0.9, 0.0), aim))
+                .turned
+        );
+        travel.update(input(&floors, Vec2::new(0.15, 0.15), aim));
+        assert!(
+            !travel
+                .update(input(&floors, Vec2::new(0.0, 0.9), aim))
+                .aiming
+        );
+        // From the middle, the next push counts, whichever way it goes.
+        travel.update(input(&floors, Vec2::new(0.1, -0.1), aim));
+        assert!(
+            travel
+                .update(input(&floors, Vec2::new(0.0, 0.9), aim))
+                .aiming
+        );
+        // Forward without a ray owns the push too, and aims nothing.
+        travel.cancel();
+        travel.update(input(&floors, Vec2::ZERO, None));
+        let outcome = travel.update(input(&floors, Vec2::Y, None));
+        assert!(!outcome.aiming);
+        assert!(
+            !travel
+                .update(input(&floors, Vec2::new(0.9, 0.0), aim))
+                .turned
+        );
+        assert!(!travel.update(input(&floors, Vec2::ZERO, aim)).teleported);
+        // A stick that reads nonsense while aiming lands nothing.
+        travel.update(input(&floors, Vec2::Y, aim));
+        assert!(!travel.update(input(&floors, Vec2::NAN, aim)).teleported);
+        // All that moved the rig was the one turn.
+        assert!((travel.rig().yaw + SNAP_TURN).abs() < 1e-5);
+        assert!(close(travel.rig().matrix().transform_point3(HEAD), HEAD));
+    }
+
+    #[test]
+    fn rising_owns_its_push_and_stops_as_the_stick_rolls_away() {
+        let fly = Locomotion::fly(vec![Surface::disc(Vec3::ZERO, 20.0)], 10.0);
+        let mut travel = Travel::default();
+        let aim = Some(ray(HEAD, Vec3::new(0.0, 0.0, -3.0)));
+        // Back, short of its threshold, rises nothing; past it, it rises.
+        travel.update(input(&fly, Vec2::new(0.0, -0.65), aim));
+        assert_eq!(travel.rig().floor(), 0.0);
+        travel.update(input(&fly, Vec2::ZERO, aim));
+        travel.update(input(&fly, Vec2::NEG_Y, aim));
+        assert!((travel.rig().floor() - 0.3).abs() < 1e-5);
+        // Eased off, still held back, it keeps rising.
+        travel.update(input(&fly, Vec2::new(0.0, -0.4), aim));
+        assert!((travel.rig().floor() - 0.6).abs() < 1e-5);
+        // Rolled to the side or forward, it neither turns, aims nor rises.
+        for rolled in [Vec2::new(0.9, -0.1), Vec2::new(0.1, 0.9)] {
+            let outcome = travel.update(input(&fly, rolled, aim));
+            assert!(!outcome.turned && !outcome.aiming, "{rolled}");
+        }
+        assert!((travel.rig().floor() - 0.6).abs() < 1e-5);
+        assert!(!travel.update(input(&fly, Vec2::ZERO, aim)).teleported);
+    }
+
+    #[test]
+    fn a_teleport_darkens_the_view_and_it_comes_back_over_a_blink() {
+        let floors = floors();
+        let mut travel = Travel::default();
+        let aim = aimed(&floors, &mut travel);
+        let short = |stick: Vec2, active: bool| Input {
+            dt: BLINK / 4.0,
+            active,
+            ..input(&floors, stick, aim)
+        };
+        assert_eq!(travel.update(short(Vec2::Y, true)).blink, 0.0);
+        let landed = travel.update(short(Vec2::ZERO, true));
+        assert!(landed.teleported);
+        assert_eq!(landed.blink, 1.0);
+        assert!((travel.update(short(Vec2::ZERO, true)).blink - 0.75).abs() < 1e-5);
+        // It comes back while travel is inactive too, as while the hand menu shows, and nonsense time stands still.
+        assert!((travel.update(short(Vec2::ZERO, false)).blink - 0.5).abs() < 1e-5);
+        let nonsense = Input {
+            dt: f32::NAN,
+            ..short(Vec2::ZERO, true)
+        };
+        assert!((travel.update(nonsense).blink - 0.5).abs() < 1e-5);
+        for _ in 0..3 {
+            travel.update(short(Vec2::ZERO, true));
+        }
+        assert_eq!(travel.update(short(Vec2::ZERO, true)).blink, 0.0);
+        // Turning does not darken it.
+        assert_eq!(travel.update(short(Vec2::X, true)).blink, 0.0);
     }
 
     #[test]

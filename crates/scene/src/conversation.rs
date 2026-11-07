@@ -321,6 +321,8 @@ pub struct Conversation {
     laid_out: Option<(TranscriptKey, Vec<crate::ui_text::Row>)>,
     /// Whether the status pill shows, a setting of this headset's. See `design/interaction.md`.
     pill: bool,
+    /// Whether the participant travels where an environment allows it, a setting of this headset's. See `design/locomotion.md`.
+    travel: bool,
     /// Approvals are decided and queued entries removed on the right wrist, so A elsewhere does neither, as on the headset and desktop window; the console decides with its own commands.
     decide_on_wrist: bool,
     /// Makes utterance identifiers unique across launches, since the server keys queued text by participant and utterance, and the participant persists.
@@ -419,6 +421,7 @@ impl Conversation {
             laid_out: None,
             decide_on_wrist: false,
             pill: true,
+            travel: true,
             launch: format!(
                 "{:x}",
                 SystemTime::now()
@@ -1268,6 +1271,7 @@ impl Conversation {
                 .unwrap_or_default(),
             muted: self.muted,
             pill: self.pill,
+            travel: self.declared_locomotion().travels().then_some(self.travel),
             pointed: None,
             feedback: self.feedback,
         }
@@ -1386,6 +1390,7 @@ impl Conversation {
             crate::hand_menu::Choice::Environment(id) => self.change_environment(&id),
             crate::hand_menu::Choice::Mute => self.toggle_mute(),
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
+            crate::hand_menu::Choice::Travel => self.toggle_travel(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
             crate::hand_menu::Choice::Leave => {}
             crate::hand_menu::Choice::Sounds => {
@@ -1634,8 +1639,23 @@ impl Conversation {
         self.locomotion = locomotion;
     }
 
-    /// How the participant may travel: as declared for the joined space's environment, when this build draws it, and otherwise not at all. See `design/locomotion.md`.
+    /// How the participant may travel: as declared for the joined space's environment, when this build draws it and travel is not turned off on this headset, and otherwise not at all. See `design/locomotion.md`.
     pub fn locomotion(&self) -> &Locomotion {
+        const NONE: &Locomotion = &Locomotion::None;
+        if self.travel {
+            self.declared_locomotion()
+        } else {
+            NONE
+        }
+    }
+
+    /// Turn travel off on this headset, staying room scale wherever an environment allows it, or on again. See `design/locomotion.md`.
+    pub fn toggle_travel(&mut self) {
+        self.travel = !self.travel;
+    }
+
+    /// How the joined space's environment lets the participant travel, as declared, whether or not it is turned off here.
+    fn declared_locomotion(&self) -> &Locomotion {
         const NONE: &Locomotion = &Locomotion::None;
         self.joined_space()
             .and_then(|(space, _)| Environment::for_space(&space.environment, &self.drawable))
@@ -5638,7 +5658,15 @@ mod tests {
         conversation.set_locomotion(vec![(OBSERVE, teleport.clone())]);
         // Shown as the grid, it has none.
         assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.menu_model().travel, None);
         conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
+        assert_eq!(conversation.locomotion(), &teleport);
+        // This headset can turn travel off, staying room scale, and on again, from the hand menu.
+        assert_eq!(conversation.menu_model().travel, Some(true));
+        conversation.choose_menu(crate::hand_menu::Choice::Travel);
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        assert_eq!(conversation.menu_model().travel, Some(false));
+        conversation.choose_menu(crate::hand_menu::Choice::Travel);
         assert_eq!(conversation.locomotion(), &teleport);
         // Sky, which declares none, and the lobby have none.
         conversation.apply(space(|state| state.environment = "sky".into()));

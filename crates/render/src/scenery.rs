@@ -115,6 +115,8 @@ impl Sceneries {
     }
 
     /// Let participants travel as `locomotion` says in a space bound to the environment `id`, when its scenery is drawn, in place of any declared before for it. An environment declared nothing has none, as Tomori's own do. See `design/locomotion.md`.
+    ///
+    /// Provisional: once environments have server sides (#75), the profile is to come from the environment's server side instead, and this may be deprecated.
     pub fn set_locomotion(&mut self, id: &'static str, locomotion: Locomotion) {
         let environment = Environment::new(id);
         self.locomotion

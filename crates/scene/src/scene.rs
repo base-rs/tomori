@@ -174,6 +174,10 @@ pub struct Frame<'a> {
     pub cards: Vec<controller_ui::Sheet>,
     /// Where a teleport being aimed would land, which is drawn as a ring on the surface; see `design/locomotion.md`.
     pub landing: Option<Vec3>,
+    /// Where the participant's room is in the space's scene, as this frame's poses were placed, so that voices are seated around where they travelled; see `design/spatial-audio.md`.
+    pub rig: Rig,
+    /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
+    pub blink: f32,
 }
 
 /// Where travel applies: the joined space, by its identifier, and its environment as drawn.
@@ -586,7 +590,8 @@ impl Step {
             && !menu_shown
             && !wrist_active
             && conversation.joined_space().is_some();
-        // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it is released, turning and rising. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
+        // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
+        let rig = self.travel.rig();
         let travel = self.travel.update(locomotion::Input {
             place: place(conversation),
             locomotion: conversation.locomotion(),
@@ -754,6 +759,8 @@ impl Step {
             presence,
             cards: board.sheets,
             landing: travel.landing,
+            rig,
+            blink: travel.blink,
         }
     }
 }
@@ -1010,6 +1017,20 @@ mod tests {
         assert_eq!(growing.landing, None);
         let mut landing = None;
         for _ in 0..400 {
+            landing = step
+                .update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                .landing;
+        }
+        // A push held from before it grew in aims nothing: the stick comes back to the middle first.
+        assert_eq!(landing, None);
+        for stick in [Vec2::ZERO, Vec2::Y] {
+            step.buttons(
+                &press(|buttons| buttons.left_stick = stick),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
             landing = step
                 .update(&senses, &mut conversation, &mut felt(), now, FRAME)
                 .landing;

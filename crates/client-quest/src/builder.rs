@@ -32,6 +32,8 @@ impl Builder {
     }
 
     /// Let participants travel as `locomotion` says in a space bound to the environment `id`, while this build draws its scenery, in place of any declared before for it. Tomori's own environments declare none. See `design/locomotion.md`.
+    ///
+    /// Provisional: once environments have server sides (#75), the profile is to come from the environment's server side instead, so that everyone in a space has the same one, and this may be deprecated.
     pub fn locomotion(mut self, id: &'static str, locomotion: Locomotion) -> Self {
         self.sceneries.set_locomotion(id, locomotion);
         self
