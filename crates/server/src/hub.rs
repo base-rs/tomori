@@ -354,8 +354,6 @@ struct ConnectionRecord {
     cards: bool,
     /// Whether the client said in Hello that it reads environments' state and events. See `design/environments.md`.
     environment_state: bool,
-    /// The environment intents it may still send.
-    intents: crate::channel::Intents,
 }
 
 impl ConnectionRecord {
@@ -438,6 +436,8 @@ struct ParticipantRecord {
     departed: Option<Instant>,
     /// What the participant's current connection last reported, if anything. See `design/spaces.md`.
     engagement: Option<Engagement>,
+    /// The environment intents they may still send, kept across their connections, so that reconnecting does not refill the burst. See `design/environments.md`.
+    intents: crate::channel::Intents,
 }
 
 struct SpaceRecord {
@@ -1427,7 +1427,7 @@ impl Hub {
         hub
     }
 
-    /// What the side of `outlet`'s binding keeps and sends: a new `state`, if any, kept for whoever joins and sent to everyone in the space now unless an `event` goes with it, which is sent to them instead. A side of a binding that has ended, or of a space that has gone, is ignored. See `design/environments.md`.
+    /// What the side of `outlet`'s binding keeps and sends: a new `state`, kept for whoever joins and sent to everyone in the space now unless an `event` goes with it, which is sent to them instead, except as the binding's first update, which is always sent as its state. A side of a binding that has ended, or of a space that has gone, is ignored. See `design/environments.md`.
     fn channel_update(
         &self,
         outlet: &SpaceOutlet,
@@ -1440,8 +1440,9 @@ impl Hub {
         let Some(record) = self.current_channel(&mut state, outlet) else {
             return Ok(());
         };
-        record.state = Some(kept.clone());
-        let message = match event {
+        // Clients ignore an event until they have a state, so the first update of a binding is sent as its state, which already includes any event that goes with it.
+        let first = record.state.replace(kept.clone()).is_none();
+        let message = match event.filter(|_| !first) {
             Some(event) => ServerMessage::EnvironmentEvent {
                 environment: outlet.environment.clone(),
                 version: outlet.version,
@@ -2032,7 +2033,6 @@ impl Hub {
                 },
                 cards: false,
                 environment_state: false,
-                intents: crate::channel::Intents::new(Instant::now()),
             },
         );
         Some((id, outbox, received, output))
@@ -2377,6 +2377,7 @@ impl Hub {
                     last_space: None,
                     departed: None,
                     engagement: None,
+                    intents: crate::channel::Intents::new(Instant::now()),
                 },
             );
         }
@@ -3264,13 +3265,15 @@ impl Hub {
                     });
                 let text = intent.text();
                 let now = Instant::now();
+                // The participant's own bucket, kept across their connections.
+                let record = state
+                    .participants
+                    .get_mut(participant)
+                    .expect("the participant acting is listed");
                 let taken = current
                     && text.len() <= tomori_protocol::MESSAGE_LIMIT
-                    && state
-                        .connections
-                        .get_mut(&connection)
-                        .is_some_and(|record| record.intents.take(now));
-                let source = state.participants[participant].source;
+                    && record.intents.take(now);
+                let source = record.source;
                 if !(taken
                     && self.server_sides.deliver(
                         space.expect("checked above"),

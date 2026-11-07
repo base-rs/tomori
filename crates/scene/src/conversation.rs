@@ -973,6 +973,13 @@ impl Conversation {
         } else {
             self.message = self.message.min(items(&state).saturating_sub(1));
         }
+        // What an environment's side sent belongs to the binding it ran for: once the space moves to another environment or version, it is forgotten, so that coming back waits for the new binding's state rather than presenting the old one.
+        if self.space.as_ref().is_some_and(|space| {
+            (space.environment.as_str(), space.environment_version)
+                != (state.environment.as_str(), state.environment_version)
+        }) {
+            self.channel.clear();
+        }
         self.space = Some(state);
         self.watch_cards();
         if arrived {
@@ -10161,6 +10168,30 @@ mod tests {
             })]
         );
         assert!(!conversation.environment_intent("garden", 2, payload(3)));
+        // The same space's state again, in the same environment, keeps what was sent.
+        conversation.apply(event(7));
+        conversation.apply(space(|state| {
+            state.environment = "garden".into();
+            state.environment_version = Some(1);
+        }));
+        assert_eq!(
+            conversation.environment_updates("garden", 1),
+            [crate::channel::Update::Event(payload(7))]
+        );
+        // Moved to another environment and back, the space waits for its new binding's state, and asks nothing until then.
+        conversation.apply(space(|state| state.environment = "sky".into()));
+        conversation.apply(space(|state| {
+            state.environment = "garden".into();
+            state.environment_version = Some(1);
+        }));
+        conversation.apply(event(8));
+        assert!(conversation.environment_updates("garden", 1).is_empty());
+        assert!(!conversation.environment_intent("garden", 1, payload(3)));
+        conversation.apply(state("garden", 1, 9));
+        assert_eq!(
+            conversation.environment_updates("garden", 1),
+            [crate::channel::Update::State(payload(9))]
+        );
         // A visitor only watches.
         conversation.apply(role(ConnectionRole::Visitor));
         assert!(!conversation.environment_intent("garden", 1, payload(3)));

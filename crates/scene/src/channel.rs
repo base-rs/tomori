@@ -7,12 +7,17 @@ use tomori_protocol::Payload;
 
 /// The most updates kept for a client side that has not taken them, such as the console's, which never does: the
 /// latest, after the latest state.
-pub const KEPT: usize = 64;
+pub const UPDATE_LIMIT: usize = 64;
 
 /// What the server side of an environment sent: its state, which replaces whatever was sent before, or an event.
+///
+/// Non-exhaustive, as later steps of state synchronization may add others, such as deltas: a client side ignores those it does not know.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Update {
+    /// The state the side keeps for the space, which replaces whatever was sent before.
     State(Payload),
+    /// Something that happened, after the state it changes.
     Event(Payload),
 }
 
@@ -50,7 +55,7 @@ impl Replica {
             Update::Event(_) => {
                 // The oldest event after the latest state goes first; the state stays, so that the client side has
                 // something to begin from.
-                if self.updates.len() == KEPT {
+                if self.updates.len() == UPDATE_LIMIT {
                     let first = usize::from(matches!(self.updates.first(), Some(Update::State(_))));
                     self.updates.remove(first);
                 }
@@ -123,19 +128,19 @@ mod tests {
     fn untaken_updates_keep_the_state_and_the_latest_events() {
         let mut replica = Replica::default();
         replica.receive("s", "garden", 1, Update::State(payload(0)));
-        for event in 1..=KEPT as u32 + 5 {
+        for event in 1..=UPDATE_LIMIT as u32 + 5 {
             replica.receive("s", "garden", 1, Update::Event(payload(event)));
         }
         let updates = replica.take("s", "garden", 1);
-        assert_eq!(updates.len(), KEPT);
+        assert_eq!(updates.len(), UPDATE_LIMIT);
         assert_eq!(updates[0], Update::State(payload(0)));
         assert_eq!(updates[1], Update::Event(payload(7)));
         // Taken, only events wait, and the oldest goes first.
-        for event in 0..=KEPT as u32 {
+        for event in 0..=UPDATE_LIMIT as u32 {
             replica.receive("s", "garden", 1, Update::Event(payload(event)));
         }
         let updates = replica.take("s", "garden", 1);
-        assert_eq!(updates.len(), KEPT);
+        assert_eq!(updates.len(), UPDATE_LIMIT);
         assert_eq!(updates[0], Update::Event(payload(1)));
     }
 }

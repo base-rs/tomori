@@ -2850,6 +2850,30 @@ fn an_environment_s_side_shares_its_state_with_those_who_present_it_and_takes_pa
         channel_messages(ada.read()).len(),
         crate::channel::INTENT_BURST as usize
     );
+    // Reconnecting does not refill the burst: the bucket is the participant's, not their connection's.
+    let again = presenting(&hub, Access::open(), "later", counter(), true);
+    join(&again);
+    for _ in 0..crate::channel::INTENT_BURST as usize {
+        again.send(intent(serde_json::json!({"bump": 5})));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let count = |hub: &Arc<Hub>| {
+        hub.lock()
+            .space(&id)
+            .unwrap()
+            .channel
+            .as_ref()
+            .unwrap()
+            .state
+            .as_ref()
+            .unwrap()
+            .value()["count"]
+            .as_u64()
+            .unwrap()
+    };
+    // At most what the rate has refilled since, far less than another burst.
+    assert!(count(&hub) < 1 + 2 * crate::channel::INTENT_BURST as u64 - 2);
+    ada.read();
 
     // What a participant points at in the environment as they begin speaking is described as its side described it.
     ada.send(ClientMessage::UtteranceBegin {
@@ -2984,4 +3008,51 @@ fn a_side_whose_binding_or_space_has_moved_on_keeps_and_sends_nothing() {
     assert_eq!(orphan.share("4".into()), Ok(()));
     assert_eq!(orphan.announce("4".into(), "4".into()), Ok(()));
     assert_eq!(orphan.describe(Vec::new()), Ok(()));
+}
+
+#[test]
+fn a_binding_s_first_update_reaches_those_in_the_space_as_its_state() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("counter", "Counter").with_server_side(Idle),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "counter".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let binding = hub.server_sides.binding(&id).unwrap();
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding,
+        environment: "counter".to_owned(),
+        version: 1,
+    };
+    let ada = presenting(
+        &hub,
+        Access::open(),
+        "ada",
+        Some(vec![EnvironmentVersion::new("counter", 1)]),
+        true,
+    );
+    ada.send(ClientMessage::Join { space: id.clone() });
+    assert!(channel_messages(ada.read()).is_empty());
+    use tomori_environment::Outlet;
+    // A side that announces before it has shared anything: those in the space, who have no state to apply an event to, are sent the state it leaves, and the event after it.
+    assert_eq!(
+        outlet.announce(r#"{"by":1}"#.into(), r#"{"count":1}"#.into()),
+        Ok(())
+    );
+    assert_eq!(
+        outlet.announce(r#"{"by":2}"#.into(), r#"{"count":2}"#.into()),
+        Ok(())
+    );
+    assert_eq!(
+        channel_messages(ada.read()),
+        [
+            ("state", serde_json::json!({"count": 1})),
+            ("event", serde_json::json!({"by": 2})),
+        ]
+    );
 }

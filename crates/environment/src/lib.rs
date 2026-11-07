@@ -178,7 +178,7 @@ impl Outlet for Nowhere {
 }
 
 /// The most intents waiting for a side: those beyond it are dropped, as the side is not keeping up.
-pub const WAITING_INTENTS: usize = 64;
+pub const WAITING_INTENT_LIMIT: usize = 64;
 
 /// The intents waiting for a side, which the server hands on and the side takes, in order.
 #[derive(Default)]
@@ -192,7 +192,7 @@ struct Waiting {
 pub struct Inbox(Arc<Waiting>);
 
 impl Inbox {
-    /// Hand on `intent`, unless [`WAITING_INTENTS`] are already waiting, when it is dropped. Says whether it was handed
+    /// Hand on `intent`, unless [`WAITING_INTENT_LIMIT`] are already waiting, when it is dropped. Says whether it was handed
     /// on.
     pub fn push(&self, intent: Intent) -> bool {
         let mut intents = self
@@ -200,7 +200,7 @@ impl Inbox {
             .intents
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if intents.len() >= WAITING_INTENTS {
+        if intents.len() >= WAITING_INTENT_LIMIT {
             return false;
         }
         intents.push_back(intent);
@@ -420,7 +420,7 @@ mod tests {
         let space = Space::new("space-1-2", "Fleet", "/srv/fleet");
         assert_eq!(space.next_intent(Duration::from_millis(1)), None);
         let inbox = space.inbox();
-        for participant in 0..WAITING_INTENTS as u32 {
+        for participant in 0..WAITING_INTENT_LIMIT as u32 {
             assert!(inbox.push(Intent::new(participant, "{}")));
         }
         assert!(!inbox.push(Intent::new(99, "{}")));
