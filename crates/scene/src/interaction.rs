@@ -16,7 +16,8 @@ pub enum SessionActivity {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// Agent speech on this device: whether it is playing, live or played again, and how loud it is, even while muted locally, as the client's player measures it. See `design/speech.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[allow(dead_code)]
 pub struct SpeechActivity {
     pub pending: bool,
@@ -83,19 +84,37 @@ pub struct Inputs {
     pub pending_text: bool,
 }
 
-/// A small settling interval avoids a one-frame ready flash at hand-offs.
+/// How long the swarm keeps speaking after agent speech stops playing: longer than a buffer running dry for a moment, or the 400 ms breath between spoken segments, so that a reply is spoken throughout without flickering back to idle.
+pub const SPEAKING_HOLD: f32 = 0.6;
+
+/// How long the session must be ready before the swarm shows it.
+const READY_SETTLE: f32 = 0.8;
+
+/// A small settling interval avoids a one-frame ready flash at hand-offs, and a hold keeps the swarm speaking through the pauses in speech.
 #[derive(Default)]
 #[allow(dead_code)]
 pub struct Signals {
     ready_for: f32,
+    /// How much longer the swarm speaks, once speech has stopped playing.
+    speaking_for: f32,
+    /// What was shown last.
+    shown: Mode,
 }
 
 impl Signals {
     #[allow(dead_code)]
     pub fn update(&mut self, input: Inputs, dt: f32) -> Visual {
+        let step = dt.clamp(0.0, 0.1);
+        // Speaking follows speech playing on this device, rather than the session, which is often idle while its reply is still being heard.
+        self.speaking_for = if input.speech.playing {
+            SPEAKING_HOLD
+        } else {
+            (self.speaking_for - step).max(0.0)
+        };
+        let speaking = input.speech.playing || self.speaking_for > 0.0;
         let mode = if input.recording {
             Mode::Listening
-        } else if input.speech.playing {
+        } else if speaking {
             Mode::Speaking
         } else if input.voice_busy {
             Mode::Transcribing
@@ -118,18 +137,21 @@ impl Signals {
                 }
             }
         };
-        self.ready_for = if mode == Mode::Ready {
-            self.ready_for + dt.clamp(0.0, 0.1)
-        } else {
-            0.0
+        self.ready_for = match mode {
+            // Speech held across its pauses has settled already, so a reply that ends ready shows ready at once.
+            Mode::Ready if self.shown == Mode::Speaking => READY_SETTLE,
+            Mode::Ready => self.ready_for + step,
+            _ => 0.0,
         };
+        let shown = if mode == Mode::Ready && self.ready_for < READY_SETTLE {
+            Mode::Preparing
+        } else {
+            mode
+        };
+        self.shown = shown;
         Visual {
-            mode: if mode == Mode::Ready && self.ready_for < 0.8 {
-                Mode::Preparing
-            } else {
-                mode
-            },
-            level: if input.speech.playing && input.speech.level.is_finite() {
+            mode: shown,
+            level: if mode == Mode::Speaking && input.speech.level.is_finite() {
                 input.speech.level.clamp(0.0, 1.0)
             } else {
                 0.0
@@ -159,58 +181,183 @@ mod tests {
         assert_eq!(signals.update(unavailable, 0.1).mode, Mode::Unavailable);
     }
 
+    /// Inputs for a session in `session`, with agent speech `playing` at `level`.
+    fn speech(session: SessionActivity, playing: bool, level: f32) -> Inputs {
+        Inputs {
+            session,
+            speech: SpeechActivity {
+                playing,
+                level,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The modes shown over `seconds` of frames of `dt`, all with `input`.
+    fn modes(
+        signals: &mut Signals,
+        input: impl Fn() -> Inputs,
+        seconds: f32,
+        dt: f32,
+    ) -> Vec<Mode> {
+        (0..(seconds / dt).round() as usize)
+            .map(|_| signals.update(input(), dt).mode)
+            .collect()
+    }
+
     #[test]
-    fn queued_speech_and_chunk_gaps_never_look_ready() {
+    fn queued_speech_never_looks_ready() {
         let mut signals = Signals::default();
-        for playing in [false, true, false, true, false] {
-            let visual = signals.update(
-                Inputs {
-                    session: SessionActivity::Ready,
-                    speech: SpeechActivity {
-                        pending: true,
-                        playing,
-                        level: 0.5,
-                        failed: false,
-                    },
+        let visual = signals.update(
+            Inputs {
+                session: SessionActivity::Ready,
+                speech: SpeechActivity {
+                    pending: true,
                     ..Default::default()
                 },
-                0.02,
-            );
-            assert_eq!(
-                visual.mode,
-                if playing {
-                    Mode::Speaking
-                } else {
-                    Mode::Preparing
-                }
-            );
-        }
+                ..Default::default()
+            },
+            0.02,
+        );
+        assert_eq!(visual.mode, Mode::Preparing);
         for _ in 0..7 {
             assert_eq!(
                 signals
-                    .update(
-                        Inputs {
-                            session: SessionActivity::Ready,
-                            ..Default::default()
-                        },
-                        0.1
-                    )
+                    .update(speech(SessionActivity::Ready, false, 0.0), 0.1)
                     .mode,
                 Mode::Preparing
             );
         }
         assert_eq!(
             signals
-                .update(
-                    Inputs {
-                        session: SessionActivity::Ready,
-                        ..Default::default()
-                    },
-                    0.1
-                )
+                .update(speech(SessionActivity::Ready, false, 0.0), 0.1)
                 .mode,
             Mode::Ready
         );
+    }
+
+    #[test]
+    fn speech_starting_shows_speaking_with_its_level() {
+        let mut signals = Signals::default();
+        assert_eq!(
+            signals
+                .update(speech(SessionActivity::Working, false, 0.0), 0.1)
+                .mode,
+            Mode::Working
+        );
+        let visual = signals.update(speech(SessionActivity::Working, true, 0.4), 1.0 / 72.0);
+        assert_eq!(visual.mode, Mode::Speaking);
+        assert_eq!(visual.level, 0.4);
+        assert!(visual.working);
+    }
+
+    #[test]
+    fn breaths_and_gaps_between_segments_keep_speaking() {
+        let mut signals = Signals::default();
+        let dt = 1.0 / 72.0;
+        for _ in 0..3 {
+            // A segment, then a breath, or a buffer running dry, of up to the hold.
+            let segment = modes(
+                &mut signals,
+                || speech(SessionActivity::Ready, true, 0.5),
+                1.5,
+                dt,
+            );
+            let breath = modes(
+                &mut signals,
+                || speech(SessionActivity::Ready, false, 0.0),
+                SPEAKING_HOLD - 0.05,
+                dt,
+            );
+            assert!(
+                segment
+                    .iter()
+                    .chain(&breath)
+                    .all(|mode| *mode == Mode::Speaking)
+            );
+        }
+        // The level falls with the speech while held, rather than holding the last.
+        assert_eq!(
+            signals
+                .update(speech(SessionActivity::Ready, false, 0.0), dt)
+                .level,
+            0.0
+        );
+    }
+
+    #[test]
+    fn playback_ending_returns_to_idle_after_the_hold() {
+        let mut signals = Signals::default();
+        let dt = 0.05;
+        modes(
+            &mut signals,
+            || speech(SessionActivity::Ready, true, 0.5),
+            2.0,
+            dt,
+        );
+        let after = modes(
+            &mut signals,
+            || speech(SessionActivity::Ready, false, 0.0),
+            1.0,
+            dt,
+        );
+        let held = after
+            .iter()
+            .take_while(|mode| **mode == Mode::Speaking)
+            .count();
+        // About the hold, whichever way its last frame rounds.
+        let hold = (SPEAKING_HOLD / dt).round() as usize;
+        assert!((hold - 2..=hold).contains(&held), "held for {held} frames");
+        // Straight to ready, without settling through preparing again.
+        assert!(after[held..].iter().all(|mode| *mode == Mode::Ready));
+        // A session that is not ready shows as it is, once speech has ended.
+        modes(
+            &mut signals,
+            || speech(SessionActivity::Ready, true, 0.5),
+            0.5,
+            dt,
+        );
+        let after = modes(
+            &mut signals,
+            || speech(SessionActivity::Waiting, false, 0.0),
+            1.0,
+            dt,
+        );
+        assert_eq!(after.last(), Some(&Mode::Waiting));
+    }
+
+    #[test]
+    fn speech_playing_wins_over_the_session_whatever_it_is_doing() {
+        for session in [
+            SessionActivity::Ready,
+            SessionActivity::Working,
+            SessionActivity::Waiting,
+            SessionActivity::Unknown,
+            SessionActivity::Unselected,
+        ] {
+            let mut signals = Signals::default();
+            assert!(
+                modes(&mut signals, || speech(session, true, 0.3), 3.0, 0.1)
+                    .iter()
+                    .all(|mode| *mode == Mode::Speaking),
+                "{session:?}"
+            );
+        }
+        // Recording still shows listening, over speech.
+        let mut signals = Signals::default();
+        let mut input = speech(SessionActivity::Ready, true, 0.3);
+        input.recording = true;
+        let visual = signals.update(input, 0.1);
+        assert_eq!(visual.mode, Mode::Listening);
+        assert_eq!(visual.level, 0.0);
+    }
+
+    #[test]
+    fn an_unmeasurable_level_is_silent() {
+        let visual = Signals::default().update(speech(SessionActivity::Ready, true, f32::NAN), 0.1);
+        assert_eq!(visual.mode, Mode::Speaking);
+        assert_eq!(visual.level, 0.0);
     }
 
     #[test]

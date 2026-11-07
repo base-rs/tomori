@@ -467,6 +467,7 @@ impl Step {
                 } else {
                     interaction::SessionActivity::Unknown
                 },
+                speech: conversation.speech(),
                 ..Default::default()
             },
             dt,
@@ -2245,6 +2246,39 @@ mod tests {
         knock(&mut approval, "knock-1", "Grace");
         assert_eq!(cued(&mut approval, true), 2);
         assert_eq!(cued(&mut joined(), true), 0);
+    }
+
+    #[test]
+    fn the_swarm_speaks_while_agent_speech_plays_though_the_agent_is_idle() {
+        use tomori_client::connection::{Report, Session};
+        let now = Instant::now();
+        let mut conversation = joined();
+        conversation.apply(space(|state| {
+            state.activity = tomori_protocol::Activity::Idle;
+        }));
+        let mut step = Step::default();
+        let speech = |conversation: &mut Conversation, playing| {
+            Session::report(
+                conversation,
+                Report::AgentSpeech {
+                    playing,
+                    level: if playing { 0.3 } else { 0.0 },
+                },
+            );
+        };
+        speech(&mut conversation, true);
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.visual.mode, interaction::Mode::Speaking);
+        // Speech stopping for a moment, as a buffer runs dry, keeps it speaking.
+        speech(&mut conversation, false);
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.visual.mode, interaction::Mode::Speaking);
+        // Once it has stopped for the hold, the swarm shows the agent as it is.
+        for _ in 0..(interaction::SPEAKING_HOLD / FRAME) as usize + 1 {
+            step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        }
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.visual.mode, interaction::Mode::Ready);
     }
 
     #[test]

@@ -40,9 +40,10 @@ struct ParticipantPresence {
     hands: Option<[Option<Hand>; 2]>,
 }
 
-/// Animate the coordinator from the space's observed activity, as the headset
-/// does. Presence does not currently carry the headset's swarm or attractor,
-/// so this is a local simulation rather than an exact copy of its particles.
+/// Animate the coordinator from the space's observed activity and the agent
+/// speech the spectator itself plays, as the headset does. Presence does not
+/// currently carry the headset's swarm or attractor, so this is a local
+/// simulation rather than an exact copy of its particles.
 struct SwarmAnimation {
     signals: interaction::Signals,
     swarm: Swarm,
@@ -56,10 +57,16 @@ impl SwarmAnimation {
         }
     }
 
-    fn update(&mut self, session: interaction::SessionActivity, dt: f32) {
+    fn update(
+        &mut self,
+        session: interaction::SessionActivity,
+        speech: interaction::SpeechActivity,
+        dt: f32,
+    ) {
         let visual = self.signals.update(
             interaction::Inputs {
                 session,
+                speech,
                 ..Default::default()
             },
             dt,
@@ -342,7 +349,8 @@ impl Feed {
         };
 
         // Use the same activity-driven swarm simulation as the headset.
-        self.swarm.update(self.conversation.activity(), dt);
+        self.swarm
+            .update(self.conversation.activity(), self.conversation.speech(), dt);
         let agents: Vec<[f32; 3]> = self
             .swarm
             .swarm
@@ -752,14 +760,37 @@ mod tests {
         let mut animation = SwarmAnimation::new();
         let initial = animation.swarm.agents[0].position;
         for _ in 0..120 {
-            animation.update(interaction::SessionActivity::Working, 1.0 / 60.0);
+            animation.update(
+                interaction::SessionActivity::Working,
+                Default::default(),
+                1.0 / 60.0,
+            );
         }
         assert_eq!(animation.swarm.visual.mode, interaction::Mode::Working);
         assert!(animation.swarm.visual.working);
         assert!(animation.swarm.agents[0].position.distance(initial) > 0.01);
 
+        // The agent speaks while the speech the spectator plays does, though its session is idle.
+        for _ in 0..60 {
+            animation.update(
+                interaction::SessionActivity::Ready,
+                interaction::SpeechActivity {
+                    playing: true,
+                    level: 0.5,
+                    ..Default::default()
+                },
+                1.0 / 60.0,
+            );
+        }
+        assert_eq!(animation.swarm.visual.mode, interaction::Mode::Speaking);
+        assert!(animation.swarm.visual.level > 0.0);
+
         for _ in 0..120 {
-            animation.update(interaction::SessionActivity::Ready, 1.0 / 60.0);
+            animation.update(
+                interaction::SessionActivity::Ready,
+                Default::default(),
+                1.0 / 60.0,
+            );
         }
         assert_eq!(animation.swarm.visual.mode, interaction::Mode::Ready);
         assert!(!animation.swarm.visual.working);
@@ -771,17 +802,24 @@ mod tests {
         let mut animation = SwarmAnimation::new();
         let mut signals = interaction::Signals::default();
         let mut headset = Swarm::default();
-        for activity in [
-            interaction::SessionActivity::Working,
-            interaction::SessionActivity::Waiting,
-            interaction::SessionActivity::Ready,
+        let speaking = interaction::SpeechActivity {
+            playing: true,
+            level: 0.4,
+            ..Default::default()
+        };
+        for (activity, speech) in [
+            (interaction::SessionActivity::Working, Default::default()),
+            (interaction::SessionActivity::Ready, speaking),
+            (interaction::SessionActivity::Waiting, Default::default()),
+            (interaction::SessionActivity::Ready, Default::default()),
         ] {
             for _ in 0..80 {
                 let dt = 1.0 / 60.0;
-                animation.update(activity, dt);
+                animation.update(activity, speech, dt);
                 let visual = signals.update(
                     interaction::Inputs {
                         session: activity,
+                        speech,
                         ..Default::default()
                     },
                     dt,

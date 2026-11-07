@@ -69,6 +69,32 @@ fn a_replay_stops_being_reported_once_it_has_been_quiet_for_a_pause() {
 }
 
 #[test]
+fn agent_speech_is_reported_while_it_plays_live_or_again_even_muted() {
+    let (sender, mut player, control) = player();
+    assert_eq!(control.agent_speech(), (false, 0.0));
+    // A participant is not the agent.
+    sender.send(frame(1, 0, 1000)).unwrap();
+    render(&mut player, FRAME);
+    assert_eq!(control.agent_speech(), (false, 0.0));
+    // Muted here, the agent still speaks to the others, so it plays, with its level.
+    control.set_agent_muted(true);
+    sender.send(frame(AGENT_SOURCE, 0, 1000)).unwrap();
+    assert_eq!(render(&mut player, FRAME), [0; FRAME]);
+    let (playing, level) = control.agent_speech();
+    assert!(playing);
+    assert!(level > 0.0);
+    // Once its buffer runs dry, it stops at once, its level falling.
+    render(&mut player, FRAME);
+    let (playing, falling) = control.agent_speech();
+    assert!(!playing);
+    assert!(falling < level);
+    // Catch-up, played again, is the agent speaking too.
+    sender.send(frame(REPLAY_SOURCE, 0, 1000)).unwrap();
+    render(&mut player, FRAME);
+    assert!(control.agent_speech().0);
+}
+
+#[test]
 fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
     let (sender, mut player, control) = player();
     control.set_agent_muted(true);
