@@ -7354,6 +7354,8 @@ mod tests {
     #[test]
     fn the_sound_section_steps_and_keeps_the_feedback_setting() {
         use feedback::{Level, Settings};
+        // Each change is logged, sounds, vibration and mono or stereo, which this test evaluates itself rather than relying on another test in the binary to have turned logging on first.
+        crate::test_support::log_everything();
         let mut conversation = Conversation::new("Ada");
         let kept = Settings {
             sounds: Level::Off,
@@ -7380,6 +7382,17 @@ mod tests {
             [Action::SetFeedback(full), Action::SetFeedback(stepped)]
         );
         assert_eq!(conversation.menu_model().feedback, stepped);
+        // Mono audio turns on and off again, and is kept each time.
+        conversation.choose_menu(crate::hand_menu::Choice::Mono);
+        conversation.choose_menu(crate::hand_menu::Choice::Mono);
+        let mono = Settings {
+            mono: true,
+            ..stepped
+        };
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::SetFeedback(mono), Action::SetFeedback(stepped)]
+        );
     }
 
     #[test]

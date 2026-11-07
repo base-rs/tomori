@@ -9,8 +9,8 @@ pub type Position = [f32; 3];
 
 /// Sources are at unity gain at this distance, louder nearer and quieter further.
 pub const REFERENCE_DISTANCE: f32 = 2.0;
-/// Nearer than this, a source grows no louder: at most 6 dB above the reference.
-pub const NEAREST: f32 = 1.0;
+/// Nearer than this, a source grows no louder, at most 12 dB above the reference, and its direction blends towards the middle of the head, reaching it at the listener's own head: so that someone standing where the listener stands, as two participants each at the centre of their own play space can, is neither deafening nor flipping from ear to ear.
+pub const NEAREST: f32 = 0.5;
 /// The quietest a person's voice gets with distance, relative to the reference: −12 dB.
 pub const PERSON_FLOOR: f32 = 0.25;
 /// The quietest the agent's voice gets with distance: −6 dB, so that it stays clear.
@@ -21,7 +21,7 @@ pub const FAR_EAR: f32 = 0.316_227_77;
 pub const INTERAURAL_DELAY: f32 = 0.000_6;
 /// The cutoff of the low-pass on an ear fully shadowed, for a source behind and to its other side.
 const SHADOW_CUTOFF: f32 = 2_500.0;
-/// How quickly a source's placement follows where it is: about two thirds of the way in this time, so that a voice moving to a new seat, or a change to mono, sweeps rather than jumps, while turning the head is followed closely.
+/// How quickly a source's placement follows where it is: about two thirds of the way in this time, so that a voice that jumps, as when someone teleports, or a change to mono, sweeps rather than jumps, while turning the head is followed closely.
 pub const GLIDE: f32 = 0.03;
 
 /// Where and how a listener hears from.
@@ -123,7 +123,7 @@ fn into_head(q: [f32; 4], vector: Position) -> Position {
     ]
 }
 
-/// How a source at `source` reaches `listener`, at `sample_rate`: its loudness by distance, never below `floor`, and its direction by panning, a delay on the far ear and a low-pass on the ear the head shadows. In `mono`, only the loudness.
+/// How a source at `source` reaches `listener`, at `sample_rate`: its loudness by distance, never below `floor` and never above that at [`NEAREST`], and its direction by panning, a delay on the far ear and a low-pass on the ear the head shadows, blended towards the middle of the head nearer than [`NEAREST`]. In `mono`, only the loudness.
 pub fn place(
     listener: &Listener,
     source: Position,
@@ -142,9 +142,10 @@ pub fn place(
     if mono || !distance.is_finite() || distance < 1e-3 {
         return Placement::CENTRE.scaled(if distance.is_finite() { loudness } else { 1.0 });
     }
-    // How far to the right, from −1 to 1, and how far behind, from 0 to 1.
-    let pan = (x / distance).clamp(-1.0, 1.0);
-    let behind = (z / distance).max(0.0);
+    // How far to the right, from −1 to 1, and how far behind, from 0 to 1, each blended towards the middle within the nearest distance.
+    let width = (distance / NEAREST).min(1.0);
+    let pan = (x / distance).clamp(-1.0, 1.0) * width;
+    let behind = (z / distance).max(0.0) * width;
     let rate = sample_rate.max(1) as f32;
     let far_delay = INTERAURAL_DELAY * pan.abs() * rate;
     // The ear away from the source is shadowed by the head, the more so for a source behind; the near ear only by being behind.

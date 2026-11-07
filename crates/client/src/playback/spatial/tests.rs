@@ -79,15 +79,52 @@ fn distance_changes_loudness_within_its_limits() {
     };
     assert!(close(loudness(REFERENCE_DISTANCE, PERSON_FLOOR), 1.0));
     assert!(close(loudness(4.0, PERSON_FLOOR), 0.5));
-    // No louder than 6 dB above the reference, however near.
-    assert!(close(loudness(NEAREST, PERSON_FLOOR), 2.0));
-    assert!(close(loudness(0.1, PERSON_FLOOR), 2.0));
+    // No louder than 12 dB above the reference, however near, so that a voice in the same place as the listener is not deafening.
+    assert_eq!(NEAREST, 0.5);
+    assert!(close(loudness(1.0, PERSON_FLOOR), 2.0));
+    assert!(close(loudness(NEAREST, PERSON_FLOOR), 4.0));
+    assert!(close(loudness(0.1, PERSON_FLOOR), 4.0));
     // Never quieter than the floor: 12 dB for people, 6 dB for the agent.
     assert!(close(loudness(100.0, PERSON_FLOOR), 0.25));
     assert!(close(loudness(100.0, AGENT_FLOOR), 0.5));
     // At the listener's own head, centred at the nearest loudness.
     let inside = place(&listener(), listener().position, PERSON_FLOOR, RATE, false);
-    assert_eq!(inside, Placement::CENTRE.scaled(2.0));
+    assert_eq!(inside, Placement::CENTRE.scaled(4.0));
+}
+
+#[test]
+fn a_source_nearer_than_the_nearest_distance_blends_towards_the_middle_of_the_head() {
+    let side = |x: f32, z: f32| place(&listener(), at(x, z), PERSON_FLOOR, RATE, false);
+    // At the nearest distance and beyond, fully to the side.
+    let edge = side(NEAREST, 0.0);
+    assert!(close(edge.gain[0] / edge.gain[1], FAR_EAR));
+    assert!(close(edge.delay[0], INTERAURAL_DELAY * RATE as f32));
+    // Half as near, half as far to the side, with half the far ear's delay, still at equal power.
+    let half = side(NEAREST / 2.0, 0.0);
+    assert!(close(
+        half.gain[0],
+        Placement::panned(0.5).scaled(4.0).gain[0]
+    ));
+    assert!(close(half.delay[0], INTERAURAL_DELAY * RATE as f32 / 2.0));
+    assert!(close(
+        half.gain[0].powi(2) + half.gain[1].powi(2),
+        2.0 * 16.0
+    ));
+    assert!(half.lowpass[0] > edge.lowpass[0]);
+    // A source 1 cm to the left and one 1 cm to the right sound almost alike, rather than flipping from ear to ear as it passes through the head.
+    let (left, right) = (side(-0.01, 0.0), side(0.01, 0.0));
+    for placed in [left, right] {
+        assert!((placed.gain[0] - placed.gain[1]).abs() < 0.1, "{placed:?}");
+        assert!(placed.delay.iter().all(|delay| *delay < 1.0));
+    }
+    // So do one just ahead and one just behind: a source behind is dulled only as far as it is outside the nearest distance.
+    let (ahead, behind) = (side(0.0, -0.01), side(0.0, 0.01));
+    assert_eq!(ahead.lowpass, [1.0, 1.0]);
+    assert!(
+        behind.lowpass.iter().all(|lowpass| *lowpass > 0.95),
+        "{behind:?}"
+    );
+    assert!(side(0.0, 2.0).lowpass[0] < behind.lowpass[0]);
 }
 
 #[test]
