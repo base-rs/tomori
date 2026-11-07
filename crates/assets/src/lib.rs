@@ -13,10 +13,14 @@
 //! - **Models and instances:** a [`Model`] is validated data: nodes, meshes, materials, textures, skins and
 //!   animations; geometry built in code is checked the same way with [`Model::built`]. An [`Instance`] places a model
 //!   in a scene, with a [`Pose`] and nodes it shows or hides.
+//! - **Animation:** an [`animation::Animator`] moves through an [`animation::Graph`] of states, each a clip of an
+//!   animation, on its parameters, cross-fading, firing events on clips' timelines and measuring root motion, the same
+//!   way however its time is divided, so that a server and its clients compute the same from the same inputs.
 //! - **Drawing** (`gpu`): `gpu::Renderer` uploads models once and draws their instances, skinned on the GPU from each
 //!   instance's joint matrices, with one draw for every instance of a primitive.
 //!
-//! See `design/assets.md` and `context/usage.md`.
+//! See `design/assets.md`, `design/animation.md` and `context/usage.md`.
+pub mod animation;
 mod gltf;
 mod instance;
 mod library;
