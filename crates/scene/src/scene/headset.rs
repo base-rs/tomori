@@ -1550,12 +1550,8 @@ mod tests {
             say(&mut rig, pressed, None, words);
             let (card, need, cue) =
                 shown(&rig.frame(&neutral(false), [None, None], at(pressed + 2100)));
-            // What the card says of sent words fades by the clock, which the rig's frames run ahead of, so here it says nothing of the failure.
-            assert!(
-                card.is_none_or(|card| card.starts_with("✓ Queued")),
-                "{words}"
-            );
-            assert_eq!((need, cue), (None, None), "{words}");
+            // The card's outcomes are timed by the clock, which the rig's frames run well ahead of, so "Queued" has already faded here, as the conversation's tests show it doing; nothing of the failure is left.
+            assert_eq!((card, need, cue), (None, None, None), "{words}");
         }
     }
 
