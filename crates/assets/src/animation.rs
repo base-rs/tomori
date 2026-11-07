@@ -4,7 +4,7 @@
 //! A small animator: named states, each playing a clip of a model's animation, looping or once, at a speed; transitions
 //! between them on conditions of parameters, or when a clip finishes, cross-fading from the pose the last state was in;
 //! events on clips' timelines; and root motion, how far a clip carries what it animates, so that movement follows the
-//! animation, as a chicken moves only as far as its planted feet carry it.
+//! animation, as a creature moves only as far as its planted feet carry it.
 //!
 //! It is deterministic: its state at a moment is a function of the graph, the moment it started, and the parameters set
 //! at given moments, however its time is advanced, in one step or many. So the server and every client compute the same
