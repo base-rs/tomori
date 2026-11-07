@@ -1,11 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The GitHub environment's data source, a prototype (issue #148): one repository's open issues and pull requests,
-//! read with one GraphQL query through a token that only the server holds. Read-only. See `design/github.md`.
+//! The server half of Tomori's GitHub environment, a prototype (issue #148): one repository's open issues and pull
+//! requests, read with one GraphQL query through a token that only the server holds, as cards that the server shows in
+//! the environment's spaces; the agent's layer of a space's instructions; and the `--github-repository` option that
+//! offers it, which [`register`] adds to a server's builder. Read-only. See `design/github.md`.
 //!
-//! The token is never sent to clients, put in a space's state, told to the agent or logged: [`Token`]'s `Debug` hides
-//! it, it has no `Display`, and it is read only to make a request's `authorization` field.
+//! The token lives in this crate alone, never in the environment's common crate, `tomori-environment-github`, or its
+//! client crate. It is never sent to clients, put in a space's state, told to the agent or logged: [`Token`]'s `Debug`
+//! hides it, it has no `Display`, and it is read only to make a request's `authorization` field.
 use std::ffi::OsString;
 use std::fmt;
 use std::process::Command;
@@ -26,14 +29,53 @@ use base_scheduler_native::{NativeOptions, NativeScheduler};
 use futures_lite::future::{block_on, or, zip};
 use serde_json::Value;
 use tomori_protocol::{Card, CardKind, Checks, Label, MAX_CARDS};
+use tomori_server::{
+    Builder, CardSource, CommandOption, Environment, Failure, Fetched, FetchedCard, Rate, Server,
+};
 
-use crate::cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
+pub use tomori_environment_github::{ID, LABEL, VERSION};
 
-/// The environment's identifier, which clients map to its presentation. Tomori's own app presents it by the same identifier and version, which a test in the app checks.
-pub const ENVIRONMENT: &str = "github";
+mod system;
 
-/// The environment's protocol version, which a client presents it at to be offered it.
-pub const VERSION: u32 = 1;
+/// The command-line option that offers the environment, naming the repository whose cards it shows.
+pub const FLAG: &str = "--github-repository";
+
+/// What `--help` says of [`FLAG`], as `tomori-server` has always said it.
+const HELP: &str = "Offer the GitHub environment, a prototype, whose spaces show this repository's
+open issues and pull requests as cards to lay out. The server reads them,
+read-only, with the token in GITHUB_TOKEN, or else from `gh auth token`, and
+never sends the token to clients or the agent.";
+
+/// Add [`FLAG`], `--github-repository OWNER/NAME`, to `builder`'s command line, after the options added before: given a repository, the server offers the GitHub environment, after the environments registered, with the token in `GITHUB_TOKEN`, or else from `gh auth token`, and does not start without one. This is how Tomori's own server offers it.
+///
+/// ```
+/// let builder = tomori_environment_github_server::register(tomori_server::Server::builder());
+/// ```
+pub fn register(builder: Builder) -> Builder {
+    builder.option(option(Token::from_environment))
+}
+
+/// [`FLAG`], finding the token with `find` when it is given.
+fn option(find: impl Fn() -> Result<Token, String> + 'static) -> CommandOption {
+    CommandOption::new(
+        FLAG,
+        "OWNER/NAME",
+        HELP,
+        |value| value.parse::<Repository>(),
+        move |server, repository| {
+            let token = find()?;
+            eprintln!("GitHub environment: showing {repository}, read-only.");
+            Ok(GitHub::new(repository, token).offer(server))
+        },
+    )
+}
+
+/// The environment, at [`ID`] and [`VERSION`], labelled [`LABEL`], telling the agent about the cards of `repository`.
+pub fn environment(repository: &Repository) -> Environment {
+    Environment::new(ID, LABEL)
+        .with_version(VERSION)
+        .with_instructions(instructions(&repository.to_string()))
+}
 
 /// GitHub's GraphQL endpoint.
 pub const API: &str = "https://api.github.com/graphql";
@@ -64,7 +106,7 @@ const QUERY: &str = "query($owner: String!, $name: String!) {
 
 /// The environment's layer of a space's instructions to the agent, about the cards of `repository`. See
 /// `design/spaces.md`.
-pub(crate) fn instructions(repository: &str) -> String {
+pub fn instructions(repository: &str) -> String {
     format!(
         "This space is in Tomori's GitHub environment, a prototype. Around the participants are cards for the open \
 issues and pull requests of the GitHub repository {repository}: each shows its number, title and kind (issue, pull \
@@ -233,6 +275,12 @@ impl GitHub {
         Self::with_api(repository, token, API).expect("GitHub's own endpoint parses")
     }
 
+    /// `server`, offering the GitHub environment, after the environments it offers, whose spaces show this repository's cards. Call it after [`Server::with_environments`], which replaces the environments offered.
+    pub fn offer(self, server: Server) -> Server {
+        let environment = environment(&self.repository);
+        server.with_cards(environment, Arc::new(self))
+    }
+
     /// `repository`, read with `token` from the GraphQL endpoint at `url`, such as a test's. `None` for a URL that is
     /// not `http://` or `https://` with a host.
     pub fn with_api(repository: Repository, token: Token, url: &str) -> Option<Self> {
@@ -267,7 +315,7 @@ impl GitHub {
 
     /// Ask GitHub, on a scheduler of this thread's own, and read its answer.
     fn exchange(&self) -> Result<Answer, String> {
-        let scheduler = crate::system::refused("github scheduler")
+        let scheduler = system::refused("github scheduler")
             .and_then(|()| {
                 NativeScheduler::with_options(NativeOptions {
                     workers: 1,
@@ -417,7 +465,7 @@ struct Answer {
 const LIMITED_LEAST: Duration = Duration::from_secs(60);
 
 /// Seconds since the epoch now.
-pub(crate) fn unix_now() -> u64 {
+fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
@@ -426,6 +474,10 @@ pub(crate) fn unix_now() -> u64 {
 impl CardSource for GitHub {
     fn source(&self) -> String {
         self.repository.to_string()
+    }
+
+    fn service(&self) -> String {
+        "GitHub".to_owned()
     }
 
     fn fetch(&self) -> Result<Fetched, Failure> {
@@ -473,22 +525,21 @@ fn interpret(repository: &Repository, answer: Answer, now: u64) -> Result<Fetche
     let rate = data
         .and_then(|data| data.get("rateLimit"))
         .and_then(|rate| {
-            Some(Rate {
-                remaining: rate.get("remaining").and_then(Value::as_u64)?,
-                reset: rate
-                    .get("resetAt")
+            Some(Rate::new(
+                rate.get("remaining").and_then(Value::as_u64)?,
+                rate.get("resetAt")
                     .and_then(Value::as_str)
                     .and_then(timestamp)
                     .map_or(Duration::ZERO, |reset| wait(reset.saturating_sub(now))),
-            })
+            ))
         })
         .or_else(|| {
-            Some(Rate {
-                remaining: answer.remaining?,
-                reset: answer
+            Some(Rate::new(
+                answer.remaining?,
+                answer
                     .reset
                     .map_or(Duration::ZERO, |reset| wait(reset.saturating_sub(now))),
-            })
+            ))
         });
     let nodes = |key: &str| {
         repo.pointer(&format!("/{key}/nodes"))
@@ -508,10 +559,10 @@ fn interpret(repository: &Repository, answer: Answer, now: u64) -> Result<Fetche
             .then_with(|| second.card.number.cmp(&first.card.number))
     });
     cards.truncate(MAX_CARDS);
-    Ok(Fetched {
-        cards: cards.into_iter().map(|(_, card)| card).collect(),
+    Ok(Fetched::new(
+        cards.into_iter().map(|(_, card)| card).collect(),
         rate,
-    })
+    ))
 }
 
 /// How long to wait, if GitHub's `answer`, without a repository and whose body is `value`, says it is limiting requests:
@@ -609,8 +660,8 @@ fn card(repository: &Repository, node: &Value, pull: bool, now: u64) -> Option<(
         .unwrap_or("ghost");
     Some((
         updated,
-        FetchedCard {
-            card: Card {
+        FetchedCard::new(
+            Card {
                 id: format!("github://{repository}/{segment}/{number}"),
                 number,
                 kind,
@@ -622,8 +673,8 @@ fn card(repository: &Repository, node: &Value, pull: bool, now: u64) -> Option<(
                 placement: None,
             },
             opened,
-            url: format!("https://github.com/{repository}/{segment}/{number}"),
-        },
+            format!("https://github.com/{repository}/{segment}/{number}"),
+        ),
     ))
 }
 
@@ -674,5 +725,4 @@ fn timestamp(text: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[path = "github_tests.rs"]
 mod tests;

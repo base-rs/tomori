@@ -5,7 +5,7 @@
 //! beside the other tests would hold their locked state directories open. See `design/github.md`.
 use std::process::Command;
 
-use tomori_server::github::Token;
+use tomori_environment_github_server::Token;
 
 const TOKEN: &str = "ghp_FAKETOKENFORTESTS0123456789";
 

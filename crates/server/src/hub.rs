@@ -4363,11 +4363,8 @@ impl Hub {
                             && state.shows_cards(space)
                     })
                     .and_then(|space| state.space(&space).zip(state.board.as_ref()))?;
-                let cards = board.cards(
-                    &space.model.id,
-                    &space.placements,
-                    crate::github::unix_now(),
-                );
+                let cards =
+                    board.cards(&space.model.id, &space.placements, crate::cards::unix_now());
                 Some(ServerMessage::Cards {
                     cards: Box::new(cards),
                 })

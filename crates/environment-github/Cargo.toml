@@ -1,0 +1,11 @@
+[package]
+name = "tomori-environment-github"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The identity of Tomori's GitHub environment prototype, shared by its server and client halves"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "github", "environment", "xr"]
+categories = ["development-tools"]

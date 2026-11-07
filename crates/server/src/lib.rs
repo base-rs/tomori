@@ -20,7 +20,6 @@ mod door;
 mod environments;
 #[cfg(unix)]
 mod exit;
-pub mod github;
 mod hub;
 mod instructions;
 pub mod kept;
@@ -29,6 +28,7 @@ mod server_sides;
 mod limits;
 #[cfg(feature = "speech")]
 pub mod offline;
+mod option;
 mod outbox;
 mod pages;
 mod process;
@@ -55,6 +55,7 @@ pub use access::{Access, Grant};
 pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use builder::Builder;
+pub use cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
 pub use environments::Environment;
 pub use hub::CLOSED_SPACES;
 pub use hub::{
@@ -63,6 +64,7 @@ pub use hub::{
 };
 #[cfg(feature = "speech")]
 pub use offline::OfflineTranscriber;
+pub use option::CommandOption;
 #[cfg(feature = "speech")]
 pub use recognition::RecognitionTranscriber;
 pub use server::{

@@ -23,6 +23,7 @@ speech = ["tomori-server/speech"]
 speech-shared = ["tomori-server/speech-shared"]
 
 [dependencies]
+tomori-environment-github-server = { version = "0.2.0", path = "../environment-github-server" }
 tomori-environment-sky = { version = "0.2.0", path = "../environment-sky" }
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 tomori-server = { version = "0.2.0", path = "../server", default-features = false }
@@ -30,6 +31,12 @@ tomori-server = { version = "0.2.0", path = "../server", default-features = fals
 [dev-dependencies]
 # The test client that the command's tests connect with.
 tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
+# Tomori's own app and spectator, with their `app` features, whose environments must agree with this program's, and the conversation that lists them in its `Hello`. They have no version, so that packaging leaves them out: only the tests use them.
+tomori-client = { path = "../client" }
+tomori-client-quest = { path = "../client-quest" }
+tomori-client-spectator = { path = "../client-spectator" }
+tomori-render = { path = "../render" }
+tomori-scene = { path = "../scene" }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

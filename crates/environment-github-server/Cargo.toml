@@ -1,0 +1,31 @@
+[package]
+name = "tomori-environment-github-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The server half of Tomori's GitHub environment prototype: a repository's open issues and pull requests as cards, read with a token only the server holds"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "github", "environment", "server"]
+categories = ["network-programming", "api-bindings"]
+
+[dependencies]
+base-http = "0.2.0"
+base-http-client = { version = "0.2.0", features = ["rustls"] }
+base-scheduler = "0.3.0"
+base-scheduler-native = "0.3.1"
+futures-lite = "2"
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+serde_json = "1"
+tomori-environment-github = { version = "0.2.0", path = "../environment-github" }
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tomori-server = { version = "0.2.0", path = "../server", default-features = false }
+# The roots GitHub's certificate is checked against.
+webpki-roots = "1"
+
+[dev-dependencies]
+log = "0.4"
+tomori-security = { version = "0.2.0", path = "../security", features = ["issue"] }
+# A server on a loopback port, with a scripted backend, for the cards' tests.
+tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }

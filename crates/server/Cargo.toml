@@ -51,19 +51,12 @@ name = "workspaces"
 required-features = ["fake"]
 
 [[test]]
-name = "github"
-required-features = ["fake"]
-
-[[test]]
 name = "server_sides"
 required-features = ["fake"]
 
 [[test]]
 name = "environment_versions"
 required-features = ["fake"]
-
-[[test]]
-name = "github_token"
 
 [[test]]
 name = "speech"
@@ -104,8 +97,6 @@ tomori-security = { version = "0.2.0", path = "../security", features = ["issue"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tomori-speech = { version = "0.2.0", path = "../speech", optional = true }
-# The roots GitHub's certificate is checked against, for the GitHub environment's cards.
-webpki-roots = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

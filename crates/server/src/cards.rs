@@ -2,8 +2,9 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Cards from a data source, such as a GitHub repository's open issues and pull requests, kept current while someone
-//! watches them and laid out by each space's participants: the server half of the GitHub environment's prototype
-//! (issue #148). See `design/github.md`.
+//! watches them and laid out by each space's participants: what the server does for an environment that shows cards,
+//! such as the GitHub environment's prototype (issue #148), whose own crate, `tomori-environment-github-server`, is
+//! the source. See `design/github.md`.
 //!
 //! The cards are fetched once for the server and shared by every space in the environment; each space keeps its own
 //! placements, which are kept with the space across restarts and never sent to the source.
@@ -52,17 +53,21 @@ const LABELS: usize = 5;
 pub const DESCRIPTION_CHARS: usize = 800;
 const _: () = assert!(DESCRIPTION_CHARS + "[Pointing at ]".len() < crate::space::CONTEXT_CHARS);
 
-/// Where cards come from.
+/// Where cards come from, such as a GitHub repository, which an environment's server crate implements and offers with [`crate::Server::with_cards`].
 pub trait CardSource: Send + Sync {
     /// Where the cards come from, for display, such as `ioquatix/tomori`.
     fn source(&self) -> String;
+
+    /// The service the cards are read from, for display, such as `GitHub`.
+    fn service(&self) -> String;
 
     /// Read the cards now. Blocks, so it is called on a thread of its own.
     fn fetch(&self) -> Result<Fetched, Failure>;
 }
 
-/// What a source read.
+/// What a source read. It may gain fields, so make it with [`Fetched::new`].
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Fetched {
     /// At most [`tomori_protocol::MAX_CARDS`], in the order to show them, without placements or ages.
     pub cards: Vec<FetchedCard>,
@@ -70,8 +75,16 @@ pub struct Fetched {
     pub rate: Option<Rate>,
 }
 
-/// One card as read, with what the server keeps about it beyond what clients are sent.
+impl Fetched {
+    /// The `cards` a source read, in the order to show them, and its `rate` limit, if it has one.
+    pub fn new(cards: Vec<FetchedCard>, rate: Option<Rate>) -> Self {
+        Self { cards, rate }
+    }
+}
+
+/// One card as read, with what the server keeps about it beyond what clients are sent. It may gain fields, so make it with [`FetchedCard::new`].
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct FetchedCard {
     pub card: Card,
     /// When it was opened, in seconds since the epoch, from which its age is worked out when it is sent.
@@ -80,16 +93,36 @@ pub struct FetchedCard {
     pub url: String,
 }
 
-/// A source's rate limit after a read.
+impl FetchedCard {
+    /// `card`, opened at `opened`, in seconds since the epoch, and read by a person at `url`.
+    pub fn new(card: Card, opened: u64, url: impl Into<String>) -> Self {
+        Self {
+            card,
+            opened,
+            url: url.into(),
+        }
+    }
+}
+
+/// A source's rate limit after a read. It may gain fields, so make it with [`Rate::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rate {
     pub remaining: u64,
     /// How long until it resets.
     pub reset: Duration,
 }
 
-/// Why a read failed, which may be shown to participants, so it never includes a credential.
+impl Rate {
+    /// `remaining` requests left, until the limit resets in `reset`.
+    pub fn new(remaining: u64, reset: Duration) -> Self {
+        Self { remaining, reset }
+    }
+}
+
+/// Why a read failed, which may be shown to participants, so it never includes a credential. It may gain fields, so make it with [`Failure::new`] or [`Failure::limited`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Failure {
     pub message: String,
     /// How long the source asked to be left alone, if it did.
@@ -99,6 +132,7 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// The read failed, as `message` says.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -115,6 +149,13 @@ impl Failure {
             limited: true,
         }
     }
+}
+
+/// Seconds since the epoch now.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// When to read the cards next.
@@ -195,6 +236,8 @@ fn jitter() -> Duration {
 pub struct Board {
     environment: String,
     source: String,
+    /// The service the cards are read from, such as `GitHub`.
+    service: String,
     cards: Vec<FetchedCard>,
     /// Why the cards are missing or may be out of date.
     status: Option<String>,
@@ -205,13 +248,19 @@ pub struct Board {
 }
 
 impl Board {
-    /// The cards of the environment `environment`, from `source`, before they are first read.
-    pub fn new(environment: impl Into<String>, source: impl Into<String>) -> Self {
+    /// The cards of the environment `environment`, from `source` on `service`, such as `ioquatix/tomori` on `GitHub`, before they are first read.
+    pub fn new(
+        environment: impl Into<String>,
+        source: impl Into<String>,
+        service: impl Into<String>,
+    ) -> Self {
         let source = source.into();
+        let service = service.into();
         Self {
             environment: environment.into(),
-            status: Some(format!("Reading {source} from GitHub.")),
+            status: Some(format!("Reading {source} from {service}.")),
             source,
+            service,
             cards: Vec::new(),
             refresh: Refresh::default(),
             limited: false,
@@ -267,8 +316,9 @@ impl Board {
         // Waiting for a rate limit is expected, and may go on for an hour: said once, when it starts.
         if limited && !self.limited {
             log::info!(
-                "GitHub's rate limit for the server's token is used up, or nearly, so the cards from {} are read \
+                "{}'s rate limit for the server's token is used up, or nearly, so the cards from {} are read \
 again in {} seconds, once it resets.",
+                self.service,
                 self.source,
                 self.refresh.wait(now).as_secs()
             );
@@ -403,8 +453,8 @@ pub(crate) mod tests {
 
     /// Card `number` of `o/r`, of `kind`, opened at 1,000 seconds after the epoch.
     pub(crate) fn card(number: u64, kind: CardKind) -> FetchedCard {
-        FetchedCard {
-            card: Card {
+        FetchedCard::new(
+            Card {
                 id: format!("github://o/r/issues/{number}"),
                 number,
                 kind,
@@ -415,9 +465,9 @@ pub(crate) mod tests {
                 age: 0,
                 placement: None,
             },
-            opened: 1_000,
-            url: format!("https://github.com/o/r/issues/{number}"),
-        }
+            1_000,
+            format!("https://github.com/o/r/issues/{number}"),
+        )
     }
 
     fn pose(x: f32) -> Pose {
@@ -445,10 +495,8 @@ pub(crate) mod tests {
     fn a_low_rate_limit_waits_for_its_reset_and_failures_back_off() {
         let start = Instant::now();
         let mut refresh = Refresh::default();
-        let plenty = Rate {
-            remaining: RATE_RESERVE,
-            reset: Duration::from_secs(3_000),
-        };
+        // Made as a source in another crate makes it, so that the constructor's coverage does not depend on whether that crate inlines it.
+        let plenty = Rate::new(RATE_RESERVE, Duration::from_secs(3_000));
         refresh.succeeded(start, Some(plenty));
         assert_eq!(refresh.next(start, true), Next::At(start + REFRESH));
         let low = Rate {
@@ -565,7 +613,7 @@ pub(crate) mod tests {
         let source = "o/limited";
         assert!(logged(source).is_empty());
         let now = Instant::now();
-        let mut board = Board::new("github", source);
+        let mut board = Board::new("github", source, "GitHub");
         let limited =
             || Failure::limited("GitHub is limiting requests", Duration::from_secs(3_600));
         // The first read finds the limit used up: it is said once, at info, with how long the wait is.
@@ -619,7 +667,7 @@ pub(crate) mod tests {
     #[test]
     fn the_board_keeps_its_cards_through_a_failure_and_says_so() {
         let now = Instant::now();
-        let mut board = Board::new("github", "o/r");
+        let mut board = Board::new("github", "o/r", "GitHub");
         assert_eq!(board.environment(), "github");
         let empty = board.cards("s", &BTreeMap::new(), 2_000);
         assert_eq!(empty.status.as_deref(), Some("Reading o/r from GitHub."));
@@ -659,7 +707,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_card_is_described_to_the_agent_as_the_board_has_it() {
-        let mut board = Board::new("github", "o/r");
+        let mut board = Board::new("github", "o/r", "GitHub");
         let mut pull = card(7, CardKind::PullRequest);
         pull.card.title = "Say \"hello\"\nproperly".into();
         pull.card.labels = vec![
@@ -684,7 +732,7 @@ pub(crate) mod tests {
             card.card.checks = checks;
             cards.push(card);
         }
-        board.fetched(Ok(Fetched { cards, rate: None }), Instant::now());
+        board.fetched(Ok(Fetched::new(cards, None)), Instant::now());
         let day = 1_000 + 86_400 * 3;
         assert_eq!(
             board.describe("github://o/r/issues/7", day).unwrap(),
@@ -757,7 +805,7 @@ pub(crate) mod tests {
             "[]".repeat(5_000),
             "A".repeat(10_000),
         ];
-        let mut board = Board::new("github", "o/r");
+        let mut board = Board::new("github", "o/r", "GitHub");
         let cards = hostile
             .iter()
             .enumerate()
@@ -775,7 +823,7 @@ pub(crate) mod tests {
                 card
             })
             .collect();
-        board.fetched(Ok(Fetched { cards, rate: None }), Instant::now());
+        board.fetched(Ok(Fetched::new(cards, None)), Instant::now());
         for (index, text) in hostile.iter().enumerate() {
             let number = index + 1;
             let line = board
@@ -819,7 +867,7 @@ pub(crate) mod tests {
         // The longest repository GitHub allows, the largest number, and title, author and labels far too long, of
         // characters wider than a byte.
         let repository = format!("{}/{}", "o".repeat(100), "r".repeat(100));
-        let mut board = Board::new("github", repository.clone());
+        let mut board = Board::new("github", repository.clone(), "GitHub");
         let mut longest = card(u64::MAX, CardKind::Draft);
         longest.card.id = "github://longest".into();
         longest.url = format!("https://github.com/{repository}/pull/{}", u64::MAX);
@@ -875,7 +923,7 @@ pub(crate) mod tests {
         ] {
             assert_eq!(placement(refused), None, "{refused:?}");
         }
-        let mut board = Board::new("github", "o/r");
+        let mut board = Board::new("github", "o/r", "GitHub");
         board.fetched(
             Ok(Fetched {
                 cards: vec![card(1, CardKind::Issue)],

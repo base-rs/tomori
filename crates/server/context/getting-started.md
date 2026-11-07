@@ -59,6 +59,10 @@ The server runs it on a thread of its own, once each time a space is bound to th
 
 `Builder::configure` changes the server after the command line has configured it and before it serves, with `Server`'s `with_` methods, such as `with_max_visitors` or `with_participant_retention`. Hooks run in the order they were given.
 
+`Builder::option` adds a command-line option of your own, a `CommandOption`, such as an environment's configuration: `--help` lists it after Tomori's own, the command line reads its value, and it changes the configured server before the hooks run. The GitHub environment prototype's `--github-repository` is one, which `tomori_environment_github_server::register` adds.
+
+An environment whose spaces show cards that participants lay out, such as the GitHub prototype's issues and pull requests, implements `CardSource` and is offered with `Server::with_cards`, which reads the cards while someone watches them, within the source's rate limit.
+
 ## Without the command line
 
 To embed a server without its command line, build a `Server` directly with `Server::new`, giving it `Backends` and a `Transcriber`, offer environments with `Server::with_environments`, before or after `Server::with_kept_spaces`, since a space's layer of the instructions is looked up in the environments offered whenever it is given, and serve a listener from `tomori_server::bind` with `Server::run` on a `base-scheduler` scheduler. Admission, TLS and kept spaces are then configured with `Server`'s `with_` methods, which is what the command line does for you.

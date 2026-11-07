@@ -3588,12 +3588,12 @@ dependencies = [
  "tomori-client",
  "tomori-client-desktop",
  "tomori-client-spectator",
+ "tomori-environment-github-client",
  "tomori-environment-sky-client",
  "tomori-protocol",
  "tomori-render",
  "tomori-scene",
  "tomori-server",
- "tomori-server-app",
  "wgpu",
  "wgpu-hal",
 ]
@@ -3612,11 +3612,11 @@ dependencies = [
  "serde_json",
  "tomori-client",
  "tomori-client-desktop",
+ "tomori-environment-github-client",
  "tomori-environment-sky-client",
  "tomori-protocol",
  "tomori-render",
  "tomori-scene",
- "tomori-server-app",
  "wgpu",
  "winit",
 ]
@@ -3635,6 +3635,37 @@ name = "tomori-environment"
 version = "0.2.0"
 dependencies = [
  "base-scheduler",
+]
+
+[[package]]
+name = "tomori-environment-github"
+version = "0.2.0"
+
+[[package]]
+name = "tomori-environment-github-client"
+version = "0.2.0"
+dependencies = [
+ "tomori-environment-github",
+ "tomori-render",
+]
+
+[[package]]
+name = "tomori-environment-github-server"
+version = "0.2.0"
+dependencies = [
+ "base-http",
+ "base-http-client",
+ "base-scheduler",
+ "base-scheduler-native",
+ "futures-lite",
+ "log",
+ "rustls",
+ "serde_json",
+ "tomori-environment-github",
+ "tomori-protocol",
+ "tomori-security",
+ "tomori-server",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -3776,7 +3807,6 @@ dependencies = [
  "tomori-protocol",
  "tomori-security",
  "tomori-speech",
- "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -3784,8 +3814,14 @@ name = "tomori-server-app"
 version = "0.2.0"
 dependencies = [
  "libc",
+ "tomori-client",
+ "tomori-client-quest",
+ "tomori-client-spectator",
+ "tomori-environment-github-server",
  "tomori-environment-sky",
  "tomori-protocol",
+ "tomori-render",
+ "tomori-scene",
  "tomori-server",
 ]
 

@@ -9,21 +9,43 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{Backends, Builder, NullTranscriber, Server, Transcriber, WorkspaceRoots};
+use crate::{
+    Backends, Builder, CommandOption, NullTranscriber, Server, Transcriber, WorkspaceRoots,
+};
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::NativeScheduler;
 use tomori_protocol::Keepalive;
 
-/// The command line's usage, naming `backends`, those it can offer, such as `fake, opencode`.
-pub(crate) fn usage(backends: &str) -> String {
+/// The command line's usage, naming `backends`, those it can offer, such as `fake, opencode`, with the `options` an application added, after Tomori's own.
+pub(crate) fn usage(backends: &str, options: &[CommandOption]) -> String {
+    let synopsis: String = options
+        .iter()
+        .map(|option| {
+            format!(
+                "\n                     [{} {}]",
+                option.flag(),
+                option.value()
+            )
+        })
+        .collect();
+    let described: String = options
+        .iter()
+        .map(|option| {
+            let lines: String = option
+                .help()
+                .lines()
+                .map(|line| format!("\n                       {line}"))
+                .collect();
+            format!("  {} {}{lines}\n", option.flag(), option.value())
+        })
+        .collect();
     format!(
         "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
                      [--speech-provider NAME] [--name NAME] [--no-advertise] [--no-advertise-attention]
                      [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
                      [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
                                           [--auth MODE] [--no-visitors]
-                     [--max-visitors COUNT] [--state-directory PATH]
-                     [--github-repository OWNER/NAME]
+                     [--max-visitors COUNT] [--state-directory PATH]{synopsis}
        tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
 
 Options:
@@ -79,12 +101,7 @@ Options:
                                                                      Where the token store, the certificate and the spaces kept across restarts
                        are (default $XDG_STATE_HOME/tomori, or ~/.local/state/tomori). One server
                        at a time uses a state directory, so give each server its own.
-  --github-repository OWNER/NAME
-                       Offer the GitHub environment, a prototype, whose spaces show this repository's
-                       open issues and pull requests as cards to lay out. The server reads them,
-                       read-only, with the token in GITHUB_TOKEN, or else from `gh auth token`, and
-                       never sends the token to clients or the agent.
-  --help               Show this help."
+{described}  --help               Show this help."
     )
 }
 
@@ -116,8 +133,8 @@ pub(crate) struct Arguments {
     visitors: bool,
     max_visitors: usize,
     state_directory: Option<PathBuf>,
-    /// The repository whose cards the GitHub environment shows, if it is offered.
-    github_repository: Option<crate::github::Repository>,
+    /// The application's own options that were given, each by its place among the builder's options, with its value, the last given of each.
+    options: Vec<(usize, String)>,
 }
 
 /// The state directory from the environment; see [`crate::auth_command::default_state_directory`].
@@ -139,10 +156,11 @@ fn seconds(flag: &str, value: Option<String>) -> Result<Duration, String> {
         .ok_or_else(|| format!("{flag} needs a positive number of seconds, not {value:?}"))
 }
 
-/// Parse the command line `arguments`, whose usage is `usage`.
+/// Parse the command line `arguments`, whose usage is `usage`, with the application's own `options` too.
 pub(crate) fn parse(
     mut arguments: impl Iterator<Item = String>,
     usage: &str,
+    options: &[CommandOption],
 ) -> Result<Arguments, String> {
     let mut parsed = Arguments {
         bind: SocketAddr::from(([0, 0, 0, 0], tomori_protocol::DEFAULT_PORT)),
@@ -165,7 +183,7 @@ pub(crate) fn parse(
         visitors: true,
         max_visitors: crate::DEFAULT_MAX_VISITORS,
         state_directory: None,
-        github_repository: None,
+        options: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -295,16 +313,20 @@ pub(crate) fn parse(
                         .into(),
                 )
             }
-            "--github-repository" => {
-                parsed.github_repository = Some(
-                    arguments
-                        .next()
-                        .ok_or("--github-repository needs OWNER/NAME")?
-                        .parse()?,
-                )
-            }
             "--help" | "-h" => return Err(usage.to_owned()),
-            other => return Err(format!("unknown argument {other:?}\n\n{usage}")),
+            other => {
+                let Some(index) = options.iter().position(|option| option.flag() == other) else {
+                    return Err(format!("unknown argument {other:?}\n\n{usage}"));
+                };
+                let option = &options[index];
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| format!("{} needs {}", option.flag(), option.value()))?;
+                option.check(&value)?;
+                // The last given is the one used, as for Tomori's own options.
+                parsed.options.retain(|(given, _)| *given != index);
+                parsed.options.push((index, value));
+            }
         }
     }
     if parsed.open && !parsed.visitors {
@@ -858,7 +880,7 @@ pub(crate) fn run(
         command.next();
         crate::auth_command::run(command, default_state).map(|output| print!("{output}"))
     } else {
-        parse(command, &builder.usage()).and_then(|arguments| {
+        parse(command, &builder.usage(), builder.options()).and_then(|arguments| {
             let (server, fingerprint) =
                 configure(builder, &arguments, default_state.as_deref(), engines)?;
             crate::process::serve_until_signalled(server, &arguments, fingerprint)
@@ -897,7 +919,7 @@ pub(crate) fn configure(
         arguments.speech_offline_model.as_deref(),
         engines,
     );
-    let (environments, hooks) = builder.into_parts();
+    let (environments, hooks, options) = builder.into_parts();
     let server = Server::new(backends, transcriber)
         .with_environments(environments)
         .with_keepalive(arguments.keepalive)
@@ -910,27 +932,20 @@ pub(crate) fn configure(
         server = server.with_request_timeout(timeout);
     }
     let server = synthesis(server, root, &arguments.speech_segmentation, engines);
-    github(server, arguments, crate::github::Token::from_environment).map(|server| {
-        (
-            hooks.into_iter().fold(server, |server, hook| hook(server)),
-            fingerprint,
-        )
-    })
-}
-
-/// `server` offering the GitHub environment, if `arguments` name a repository, with the token `find` finds: `GITHUB_TOKEN`, or else `gh auth token`, as [`crate::github::Token::from_environment`] does.
-fn github(
-    server: Server,
-    arguments: &Arguments,
-    find: impl FnOnce() -> Result<crate::github::Token, String>,
-) -> Result<Server, String> {
-    let Some(repository) = &arguments.github_repository else {
-        return Ok(server);
-    };
-    find().map(|token| {
-        eprintln!("GitHub environment: showing {repository}, read-only.");
-        server.with_github(crate::github::GitHub::new(repository.clone(), token))
-    })
+    // The application's own options that were given, in the order it added them, such as an environment's.
+    let server = options
+        .iter()
+        .enumerate()
+        .try_fold(server, |server, (index, option)| {
+            match arguments.options.iter().find(|(given, _)| *given == index) {
+                Some((_, value)) => option.apply(server, value),
+                None => Ok(server),
+            }
+        })?;
+    Ok((
+        hooks.into_iter().fold(server, |server, hook| hook(server)),
+        fingerprint,
+    ))
 }
 
 /// Listen where `arguments` say, advertise with `start` unless turned off, and serve until `cancellation`, withdrawing the advertisement as soon as serving ends.
@@ -980,7 +995,11 @@ mod tests {
     use futures_lite::future::block_on;
 
     fn arguments(list: &[&str]) -> Result<Arguments, String> {
-        parse(list.iter().map(|argument| argument.to_string()), &usage())
+        parse(
+            list.iter().map(|argument| argument.to_string()),
+            &usage(),
+            &[],
+        )
     }
 
     /// The usage of `tomori-server`, with Tomori's own backends.
@@ -1076,14 +1095,6 @@ mod tests {
                 "--speech-segmentation needs block or sentence, not \"word\"",
             ),
             (&["--name"], "--name needs a name"),
-            (
-                &["--github-repository"],
-                "--github-repository needs OWNER/NAME",
-            ),
-            (
-                &["--github-repository", "tomori"],
-                "--github-repository needs OWNER/NAME, such as ioquatix/tomori, not \"tomori\"",
-            ),
             (
                 &["--max-visitors", "many"],
                 "--max-visitors needs a count, not \"many\"",
@@ -1953,31 +1964,5 @@ mod tests {
             roots.roots(),
             [std::env::temp_dir().canonicalize().unwrap()]
         );
-    }
-
-    #[test]
-    fn the_github_environment_is_offered_only_with_a_repository_and_a_token() {
-        let server = || Server::new(Backends::new(), Arc::new(NullTranscriber::new()));
-        let offered = |server: &Server| {
-            server
-                .environments()
-                .iter()
-                .any(|environment| environment.id == crate::github::ENVIRONMENT)
-        };
-        // Without the flag, no token is looked for: the server's own lookup is not run.
-        let plain = github(
-            server(),
-            &arguments(&[]).unwrap(),
-            crate::github::Token::from_environment,
-        )
-        .unwrap();
-        assert!(!offered(&plain));
-        // With it, the token is looked for, and the server does not start without one. Finding it with `gh` is tested
-        // in `tests/github_token.rs`, a process of its own.
-        let flagged = arguments(&["--github-repository", "ioquatix/tomori"]).unwrap();
-        let missing = github(server(), &flagged, || Err("no token".to_owned()));
-        assert_eq!(missing.err().as_deref(), Some("no token"));
-        let token = || Ok(crate::github::Token::new("not-a-real-token").unwrap());
-        assert!(offered(&github(server(), &flagged, token).unwrap()));
     }
 }
