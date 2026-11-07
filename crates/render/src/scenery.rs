@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 
-use crate::environment::Environment;
+use crate::{environment::Environment, locomotion::Locomotion};
 
 /// What a scenery is given when the renderer creates it.
 pub struct Target<'a> {
@@ -65,10 +65,11 @@ impl Scenery for tomori_environment_sky::Sky {
 /// Makes a scenery for a renderer's target.
 type Create = Arc<dyn Fn(&Target) -> Box<dyn Scenery> + Send + Sync>;
 
-/// The sceneries a client can draw, by the identifiers spaces name them by, in the order they were registered. The Minimal grid is built in, and is not registered.
+/// The sceneries a client can draw, by the identifiers spaces name them by, in the order they were registered, with the locomotion each environment allows. The Minimal grid is built in, and is not registered.
 #[derive(Clone)]
 pub struct Sceneries {
     entries: Vec<(Environment, Create)>,
+    locomotion: Vec<(Environment, Locomotion)>,
 }
 
 /// Tomori's moonlit sky, for `target`.
@@ -97,6 +98,7 @@ impl Sceneries {
     pub fn empty() -> Self {
         Self {
             entries: Vec::new(),
+            locomotion: Vec::new(),
         }
     }
 
@@ -110,6 +112,19 @@ impl Sceneries {
         self.entries
             .retain(|(registered, _)| *registered != environment);
         self.entries.push((environment, Arc::new(create)));
+    }
+
+    /// Let participants travel as `locomotion` says in a space bound to the environment `id`, when its scenery is drawn, in place of any declared before for it. An environment declared nothing has none, as Tomori's own do. See `design/locomotion.md`.
+    pub fn set_locomotion(&mut self, id: &'static str, locomotion: Locomotion) {
+        let environment = Environment::new(id);
+        self.locomotion
+            .retain(|(declared, _)| *declared != environment);
+        self.locomotion.push((environment, locomotion));
+    }
+
+    /// The locomotion declared for each environment, for the conversation.
+    pub fn locomotion(&self) -> Vec<(Environment, Locomotion)> {
+        self.locomotion.clone()
     }
 
     /// Whether the environment `id` has a scenery here; the grid's, `minimal`, always does.
@@ -193,6 +208,25 @@ pub mod test {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locomotion_is_declared_by_identifier_and_tomori_s_own_declare_none() {
+        use crate::locomotion::Surface;
+        assert!(Sceneries::default().locomotion().is_empty());
+        let mut sceneries = Sceneries::empty();
+        let teleport = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 3.0)]);
+        sceneries.set_locomotion("floor", Locomotion::fly(Vec::new(), 10.0));
+        sceneries.set_locomotion("deck", teleport.clone());
+        // Declaring an identifier again replaces it, at the end.
+        sceneries.set_locomotion("floor", teleport.clone());
+        assert_eq!(
+            sceneries.locomotion(),
+            [
+                (Environment::new("deck"), teleport.clone()),
+                (Environment::new("floor"), teleport)
+            ]
+        );
+    }
 
     #[test]
     fn the_grid_is_built_in_and_sceneries_are_kept_in_order_by_identifier() {

@@ -20,7 +20,7 @@ use winit::{dpi::LogicalSize, event::MouseButton, keyboard::KeyCode};
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
 pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left button: choose what is pointed at, or attract the swarm; right drag: look around.\n\
 Enter: A. Backspace: B (hold for a second to leave the space). Space (hold): X, push-to-talk. Tab: Y, which in a space pins the hand menu open at its Space section.\n\
-Arrow keys: left stick. [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
+Arrow keys: left stick, which in a space that allows travel teleports (hold Up, point at the floor, release), turns (Left and Right) and rises (hold Down). [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
 V: mute spoken replies (left stick click). R: play the latest reply again, or stop it (right stick click).\n\
 M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
 Esc: close the hand menu, or quit.";
@@ -93,6 +93,7 @@ impl Participant {
         sceneries: &Sceneries,
     ) -> Self {
         conversation.set_drawable(sceneries.environments());
+        conversation.set_locomotion(sceneries.locomotion());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,
@@ -143,8 +144,8 @@ impl Participant {
         surface.request_redraw();
     }
 
-    /// One frame of the desktop's logic, returning the head's view and projection to draw it with.
-    fn step(&mut self, surface: &mut dyn Surface) -> Mat4 {
+    /// One frame of the desktop's logic, returning the head's view and projection, and the transform from the scene to the participant's room, to draw it with.
+    fn step(&mut self, surface: &mut dyn Surface) -> (Mat4, Mat4) {
         let now = Instant::now();
         let (conversation, connection) = (&mut self.conversation, &mut self.connection);
         connection.poll(self.desktop.focused(), conversation);
@@ -172,12 +173,12 @@ impl Participant {
         if let Some(presence) = drawn.frame.presence {
             presence.send(connection);
         }
-        drawn.view_projection
+        (drawn.view_projection, drawn.scene_to_space)
     }
 
     /// One frame of the desktop's logic, drawn.
     fn frame(&mut self, surface: &mut dyn Surface) -> Result<()> {
-        let view_projection = self.step(surface);
+        let (view_projection, scene_to_space) = self.step(surface);
         let Some(target) = surface.acquire()? else {
             return Ok(());
         };
@@ -186,8 +187,8 @@ impl Participant {
             &self.queue,
             &[target],
             &[view_projection],
-            Mat4::IDENTITY,
-            &self.panels.list(Mat4::IDENTITY),
+            scene_to_space,
+            &self.panels.list(scene_to_space),
         );
         surface.present();
         if self.first_frame {

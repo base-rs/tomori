@@ -43,11 +43,17 @@ impl Default for Instance {
 // Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm. The grid takes up to twice its lines while an environment grows through it.
 const MAX_INSTANCES: usize = AGENT_COUNT
     + 210
+    + LANDING_CUBES
     + if crate::delegation::MAX_CUBES > crate::arrival_graphics::MAX_CUBES {
         crate::delegation::MAX_CUBES
     } else {
         crate::arrival_graphics::MAX_CUBES
     };
+/// How many cubes make the ring drawn where a teleport being aimed would land.
+const LANDING_CUBES: usize = 16;
+/// The ring's radius, in metres.
+const LANDING_RADIUS: f32 = 0.3;
+
 /// The usage of attachments that live only within one eye's scene pass, cleared at its start and discarded at its end; see [`Renderer::multisampled_views`].
 const TRANSIENT: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TRANSIENT_ATTACHMENT);
@@ -111,6 +117,8 @@ pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
     reveal: Option<crate::arrival_motion::Sphere>,
+    /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
+    landing: Option<glam::Vec3>,
     /// The registered sceneries, each drawn while its environment is.
     sceneries: Vec<(Environment, Box<dyn crate::scenery::Scenery>)>,
     /// What this renderer can draw: the grid, then each scenery's environment.
@@ -303,6 +311,7 @@ impl Renderer {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
             reveal: None,
+            landing: None,
             sceneries: sceneries.create(&crate::scenery::Target {
                 device,
                 queue,
@@ -440,6 +449,11 @@ impl Renderer {
         }
     }
 
+    /// Draw a ring at `landing`, where a teleport being aimed would land, from the next [`Self::update`], or none.
+    pub fn set_landing(&mut self, landing: Option<glam::Vec3>) {
+        self.landing = landing.filter(|landing| landing.is_finite());
+    }
+
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -467,6 +481,9 @@ impl Renderer {
                 color: [0.08, 0.5, 0.65],
                 ..Default::default()
             });
+        }
+        if let Some(landing) = self.landing {
+            landing_ring(landing, &mut self.scene);
         }
         if let Some(position) = controller {
             self.scene.push(Instance {
@@ -675,6 +692,23 @@ impl Renderer {
             }
         }
         queue.submit([encoder.finish()])
+    }
+}
+
+/// The ring where a teleport would land: flat on the surface at `landing`, in the hover highlight's colour.
+fn landing_ring(landing: glam::Vec3, scene: &mut Vec<Instance>) {
+    for n in 0..LANDING_CUBES {
+        let angle = n as f32 * std::f32::consts::TAU / LANDING_CUBES as f32;
+        scene.push(Instance {
+            position: [
+                landing.x + angle.cos() * LANDING_RADIUS,
+                landing.y + 0.01,
+                landing.z + angle.sin() * LANDING_RADIUS,
+            ],
+            scale: [0.04, 0.01, 0.04],
+            color: [0.45, 0.95, 1.0],
+            ..Default::default()
+        });
     }
 }
 
@@ -2669,6 +2703,33 @@ mod tests {
             })
         });
     }
+    #[test]
+    fn a_ring_is_drawn_where_a_teleport_would_land() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 8, 8);
+            renderer.update(&queue, &Swarm::default(), None, false);
+            let without = renderer.scene.len();
+            let landing = glam::Vec3::new(2.0, 3.0, -4.0);
+            renderer.set_landing(Some(landing));
+            renderer.update(&queue, &Swarm::default(), None, false);
+            assert_eq!(renderer.scene.len(), without + LANDING_CUBES);
+            for instance in &renderer.scene[without..] {
+                let at = glam::Vec3::from_array(instance.position);
+                assert!((at.y - landing.y - 0.01).abs() < 1e-5);
+                let across = glam::Vec2::new(at.x - landing.x, at.z - landing.z).length();
+                assert!((across - LANDING_RADIUS).abs() < 1e-5);
+            }
+            // Nonsense, or none, draws no ring.
+            renderer.set_landing(Some(glam::Vec3::NAN));
+            renderer.update(&queue, &Swarm::default(), None, false);
+            assert_eq!(renderer.scene.len(), without);
+            renderer.set_landing(None);
+            renderer.update(&queue, &Swarm::default(), None, false);
+            assert_eq!(renderer.scene.len(), without);
+        });
+    }
+
     #[test]
     fn the_grid_gives_way_inside_a_growing_environment() {
         use crate::arrival_motion::Sphere;

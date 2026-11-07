@@ -1,0 +1,61 @@
+# Locomotion
+
+This describes how a participant travels in a space beyond the room they stand in, and how an environment allows it. It is the first part of the locomotion in #78.
+
+## Requirement
+
+**Environments declare it; Tomori owns the devices.** An environment declares a locomotion profile, and Tomori's clients turn the controllers, the keyboard and the mouse into travel for it. There are three:
+
+- **None**, the default: room scale, as before. Nothing in this document changes anything in a space whose environment declares none, or anywhere outside a space. Sky and the Minimal grid declare none.
+- **Teleport**: point and release onto walkable surfaces that the environment declares, with a preview, and turn in snaps of 30°.
+- **Fly**: teleport, and rise as well, up to a ceiling the environment declares; landing on a surface brings the participant back down to it.
+
+There is no smooth artificial walking or turning in any profile; the only continuous artificial movement is rising, where an environment declares fly.
+
+**Declared with the scenery, for now.** Until environments have server sides (#75), a headset build declares an environment's profile beside its scenery, by the environment's identifier, through `tomori::Builder::locomotion` or `tomori-render`'s `Sceneries::set_locomotion`, as `builders.md` describes. A client applies the profile only inside a space bound to that environment, and only when it draws the environment's scenery: a client that shows the grid for an environment it lacks applies none, since the surfaces would not be seen. Once the server side exists, it is to declare the profile, so that everyone in the space has the same one.
+
+**Walkable surfaces.** A walkable surface is a horizontal rectangle, aligned with the scene's axes, or a disc, at a height, in the space's scene coordinates. The environment declares only where a participant may land, already clear of edges and obstacles. A teleport lands where the pointing ray first meets a declared surface from above, if that is at least 0.25 m along the ray and at most 15 m from the ray's origin horizontally; the ray must point at least about 1° below the horizontal; and a surface hides any beneath it from a ray that passes through it first, even where it is too near to land on. Nothing else blocks the ray in this first pass, since environments declare no colliders yet. A ray that meets no surface by these rules has nowhere to land.
+
+**The rig.** Travel is a per-participant rig, a translation and a turn about the vertical, that takes the participant's room into the space's scene. Each client applies its participant's rig to the head, eyes, controllers, hands and pointing ray before the scene, pointing, the panels held by the hands, rendering, presence and the listener see them, so that all of them agree on where the participant is. A teleport moves the rig so that the head stands above the landing at the same physical height, with the room's floor at the surface's height; a turn turns the rig 30° about the head, which stays where it is; flying raises the rig at 0.6 m/s, never above the ceiling. Travel belongs to one space in one environment: the rig goes back home, where it starts and where the participant stood before, on leaving the space, on joining another, when the space's environment changes, and whenever the profile is none, before that frame's poses are placed with it, or, for a change the frame makes itself, such as leaving from the hand menu, from the next frame. A teleport, turn or rise applies from the next frame, so that every pose in a frame is placed with the same rig. Recentring is unchanged: it places the room again as before and keeps the rig. The status pill stands in the participant's room (see `interaction.md`), on the headset and in the desktop window alike, so travelling carries it along.
+
+**Controls.** On the headset, in a space whose profile is teleport or fly, the left stick, which does nothing else in a space (see `interaction.md`):
+
+- **forward**, held while the right controller points, aims a teleport, and releasing it lands there. While it is held the ray ends at the landing, highlighted, with a ring on the surface, or is plain and short where there is nowhere to land, and releasing it then does nothing. Losing focus, the right controller's ray or the space, or the hand menu or the right wrist's transcript showing, cancels the aim without travelling, and so does a release in the frame the ray is lost, or the left controller's stick being lost, which reads as released.
+- **left or right** turns 30° that way, once per push; the stick returns towards the middle before it turns again.
+- **back**, held, rises, only where the profile is fly.
+
+A push counts once the stick is more than 0.6 from the middle, along whichever axis it is pushed further. While a teleport is aimed, the ray serves only it: no worker or card is pointed at, and the right grip picks up nothing. While a card is carried (see `github.md`), the left stick does nothing, since aiming would put the card down. Nothing else changes meaning, and travel never happens while the hand menu or the right wrist's transcript shows, nor before the space's scenery has grown in on entering it, or on a change of environment, so that its surfaces are seen. Hand tracking alone does not travel in this first pass, since it has no stick to aim with.
+
+**The desktop window** does the same with the left stick's keys, the arrow keys (see `desktop.md`): hold **↑**, point the mouse at a surface, and release **↑** to land at its ring; **←** and **→** turn; and **↓**, held, rises. The window draws the ring but no ray, as its cursor shows where it points.
+
+**Feedback.** The ray finding a landing while a teleport is aimed ticks as hover does, once until it has nowhere to land again, and landing clicks as choosing does, felt on the right controller (see `feedback.md`). Turning and rising have no cue: the view moving is their signal.
+
+**Presence carries where each person travelled.** Presence carries the head, controllers and hands in the space's scene coordinates (see `spaces.md`), so a client sends them with its rig applied, without a change to the protocol, and whatever shows presence shows each person where they travelled: today the spectator, which follows a participant's head and draws their controllers and hands (see `spectator.md`), and the movement of a voice from its seat (see `spatial-audio.md`); participants' own clients draw no other participants yet. The rig itself is not sent. The preview, the ray and the ring, is drawn only for the participant aiming.
+
+**Known limits.** Spatial audio still seats the other participants on a circle around the space's home, not around where the listener travelled (see `spatial-audio.md`), so a participant far from home hears the others from their seats back at home; the spectator, which hears as the participant it follows, does the same. The spectator draws only Tomori's own sceneries (see `builders.md`), so it shows a build's own environment, the kind that declares travel, as the grid, from where the participant travelled. Comfort, the snap angle, the stick's thresholds and the ring's size are still to be confirmed on the headset.
+
+## Rationale
+
+Issue #78 and the environment framework proposal (`context/environments.md` on the `environment-framework-proposal` branch, section 5) set locomotion profiles, declared by the environment, with `none` the default, `teleport` onto declared walkable surfaces with a preview and 30° snap turns, and `fly` for vertical travel; no smooth artificial motion by default; travel as a per-participant rig of translation and yaw; presence carrying it, so that others and the spectator see each person where they travelled; and recentring unchanged. Teleport and snap turns avoid the discomfort of smooth artificial movement. The maintainer's prototype Fantail Observe proved the rig, teleports that keep physical eye height, snap turns about the head, a ceiling for flying and landing on the nearest supported floor, which this follows.
+
+The issue and the proposal leave the controls and the details of each profile open; the first pass, in November 2026, took the details below from Fantail, where it proved them, or chose them where Tomori differs, and its pull request lists the choices for the maintainer's review. The left stick carries all of travel, rather than Fantail's right stick for turning and left stick click for flying, because Tomori's left stick is free in a space while the right stick moves the right wrist's focus and pages result cards and the left stick click mutes spoken replies. Fly includes teleport, as in Fantail, since rising without a way down is no use. Profiles are declared beside the scenery until the server side that the proposal gives them exists. Presence already carries poses in the space's scene, so sending them with the rig applied carries travel without a protocol change. The reach of 15 m is measured horizontally, unlike Fantail's along the ray, so that a participant who has flown high can still land straight below. A release in the frame the ray is lost cancels, as in Fantail, since a controller that stops being tracked reads as a released stick; a card carried blocks travel, since the board puts down a card whenever the ray is taken from it.
+
+## Open questions
+
+- Whether the rig itself should join presence, such as to seat voices around where a participant travelled, or for clients that draw other participants.
+- Whether profiles should come from the environment's server side (#75), so that everyone in a space has the same one, and how a client that cannot draw the environment then behaves.
+- Whether snap turns should move to the right stick, as in Fantail, if the right stick's result cards move elsewhere, and the angle and thresholds, once tried on a Quest.
+- Whether hand tracking gets a teleport gesture, and whether surfaces gain colliders that block the ray (#97).
+
+## Scope
+
+`crates/scene`'s `locomotion.rs` (the profiles, surfaces, landing and the rig), the frame step's use of it in `scene.rs`, `scene/headset.rs` and `scene/desktop.rs`, the conversation's profile for its space in `conversation.rs`; `crates/render`'s `Sceneries` and the ring drawn by its renderer; `crates/client-quest`'s builder and the clients that hand the profiles to the conversation (`lib.rs`, `crates/client-desktop`'s `desktop_participant.rs`).
+
+## Validation
+
+- Unit tests of the rig: a teleport keeps the head's physical height above the landing, on surfaces at different heights; a turn keeps the head where it is and turns the rig by 30°; rising stops at the ceiling, and landing comes back down.
+- Unit tests of landing: the nearest surface the ray meets from above, rectangles and discs, a higher surface hiding a lower one, even one too near to land on, nothing for a ray pointing level or up, nothing nearer than 0.25 m or further than 15 m horizontally, and nothing for a profile of none.
+- Unit tests of the controls: forward aims and release lands, once; release with nowhere to land, after losing the ray, in the frame the ray is lost, or while inactive, does nothing; left and right turn once per push; back rises only for fly; leaving the space, joining another in the same environment, changing environment and a profile of none send the rig home.
+- Frame step tests: in a space with a teleport profile, the ray ends at the landing with its ring, workers are not pointed at while aiming, a carried card is not put down by the stick, the hover and choose cues are given, and the next frame's head, controllers, a tracked hand, listener and presence are where the participant travelled, as are the headset's eye matrices and the desktop window's view, while the pill stays with the participant; with a profile of none, or outside a space, the left stick changes nothing.
+- A test that the conversation applies a declared profile only in a space bound to an environment it draws, and that Tomori's own build declares none.
+- On the headset: confirm that teleporting and snap turns are comfortable, that the ring is easy to see and place, that the stick's thresholds suit a real Quest, and that the spectator sees from where the participant travelled.

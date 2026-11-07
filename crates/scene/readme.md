@@ -1,6 +1,6 @@
 # `tomori-scene`
 
-The platform-neutral [Tomori](https://github.com/ioquatix/tomori) client: the frame step that the headset and the desktop window share, with each platform's own logic, the conversation with a server, arrival, the hand menu, the transcript, pointing, the swarm and its workers, haptic and spatial audio logic, and the panels' layout. The conversation is the `Session` that [`tomori-client`](https://crates.io/crates/tomori-client)'s `Connection` carries out, so the connection, the microphone and speaker traits and the feedback model are that crate's.
+The platform-neutral [Tomori](https://github.com/ioquatix/tomori) client: the frame step that the headset and the desktop window share, with each platform's own logic, the conversation with a server, arrival, the hand menu, the transcript, pointing, travel (the locomotion an environment declares and the participant's rig), the swarm and its workers, haptic and spatial audio logic, and the panels' layout. The conversation is the `Session` that [`tomori-client`](https://crates.io/crates/tomori-client)'s `Connection` carries out, so the connection, the microphone and speaker traits and the feedback model are that crate's.
 
 It depends on no rendering, windowing or platform audio crate, so it builds for every client target, including `aarch64-linux-android`; a test checks that with `cargo tree`.
 

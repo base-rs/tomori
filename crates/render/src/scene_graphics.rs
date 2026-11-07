@@ -113,6 +113,7 @@ pub fn draw(
     frame: &Frame,
 ) {
     renderer.set_scenery(frame.scenery);
+    renderer.set_landing(frame.landing);
     renderer.update(queue, frame.swarm, frame.marker, frame.attracting);
     renderer.set_presentation_page(frame.card);
     renderer.set_presentation_content_page(frame.content);

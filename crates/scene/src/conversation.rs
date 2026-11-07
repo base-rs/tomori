@@ -9,6 +9,7 @@ use crate::{
     caption::{COLUMNS, ROWS, wrapped_lines},
     environment::Environment,
     interaction::SessionActivity,
+    locomotion::Locomotion,
 };
 #[cfg(any(not(target_os = "android"), test))]
 use std::sync::Arc;
@@ -256,6 +257,8 @@ pub struct Conversation {
     environments: Vec<EnvironmentInfo>,
     /// The environments this build draws; a space bound to another shows the grid, and says so.
     drawable: Vec<Environment>,
+    /// The locomotion profiles this build declares, by environment; see `design/locomotion.md`.
+    locomotion: Vec<(Environment, Locomotion)>,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
@@ -379,6 +382,7 @@ impl Conversation {
             roots: Vec::new(),
             environments: Vec::new(),
             drawable: Environment::BUILT_IN.to_vec(),
+            locomotion: Vec::new(),
             sessions: Vec::new(),
             menu_backend: None,
             menu_directory: None,
@@ -1623,6 +1627,24 @@ impl Conversation {
     /// Draw `drawable`, the environments this build has sceneries for, rather than Tomori's own, the grid and Sky.
     pub fn set_drawable(&mut self, drawable: Vec<Environment>) {
         self.drawable = drawable;
+    }
+
+    /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
+    pub fn set_locomotion(&mut self, locomotion: Vec<(Environment, Locomotion)>) {
+        self.locomotion = locomotion;
+    }
+
+    /// How the participant may travel: as declared for the joined space's environment, when this build draws it, and otherwise not at all. See `design/locomotion.md`.
+    pub fn locomotion(&self) -> &Locomotion {
+        const NONE: &Locomotion = &Locomotion::None;
+        self.joined_space()
+            .and_then(|(space, _)| Environment::for_space(&space.environment, &self.drawable))
+            .and_then(|environment| {
+                self.locomotion
+                    .iter()
+                    .find(|(declared, _)| *declared == environment)
+            })
+            .map_or(NONE, |(_, locomotion)| locomotion)
     }
 
     /// The scenery to draw: the Minimal grid outside a space, and inside one the environment it is bound to, or the grid when this build cannot draw that environment. See `design/environments.md`.
@@ -5603,6 +5625,28 @@ mod tests {
         conversation.apply(space(|state| state.environment = "sky".into()));
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         assert!(conversation.text().contains("Unknown environment: sky"));
+    }
+
+    #[test]
+    fn a_declared_locomotion_applies_only_in_a_space_in_a_drawn_environment() {
+        use crate::locomotion::{Locomotion, Surface};
+        const OBSERVE: Environment = Environment::new("observe");
+        let teleport = Locomotion::teleport(vec![Surface::disc(glam::Vec3::ZERO, 5.0)]);
+        // Tomori's own build declares none.
+        let mut conversation = joined(|state| state.environment = "observe".into());
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        conversation.set_locomotion(vec![(OBSERVE, teleport.clone())]);
+        // Shown as the grid, it has none.
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
+        assert_eq!(conversation.locomotion(), &teleport);
+        // Sky, which declares none, and the lobby have none.
+        conversation.apply(space(|state| state.environment = "sky".into()));
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
+        conversation.apply(space(|state| state.environment = "observe".into()));
+        assert_eq!(conversation.locomotion(), &teleport);
+        hold_b(&mut conversation);
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
     }
 
     #[test]

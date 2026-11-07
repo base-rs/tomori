@@ -24,6 +24,7 @@ pub mod hand_menu;
 pub mod hands;
 pub mod haptics;
 pub mod interaction;
+pub mod locomotion;
 pub mod log_cadence;
 mod markdown_lite;
 pub mod microphone_request;
