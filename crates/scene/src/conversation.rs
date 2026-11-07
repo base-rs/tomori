@@ -275,6 +275,8 @@ pub struct Conversation {
     pointing_at: Option<tomori_protocol::Resource>,
     /// The cards of the space, in a space whose environment shows them. See `design/github.md`.
     cards: Option<tomori_protocol::Cards>,
+    /// The state and events of the joined space's environment, as its server side sent them, until its client side takes them. See `design/environments.md`.
+    channel: crate::channel::Replica,
     /// The space whose cards this connection asked to watch, so that it asks once for each space and connection.
     watching: Option<String>,
     live: bool,
@@ -396,6 +398,7 @@ impl Conversation {
             talk: None,
             pointing_at: None,
             cards: None,
+            channel: crate::channel::Replica::default(),
             watching: None,
             live: false,
             engagement: Engagement::Engaged,
@@ -762,6 +765,22 @@ impl Conversation {
             ServerMessage::Name { name } => {
                 log::info!("Now called {name:?}");
                 self.server_name = Some(name);
+            }
+            // For the joined space's environment only, as it is now: a late one from a space left, or from before the
+            // space changed environment, is ignored.
+            ServerMessage::EnvironmentState {
+                environment,
+                version,
+                state,
+            } => {
+                self.receive_environment(environment, version, crate::channel::Update::State(state))
+            }
+            ServerMessage::EnvironmentEvent {
+                environment,
+                version,
+                event,
+            } => {
+                self.receive_environment(environment, version, crate::channel::Update::Event(event))
             }
             // Only the joined space's cards are kept; a late update from a space left is ignored.
             ServerMessage::Cards { cards } => {
@@ -1150,6 +1169,7 @@ impl Conversation {
         self.knock = None;
         self.space = None;
         self.cards = None;
+        self.channel.clear();
         self.watching = None;
         self.joining = None;
         self.message = 0;
@@ -2707,6 +2727,65 @@ impl Conversation {
             self.joined_space()
                 .is_some_and(|(space, _)| space.id == cards.space)
         })
+    }
+
+    /// Keep `update` of `environment` at `version`, if that is the joined space's environment as the space says.
+    fn receive_environment(
+        &mut self,
+        environment: String,
+        version: u32,
+        update: crate::channel::Update,
+    ) {
+        if let Some(space) = self.space.as_ref().filter(|space| {
+            space.environment == environment
+                && space
+                    .environment_version
+                    .is_none_or(|named| named == version)
+        }) {
+            self.channel
+                .receive(&space.id, &environment, version, update);
+        }
+    }
+
+    /// What the server side of `environment` at `version` sent for the joined space since it was last taken, in order:
+    /// its state, which replaces whatever was sent before, and its events. Nothing for another environment or version,
+    /// or outside a space. See `design/environments.md`.
+    pub fn environment_updates(
+        &mut self,
+        environment: &str,
+        version: u32,
+    ) -> Vec<crate::channel::Update> {
+        match self.joined_space() {
+            Some((space, _)) => {
+                let space = space.id.clone();
+                self.channel.take(&space, environment, version)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Ask the server side of `environment` at `version`, the joined space's, for `intent`. Only a participant asks, of
+    /// a server that has sent the environment's state in this space, so that it runs the side and takes intents; says
+    /// whether it asked.
+    pub fn environment_intent(
+        &mut self,
+        environment: &str,
+        version: u32,
+        intent: tomori_protocol::Payload,
+    ) -> bool {
+        let asking = self.role.participates()
+            && self.joined_space().is_some_and(|(space, connected)| {
+                connected && self.channel.has(&space.id, environment, version)
+            });
+        if asking {
+            self.actions
+                .push(Action::Send(ClientMessage::EnvironmentIntent {
+                    environment: environment.to_owned(),
+                    version,
+                    intent,
+                }));
+        }
+        asking
     }
 
     /// Put the card `card` at `placement`, or back in the inbox, for everyone in the space. Only a participant can.
@@ -10031,5 +10110,73 @@ mod tests {
         conversation.apply(space(|_| {}));
         conversation.talk(true);
         assert_eq!(observed(&conversation), (vec![], 2));
+    }
+
+    #[test]
+    fn the_joined_space_s_environment_state_waits_for_its_client_side_which_asks_only_once_it_has_some()
+     {
+        let mut conversation = joined(|state| {
+            state.environment = "garden".into();
+            state.environment_version = Some(1);
+        });
+        let payload = |value: u32| tomori_protocol::Payload::new(serde_json::json!(value));
+        let state = |environment: &str, version, value| {
+            Event::Message(ServerMessage::EnvironmentState {
+                environment: environment.into(),
+                version,
+                state: payload(value),
+            })
+        };
+        let event = |value| {
+            Event::Message(ServerMessage::EnvironmentEvent {
+                environment: "garden".into(),
+                version: 1,
+                event: payload(value),
+            })
+        };
+        // Before the server has sent any state, it is not asked anything: it may not run the environment's side.
+        assert!(!conversation.environment_intent("garden", 1, payload(0)));
+        assert!(conversation.take_actions().is_empty());
+        // Another environment's state, or another version's, is not the space's.
+        conversation.apply(state("sky", 1, 1));
+        conversation.apply(state("garden", 2, 1));
+        assert!(conversation.environment_updates("garden", 1).is_empty());
+        conversation.apply(state("garden", 1, 1));
+        conversation.apply(event(2));
+        assert!(conversation.environment_updates("garden", 2).is_empty());
+        assert_eq!(
+            conversation.environment_updates("garden", 1),
+            [
+                crate::channel::Update::State(payload(1)),
+                crate::channel::Update::Event(payload(2))
+            ]
+        );
+        assert!(conversation.environment_intent("garden", 1, payload(3)));
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(ClientMessage::EnvironmentIntent {
+                environment: "garden".into(),
+                version: 1,
+                intent: payload(3),
+            })]
+        );
+        assert!(!conversation.environment_intent("garden", 2, payload(3)));
+        // A visitor only watches.
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert!(!conversation.environment_intent("garden", 1, payload(3)));
+        conversation.apply(role(ConnectionRole::Owner));
+        // Leaving the space forgets its state; outside one there is nothing to take or ask.
+        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(event(4));
+        conversation.apply(state("garden", 1, 5));
+        assert!(conversation.environment_updates("garden", 1).is_empty());
+        assert!(!conversation.environment_intent("garden", 1, payload(3)));
+        // A space from an older server, which names no version, takes the state at any.
+        let mut older = joined(|state| state.environment = "garden".into());
+        older.apply(state("garden", 1, 6));
+        assert_eq!(
+            older.environment_updates("garden", 1),
+            [crate::channel::Update::State(payload(6))]
+        );
     }
 }

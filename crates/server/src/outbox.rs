@@ -139,6 +139,17 @@ impl Outbox {
             if inner.supersede(&mut message) {
                 return true;
             }
+            // A newer state of an environment makes one still queued pointless, and the events queued since already
+            // happened to it: the newer one goes at the end, after them, so that nothing is applied twice.
+            if let ServerMessage::EnvironmentState { environment, .. } = &message {
+                inner.control.retain(|item| {
+                    !matches!(
+                        item,
+                        Outgoing::Message(ServerMessage::EnvironmentState { environment: queued, .. })
+                            if queued == environment
+                    )
+                });
+            }
             if matches!(message, ServerMessage::Error { .. }) {
                 if inner.errors == ERROR_LIMIT {
                     log::debug!(
@@ -323,6 +334,32 @@ mod tests {
             sample_rate: 24_000,
             replay: false,
         }
+    }
+
+    #[test]
+    fn a_newer_environment_state_replaces_one_still_queued_after_the_events_since() {
+        let outbox = Outbox::new();
+        let payload = |value: u32| tomori_protocol::Payload::new(serde_json::json!(value));
+        let state = |environment: &str, value| ServerMessage::EnvironmentState {
+            environment: environment.into(),
+            version: 1,
+            state: payload(value),
+        };
+        let event = ServerMessage::EnvironmentEvent {
+            environment: "garden".into(),
+            version: 1,
+            event: payload(2),
+        };
+        outbox.message(state("garden", 1));
+        outbox.message(state("other", 1));
+        outbox.message(event.clone());
+        outbox.message(state("garden", 3));
+        let popped: Vec<ServerMessage> = std::iter::from_fn(|| match outbox.pop() {
+            Popped::Control(Outgoing::Message(message)) => Some(message),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(popped, [state("other", 1), event, state("garden", 3)]);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod auth_command;
 mod backends;
 mod builder;
 mod cards;
+mod channel;
 mod command;
 mod connection;
 mod door;

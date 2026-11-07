@@ -113,7 +113,9 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::DecideKnock { .. }
         // Visitors see no cards in this prototype, as a repository may be private. See `design/github.md`.
         | ClientMessage::WatchCards
-        | ClientMessage::PlaceCard { .. } => participant,
+        | ClientMessage::PlaceCard { .. }
+        // Visitors watch an environment, but ask nothing of it. See `design/environments.md`.
+        | ClientMessage::EnvironmentIntent { .. } => participant,
     };
     if permitted {
         None
@@ -139,6 +141,7 @@ mod tests {
                 name: "n".into(),
                 names: false,
                 environments: None,
+                environment_state: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },
@@ -215,6 +218,11 @@ mod tests {
             ClientMessage::DecideKnock {
                 knock: "k".into(),
                 admit: true,
+            },
+            ClientMessage::EnvironmentIntent {
+                environment: "garden".into(),
+                version: 1,
+                intent: tomori_protocol::Payload::new(serde_json::json!({})),
             },
         ]
     }

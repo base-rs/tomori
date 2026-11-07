@@ -84,6 +84,7 @@ fn a_space_is_created_with_the_placeholder_backend_in_the_placeholder_environmen
         name: "Ada".into(),
         names: false,
         environments: None,
+        environment_state: false,
     });
     let (backends, environments) = client.wait_for(|message| match message {
         ServerMessage::Welcome {

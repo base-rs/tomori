@@ -15,6 +15,7 @@ pub mod canvas;
 pub mod caption;
 pub mod capture;
 pub mod cards;
+pub mod channel;
 pub mod controller;
 pub mod controller_ui;
 pub mod conversation;

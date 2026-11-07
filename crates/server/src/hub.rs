@@ -226,6 +226,35 @@ pub struct Restore {
 /// What a space listed again after a restart says until it is bound to its session.
 pub const RESTORING: &str = "Reconnecting to the agent after the server restarted.";
 
+/// Where the server side of one binding of a space to its environment sends its state, events and descriptions: the hub, which keeps them for the space and sends them to the clients in it that present the environment. See `design/environments.md`.
+struct SpaceOutlet {
+    hub: Weak<Hub>,
+    space: String,
+    binding: u64,
+    environment: String,
+    version: u32,
+}
+
+impl tomori_environment::Outlet for SpaceOutlet {
+    fn share(&self, state: String) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_update(self, &state, None))
+    }
+
+    fn announce(&self, event: String, state: String) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_update(self, &state, Some(&event)))
+    }
+
+    fn describe(&self, objects: Vec<tomori_environment::Object>) -> tomori_environment::Result<()> {
+        self.hub
+            .upgrade()
+            .map_or(Ok(()), |hub| hub.channel_describe(self, objects))
+    }
+}
+
 pub struct Hub {
     state: Mutex<HubState>,
     pub(crate) backends: Backends,
@@ -323,6 +352,10 @@ struct ConnectionRecord {
     liveness: Liveness,
     /// Whether the client watches the cards of the space it is in, until it leaves it. See `design/github.md`.
     cards: bool,
+    /// Whether the client said in Hello that it reads environments' state and events. See `design/environments.md`.
+    environment_state: bool,
+    /// The environment intents it may still send.
+    intents: crate::channel::Intents,
 }
 
 impl ConnectionRecord {
@@ -433,6 +466,8 @@ struct SpaceRecord {
     placements: std::collections::BTreeMap<String, tomori_protocol::Pose>,
     /// Listed again after a restart and not yet bound to its session, so its directory has not yet been resolved within the workspace roots again: its environment's server side waits until it is. See `design/environments.md`.
     restoring: bool,
+    /// What the server side of the space's environment keeps for it, for its current binding only. See `design/environments.md`.
+    channel: Option<crate::channel::Channel>,
 }
 
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
@@ -680,6 +715,32 @@ impl HubState {
 
     fn error(&self, participant: &str, error: impl Into<String>) {
         self.send(participant, error_message(error));
+    }
+
+    /// The outboxes of everyone in `space` whose client reads environments' state and presents the space's environment at the version its side runs for, participants and visitors alike. See `design/environments.md`.
+    fn channel_outboxes(&self, space: &str) -> Vec<Arc<Outbox>> {
+        let Some((record, channel)) = self
+            .space(space)
+            .and_then(|record| record.channel.as_ref().map(|channel| (record, channel)))
+        else {
+            return Vec::new();
+        };
+        let presented = EnvironmentVersion::new(channel.environment.clone(), channel.version);
+        record
+            .model
+            .members()
+            .filter_map(|member| self.participants.get(member))
+            .filter_map(|participant| participant.connection)
+            .filter_map(|connection| self.connections.get(&connection))
+            .filter(|connection| {
+                connection.environment_state
+                    && connection
+                        .presents
+                        .as_ref()
+                        .is_some_and(|presents| presents.contains(&presented))
+            })
+            .map(|connection| connection.outbox.clone())
+            .collect()
     }
 
     /// The environments `connection` listed in Hello, or `None` when it listed none.
@@ -960,6 +1021,21 @@ impl HubState {
         }
         self.forget_closed();
         self.touch_space(space);
+        // After the space's state, the state its environment's side keeps for it, so that the client knows which space and environment it is for.
+        if let Some(message) = self.space(space).and_then(|record| {
+            let channel = record.channel.as_ref()?;
+            Some(ServerMessage::EnvironmentState {
+                environment: channel.environment.clone(),
+                version: channel.version,
+                state: channel.state.clone()?,
+            })
+        }) && self
+            .channel_outboxes(space)
+            .iter()
+            .any(|joined| Arc::ptr_eq(joined, &outbox))
+        {
+            outbox.message(message);
+        }
         true
     }
 
@@ -1337,7 +1413,87 @@ impl Hub {
         hub.server_sides.on_failure(move |failure| {
             let _ = this.upgrade().map(|hub| hub.side_failed(failure));
         });
+        let this = Arc::downgrade(&hub);
+        hub.server_sides
+            .on_outlet(move |space, binding, environment| {
+                Arc::new(SpaceOutlet {
+                    hub: this.clone(),
+                    space: space.to_owned(),
+                    binding,
+                    environment: environment.id().to_owned(),
+                    version: environment.version(),
+                })
+            });
         hub
+    }
+
+    /// What the side of `outlet`'s binding keeps and sends: a new `state`, if any, kept for whoever joins and sent to everyone in the space now unless an `event` goes with it, which is sent to them instead. A side of a binding that has ended, or of a space that has gone, is ignored. See `design/environments.md`.
+    fn channel_update(
+        &self,
+        outlet: &SpaceOutlet,
+        state_text: &str,
+        event_text: Option<&str>,
+    ) -> tomori_environment::Result<()> {
+        let kept = crate::channel::state(state_text)?;
+        let event = event_text.map(crate::channel::event).transpose()?;
+        let mut state = self.lock();
+        let Some(record) = self.current_channel(&mut state, outlet) else {
+            return Ok(());
+        };
+        record.state = Some(kept.clone());
+        let message = match event {
+            Some(event) => ServerMessage::EnvironmentEvent {
+                environment: outlet.environment.clone(),
+                version: outlet.version,
+                event,
+            },
+            None => ServerMessage::EnvironmentState {
+                environment: outlet.environment.clone(),
+                version: outlet.version,
+                state: kept,
+            },
+        };
+        for outbox in state.channel_outboxes(&outlet.space) {
+            outbox.message(message.clone());
+        }
+        Ok(())
+    }
+
+    /// The objects the side of `outlet`'s binding describes, for the agent; see [`Self::channel_update`].
+    fn channel_describe(
+        &self,
+        outlet: &SpaceOutlet,
+        objects: Vec<tomori_environment::Object>,
+    ) -> tomori_environment::Result<()> {
+        let objects = crate::channel::objects(objects);
+        let mut state = self.lock();
+        if let Some(record) = self.current_channel(&mut state, outlet) {
+            record.objects = objects;
+        }
+        Ok(())
+    }
+
+    /// What the space of `outlet` keeps for its binding, begun anew for a new binding, or `None` if the binding has ended or the space has gone.
+    fn current_channel<'a>(
+        &self,
+        state: &'a mut HubState,
+        outlet: &SpaceOutlet,
+    ) -> Option<&'a mut crate::channel::Channel> {
+        if self.server_sides.binding(&outlet.space) != Some(outlet.binding) {
+            return None;
+        }
+        let record = state.space_mut(&outlet.space)?;
+        if record.model.environment != outlet.environment {
+            return None;
+        }
+        let channel = record.channel.get_or_insert_with(|| {
+            crate::channel::Channel::new(outlet.binding, &outlet.environment, outlet.version)
+        });
+        if channel.binding != outlet.binding {
+            *channel =
+                crate::channel::Channel::new(outlet.binding, &outlet.environment, outlet.version);
+        }
+        Some(channel)
     }
 
     /// Start and stop the server sides of the environments to match the spaces that are open and the environments they are bound to. Called whenever a space is bound, closes or changes environment, the environments offered change, or the hub shuts down, so that each is run for as it should be whichever came first. See `design/environments.md`.
@@ -1360,6 +1516,14 @@ impl Hub {
         let failures = self.server_sides.reconcile(&self.environments(), &wanted);
         for failure in failures {
             self.show_side_failure(state, failure);
+        }
+        // What a side kept is forgotten with its binding, so that nobody joining is sent another environment's state, or an earlier run's.
+        for record in &mut state.spaces {
+            if record.channel.as_ref().is_some_and(|channel| {
+                self.server_sides.binding(&record.model.id) != Some(channel.binding)
+            }) {
+                record.channel = None;
+            }
         }
     }
 
@@ -1868,6 +2032,8 @@ impl Hub {
                     cancellation,
                 },
                 cards: false,
+                environment_state: false,
+                intents: crate::channel::Intents::new(Instant::now()),
             },
         );
         Some((id, outbox, received, output))
@@ -2087,8 +2253,13 @@ impl Hub {
                 name,
                 names,
                 environments,
+                environment_state,
             } = message
             {
+                // Before Hello rejoins the space they were in, so that they are sent its environment's state.
+                if let Some(record) = state.connections.get_mut(&connection) {
+                    record.environment_state = environment_state;
+                }
                 self.hello(
                     &mut state,
                     connection,
@@ -2501,9 +2672,11 @@ impl Hub {
                 // space that shows them. An answer goes to the question presented, and a name to the participant, so
                 // either is about nothing attended to.
                 let attention = match state.space(&space) {
-                    Some(record) if answer.is_none() && !naming => {
-                        record.model.resolve(&attention, state.cards_of(&space))
-                    }
+                    Some(record) if answer.is_none() && !naming => record.model.resolve(
+                        &attention,
+                        state.cards_of(&space),
+                        record.channel.as_ref(),
+                    ),
                     _ => Vec::new(),
                 };
                 state.next_utterance += 1;
@@ -2576,9 +2749,11 @@ impl Hub {
                         })
                         .and_then(|record| {
                             state.space(&record.space).map(|space| {
-                                space
-                                    .model
-                                    .resolve(&[resource], state.cards_of(&record.space))
+                                space.model.resolve(
+                                    &[resource],
+                                    state.cards_of(&record.space),
+                                    space.channel.as_ref(),
+                                )
                             })
                         })
                 });
@@ -3076,6 +3251,36 @@ impl Hub {
                 record.outbox.cards();
                 self.cards_watched.notify(usize::MAX);
             }
+            // Ambient, so dropped quietly, as the server side would drop an intent it does not take: outside a space whose environment is the one named at its version, too large, or too soon after the last. The side validates the rest. See `design/environments.md`.
+            ClientMessage::EnvironmentIntent {
+                environment,
+                version,
+                intent,
+            } => {
+                let current = space
+                    .and_then(|space| state.space(space))
+                    .is_some_and(|record| {
+                        record.model.environment == environment
+                            && self.environments().version(&environment) == Some(version)
+                    });
+                let text = intent.text();
+                let now = Instant::now();
+                let taken = current
+                    && text.len() <= tomori_protocol::MESSAGE_LIMIT
+                    && state
+                        .connections
+                        .get_mut(&connection)
+                        .is_some_and(|record| record.intents.take(now));
+                let source = state.participants[participant].source;
+                if !(taken
+                    && self.server_sides.deliver(
+                        space.expect("checked above"),
+                        tomori_environment::Intent::new(source, text),
+                    ))
+                {
+                    log::debug!("An environment intent was dropped.");
+                }
+            }
             ClientMessage::PlaceCard { card, placement } => {
                 if let Err(error) = limits::check(&card, limits::IDENTIFIER_BYTES, "card") {
                     state.error(participant, error);
@@ -3493,6 +3698,7 @@ impl Hub {
             instructing: Cell::new(None),
             placements: std::collections::BTreeMap::new(),
             restoring: false,
+            channel: None,
         });
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
@@ -3608,6 +3814,7 @@ impl Hub {
                     instructing: Cell::new(None),
                     placements: kept.placements,
                     restoring: true,
+                    channel: None,
                 });
             }
             // Listed in the order they were created, as before the restart.
@@ -4253,6 +4460,7 @@ mod tests {
                 name: "Ada".into(),
                 names: false,
                 environments: None,
+                environment_state: false,
             });
             // The welcome is the first reply to hello.
             client.wait_for(|message| {
@@ -4349,6 +4557,7 @@ mod tests {
                 name: participant.to_owned(),
                 names: false,
                 environments: None,
+                environment_state: false,
             },
         );
         connection
@@ -4415,6 +4624,7 @@ mod tests {
                 name: "Vic".to_owned(),
                 names: false,
                 environments: None,
+                environment_state: false,
             },
         );
         assert_eq!(hub.counts(), counts(0, 0));
@@ -4448,6 +4658,7 @@ mod tests {
                     name: identity.to_owned(),
                     names: false,
                     environments: None,
+                    environment_state: false,
                 },
             );
             connection
@@ -4644,6 +4855,7 @@ mod tests {
                 name: "Vic".to_owned(),
                 names: false,
                 environments: None,
+                environment_state: false,
             },
         );
         hub.handle(

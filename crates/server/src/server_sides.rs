@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use base_scheduler::Cancellation;
 use event_listener::{Event, EventListener};
-use tomori_environment::{ServerSide, Space};
+use tomori_environment::{Inbox, Intent, Outlet, ServerSide, Space};
 
 use crate::environments::Environments;
 use crate::limits;
@@ -37,6 +37,10 @@ pub(crate) struct Failure {
 /// What is told of a side that fails after it started.
 type Report = Box<dyn Fn(Failure) + Send + Sync>;
 
+/// Makes the outlet a side's state, events and descriptions go to, for a space, a binding and the environment.
+type Outlets =
+    Box<dyn Fn(&str, u64, &crate::environments::Environment) -> Arc<dyn Outlet> + Send + Sync>;
+
 /// The sides running or finished for the open spaces, by space.
 #[derive(Default)]
 pub(crate) struct ServerSides {
@@ -44,6 +48,8 @@ pub(crate) struct ServerSides {
     binding: AtomicU64,
     /// Told when a side fails after it started, set once by the hub.
     report: Arc<OnceLock<Report>>,
+    /// Makes each side's outlet, set once by the hub; without it, as in tests, a side's state goes nowhere.
+    outlets: OnceLock<Outlets>,
     /// The sides whose threads have not ended, and what is notified as each ends.
     alive: Arc<Alive>,
 }
@@ -55,6 +61,8 @@ struct Running {
     side: Arc<dyn ServerSide>,
     binding: u64,
     cancellation: Cancellation,
+    /// Where intents for the side are handed on.
+    inbox: Inbox,
 }
 
 #[derive(Default)]
@@ -100,6 +108,35 @@ impl ServerSides {
         let _ = self.report.set(Box::new(report));
     }
 
+    /// Send each side's state, events and descriptions to the outlet `outlets` makes for its space, binding and environment. Set once; the hub does so when it is made.
+    pub(crate) fn on_outlet(
+        &self,
+        outlets: impl Fn(&str, u64, &crate::environments::Environment) -> Arc<dyn Outlet>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        let _ = self.outlets.set(Box::new(outlets));
+    }
+
+    /// Hand `intent` on to the side running for `space`, if there is one; says whether it was handed on.
+    pub(crate) fn deliver(&self, space: &str, intent: Intent) -> bool {
+        self.running
+            .lock()
+            .expect("never left poisoned")
+            .get(space)
+            .is_some_and(|running| running.inbox.push(intent))
+    }
+
+    /// The binding the side of `space` runs for, if one does.
+    pub(crate) fn binding(&self, space: &str) -> Option<u64> {
+        self.running
+            .lock()
+            .expect("never left poisoned")
+            .get(space)
+            .map(|running| running.binding)
+    }
+
     /// Start the sides the open spaces `wanted` need, stop those whose spaces are no longer there or are bound to another environment, and return the sides that could not be started.
     ///
     /// A side is run once for each binding, so one that has finished or failed stays until its space leaves its environment.
@@ -134,12 +171,16 @@ impl ServerSides {
             let cancellation = Cancellation::new();
             let label = environment.label().to_owned();
             let offered = side.clone();
-            let started = Space::with_cancellation(
+            let mut started = Space::with_cancellation(
                 space.id.clone(),
                 space.title.clone(),
                 space.directory.clone(),
                 cancellation.clone(),
             );
+            if let Some(outlets) = self.outlets.get() {
+                started = started.with_outlet(outlets(&space.id, binding, environment));
+            }
+            let inbox = started.inbox();
             let living = Living::new(&self.alive);
             let report = self.report.clone();
             let id = space.id.clone();
@@ -198,6 +239,7 @@ impl ServerSides {
                     side: offered,
                     binding,
                     cancellation,
+                    inbox,
                 },
             );
         }

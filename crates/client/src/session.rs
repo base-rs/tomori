@@ -313,6 +313,8 @@ async fn exchange(
             // Every client built with this crate reads `Name`, which it hands on as any other message.
             names: true,
             environments: options.environments.clone(),
+            // Every client built with this crate reads environments' state and events, which it hands on as any other message, for the client side of the environment, if it has one, to present.
+            environment_state: true,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
