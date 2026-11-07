@@ -29,8 +29,8 @@ use tomori_protocol::{Card, CardKind, Checks, Label, MAX_CARDS};
 
 use crate::cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
 
-/// The environment's identifier, which clients map to its presentation.
-pub const ENVIRONMENT: &str = "github";
+/// The environment's identifier, which clients map to its presentation, from [`tomori_protocol::environments::GITHUB`], which Tomori's own clients present it by too.
+pub const ENVIRONMENT: &str = tomori_protocol::environments::GITHUB.id;
 
 /// GitHub's GraphQL endpoint.
 pub const API: &str = "https://api.github.com/graphql";

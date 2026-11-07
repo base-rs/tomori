@@ -85,10 +85,10 @@ pub fn sky(target: &Target) -> Box<dyn Scenery> {
 }
 
 impl Default for Sceneries {
-    /// Tomori's own: [`sky`].
+    /// Tomori's own: [`sky`], at the version `tomori_protocol::environments::SKY` gives it, which the server offers it at.
     fn default() -> Self {
         let mut sceneries = Self::empty();
-        sceneries.register(Environment::SKY.id(), sky);
+        sceneries.register_versioned(Environment::SKY.id(), Environment::SKY.version(), sky);
         sceneries
     }
 }
@@ -111,7 +111,7 @@ impl Sceneries {
         self.register_versioned(id, 1, create);
     }
 
-    /// Draw `create`'s scenery for the environment `id` at protocol `version`, in place of any registered before under the same identifier, whatever its version. The grid, `minimal`, is built in at version 1: a scenery registered for it is drawn with it, at version 1 whatever version it is registered at. A client presents the environment only for a space whose environment is at the same version, and shows the grid for one at another; see `design/environments.md`.
+    /// Draw `create`'s scenery for the environment `id` at protocol `version`, in place of any registered before under the same identifier, whatever its version. The grid, `minimal`, is built in, at the version `tomori_protocol::environments::MINIMAL` gives it: a scenery registered for it is drawn with it, at the grid's version whatever version it is registered at. A client presents the environment only for a space whose environment is at the same version, and shows the grid for one at another; see `design/environments.md`.
     pub fn register_versioned(
         &mut self,
         id: &'static str,
@@ -146,7 +146,7 @@ impl Sceneries {
             .any(|environment| environment.id() == id)
     }
 
-    /// Every environment a client with these sceneries can draw, each at the version it was registered at: the grid, always at version 1 since it is built in, then the registered ones in order.
+    /// Every environment a client with these sceneries can draw, each at the version it was registered at: the grid, always at its built-in version, then the registered ones in order.
     pub fn environments(&self) -> Vec<Environment> {
         std::iter::once(Environment::MINIMAL)
             .chain(
@@ -262,22 +262,30 @@ mod tests {
         sceneries.register("minimal", sky);
         assert_eq!(sceneries.environments().len(), 3);
         assert_eq!(Sceneries::default().environments(), Environment::BUILT_IN);
-        // Each is at version 1 unless registered at another, which registering again replaces.
-        assert!(
-            Sceneries::default()
+        // Tomori's own are at their built-in versions, and another at version 1 unless registered at another, which
+        // registering again replaces.
+        let versions = |sceneries: &Sceneries| -> Vec<(&str, u32)> {
+            sceneries
                 .environments()
-                .iter()
-                .all(|environment| environment.version() == 1)
+                .into_iter()
+                .map(|environment| (environment.id(), environment.version()))
+                .collect()
+        };
+        assert_eq!(
+            versions(&Sceneries::default()),
+            Environment::BUILT_IN.map(|environment| (environment.id(), environment.version()))
         );
         sceneries.register_versioned("floor", 2, sky);
-        // The grid is built in at version 1, whatever version a scenery drawn with it is registered at.
+        // The grid is built in at its own version, whatever version a scenery drawn with it is registered at.
         sceneries.register_versioned("minimal", 3, sky);
-        let versions: Vec<(&str, u32)> = sceneries
-            .environments()
-            .into_iter()
-            .map(|environment| (environment.id(), environment.version()))
-            .collect();
-        assert_eq!(versions, [("minimal", 1), ("sky", 1), ("floor", 2)]);
+        assert_eq!(
+            versions(&sceneries),
+            [
+                ("minimal", Environment::MINIMAL.version()),
+                ("sky", 1),
+                ("floor", 2)
+            ]
+        );
         sceneries.register("floor", sky);
         assert_eq!(sceneries.environments()[2].version(), 1);
     }
