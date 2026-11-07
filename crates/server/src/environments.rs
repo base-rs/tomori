@@ -77,13 +77,13 @@ impl Environment {
     /// The environment, running `side` for each space bound to it, from when the space is bound until it is bound to another environment or closes, or the server stops. See `design/environments.md`.
     ///
     /// ```
-    /// use tomori_environment::{ServerSide, Space};
+    /// use tomori_environment::{Result, ServerSide, Space};
     /// use tomori_server::Environment;
     ///
     /// struct Watch;
     ///
     /// impl ServerSide for Watch {
-    ///     fn run(&self, space: &Space) -> Result<(), String> {
+    ///     fn run(&self, space: &Space) -> Result<()> {
     ///         while !space.cancellation().is_cancelled() {
     ///             std::thread::sleep(std::time::Duration::from_millis(10));
     ///         }
@@ -223,7 +223,7 @@ mod tests {
     struct Idle;
 
     impl ServerSide for Idle {
-        fn run(&self, _: &Space) -> Result<(), String> {
+        fn run(&self, _: &Space) -> tomori_environment::Result<()> {
             Ok(())
         }
     }

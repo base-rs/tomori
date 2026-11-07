@@ -2374,7 +2374,7 @@ fn a_card_attended_to_as_the_words_begin_is_described_from_the_board_before_them
 struct Idle;
 
 impl tomori_environment::ServerSide for Idle {
-    fn run(&self, space: &tomori_environment::Space) -> Result<(), String> {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
         while !space.cancellation().is_cancelled() {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
@@ -2507,4 +2507,50 @@ fn a_server_side_runs_only_once_the_server_is_serving_and_stops_when_its_space_e
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     hub.shutdown();
+}
+
+#[test]
+fn a_restored_space_runs_its_server_side_only_once_bound_to_its_session_again() {
+    let directory = std::env::temp_dir().join(format!("tomori-hub-sides-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let store = Arc::new(crate::kept::SpaceStore::open(&directory).unwrap());
+    let observe = || {
+        Environments::new([
+            crate::environments::Environment::new("sky", "Sky"),
+            crate::environments::Environment::new("observe", "Observe").with_server_side(Idle),
+        ])
+    };
+    let mut bound = request("ada");
+    bound.environment = "observe".to_owned();
+    let (kept, unbound) = {
+        let (hub, _jobs) = hub_with(FakeBackend::new());
+        hub.set_environments(observe());
+        assert!(hub.restore(store.clone()).is_empty());
+        let (kept, _commands) = running(&hub, &bound, Snapshot::default());
+        let (unbound, _commands) = running(&hub, &bound, Snapshot::default());
+        (kept, unbound)
+    };
+
+    // After a restart, the spaces are listed again while serving, but their directories are not yet resolved within the workspace roots again, so no side runs for them.
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    hub.set_environments(observe());
+    hub.serving();
+    assert_eq!(hub.restore(store.clone()).len(), 2);
+    assert_eq!(hub.server_sides.alive(), 0);
+
+    // Bound to its session again, a space runs its side.
+    assert!(hub.bound(&kept, "session".to_owned(), Snapshot::default()));
+    assert_eq!(hub.server_sides.alive(), 1);
+    assert!(hub.server_sides.is_current(&kept, 0));
+
+    // One that cannot be bound again, as when its directory is no longer in the workspace roots, never runs one.
+    hub.restore_failed(
+        &unbound,
+        "The directory is not available.".to_owned(),
+        false,
+    );
+    assert_eq!(hub.server_sides.alive(), 1);
+    assert!(!hub.server_sides.is_current(&unbound, 1));
+    hub.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
 }

@@ -11,12 +11,12 @@ cargo add tomori-environment
 Implement `ServerSide`, and register it with its environment on the server's builder, as [`tomori-server`](https://crates.io/crates/tomori-server) describes:
 
 ```rust
-use tomori_environment::{ServerSide, Space};
+use tomori_environment::{Result, ServerSide, Space};
 
 struct Observe;
 
 impl ServerSide for Observe {
-    fn run(&self, space: &Space) -> Result<(), String> {
+    fn run(&self, space: &Space) -> Result<()> {
         while !space.cancellation().is_cancelled() {
             // Read what the space presents, until the space no longer needs it.
             std::thread::sleep(std::time::Duration::from_millis(100));

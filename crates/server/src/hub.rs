@@ -428,6 +428,8 @@ struct SpaceRecord {
     answered: std::collections::VecDeque<(String, String)>,
     /// Where the space's participants put its cards, by card. See `design/github.md`.
     placements: std::collections::BTreeMap<String, tomori_protocol::Pose>,
+    /// Listed again after a restart and not yet bound to its session, so its directory has not yet been resolved within the workspace roots again: its environment's server side waits until it is. See `design/environments.md`.
+    restoring: bool,
 }
 
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
@@ -1336,7 +1338,7 @@ impl Hub {
             state
                 .spaces
                 .iter()
-                .filter(|record| !record.model.is_closed())
+                .filter(|record| !record.model.is_closed() && !record.restoring)
                 .map(|record| crate::server_sides::Wanted {
                     id: record.model.id.clone(),
                     title: record.model.title.clone(),
@@ -1351,7 +1353,7 @@ impl Hub {
         }
     }
 
-    /// The server has begun serving: run the server sides of the spaces that were bound while it was being configured, such as the kept spaces, and of those bound from now on.
+    /// The server has begun serving: run the server sides of the spaces that were bound while it was being configured, and of those bound from now on. A kept space listed again waits until it is bound to its session again; see [`Hub::bound`].
     pub(crate) fn serving(&self) {
         let mut state = self.lock();
         state.serving = true;
@@ -3457,6 +3459,7 @@ impl Hub {
             answered: std::collections::VecDeque::new(),
             instructing: Cell::new(None),
             placements: std::collections::BTreeMap::new(),
+            restoring: false,
         });
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
@@ -3571,10 +3574,9 @@ impl Hub {
                     answered: std::collections::VecDeque::new(),
                     instructing: Cell::new(None),
                     placements: kept.placements,
+                    restoring: true,
                 });
             }
-            // Spaces restored in an environment with a server side run it as one just created does.
-            self.reconcile_server_sides(&mut state);
             // Listed in the order they were created, as before the restart.
             state.spaces.sort_by_key(|space| {
                 order
@@ -3607,6 +3609,9 @@ impl Hub {
         );
         // Given again before any input, as the agent may have lost them while the server was stopped.
         record.instruct(true);
+        // Its directory has been resolved within the workspace roots again, so its environment's server side runs for it as for a space just created.
+        record.restoring = false;
+        self.reconcile_server_sides(&mut state);
         state.pump(id);
         state.touch_space(id);
         drop(state);

@@ -89,14 +89,14 @@ impl Recorder {
 }
 
 impl ServerSide for Recorder {
-    fn run(&self, space: &Space) -> Result<(), String> {
+    fn run(&self, space: &Space) -> tomori_environment::Result<()> {
         self.seen.lock().unwrap().push(Seen::Started {
             id: space.id().to_owned(),
             title: space.title().to_owned(),
             directory: space.directory().to_owned(),
         });
         match self.ending {
-            Ending::Error => return Err("the fleet is unreachable".to_owned()),
+            Ending::Error => return Err("the fleet is unreachable".into()),
             Ending::Panic => panic!("the fleet is unreachable"),
             Ending::Ignoring => loop {
                 std::thread::sleep(Duration::from_secs(3600));

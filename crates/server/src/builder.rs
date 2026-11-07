@@ -269,7 +269,7 @@ mod tests {
     fn an_environment_registered_again_has_the_server_side_of_the_last() {
         struct Idle;
         impl tomori_environment::ServerSide for Idle {
-            fn run(&self, _: &tomori_environment::Space) -> Result<(), String> {
+            fn run(&self, _: &tomori_environment::Space) -> tomori_environment::Result<()> {
                 Ok(())
             }
         }

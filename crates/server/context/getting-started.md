@@ -35,13 +35,13 @@ The executable takes the same command line as `tomori-server`, including `auth` 
 An environment may also have a server side, a program in the server that runs while a space is bound to the environment, which `Environment::with_server_side` registers with it. Implement `ServerSide` from `tomori-environment`:
 
 ```rust
-use tomori_environment::{ServerSide, Space};
+use tomori_environment::{Result, ServerSide, Space};
 use tomori_server::Environment;
 
 struct Observe;
 
 impl ServerSide for Observe {
-    fn run(&self, space: &Space) -> Result<(), String> {
+    fn run(&self, space: &Space) -> Result<()> {
         while !space.cancellation().is_cancelled() {
             // Read what the space presents, until it is bound to another environment or closes.
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -53,7 +53,7 @@ impl ServerSide for Observe {
 let observe = Environment::new("observe", "Observe").with_server_side(Observe);
 ```
 
-The server runs it on a thread of its own, once each time a space is bound to the environment: when the space is created in it, an owner changes it to it, or it is restored after a restart. It is given the space's identifier, title and directory and a cancellation, which is cancelled when the space is bound to another environment, closes, or the server stops; the server waits only `Server::with_drain_timeout` for sides to stop when it stops itself. A side that returns an error or panics is shown in the space, which keeps its environment and conversation, and is not run again for that binding. Environments have no client sides, state, data sources or tools yet. Those are planned, and will be registered through the same builder.
+The server runs it on a thread of its own, once each time a space is bound to the environment: when the space is created in it, an owner changes it to it, or it is bound to its session again after a restart. It is given the space's identifier, title and directory and a cancellation, which is cancelled when the space is bound to another environment, closes, or the server stops; the server waits only `Server::with_drain_timeout` for sides to stop when it stops itself. A side that returns an `Error` or panics is shown in the space, which keeps its environment and conversation, and is not run again for that binding. Environments have no client sides, state, data sources or tools yet. Those are planned, and will be registered through the same builder.
 
 ## Other settings
 

@@ -3,10 +3,10 @@
 
 //! The server sides of environments, run for the spaces bound to them. See `design/environments.md`.
 //!
-//! [`ServerSides::reconcile`] is told which spaces are open and the environment each is bound to, and starts and stops sides to match, so that a space created in an environment, changed to it or restored in it is run for the same way, whichever order the environments were offered and the kept spaces listed in. Each side runs on a thread of its own, as `crates/server/src/github.rs` reads GitHub, so that nothing it does can block the hub, another space or a conversation.
+//! [`ServerSides::reconcile`] is told which spaces are open and the environment each is bound to, and starts and stops sides to match, so that a space created in an environment, changed to it or bound again in it after a restart is run for the same way, whichever order the environments were offered and the kept spaces listed in. Each side runs on a thread of its own, as `crates/server/src/github.rs` reads GitHub, so that nothing it does can block the hub, another space or a conversation.
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base_scheduler::Cancellation;
@@ -41,7 +41,7 @@ type Report = Box<dyn Fn(Failure) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct ServerSides {
     running: Mutex<HashMap<String, Running>>,
-    binding: AtomicUsize,
+    binding: AtomicU64,
     /// Told when a side fails after it started, set once by the hub.
     report: Arc<OnceLock<Report>>,
     /// The sides whose threads have not ended, and what is notified as each ends.
@@ -130,7 +130,7 @@ impl ServerSides {
             let Some(side) = environment.server_side().cloned() else {
                 continue;
             };
-            let binding = self.binding.fetch_add(1, Ordering::SeqCst) as u64;
+            let binding = self.binding.fetch_add(1, Ordering::SeqCst);
             let cancellation = Cancellation::new();
             let label = environment.label().to_owned();
             let offered = side.clone();
@@ -151,7 +151,7 @@ impl ServerSides {
                     Ok(Ok(())) => return,
                     Ok(Err(error)) => format!(
                         "The {label} environment failed: {}",
-                        limits::truncate(&error, limits::ERROR_BYTES)
+                        limits::truncate(error.message(), limits::ERROR_BYTES)
                     ),
                     Err(panic) => {
                         let reason = panic
@@ -252,11 +252,11 @@ mod tests {
     /// A side that tells `started` the space it runs for, and then ends as `ending` says.
     struct Test {
         started: Mutex<Sender<String>>,
-        ending: fn(&Space) -> Result<(), String>,
+        ending: fn(&Space) -> tomori_environment::Result<()>,
     }
 
     impl ServerSide for Test {
-        fn run(&self, space: &Space) -> Result<(), String> {
+        fn run(&self, space: &Space) -> tomori_environment::Result<()> {
             self.started
                 .lock()
                 .unwrap()
@@ -266,7 +266,7 @@ mod tests {
         }
     }
 
-    fn until_cancelled(space: &Space) -> Result<(), String> {
+    fn until_cancelled(space: &Space) -> tomori_environment::Result<()> {
         while !space.cancellation().is_cancelled() {
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -275,7 +275,7 @@ mod tests {
 
     /// Environments offering `observe`, running a side that ends as `ending` says, and `plain`, which has none.
     fn offered(
-        ending: fn(&Space) -> Result<(), String>,
+        ending: fn(&Space) -> tomori_environment::Result<()>,
     ) -> (Environments, std::sync::mpsc::Receiver<String>) {
         let (sender, receiver) = channel();
         let observe = Environment::new("observe", "Observe").with_server_side(Test {
@@ -399,7 +399,8 @@ mod tests {
     fn a_failure_is_reported_for_its_binding_and_the_side_is_not_run_again() {
         for (ending, message) in [
             (
-                (|_: &Space| Err("no route".to_owned())) as fn(&Space) -> Result<(), String>,
+                (|_: &Space| Err("no route".into()))
+                    as fn(&Space) -> tomori_environment::Result<()>,
                 "The Observe environment failed: no route",
             ),
             (
@@ -436,7 +437,7 @@ mod tests {
         let (sides, reported) = reporting();
         let (environments, started) = offered(|space| {
             until_cancelled(space).expect("it ends once cancelled");
-            Err("late".repeat(1000))
+            Err("late".repeat(1000).into())
         });
         sides.reconcile(&environments, &[wanted("space-1", "observe")]);
         started.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -445,7 +446,7 @@ mod tests {
         assert!(reported.try_recv().is_err());
 
         // An error that is not from stopping is cut to the limit.
-        let (environments, started) = offered(|_| Err("long".repeat(1000)));
+        let (environments, started) = offered(|_| Err("long".repeat(1000).into()));
         sides.reconcile(&environments, &[wanted("space-2", "observe")]);
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let failure = reported.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -456,7 +457,7 @@ mod tests {
     #[test]
     fn a_failure_with_nobody_to_tell_is_only_logged() {
         let sides = ServerSides::default();
-        let (environments, started) = offered(|_| Err("no route".to_owned()));
+        let (environments, started) = offered(|_| Err("no route".into()));
         sides.reconcile(&environments, &[wanted("space-1", "observe")]);
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         eventually("the side never ended", || sides.alive() == 0);
