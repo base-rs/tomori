@@ -40,6 +40,8 @@ pub use tomori_client_spectator::{
     SpectatorOptions, run_pipewire as run_spectator_pipewire,
     run_pipewire_preview as run_spectator_pipewire_preview, run_window as run_spectator,
 };
+/// How participants travel in an environment, for [`Builder::locomotion`]; see `design/locomotion.md`.
+pub use tomori_scene::locomotion::{Locomotion, Surface};
 
 /// The `tomori` executable's command line, running `builder`'s headset: `tomori --xr`, `--desktop` and the server-less window draw its sceneries, and `--console` names its environments. The spectator modes draw Tomori's own sceneries, as `tomori-spectator` does, whatever the build. A downstream build's `main` is `tomori::main(builder)`.
 #[cfg(not(target_os = "android"))]
@@ -203,6 +205,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             let samples = android_samples(&android);
             let (mut conversation, connection) = android_connection(android);
             conversation.set_drawable(sceneries.environments());
+            conversation.set_locomotion(sceneries.locomotion());
             xr::run(
                 &platform,
                 samples,

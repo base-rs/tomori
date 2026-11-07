@@ -8,7 +8,7 @@
 cargo add tomori-render
 ```
 
-`scenery::Scenery` is what a client draws for a space bound to an environment, natively in each eye's pass. Implement it to draw an environment of your own, and register it by the environment's identifier in `scenery::Sceneries`, or with [`tomori-client-quest`](https://crates.io/crates/tomori-client-quest)'s `tomori::Builder::scenery`. Tomori's own build registers Sky, from [`tomori-environment-sky`](https://crates.io/crates/tomori-environment-sky), and the Minimal grid is built in.
+`scenery::Scenery` is what a client draws for a space bound to an environment, natively in each eye's pass. Implement it to draw an environment of your own, and register it by the environment's identifier in `scenery::Sceneries`, or with [`tomori-client-quest`](https://crates.io/crates/tomori-client-quest)'s `tomori::Builder::scenery`. `Sceneries::set_locomotion`, or `tomori::Builder::locomotion`, declares how participants travel in a space bound to the environment, teleporting onto walkable surfaces or flying, while its scenery is drawn. Tomori's own build registers Sky, from [`tomori-environment-sky`](https://crates.io/crates/tomori-environment-sky), and the Minimal grid is built in.
 
 The `test-gpu` feature adds the shared device for offscreen rendering tests and WGSL validation, for other crates' tests; they run on a GPU or on Mesa's lavapipe.
 

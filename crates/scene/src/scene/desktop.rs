@@ -201,8 +201,10 @@ pub struct Drawn<'a> {
     pub frame: Frame<'a>,
     /// The window's new title, when the knocks waiting change.
     pub title: Option<String>,
-    /// The head's view and projection.
+    /// The head's view and projection, in the participant's room.
     pub view_projection: Mat4,
+    /// Takes the space's scene to the room, where the participant has travelled; see `design/locomotion.md`.
+    pub scene_to_space: Mat4,
 }
 
 /// The conversation's participant in a window, and everything the frame step keeps between frames, without the headset.
@@ -393,24 +395,37 @@ impl Desktop {
                 None => TITLE.to_owned(),
             }
         });
-        let head = self.head.transform();
+        // The head stands in the participant's room, which travel takes into the space's scene, as the headset's reference space; see `design/locomotion.md`.
+        let rig = self.step.rig(conversation).matrix();
+        let room_head = self.head.transform();
+        let head = rig * room_head;
         let ray = self
             .input
             .cursor
             .filter(|_| focused)
-            .and_then(|cursor| self.head.ray(cursor, size));
+            .and_then(|cursor| self.head.ray(cursor, size))
+            .and_then(|ray| {
+                Ray::new(
+                    rig.transform_point3(ray.origin),
+                    rig.transform_vector3(ray.direction),
+                )
+            });
+        let travelled = |palm: Palm| Palm {
+            wrist: rig.transform_point3(palm.wrist),
+            normal: rig.transform_vector3(palm.normal),
+        };
         let senses = Senses {
             focused,
             head: Some(head),
             head_pose: Pose::from_transform(head),
             // The head turns about the eye, so what faces the head faces the eye.
-            viewer: Some(arrival::HOME),
-            space_head: head,
+            viewer: Some(rig.transform_point3(arrival::HOME)),
+            space_head: room_head,
             ray,
             trigger: focused.then_some(if self.input.trigger { 1.0 } else { 0.0 }),
             pointing: self.input.trigger,
-            left_palm: (self.menu_open || self.step.pinned()).then(|| self.head.palm()),
-            right_palm: self.wrist_open.then(|| self.head.right_palm()),
+            left_palm: (self.menu_open || self.step.pinned()).then(|| travelled(self.head.palm())),
+            right_palm: self.wrist_open.then(|| travelled(self.head.right_palm())),
             hands_only: false,
             grip: Some(if self.input.grip { 1.0 } else { 0.0 }),
             // A desktop has no controllers, so the recording indicator stands low in the view.
@@ -427,11 +442,11 @@ impl Desktop {
             cues: false,
             beam: false,
         };
-        let view_projection = self.head.view_projection(size.x / size.y);
         Drawn {
             frame: self.step.update(&senses, conversation, feedback, now, dt),
             title,
-            view_projection,
+            view_projection: self.head.view_projection(size.x / size.y),
+            scene_to_space: rig.inverse(),
         }
     }
 }
@@ -795,5 +810,68 @@ mod tests {
         let presence = drawn.frame.presence.expect("a participant");
         assert_eq!((presence.left, presence.right), (None, None));
         assert!((desktop.step.arrival_time - MAX_STEP).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_arrow_keys_teleport_where_the_mouse_points_and_turn() {
+        use crate::locomotion::{Locomotion, Surface};
+        let mut conversation = joined();
+        conversation.set_locomotion(vec![(
+            crate::environment::Environment::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(20.0))]),
+        )]);
+        let mut desktop = desktop(&mut conversation);
+        // Travel waits for the space's scenery to grow in, so that its surfaces are seen.
+        let mut start = Instant::now();
+        for _ in 0..40 {
+            start += Duration::from_millis(100);
+            desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+        }
+        // Low in the window, the mouse points at the floor a little ahead.
+        desktop.cursor_moved(Vec2::new(SIZE.x * 0.5, SIZE.y * 0.95));
+        desktop.key(Key::Left(Direction::Up), true, false, &mut conversation);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start, SIZE);
+        let landing = drawn.frame.landing.expect("somewhere to land");
+        let pill = drawn.frame.panels.pill.model.expect("the pill");
+        assert!(landing.y == 0.0 && landing.z < -0.5 && landing.x.abs() < 1e-3);
+        // The window draws the ring but no ray, and here nothing else of arrival.
+        assert!(drawn.frame.arrival.is_none());
+        desktop.key(Key::Left(Direction::Up), false, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD, SIZE);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 2, SIZE);
+        let head = drawn.frame.presence.unwrap().head;
+        let travelled = Vec3::new(landing.x, arrival::HOME.y, landing.z);
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+        assert_eq!(drawn.frame.listener, Some(head));
+        // The pill stands in the participant's room, so it came along.
+        assert_eq!(drawn.frame.panels.pill.model, Some(pill));
+        // The window looks from there.
+        let ahead = travelled + Head::default().transform().transform_vector3(-Vec3::Z);
+        let seen = (drawn.view_projection * drawn.scene_to_space).project_point3(ahead);
+        assert!(seen.x.abs() < 1e-3 && seen.y.abs() < 1e-3);
+        // Left turns 30° about the head, and the hand menu turns with it.
+        desktop.key(Key::Left(Direction::Left), true, false, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 3, SIZE);
+        desktop.key(Key::Left(Direction::Left), false, false, &mut conversation);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 4, SIZE);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+        let turned = Quat::from_array(head.orientation).angle_between(Head::default().rotation());
+        assert!((turned - crate::locomotion::SNAP_TURN).abs() < 1e-3);
+        tap(&mut desktop, Key::Menu, &mut conversation);
+        let palm = desktop
+            .step
+            .rig(&conversation)
+            .matrix()
+            .transform_point3(desktop.head.palm().wrist);
+        desktop.frame(&mut conversation, &mut felt(), start + HOLD * 5, SIZE);
+        let drawn = desktop.frame(&mut conversation, &mut felt(), start + HOLD * 6, SIZE);
+        let menu = drawn.frame.arrival.expect("the menu");
+        assert!(
+            menu.scene
+                .objects
+                .iter()
+                .any(|object| object.position.distance(palm) < 0.5)
+        );
     }
 }

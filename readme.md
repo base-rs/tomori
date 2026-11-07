@@ -84,6 +84,7 @@ Before you join a space, servers, spaces and the **New space** object stand in t
 - **Pending question:** hold **X** and say your answer, or its number; it goes to the question rather than the queue. A question Tomori can't present says to answer it on the PC.
 - **B:** close the list, deselect a queue entry, or dismiss the problem shown. It never denies, cancels or leaves. **Hold B** for a second to leave the space.
 - **Hold X:** talk to the agent; release to send. See [Voice](#voice).
+- **Travel:** only in a space whose environment allows it, which neither Sky nor the grid does: hold the left stick forward and point the right controller at the floor, where a ring shows where you will land, and let the stick back to the middle to go there, with a short blink; push it left or right to turn 30°; and, where the environment lets you fly, hold it back to rise. Each push does one thing, whichever way it went first, until the stick is back in the middle. There is no smooth movement, and the others and the spectator see you where you travelled. To stay room scale, turn **Travel** off in the hand menu's Space section (see [design/locomotion.md](design/locomotion.md)).
 
 The server keeps the conversation: after a dropped connection the headset reconnects and rejoins the space by itself. If the space is gone, as after the server restarts, the headset returns to the space list.
 
@@ -261,7 +262,7 @@ That window doesn't connect to a server. To take part in a server's spaces from 
 cargo run -p tomori-client-quest -- --desktop [--server HOST:PORT] [--name NAME] [--token TOKEN]
 ```
 
-The mouse points as the right controller does: its left button chooses what it points at, and dragging with the right button looks around. **Enter** is A, **Backspace** is B (hold it for a second to leave a space), hold **Space** to talk to the agent (X), **Tab** is Y, the arrow keys are the left stick, **\[** and **]** the right stick left and right, and **Page Up**/**Page Down** the right stick up and down. **M** opens the hand menu, **K** knocks on the space you watch, **+** and **-** admit or decline the first knock waiting, **P** pairs, **V** mutes spoken replies and **R** replays the latest. `tomori --help` lists them too. Desktop windows draw with 4× multisample anti-aliasing where the GPU supports it.
+The mouse points as the right controller does: its left button chooses what it points at, and dragging with the right button looks around. **Enter** is A, **Backspace** is B (hold it for a second to leave a space), hold **Space** to talk to the agent (X), **Tab** is Y, the arrow keys are the left stick, so in a space that allows travel, hold **↑**, point the mouse at the floor and release **↑** to land at the ring, and **←** and **→** turn, **\[** and **]** the right stick left and right, and **Page Up**/**Page Down** the right stick up and down. **M** opens the hand menu, **K** knocks on the space you watch, **+** and **-** admit or decline the first knock waiting, **P** pairs, **V** mutes spoken replies and **R** replays the latest. `tomori --help` lists them too. Desktop windows draw with 4× multisample anti-aliasing where the GPU supports it.
 
 To use a server without a headset or a GPU, show the headset's panel in the terminal:
 

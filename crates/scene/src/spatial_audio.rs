@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Where each voice comes from in this client's scene: the agent from the swarm, and each other participant from a seat on a circle at the edge of the space, moved by their head. Pure, so that the layout is tested; the player pans and attenuates from it. See `design/spatial-audio.md`.
+//! Where each voice comes from in this client's scene: the agent from the swarm, and each other participant from a seat on a circle at the edge of the space, around where this participant has travelled, moved by their head. Pure, so that the layout is tested; the player pans and attenuates from it. See `design/spatial-audio.md`.
 use std::collections::HashMap;
 
 use tomori_client::{
@@ -10,16 +10,16 @@ use tomori_client::{
 };
 use tomori_protocol::{AGENT_SOURCE, Pose};
 
-use crate::{arrival::HOME, controller, conversation::Conversation};
+use crate::{arrival::HOME, controller, conversation::Conversation, locomotion::Rig};
 
 /// The radius of the circle remote participants sit on, around where the listener stands, so that none sounds as if they stood inside the listener.
 pub const RING: f32 = 2.5;
 /// A voice comes from this far below the head, at the mouth.
 pub const MOUTH: f32 = 0.1;
-/// A remote participant moving away from their own home moves their voice at most this far from their seat.
+/// A remote participant moving away from their own home moves their voice at most this far from their seat, across, and up or down from standing height.
 pub const REACH: f32 = 1.0;
 
-/// The seat of the `index`th of `count` other participants, ordered by participant number, and the direction it faces, as an angle clockwise from straight ahead seen from above. The seats share the circle evenly with the agent, which is straight ahead: one participant sits behind, two at the back left and right, three to the right, behind and to the left.
+/// The seat of the `index`th of `count` other participants, ordered by participant number, in this participant's room, and the direction it faces, as an angle clockwise from straight ahead seen from above. The seats share the circle evenly with the agent, which is straight ahead: one participant sits behind, two at the back left and right, three to the right, behind and to the left.
 pub fn seat(index: usize, count: usize) -> (Position, f32) {
     let angle = std::f32::consts::TAU * (index + 1) as f32 / (count + 1) as f32;
     let position = [
@@ -30,7 +30,7 @@ pub fn seat(index: usize, count: usize) -> (Position, f32) {
     (position, angle)
 }
 
-/// Where a participant seated at `seat`, at `angle`, speaks from: their head's movement from their own home, turned so that their forward faces the centre of the circle and kept within [`REACH`], at their head's height less [`MOUTH`].
+/// Where a participant seated at `seat`, at `angle`, speaks from, in this participant's room: their head's movement from their own home, turned so that their forward faces the centre of the circle and kept within [`REACH`], at their head's height less [`MOUTH`], kept within [`REACH`] of standing height. Their head is where they travelled, which this client cannot tell from where they walk, so a long walk, a teleport or a flight moves the voice no further than that.
 pub fn voice(seat: Position, angle: f32, head: Option<&Pose>) -> Position {
     let Some(head) = head.filter(|head| head.position.iter().all(|axis| axis.is_finite())) else {
         return [seat[0], HOME.y - MOUTH, seat[2]];
@@ -45,7 +45,8 @@ pub fn voice(seat: Position, angle: f32, head: Option<&Pose>) -> Position {
         x *= REACH / reach;
         z *= REACH / reach;
     }
-    [seat[0] + x, head.position[1] - MOUTH, seat[2] + z]
+    let height = HOME.y + (head.position[1] - HOME.y).clamp(-REACH, REACH);
+    [seat[0] + x, height - MOUTH, seat[2] + z]
 }
 
 /// The middle of the swarm's agents, where the agent's voice comes from, or the swarm's resting centre while it has none.
@@ -59,10 +60,11 @@ pub fn centre(agents: &[[f32; 3]]) -> Position {
     sum.map(|axis| axis / agents.len() as f32)
 }
 
-/// Place the voices `connection` plays, once a frame: this participant hears from `listener`, in the space's scene coordinates, and the agent is at `agent`, typically the swarm's centre. Every other participant in the joined space sits as [`fill`] says. Without a listener, every source plays centred.
+/// Place the voices `connection` plays, once a frame: this participant hears from `listener`, in the space's scene coordinates, having travelled as `rig` says, and the agent is at `agent`, typically the swarm's centre. Every other participant in the joined space sits as [`fill`] says. Without a listener, every source plays centred.
 pub fn listen(
     connection: &mut Connection,
     listener: Option<controller::Pose>,
+    rig: Rig,
     agent: Position,
     conversation: &Conversation,
 ) {
@@ -83,6 +85,7 @@ pub fn listen(
         fill(
             scene,
             listener,
+            rig,
             agent,
             voices.others,
             voices.heads,
@@ -91,10 +94,11 @@ pub fn listen(
     });
 }
 
-/// Fill `scene` for `listener`: the agent at `agent`, and each of `others`, the other participants by number, on their seats and moved by their latest `heads`. Participants share no physical space with each other yet, each standing at their own home, so every other participant is remote and seated. Reuses the scene's storage.
+/// Fill `scene` for `listener`, in the space's scene: the agent at `agent`, and each of `others`, the other participants by number, on their seats and moved by their latest `heads`, with the seats carried by `rig`, where the listener has travelled, so that they stay around the listener however far they travel. Participants share no physical space with each other yet, each standing at their own home, and presence does not carry where the others travelled, so every other participant is remote and seated. Reuses the scene's storage.
 pub fn fill(
     scene: &mut Scene,
     listener: Option<Listener>,
+    rig: Rig,
     agent: Position,
     others: &[u32],
     heads: &HashMap<u32, Pose>,
@@ -104,11 +108,15 @@ pub fn fill(
     scene.mono = mono;
     scene.sources.clear();
     scene.sources.push((AGENT_SOURCE, agent));
+    let room = rig.matrix();
     for (index, &source) in others.iter().enumerate() {
         let (seat, angle) = seat(index, others.len());
-        scene
-            .sources
-            .push((source, voice(seat, angle, heads.get(&source))));
+        let voice = voice(seat, angle, heads.get(&source));
+        scene.sources.push((
+            source,
+            room.transform_point3(glam::Vec3::from_array(voice))
+                .to_array(),
+        ));
     }
 }
 
@@ -174,6 +182,74 @@ mod tests {
         ));
         // Sitting down lowers the voice.
         assert!((voice(seat, angle, Some(&pose([0.0, 1.2, 0.0])))[1] - 1.1).abs() < 1e-4);
+        // Someone who flew, or stands on a balcony, is heard no more than the reach above standing height, nor below it from a pit.
+        let flown = voice(seat, angle, Some(&pose([0.0, 21.6, 0.0])));
+        assert!(close(flown, [seat[0], HOME.y + REACH - MOUTH, seat[2]]));
+        let sunk = voice(seat, angle, Some(&pose([0.0, -5.0, 0.0])));
+        assert!((sunk[1] - (HOME.y - REACH - MOUTH)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn voices_stay_seated_around_the_listener_wherever_they_travel() {
+        use glam::{Quat, Vec3};
+        let agent = [0.0, 1.4, -2.3];
+        let mut heads = HashMap::new();
+        heads.insert(7, pose([0.3, 1.7, 0.2]));
+        let mut home = Scene::default();
+        let listener = |rig: Rig| {
+            let head = rig.matrix() * glam::Mat4::from_translation(HOME);
+            let (_, rotation, position) = head.to_scale_rotation_translation();
+            Listener {
+                position: position.to_array(),
+                orientation: rotation.to_array(),
+            }
+        };
+        fill(
+            &mut home,
+            Some(listener(Rig::default())),
+            Rig::default(),
+            agent,
+            &[3, 7],
+            &heads,
+            false,
+        );
+        // Teleported 12 m away onto a ledge 3 m up, and turned twice.
+        let mut rig = Rig::default();
+        rig.teleport(Vec3::new(4.0, 3.0, -11.0), HOME);
+        rig.turn(
+            crate::locomotion::SNAP_TURN,
+            rig.matrix().transform_point3(HOME),
+        );
+        rig.turn(
+            crate::locomotion::SNAP_TURN,
+            rig.matrix().transform_point3(HOME),
+        );
+        let mut travelled = Scene::default();
+        fill(
+            &mut travelled,
+            Some(listener(rig)),
+            rig,
+            agent,
+            &[3, 7],
+            &heads,
+            false,
+        );
+        // Each voice is where it was relative to the listener's head, so none drifts as they travel.
+        let relative = |scene: &Scene, source: u32| {
+            let listener = scene.listener.unwrap();
+            let at = Vec3::from_array(scene.position(source).unwrap());
+            Quat::from_array(listener.orientation).inverse()
+                * (at - Vec3::from_array(listener.position))
+        };
+        for source in [3, 7] {
+            assert!(
+                relative(&home, source).distance(relative(&travelled, source)) < 1e-4,
+                "{source}"
+            );
+            assert!(Vec3::from_array(travelled.position(source).unwrap()).y > 3.0);
+        }
+        // The agent stays with the swarm, in the scene.
+        assert_eq!(travelled.position(AGENT_SOURCE), Some(agent));
     }
 
     #[test]
@@ -213,7 +289,15 @@ mod tests {
         let agent = [0.0, 1.4, -2.3];
         let mut heads = HashMap::new();
         heads.insert(7, pose([0.3, 1.7, 0.2]));
-        fill(&mut scene, listener, agent, &[3, 7], &heads, false);
+        fill(
+            &mut scene,
+            listener,
+            Rig::default(),
+            agent,
+            &[3, 7],
+            &heads,
+            false,
+        );
         assert_eq!(scene.listener, listener);
         assert!(!scene.mono);
         assert_eq!(scene.position(AGENT_SOURCE), Some(agent));
@@ -229,7 +313,7 @@ mod tests {
             voice(seat7, angle7, heads.get(&7))
         ));
         // Filled again in place, for one participant, in mono.
-        fill(&mut scene, None, agent, &[7], &heads, true);
+        fill(&mut scene, None, Rig::default(), agent, &[7], &heads, true);
         assert!(scene.mono);
         assert_eq!(scene.listener, None);
         assert_eq!(scene.sources.len(), 2);

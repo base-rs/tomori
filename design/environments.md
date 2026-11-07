@@ -10,6 +10,8 @@ Each space is bound to exactly one environment at a time. The environment is cho
 
 Arrival, outside any space, uses the Minimal grid as its waiting area (see `arrival.md`).
 
+An environment may allow travel beyond the room, declaring a locomotion profile with walkable surfaces (see `locomotion.md`). Until environments have server sides (#75), a headset build declares it beside the environment's scenery; Sky and the Minimal grid declare none.
+
 An environment may contribute a layer of the instructions Tomori gives a space's agent, about what it presents and which tools and data sources to use (see `spaces.md`), given with the environment when it is offered. Sky and the Minimal grid contribute none yet; an environment the server no longer offers contributes none. A space keeps only its environment's identifier, not its layer: the server looks the layer up in the environments it offers whenever it shows the space's instructions or gives them to the agent, so that a space restored after a restart is given the same layer as one just created or changed to that environment, whatever order the server was configured in.
 
 Long-term direction, not yet requirements:

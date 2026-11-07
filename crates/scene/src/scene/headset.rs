@@ -83,6 +83,8 @@ pub struct Controls {
     pub back_held: bool,
     pub refresh: bool,
     pub navigation: Vec2,
+    /// The left stick's action is bound to a connected controller, so that a stick that reads zero because it was lost is not taken for a released one.
+    pub navigation_active: bool,
     pub presentation_navigation: Vec2,
     pub sound_toggle: bool,
     pub replay: bool,
@@ -115,6 +117,7 @@ impl Controls {
             back_held: held(actions.back),
             refresh: pressed(actions.refresh),
             navigation: axis(actions.navigation),
+            navigation_active: actions.navigation.active,
             presentation_navigation: axis(actions.presentation_navigation),
             sound_toggle: pressed(actions.sound_toggle),
             replay: pressed(actions.replay),
@@ -255,10 +258,12 @@ pub fn initial_scene_transform(views: &[View; 2]) -> Option<Mat4> {
     ))
 }
 
-/// Positions the simulation once at startup, then follows explicit runtime reference-space changes only at their effective predicted display time, in nanoseconds. It does not re-anchor on focus/visibility changes or normal head movement.
+/// Positions the simulation once at startup, then follows explicit runtime reference-space changes only at their effective predicted display time, in nanoseconds. It does not re-anchor on focus/visibility changes or normal head movement. Travel, the participant's rig, then takes the room it places into the space's scene, and a recentre keeps it; see `design/locomotion.md`.
 #[derive(Debug)]
 pub struct SceneAnchor {
     scene_to_space: Option<Mat4>,
+    /// The rig: from the room to the space's scene.
+    travel: Mat4,
     pending: Vec<i64>,
     recenter_log: Cadence,
 }
@@ -267,6 +272,7 @@ impl Default for SceneAnchor {
     fn default() -> Self {
         Self {
             scene_to_space: None,
+            travel: Mat4::IDENTITY,
             pending: Vec::new(),
             recenter_log: Cadence::new(RECENTER_LOG),
         }
@@ -302,8 +308,14 @@ impl SceneAnchor {
         }
     }
 
+    /// Place the room in the space's scene with the rig's `travel`.
+    pub fn set_travel(&mut self, travel: Mat4) {
+        self.travel = travel;
+    }
+
+    /// The transform from the space's scene to the reference space, with travel.
     pub fn transform(&self) -> Mat4 {
-        self.scene_to_space.unwrap_or(Mat4::IDENTITY)
+        self.scene_to_space.unwrap_or(Mat4::IDENTITY) * self.travel.inverse()
     }
 
     pub fn to_scene(&self, point: Vec3) -> Vec3 {
@@ -556,6 +568,10 @@ impl Headset {
             feedback,
             now,
         );
+        // A left stick that was lost reads as released, which must not land a teleport being aimed; see `design/locomotion.md`.
+        if !controls.navigation_active {
+            self.step.cancel_travel();
+        }
     }
 
     /// Move the scene on by `dt` seconds to `now`, for display at `display_time`, in nanoseconds, from the eyes' `views`, the `controls` with their poses, and the tracked `hands`' joints, all in the reference space.
@@ -573,6 +589,8 @@ impl Headset {
     ) -> Drawn<'_> {
         let anchor = &mut self.anchor;
         anchor.update(views, display_time, now);
+        // Everything below is in the space's scene, where the participant has travelled to.
+        anchor.set_travel(self.step.rig(conversation).matrix());
         // The simulation stays in its own coordinates; tracked controller positions must be transformed into that same space after recenter.
         let controller = controls
             .controller
@@ -764,6 +782,7 @@ mod tests {
             assert_eq!(controls.audience_grip, 1.0);
             assert_eq!(controls.transcript_grip, Some(1.0));
             assert_eq!(controls.navigation.x, 0.8);
+            assert!(controls.navigation_active);
             assert_eq!(controls.presentation_navigation.x, -0.9);
             assert!(controls.controller.is_none());
             assert!(controls.controller_poses.iter().all(Option::is_none));
@@ -807,6 +826,7 @@ mod tests {
             assert_eq!(controls.audience_grip, 0.0);
             assert_eq!(controls.transcript_grip, None);
             assert_eq!(controls.navigation, Vec2::ZERO);
+            assert!(!controls.navigation_active);
             assert_eq!(controls.presentation_navigation, Vec2::ZERO);
         }
         // Refocusing samples fresh action state, not a cached button. Held X is level-triggered; one-shot menu actions still require a new edge.
@@ -1603,5 +1623,152 @@ mod tests {
                 .scene_to_space,
             Mat4::IDENTITY
         );
+    }
+
+    /// A space in Sky, declared for this test to teleport onto a floor 20 m across.
+    fn travelling() -> Conversation {
+        let mut conversation = joined();
+        conversation.set_locomotion(vec![(
+            crate::environment::Environment::SKY,
+            crate::locomotion::Locomotion::teleport(vec![crate::locomotion::Surface::rectangle(
+                Vec3::ZERO,
+                glam::Vec2::splat(20.0),
+            )]),
+        )]);
+        conversation
+    }
+
+    #[test]
+    fn the_left_stick_teleports_and_turns_and_every_pose_follows() {
+        let mut rig = Rig::new(travelling());
+        // Travel waits for the space's scenery to grow in, so that its surfaces are seen.
+        for _ in 0..400 {
+            rig.frame(&Controls::default(), [None, None], Duration::ZERO);
+        }
+        // The right controller points down and ahead, at the floor 1.5 m in front.
+        let aim = Pose {
+            position: [0.2, 1.2, -0.3],
+            orientation: Quat::from_rotation_x(-45f32.to_radians()).to_array(),
+        };
+        let right = grip(Quat::IDENTITY);
+        let pointing = |stick: glam::Vec2| Controls {
+            aim: Some(aim),
+            controller_poses: [None, Some(right)],
+            navigation: stick,
+            navigation_active: true,
+            trigger: Some(0.0),
+            ..Controls::default()
+        };
+        let drawn = rig.frame(&pointing(glam::Vec2::Y), [None, None], Duration::ZERO);
+        let landing = drawn.frame.landing.expect("somewhere to land");
+        assert!(landing.distance(Vec3::new(0.2, 0.0, -1.5)) < 1e-4);
+        let beam = drawn.frame.arrival.and_then(|arrival| arrival.ray).unwrap();
+        assert!(beam.hit && beam.end.distance(landing) < 1e-4);
+        // Finding a landing ticks, on the right.
+        let now = rig.start;
+        let ticks = rig.headset.haptics(&mut rig.feedback, now);
+        assert!(matches!(ticks.as_slice(), [(Side::Right, _)]), "{ticks:?}");
+        // Releasing the stick lands there, with a click, and this frame is still drawn from where the participant was.
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD);
+        assert_eq!(drawn.frame.landing, None);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(Vec3::new(0.0, 1.6, 0.0)) < 1e-4);
+        // That frame is drawn dark, from where the poses were placed, so that the view does not jump.
+        assert_eq!(drawn.frame.blink, 1.0);
+        assert_eq!(drawn.frame.rig, crate::locomotion::Rig::default());
+        assert_eq!(
+            rig.headset
+                .haptics(&mut rig.feedback, rig.start + HOLD)
+                .len(),
+            1
+        );
+        // From the next frame, everything is where the participant travelled, a tracked hand too.
+        let wrist = Vec3::new(-0.2, 1.1, -0.3);
+        let mut joints = [Joint::default(); hands::JOINT_COUNT];
+        for (index, joint) in joints.iter_mut().enumerate() {
+            *joint = Joint {
+                position: wrist + Vec3::new(0.0, 0.01 * index as f32, 0.0),
+                radius: 0.01,
+                position_valid: true,
+            };
+        }
+        joints[1].position = wrist;
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [Some(joints), None], HOLD * 2);
+        let travelled = Vec3::new(0.2, 1.6, -1.5);
+        // It comes back from dark, and the frame says where the room now is, for the voices around it.
+        assert!(drawn.frame.blink > 0.0 && drawn.frame.blink < 1.0);
+        assert!(
+            drawn
+                .frame
+                .rig
+                .matrix()
+                .transform_point3(Vec3::new(0.0, 1.6, 0.0))
+                .distance(travelled)
+                < 1e-4
+        );
+        let presence = drawn.frame.presence.unwrap();
+        let hand = presence.hands[controller::LEFT].unwrap().joints[1].unwrap();
+        assert!(Vec3::from_array(hand.position).distance(wrist + Vec3::new(0.2, 0.0, -1.5)) < 1e-4);
+        assert!(Vec3::from_array(presence.head.position).distance(travelled) < 1e-4);
+        assert_eq!(drawn.frame.listener, Some(presence.head));
+        let controller = Vec3::from_array(presence.right.unwrap().position);
+        assert!(
+            controller.distance(Vec3::from_array(right.position) + Vec3::new(0.2, 0.0, -1.5))
+                < 1e-4
+        );
+        assert_eq!(drawn.controllers[controller::RIGHT], presence.right);
+        // The eyes see the scene from there: the scene's travelled head is the reference space's head.
+        let seen = drawn.scene_to_space.transform_point3(travelled);
+        assert!(seen.distance(Vec3::new(0.0, 1.6, 0.0)) < 1e-4);
+        // Right turns 30° about the head, which stays where it is.
+        rig.frame(&pointing(glam::Vec2::X), [None, None], HOLD * 3);
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 4);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+        let forward = Quat::from_array(head.orientation) * -Vec3::Z;
+        assert!(forward.distance(Vec3::new(0.5, 0.0, -(3f32.sqrt()) / 2.0)) < 1e-4);
+        // A left controller lost while aiming, whose stick then reads zero, lands nowhere.
+        rig.frame(&pointing(glam::Vec2::Y), [None, None], HOLD * 5);
+        let lost = Controls {
+            navigation_active: false,
+            ..pointing(glam::Vec2::ZERO)
+        };
+        rig.frame(&lost, [None, None], HOLD * 6);
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 7);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+        // A recentre keeps where the participant travelled.
+        rig.headset.recentre(0);
+        let drawn = rig.frame(&pointing(glam::Vec2::ZERO), [None, None], HOLD * 5);
+        let head = drawn.frame.presence.unwrap().head;
+        assert!(Vec3::from_array(head.position).distance(travelled) < 1e-4);
+    }
+
+    #[test]
+    fn without_a_declared_locomotion_the_left_stick_changes_nothing() {
+        let mut rig = Rig::new(joined());
+        let controls = |stick: glam::Vec2| Controls {
+            aim: Some(Pose {
+                position: [0.2, 1.2, -0.3],
+                orientation: Quat::from_rotation_x(-45f32.to_radians()).to_array(),
+            }),
+            navigation: stick,
+            ..Controls::default()
+        };
+        for (at, stick) in [
+            glam::Vec2::Y,
+            glam::Vec2::ZERO,
+            glam::Vec2::X,
+            glam::Vec2::ZERO,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let drawn = rig.frame(&controls(stick), [None, None], HOLD * at as u32);
+            assert_eq!(drawn.frame.landing, None);
+            let head = drawn.frame.presence.unwrap().head;
+            assert_eq!(head.position, [0.0, 1.6, 0.0]);
+            assert_eq!(head.orientation, [0.0, 0.0, 0.0, 1.0]);
+        }
     }
 }

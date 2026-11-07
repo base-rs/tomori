@@ -217,7 +217,7 @@ impl Feed {
         // Build the frame.
         let frame = self.build_frame(&presence, aspect, dt);
 
-        // The audience hears as the participant it follows, from their head, or from the neutral view; see `design/spatial-audio.md`.
+        // The audience hears as the participant it follows, from their head, or from the neutral view; see `design/spatial-audio.md`. Presence does not carry where they travelled, so the others stay seated around the space's home.
         let listener = match self.following.and_then(|source| presence.get(&source)) {
             Some(followed) => Pose {
                 position: followed.head.position,
@@ -232,6 +232,7 @@ impl Feed {
         crate::spatial_audio::listen(
             &mut self.connection,
             Some(listener),
+            tomori_scene::locomotion::Rig::default(),
             crate::spatial_audio::centre(&frame.agents),
             &self.conversation,
         );

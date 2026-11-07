@@ -22,7 +22,7 @@ pub mod workspace_graphics;
 use tomori_client::server_choice;
 use tomori_scene::{
     arrival, arrival_motion, controller_ui, delegation, environment, hand_menu, hands, interaction,
-    panel, scene, swarm, ui_text,
+    locomotion, panel, scene, swarm, ui_text,
 };
 
 /// The licence of the bundled controller models, which [`controller_graphics`] draws.

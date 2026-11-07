@@ -20,7 +20,7 @@ use winit::{dpi::LogicalSize, event::MouseButton, keyboard::KeyCode};
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
 pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left button: choose what is pointed at, or attract the swarm; right drag: look around.\n\
 Enter: A. Backspace: B (hold for a second to leave the space). Space (hold): X, push-to-talk. Tab: Y, which in a space pins the hand menu open at its Space section.\n\
-Arrow keys: left stick. [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
+Arrow keys: left stick, which in a space that allows travel teleports (hold Up, point at the floor, release), turns (Left and Right) and rises (hold Down). [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
 V: mute spoken replies (left stick click). R: play the latest reply again, or stop it (right stick click).\n\
 M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
 Esc: close the hand menu, or quit.";
@@ -93,6 +93,7 @@ impl Participant {
         sceneries: &Sceneries,
     ) -> Self {
         conversation.set_drawable(sceneries.environments());
+        conversation.set_locomotion(sceneries.locomotion());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,
@@ -143,8 +144,8 @@ impl Participant {
         surface.request_redraw();
     }
 
-    /// One frame of the desktop's logic, returning the head's view and projection to draw it with.
-    fn step(&mut self, surface: &mut dyn Surface) -> Mat4 {
+    /// One frame of the desktop's logic, returning the head's view and projection, and the transform from the scene to the participant's room, to draw it with.
+    fn step(&mut self, surface: &mut dyn Surface) -> (Mat4, Mat4) {
         let now = Instant::now();
         let (conversation, connection) = (&mut self.conversation, &mut self.connection);
         connection.poll(self.desktop.focused(), conversation);
@@ -166,18 +167,29 @@ impl Participant {
         spatial_audio::listen(
             connection,
             drawn.frame.listener,
+            drawn.frame.rig,
             drawn.frame.agent,
             conversation,
         );
         if let Some(presence) = drawn.frame.presence {
             presence.send(connection);
         }
-        drawn.view_projection
+        (drawn.view_projection, drawn.scene_to_space)
     }
 
     /// One frame of the desktop's logic, drawn.
     fn frame(&mut self, surface: &mut dyn Surface) -> Result<()> {
-        let view_projection = self.step(surface);
+        let (view_projection, scene_to_space) = self.step(surface);
+        self.draw(surface, view_projection, scene_to_space)
+    }
+
+    /// Draw what the last step decided into the window, from the participant's room: `view_projection` is the head's in it, and `scene_to_space` takes the space's scene, and the panels in it, from where the participant travelled to it. See `design/locomotion.md`.
+    fn draw(
+        &mut self,
+        surface: &mut dyn Surface,
+        view_projection: Mat4,
+        scene_to_space: Mat4,
+    ) -> Result<()> {
         let Some(target) = surface.acquire()? else {
             return Ok(());
         };
@@ -186,8 +198,8 @@ impl Participant {
             &self.queue,
             &[target],
             &[view_projection],
-            Mat4::IDENTITY,
-            &self.panels.list(Mat4::IDENTITY),
+            scene_to_space,
+            &self.panels.list(scene_to_space),
         );
         surface.present();
         if self.first_frame {
@@ -426,6 +438,103 @@ mod tests {
                 window.conversation.knocks().is_empty()
             });
             assert_eq!(surface.titles.last().map(String::as_str), Some(TITLE));
+        });
+    }
+
+    #[test]
+    fn after_travelling_the_window_draws_the_space_and_its_panels_from_where_the_participant_is() {
+        use glam::{Quat, Vec3};
+        use tomori_scene::locomotion::{Locomotion, Surface};
+        with_gpu(FORMAT, |gpu| {
+            let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+            let server = Server::start();
+            let bea = server.remote("Bea", Some(server.owner("Bea")));
+            let space = bea.create_space("Studio", || {});
+            assert_eq!(space.environment, "sky");
+            let (mut conversation, connection) =
+                server.participant("Ada", Some(server.owner("Ada")));
+            conversation.join_space(space.id);
+            let mut sceneries = Sceneries::default();
+            sceneries.set_locomotion(
+                "sky",
+                Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+            );
+            let mut window = Participant::with_sceneries(gpu, conversation, connection, &sceneries);
+            let mut surface = TestSurface::new(&device, FORMAT);
+            let input = |window: &mut Participant, surface: &mut TestSurface, input| {
+                window.input(input, surface).unwrap();
+                window.redraw(surface).unwrap();
+            };
+            input(&mut window, &mut surface, Input::Focused(true));
+            // Low in the window, the mouse points at the floor a little ahead.
+            input(
+                &mut window,
+                &mut surface,
+                Input::CursorMoved(Vec2::new(32.0, 46.0)),
+            );
+            // Once the space's scenery has grown in, ↑ held and released lands there, and ← turns.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                assert!(Instant::now() < deadline, "timed out travelling");
+                for (code, pressed) in [
+                    (KeyCode::ArrowUp, true),
+                    (KeyCode::ArrowUp, false),
+                    (KeyCode::ArrowLeft, true),
+                    (KeyCode::ArrowLeft, false),
+                ] {
+                    input(&mut window, &mut surface, press(code, pressed));
+                }
+                let (_, scene_to_space) = window.step(&mut surface);
+                let (_, turned, moved) = scene_to_space.to_scale_rotation_translation();
+                if turned.angle_between(Quat::IDENTITY) > 0.1 && moved.length() > 0.1 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The transcript shows on the right wrist, a panel in the scene, where the participant now is.
+            input(&mut window, &mut surface, press(KeyCode::KeyT, true));
+            input(&mut window, &mut surface, press(KeyCode::KeyT, false));
+            let models = |window: &Participant, scene_to_space: Mat4| -> Vec<Mat4> {
+                let list = window.panels.list(scene_to_space);
+                list.into_iter().map(|(_, model)| model).collect()
+            };
+            let (view_projection, scene_to_space) = loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out showing the transcript"
+                );
+                let (view_projection, scene_to_space) = window.step(&mut surface);
+                if models(&window, scene_to_space) != models(&window, Mat4::IDENTITY) {
+                    break (view_projection, scene_to_space);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            window
+                .draw(&mut surface, view_projection, scene_to_space)
+                .unwrap();
+            let drawn = surface.pixels(&device, &queue);
+            // What the window draws is the space, and the panels in it, both taken to the participant's room; drawing either from home instead would differ.
+            let render = |world: Mat4, panels: Mat4| {
+                let target = surface.texture.create_view(&Default::default());
+                window.renderer.render(
+                    &device,
+                    &queue,
+                    &[target],
+                    &[view_projection],
+                    world,
+                    &window.panels.list(panels),
+                );
+                surface.pixels(&device, &queue)
+            };
+            assert!(drawn == render(scene_to_space, scene_to_space));
+            assert!(
+                drawn != render(Mat4::IDENTITY, scene_to_space),
+                "the space from home"
+            );
+            assert!(
+                drawn != render(scene_to_space, Mat4::IDENTITY),
+                "the panels from home"
+            );
         });
     }
 

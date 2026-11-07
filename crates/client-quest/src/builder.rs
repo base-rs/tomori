@@ -5,7 +5,7 @@
 //!
 //! An environment's client half, which [#75](https://github.com/ioquatix/tomori/issues/75) defines, will be registered here too, once it exists. Until then a build registers sceneries: what it draws for an environment that its server offers.
 use tomori_render::scenery::{Sceneries, Scenery, Target};
-use tomori_scene::environment::Environment;
+use tomori_scene::{environment::Environment, locomotion::Locomotion};
 
 /// A headset build: the sceneries it draws, and how to run it.
 #[derive(Clone, Default)]
@@ -31,6 +31,14 @@ impl Builder {
         self
     }
 
+    /// Let participants travel as `locomotion` says in a space bound to the environment `id`, while this build draws its scenery, in place of any declared before for it. Tomori's own environments declare none. See `design/locomotion.md`.
+    ///
+    /// Provisional: once environments have server sides (#75), the profile is to come from the environment's server side instead, so that everyone in a space has the same one, and this may be deprecated.
+    pub fn locomotion(mut self, id: &'static str, locomotion: Locomotion) -> Self {
+        self.sceneries.set_locomotion(id, locomotion);
+        self
+    }
+
     /// The sceneries registered so far, to register more.
     pub fn sceneries(&mut self) -> &mut Sceneries {
         &mut self.sceneries
@@ -52,6 +60,7 @@ impl Builder {
     ) {
         let (mut conversation, connection) = tomori_client_desktop::connection(overrides);
         conversation.set_drawable(self.environments());
+        conversation.set_locomotion(self.sceneries.locomotion());
         (conversation, connection)
     }
 
@@ -130,5 +139,23 @@ mod tests {
         let builder = Builder::empty().scenery("floor", tomori_render::scenery::sky);
         let (conversation, _connection) = builder.participant(crate::Overrides::default());
         assert_eq!(conversation.drawable(), builder.environments());
+    }
+
+    #[test]
+    fn a_build_declares_how_its_environments_travel() {
+        use tomori_scene::locomotion::Surface;
+        assert!(Builder::default().sceneries().locomotion().is_empty());
+        let teleport = Locomotion::teleport(vec![Surface::disc(glam::Vec3::ZERO, 5.0)]);
+        let mut builder = Builder::empty()
+            .scenery("floor", tomori_render::scenery::sky)
+            .locomotion("floor", Locomotion::fly(Vec::new(), 10.0))
+            .locomotion("floor", teleport.clone());
+        assert_eq!(
+            builder.sceneries().locomotion(),
+            [(Environment::new("floor"), teleport)]
+        );
+        let (conversation, _connection) = builder.participant(crate::Overrides::default());
+        // Outside a space, there is no travel.
+        assert_eq!(conversation.locomotion(), &Locomotion::None);
     }
 }

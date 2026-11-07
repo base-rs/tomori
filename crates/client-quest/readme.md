@@ -1,6 +1,6 @@
 # `tomori-client-quest`
 
-[Tomori](https://github.com/ioquatix/tomori)'s headset, for the Meta Quest with OpenXR, and the `tomori` library and executable that run it, its desktop modes and the spectator. The library is also what another project builds a headset of its own on, through `tomori::Builder`, registering sceneries for environments of its own without changing Tomori.
+[Tomori](https://github.com/ioquatix/tomori)'s headset, for the Meta Quest with OpenXR, and the `tomori` library and executable that run it, its desktop modes and the spectator. The library is also what another project builds a headset of its own on, through `tomori::Builder`, registering sceneries for environments of its own, and how participants travel in them, without changing Tomori.
 
 ## Usage
 
@@ -17,7 +17,16 @@ tomori --xr --server 192.168.1.10:8765       # a desktop OpenXR runtime
 
 ```rust
 fn builder() -> tomori::Builder {
-    tomori::Builder::default().scenery("observe", my_scenery)
+    tomori::Builder::default()
+        .scenery("observe", my_scenery)
+        // Teleport onto a floor 40 m across, and turn in snaps of 30°; Tomori's own environments declare none. Provisional, until environments have server sides to declare it.
+        .locomotion(
+            "observe",
+            tomori::Locomotion::teleport(vec![tomori::Surface::rectangle(
+                glam::Vec3::ZERO,
+                glam::Vec2::splat(40.0),
+            )]),
+        )
 }
 
 fn main() -> anyhow::Result<()> {

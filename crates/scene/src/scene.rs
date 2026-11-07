@@ -20,6 +20,7 @@ use crate::{
     hand_menu::{self, HandMenu, Palm},
     hands::Hand,
     interaction,
+    locomotion::{self, Rig, Travel},
     panel_anchor::PanelAnchor,
     pointing::{Pointer, Ray},
     recording::Trackers,
@@ -171,6 +172,19 @@ pub struct Frame<'a> {
     pub presence: Option<Presence>,
     /// The GitHub environment's inbox and cards, in the scene, while the space shows them.
     pub cards: Vec<controller_ui::Sheet>,
+    /// Where a teleport being aimed would land, which is drawn as a ring on the surface; see `design/locomotion.md`.
+    pub landing: Option<Vec3>,
+    /// Where the participant's room is in the space's scene, as this frame's poses were placed, so that voices are seated around where they travelled; see `design/spatial-audio.md`.
+    pub rig: Rig,
+    /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
+    pub blink: f32,
+}
+
+/// Where travel applies: the joined space, by its identifier, and its environment as drawn.
+fn place(conversation: &Conversation) -> locomotion::Place<'_> {
+    conversation
+        .joined_space()
+        .map(|(space, _)| (space.id.as_str(), conversation.environment()))
 }
 
 /// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
@@ -210,6 +224,10 @@ pub struct Step {
     panel: PanelAnchor,
     /// The GitHub environment's cards: the one carried and the one put down; see `design/github.md`.
     board: crate::board::Board,
+    /// Where the participant has travelled, in an environment that allows it, and the teleport being aimed; see `design/locomotion.md`.
+    travel: Travel,
+    /// The left stick, which travels in such a space, from the last buttons.
+    travel_stick: Vec2,
 }
 
 impl Default for Step {
@@ -236,6 +254,8 @@ impl Default for Step {
             presentation_navigation: CardNavigation::default(),
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
+            travel: Travel::default(),
+            travel_stick: Vec2::ZERO,
         }
     }
 }
@@ -253,6 +273,19 @@ impl Step {
         self.pointer.release();
         self.highlighted = None;
         self.presentation_navigation.release();
+        self.cancel_travel();
+    }
+
+    /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
+    pub fn cancel_travel(&mut self) {
+        self.travel.cancel();
+        self.travel_stick = Vec2::ZERO;
+    }
+
+    /// Where the participant's room is in the space's scene, in the space `conversation` is in: the transform the frame's poses are given in, which each platform applies to its head, eyes, controllers and hands before [`Self::update`]. Anywhere else, or in another space, the room is back home. See `design/locomotion.md`.
+    pub fn rig(&mut self, conversation: &Conversation) -> Rig {
+        self.travel
+            .settle(place(conversation), conversation.locomotion())
     }
 
     /// The participant recentred: the floating panel stands in front of them again.
@@ -287,6 +320,8 @@ impl Step {
         now: Instant,
     ) {
         let stick = buttons.left_stick;
+        // In a space whose environment allows it, the left stick travels, which the frame step does with the ray; see `design/locomotion.md`.
+        self.travel_stick = if focused { stick } else { Vec2::ZERO };
         let moving = stick.x.abs() > STICK || stick.y.abs() > STICK;
         let navigate = moving && !self.stick_latched;
         self.stick_latched = moving;
@@ -555,6 +590,26 @@ impl Step {
             && !menu_shown
             && !wrist_active
             && conversation.joined_space().is_some();
+        // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
+        let rig = self.travel.rig();
+        let travel = self.travel.update(locomotion::Input {
+            place: place(conversation),
+            locomotion: conversation.locomotion(),
+            stick: self.travel_stick,
+            ray: senses.ray,
+            head: senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
+            // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card is carried, since aiming would put the card down.
+            active: in_space
+                && scenery.reveal.is_none()
+                && scenery.environment == conversation.environment()
+                && self.board.held().is_none(),
+            dt,
+        });
+        if travel.teleported {
+            feedback.emit(feedback::Event::Choose, now);
+        }
+        // While a teleport is aimed, the ray serves only it.
+        let in_space = in_space && !travel.aiming;
         // The space's cards stand wherever it shows them; the ray and the right grip act on them only while nothing else takes them. See `design/github.md`.
         let board = self.board.update(crate::board::Input {
             cards: conversation.cards().filter(|_| !in_arrival),
@@ -599,7 +654,8 @@ impl Step {
             .as_ref()
             .map(feedback::key)
             .or_else(|| card.as_ref().map(feedback::key))
-            .or_else(|| worker.as_ref().map(feedback::key));
+            .or_else(|| worker.as_ref().map(feedback::key))
+            .or_else(|| travel.landing.map(|_| feedback::key("landing")));
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
         }
@@ -629,6 +685,15 @@ impl Step {
                     end,
                     hit: pointing.hit.is_some(),
                 })
+        } else if travel.aiming {
+            // Aiming a teleport, it ends at the landing, highlighted, or is plain and short where there is nowhere to land.
+            ray.map(|ray| crate::pointing::Beam {
+                origin: ray.origin,
+                end: travel
+                    .landing
+                    .unwrap_or_else(|| ray.at(crate::pointing::SPACE_RAY_LENGTH)),
+                hit: travel.landing.is_some(),
+            })
         } else {
             let hit = card_end.or_else(|| self.delegation_scene.hit_point());
             ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
@@ -693,6 +758,9 @@ impl Step {
             agent,
             presence,
             cards: board.sheets,
+            landing: travel.landing,
+            rig,
+            blink: travel.blink,
         }
     }
 }
@@ -916,6 +984,161 @@ mod tests {
     }
 
     #[test]
+    fn travel_waits_for_the_space_s_scenery_to_grow_in() {
+        use crate::locomotion::{Locomotion, Surface};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(
+            crate::environment::Environment::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+        )]);
+        let mut step = Step::default();
+        let now = Instant::now();
+        let senses = Senses {
+            ray: Ray::new(arrival::HOME, Vec3::new(0.0, -1.0, -1.0)),
+            ..senses()
+        };
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        conversation.apply(space(|_| {}));
+        step.buttons(
+            &press(|buttons| buttons.left_stick = Vec2::Y),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        let growing = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_ne!(
+            growing.scenery,
+            arrival_motion::Scenery {
+                environment: crate::environment::Environment::SKY,
+                reveal: None
+            }
+        );
+        assert_eq!(growing.landing, None);
+        let mut landing = None;
+        for _ in 0..400 {
+            landing = step
+                .update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                .landing;
+        }
+        // A push held from before it grew in aims nothing: the stick comes back to the middle first.
+        assert_eq!(landing, None);
+        for stick in [Vec2::ZERO, Vec2::Y] {
+            step.buttons(
+                &press(|buttons| buttons.left_stick = stick),
+                true,
+                &mut conversation,
+                &mut felt(),
+                now,
+            );
+            landing = step
+                .update(&senses, &mut conversation, &mut felt(), now, FRAME)
+                .landing;
+        }
+        assert!(landing.is_some(), "once it has grown in");
+    }
+
+    #[test]
+    fn aiming_a_teleport_takes_the_ray_from_workers_and_the_hand_menu_or_focus_cancels_it() {
+        use crate::locomotion::{Locomotion, Surface};
+        use tomori_protocol::Resource;
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(
+            crate::environment::Environment::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+        )]);
+        conversation.apply(space(|state| {
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ..senses()
+        };
+        // Travel waits for the space's scenery to grow in.
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        }
+        let worker = Vec3::from_array(
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME)
+                .stations[0]
+                .position,
+        );
+        senses.ray = Ray::new(arrival::HOME, worker - arrival::HOME);
+        let attending = |conversation: &mut Conversation| {
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            utterance.attention.clone()
+        };
+        let stick = |step: &mut Step, conversation: &mut Conversation, stick: Vec2| {
+            step.buttons(
+                &press(|buttons| buttons.left_stick = stick),
+                true,
+                conversation,
+                &mut felt(),
+                now,
+            );
+        };
+        conversation.take_actions();
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(attending(&mut conversation), [Resource::worker("ses_a")]);
+        // Aiming, the worker is no longer pointed at. It stands above the floor, so a ray at it has nowhere to land, and is drawn plain and short of it.
+        stick(&mut step, &mut conversation, Vec2::Y);
+        let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let beam = output
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert_eq!(output.landing, None);
+        assert!(!beam.hit);
+        let short = senses.ray.unwrap().at(crate::pointing::SPACE_RAY_LENGTH);
+        assert!(beam.end.distance(short) < 1e-4);
+        assert!(attending(&mut conversation).is_empty());
+        // Down at the floor, it lands; with the hand menu showing, the aim is dropped and releasing does nothing.
+        senses.ray = Ray::new(arrival::HOME, Vec3::new(0.0, -1.0, -1.0));
+        assert!(
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME)
+                .landing
+                .is_some()
+        );
+        senses.left_palm = Some(left_palm_up(0.0));
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let shown = step.update(&senses, &mut conversation, &mut feedback, now + HOLD, FRAME);
+        assert_eq!(shown.landing, None);
+        senses.left_palm = None;
+        stick(&mut step, &mut conversation, Vec2::ZERO);
+        step.update(&senses, &mut conversation, &mut feedback, now + HOLD, FRAME);
+        assert_eq!(step.rig(&conversation), Rig::default());
+        // Losing focus drops it too.
+        stick(&mut step, &mut conversation, Vec2::Y);
+        step.update(&senses, &mut conversation, &mut feedback, now + HOLD, FRAME);
+        step.blur(&mut conversation);
+        step.update(&senses, &mut conversation, &mut feedback, now + HOLD, FRAME);
+        assert_eq!(step.rig(&conversation), Rig::default());
+        // Unfocused buttons hold the stick in the middle.
+        step.buttons(
+            &press(|buttons| buttons.left_stick = Vec2::Y),
+            false,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        assert_eq!(step.travel_stick, Vec2::ZERO);
+    }
+
+    #[test]
     fn the_ray_points_at_the_nearer_of_a_card_and_a_worker_and_the_grip_carries_a_card() {
         use tomori_protocol::{Card, CardKind, Cards, Checks, Resource, ServerMessage};
         let mut conversation = lobby(ConnectionRole::Owner);
@@ -1017,6 +1240,39 @@ mod tests {
         senses.grip = Some(1.0);
         frame(&mut step, &mut conversation, &senses);
         assert_eq!(step.board.held(), Some("github://o/r/issues/1"));
+        // In an environment that allows travel, the left stick does not aim while a card is carried, which would put it down.
+        conversation.set_locomotion(vec![(
+            crate::environment::Environment::SKY,
+            crate::locomotion::Locomotion::teleport(vec![crate::locomotion::Surface::disc(
+                Vec3::ZERO,
+                20.0,
+            )]),
+        )]);
+        // Once the scenery has grown in, where travel could otherwise aim.
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        }
+        assert_eq!(step.board.held(), Some("github://o/r/issues/1"));
+        conversation.take_actions();
+        step.buttons(
+            &press(|buttons| buttons.left_stick = Vec2::Y),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(output.landing, None);
+        assert_eq!(step.board.held(), Some("github://o/r/issues/1"));
+        assert!(conversation.take_actions().is_empty(), "nothing put down");
+        step.buttons(
+            &Buttons::default(),
+            true,
+            &mut conversation,
+            &mut felt(),
+            now,
+        );
+        conversation.set_locomotion(Vec::new());
         senses.ray = Ray::new(arrival::HOME, Vec3::new(0.5, 0.0, -1.0));
         let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         let beam = output

@@ -43,11 +43,17 @@ impl Default for Instance {
 // Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm. The grid takes up to twice its lines while an environment grows through it.
 const MAX_INSTANCES: usize = AGENT_COUNT
     + 210
+    + LANDING_CUBES
     + if crate::delegation::MAX_CUBES > crate::arrival_graphics::MAX_CUBES {
         crate::delegation::MAX_CUBES
     } else {
         crate::arrival_graphics::MAX_CUBES
     };
+/// How many cubes make the ring drawn where a teleport being aimed would land.
+const LANDING_CUBES: usize = 16;
+/// The ring's radius, in metres.
+const LANDING_RADIUS: f32 = 0.3;
+
 /// The usage of attachments that live only within one eye's scene pass, cleared at its start and discarded at its end; see [`Renderer::multisampled_views`].
 const TRANSIENT: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TRANSIENT_ATTACHMENT);
@@ -111,6 +117,12 @@ pub struct Renderer {
     environment: Environment,
     /// While a space's environment grows or shrinks, the sphere it fills; the grid is drawn outside it.
     reveal: Option<crate::arrival_motion::Sphere>,
+    /// Where a teleport being aimed would land, drawn as a ring; see `design/locomotion.md`.
+    landing: Option<glam::Vec3>,
+    /// How dark the whole view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
+    blink: f32,
+    /// Darkens the whole view by `blink`, drawn last in each eye.
+    blink_pipeline: wgpu::RenderPipeline,
     /// The registered sceneries, each drawn while its environment is.
     sceneries: Vec<(Environment, Box<dyn crate::scenery::Scenery>)>,
     /// What this renderer can draw: the grid, then each scenery's environment.
@@ -299,10 +311,14 @@ impl Renderer {
             samples,
         );
         let panels = crate::ui_panel::Pipeline::new(device, format, &glyphs, samples);
+        let blink_pipeline = blink_pipeline(device, format, samples);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
             environment: Environment::MINIMAL,
             reveal: None,
+            landing: None,
+            blink: 0.0,
+            blink_pipeline,
             sceneries: sceneries.create(&crate::scenery::Target {
                 device,
                 queue,
@@ -440,6 +456,20 @@ impl Renderer {
         }
     }
 
+    /// Draw a ring at `landing`, where a teleport being aimed would land, from the next [`Self::update`], or none.
+    pub fn set_landing(&mut self, landing: Option<glam::Vec3>) {
+        self.landing = landing.filter(|landing| landing.is_finite());
+    }
+
+    /// Darken the whole view by `blink`, from 0, not at all, to 1, black, from the next [`Self::render`]: a teleport's blink. Nonsense draws nothing.
+    pub fn set_blink(&mut self, blink: f32) {
+        self.blink = if blink.is_finite() {
+            blink.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+
     pub fn update(
         &mut self,
         queue: &wgpu::Queue,
@@ -467,6 +497,9 @@ impl Renderer {
                 color: [0.08, 0.5, 0.65],
                 ..Default::default()
             });
+        }
+        if let Some(landing) = self.landing {
+            landing_ring(landing, &mut self.scene);
         }
         if let Some(position) = controller {
             self.scene.push(Instance {
@@ -673,8 +706,111 @@ impl Renderer {
                     panel.draw(&mut pass, eye);
                 }
             }
+            // A teleport's blink darkens everything, panels too, so that the view does not jump.
+            if self.blink > 0.0 {
+                let blink = f64::from(self.blink);
+                pass.set_pipeline(&self.blink_pipeline);
+                pass.set_blend_constant(wgpu::Color {
+                    r: blink,
+                    g: blink,
+                    b: blink,
+                    a: blink,
+                });
+                pass.draw(0..3, 0..1);
+            }
         }
         queue.submit([encoder.finish()])
+    }
+}
+
+/// One triangle over the whole view, black, which the blend constant mixes in: what is drawn is kept by one less the constant.
+const BLINK_SHADER: &str = r"
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+";
+
+/// The pipeline that darkens the whole view by the blend constant, over whatever was drawn, ignoring depth.
+fn blink_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    samples: u32,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("blink"),
+        source: wgpu::ShaderSource::Wgsl(BLINK_SHADER.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("blink pipeline layout"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    let darken = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::OneMinusConstant,
+        operation: wgpu::BlendOperation::Add,
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("blink pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: darken,
+                    alpha: darken,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: samples,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The ring where a teleport would land: flat on the surface at `landing`, in the hover highlight's colour.
+fn landing_ring(landing: glam::Vec3, scene: &mut Vec<Instance>) {
+    for n in 0..LANDING_CUBES {
+        let angle = n as f32 * std::f32::consts::TAU / LANDING_CUBES as f32;
+        scene.push(Instance {
+            position: [
+                landing.x + angle.cos() * LANDING_RADIUS,
+                landing.y + 0.01,
+                landing.z + angle.sin() * LANDING_RADIUS,
+            ],
+            scale: [0.04, 0.01, 0.04],
+            color: [0.45, 0.95, 1.0],
+            ..Default::default()
+        });
     }
 }
 
@@ -2669,6 +2805,122 @@ mod tests {
             })
         });
     }
+    #[test]
+    fn a_ring_is_drawn_where_a_teleport_would_land() {
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 8, 8);
+            renderer.update(&queue, &Swarm::default(), None, false);
+            let without = renderer.scene.len();
+            let landing = glam::Vec3::new(2.0, 3.0, -4.0);
+            renderer.set_landing(Some(landing));
+            renderer.update(&queue, &Swarm::default(), None, false);
+            assert_eq!(renderer.scene.len(), without + LANDING_CUBES);
+            for instance in &renderer.scene[without..] {
+                let at = glam::Vec3::from_array(instance.position);
+                assert!((at.y - landing.y - 0.01).abs() < 1e-5);
+                let across = glam::Vec2::new(at.x - landing.x, at.z - landing.z).length();
+                assert!((across - LANDING_RADIUS).abs() < 1e-5);
+            }
+            // Nonsense, or none, draws no ring.
+            renderer.set_landing(Some(glam::Vec3::NAN));
+            renderer.update(&queue, &Swarm::default(), None, false);
+            assert_eq!(renderer.scene.len(), without);
+            renderer.set_landing(None);
+            renderer.update(&queue, &Swarm::default(), None, false);
+            assert_eq!(renderer.scene.len(), without);
+        });
+    }
+
+    #[test]
+    fn a_blink_darkens_the_whole_view_to_black_and_back() {
+        const SIZE: u32 = 64;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("blink test eye"),
+                size: wgpu::Extent3d {
+                    width: SIZE,
+                    height: SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            // From standing height at home, looking at the swarm's ring on the grid.
+            let matrix = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0)
+                * Mat4::look_at_rh(glam::Vec3::new(0.0, 1.6, 1.0), CENTER, glam::Vec3::Y);
+            let capture = |renderer: &Renderer| -> Vec<u8> {
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &[],
+                );
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("blink test readback"),
+                    size: u64::from(SIZE * SIZE * 4),
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(SIZE * 4),
+                            rows_per_image: Some(SIZE),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                buffer.unmap();
+                data
+            };
+            let light = |pixels: &[u8]| -> u64 {
+                pixels
+                    .chunks(4)
+                    .map(|pixel| pixel[..3].iter().map(|&v| u64::from(v)).sum::<u64>())
+                    .sum()
+            };
+            for samples in [1, 4] {
+                let mut renderer =
+                    Renderer::with_samples(&device, &queue, format, SIZE, SIZE, samples);
+                renderer.update(&queue, &Swarm::default(), None, false);
+                let open = capture(&renderer);
+                assert!(light(&open) > 0, "something is seen");
+                renderer.set_blink(0.5);
+                let half = capture(&renderer);
+                assert!(light(&half) > 0 && light(&half) < light(&open), "{samples}");
+                // Shut, nothing is seen, not even the background.
+                renderer.set_blink(1.0);
+                assert_eq!(light(&capture(&renderer)), 0, "{samples}");
+                renderer.set_blink(2.0);
+                assert_eq!(light(&capture(&renderer)), 0, "{samples}");
+                // Open again, or given nonsense, it draws as before.
+                for open_again in [0.0, -1.0, f32::NAN] {
+                    renderer.set_blink(open_again);
+                    assert_eq!(capture(&renderer), open, "{samples} {open_again}");
+                }
+            }
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     #[test]
     fn the_grid_gives_way_inside_a_growing_environment() {
         use crate::arrival_motion::Sphere;
