@@ -8,7 +8,7 @@ use tomori_backend::Backend;
 
 use crate::command::{self, Arguments, ENGINE_STOP, Engines};
 use crate::environments::{Environment, Environments};
-use crate::{AnyBackend, Server};
+use crate::{AnyBackend, CommandOption, Server};
 
 /// Makes the backend registered under a name, from the command line.
 type Constructor = Box<dyn Fn(&Arguments) -> Result<AnyBackend, String>>;
@@ -41,6 +41,8 @@ pub struct Builder {
     /// Each backend's name and how to make it, in the order `--help` lists them.
     backends: Vec<(String, Constructor)>,
     environments: Environments,
+    /// The application's own command-line options, in the order `--help` lists them and they are applied.
+    options: Vec<CommandOption>,
     hooks: Vec<Hook>,
 }
 
@@ -50,6 +52,7 @@ impl Default for Builder {
         let builder = Self {
             backends: Vec::new(),
             environments: Environments::default(),
+            options: Vec::new(),
             hooks: Vec::new(),
         };
         #[cfg(feature = "fake")]
@@ -134,6 +137,24 @@ impl Builder {
         self.environments.as_slice()
     }
 
+    /// Add `option` to the command line, in place of one with the same flag, or else after those already added: an option of the application's own, such as an environment's configuration, which `--help` lists after Tomori's own, and which changes the server once the command line has configured it, before the hooks run. See [`CommandOption`].
+    pub fn option(mut self, option: CommandOption) -> Self {
+        match self
+            .options
+            .iter_mut()
+            .find(|added| added.flag() == option.flag())
+        {
+            Some(added) => *added = option,
+            None => self.options.push(option),
+        }
+        self
+    }
+
+    /// The application's own command-line options, in order.
+    pub(crate) fn options(&self) -> &[CommandOption] {
+        &self.options
+    }
+
     /// Change the server once the command line has configured it, and before it serves, with `hook`, such as to set a limit with one of [`Server`]'s `with_` methods. Hooks run in the order they were given. Serving replaces the server's [`Server::with_counts`] callback with the one that advertises them.
     ///
     /// ```
@@ -181,7 +202,7 @@ impl Builder {
             .iter()
             .map(|(name, _)| name.as_str())
             .collect();
-        command::usage(&names.join(", "))
+        command::usage(&names.join(", "), &self.options)
     }
 
     /// The backend registered as `name`, made as `arguments` say.
@@ -205,9 +226,9 @@ impl Builder {
         Ok(backend)
     }
 
-    /// The environments to offer and the hooks to run, once the backends are made.
-    pub(crate) fn into_parts(self) -> (Vec<Environment>, Vec<Hook>) {
-        (self.environments.into_vec(), self.hooks)
+    /// The environments to offer, the hooks to run and the options that may change the server, once the backends are made.
+    pub(crate) fn into_parts(self) -> (Vec<Environment>, Vec<Hook>, Vec<CommandOption>) {
+        (self.environments.into_vec(), self.hooks, self.options)
     }
 }
 
@@ -225,6 +246,7 @@ mod tests {
         command::parse(
             list.iter().map(|argument| argument.to_string()),
             &builder.usage(),
+            builder.options(),
         )
         .unwrap()
     }
@@ -288,7 +310,7 @@ mod tests {
         }
         let first = Environment::new("observe", "Observe").with_server_side(Idle);
         let second = Environment::new("observe", "Observe").with_server_side(Idle);
-        let (environments, _) = Server::builder()
+        let (environments, _, _) = Server::builder()
             .environment(first)
             .environment(second.clone())
             .into_parts();
@@ -304,7 +326,7 @@ mod tests {
         );
 
         // Registered again without one, it has none.
-        let (environments, _) = Server::builder()
+        let (environments, _, _) = Server::builder()
             .environment(second)
             .environment(Environment::new("observe", "Observe"))
             .into_parts();
@@ -321,16 +343,120 @@ mod tests {
     fn registered_environments_are_offered_in_order_and_replace_those_they_name() {
         // None until they are registered.
         assert!(Server::builder().into_parts().0.is_empty());
+        assert!(Server::builder().environments().is_empty());
         let observe =
             Environment::new("observe", "Observe").with_instructions("Mind the topology.");
         let grid = Environment::new(tomori_protocol::GRID, "Grid");
         let night = Environment::new("observe", "Night");
-        let (environments, _) = Server::builder()
+        let (environments, _, _) = Server::builder()
             .environment(observe)
             .environment(grid.clone())
             .environment(night.clone())
             .into_parts();
-        assert_eq!(environments, [night, grid]);
+        assert_eq!(environments, [night.clone(), grid.clone()]);
+        let builder = Server::builder().environment(grid.clone());
+        assert_eq!(builder.environments(), [grid]);
+    }
+
+    /// An option of an application's own, `--fleet NAME`, offering an environment named for the fleet, and refusing the fleet `nowhere` as it configures the server.
+    fn fleet() -> CommandOption {
+        fleet_named("NAME")
+    }
+
+    /// `--fleet`, its value named `value` in `--help`.
+    fn fleet_named(value: &str) -> CommandOption {
+        CommandOption::new(
+            "--fleet",
+            value,
+            "Offer the Observe environment, showing this fleet.\nThe fleet must exist.",
+            |value| match value {
+                "" => Err("--fleet needs a name, not \"\"".to_owned()),
+                name => Ok(name.to_owned()),
+            },
+            |server, fleet| match fleet.as_str() {
+                "nowhere" => Err("There is no fleet nowhere.".to_owned()),
+                fleet => Ok(server.with_environments([Environment::new("observe", fleet)])),
+            },
+        )
+    }
+
+    #[test]
+    fn an_applications_options_are_listed_read_and_applied_after_tomoris() {
+        let builder = Server::builder().option(fleet());
+        assert_eq!(
+            (
+                builder.options()[0].flag(),
+                builder.options()[0].value(),
+                builder.options()[0].help()
+            ),
+            (
+                "--fleet",
+                "NAME",
+                "Offer the Observe environment, showing this fleet.\nThe fleet must exist."
+            )
+        );
+        // `--help` lists it after Tomori's own, in the synopsis and among the options, each line of its help indented.
+        let usage = builder.usage();
+        assert!(usage.contains(
+            "[--max-visitors COUNT] [--state-directory PATH]\n                     [--fleet NAME]\n       tomori-server auth"
+        ));
+        assert!(usage.contains(
+            "  --fleet NAME\n                       Offer the Observe environment, showing this fleet.\n                       The fleet must exist.\n  --help               Show this help."
+        ));
+        assert!(!Server::builder().usage().contains("--fleet"));
+        // It needs its value, which it reads as the command line is read, and the last given is used.
+        let parse = |list: &[&str]| {
+            command::parse(
+                list.iter().map(|argument| argument.to_string()),
+                &builder.usage(),
+                builder.options(),
+            )
+        };
+        assert_eq!(
+            parse(&["--fleet"]).err().as_deref(),
+            Some("--fleet needs NAME")
+        );
+        assert_eq!(
+            parse(&["--fleet", ""]).err().as_deref(),
+            Some("--fleet needs a name, not \"\"")
+        );
+        // It changes the server once the command line has configured it, and its failure stops the server.
+        let directory = directory("options");
+        let root = directory.to_str().unwrap();
+        let local = [
+            "--auth",
+            "open",
+            "--state-directory",
+            root,
+            "--workspace-root",
+            root,
+        ];
+        let configure = |extra: &[&str]| {
+            let builder = Server::builder().option(fleet());
+            let list: Vec<&str> = local.iter().chain(extra).copied().collect();
+            let parsed = arguments(&builder, &list);
+            let mut engines = Engines::default();
+            let configured = command::configure(builder, &parsed, None, &mut engines)
+                .map(|(server, _)| server.environment_labels());
+            assert!(engines.stop(Instant::now()));
+            configured
+        };
+        assert_eq!(
+            configure(&["--fleet", "alpha", "--fleet", "beta"]),
+            Ok(vec!["beta".to_owned()])
+        );
+        assert_eq!(configure(&[]), Ok(Vec::new()));
+        assert_eq!(
+            configure(&["--fleet", "nowhere"]).err().as_deref(),
+            Some("There is no fleet nowhere.")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+        // Added again under its flag, an option replaces the one added before, in its place.
+        let replaced = Server::builder()
+            .option(fleet())
+            .option(fleet_named("FLEET"));
+        assert_eq!(replaced.options().len(), 1);
+        assert_eq!(replaced.options()[0].value(), "FLEET");
     }
 
     #[test]

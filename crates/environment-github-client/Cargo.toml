@@ -1,0 +1,15 @@
+[package]
+name = "tomori-environment-github-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The client half of Tomori's GitHub environment prototype: its presentation, over the grid, where the shared scene draws its cards"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "github", "environment", "xr"]
+categories = ["game-development"]
+
+[dependencies]
+tomori-environment-github = { version = "0.2.0", path = "../environment-github" }
+tomori-render = { version = "0.2.0", path = "../render" }

@@ -65,7 +65,7 @@ pub struct Server {
     restoring: std::sync::Mutex<Vec<Restore>>,
     /// Whether the counts include how many spaces need attention; see [`Self::with_attention_advertised`].
     advertise_attention: bool,
-    /// Where the cards come from, for the spaces that show them; see [`Self::with_github`].
+    /// Where the cards come from, for the spaces that show them; see [`Self::with_cards`].
     cards: Option<Arc<dyn crate::cards::CardSource>>,
 }
 
@@ -256,34 +256,18 @@ impl Server {
         self
     }
 
-    /// Offer the GitHub environment, a prototype, whose spaces show `github`'s open issues and pull requests as cards
-    /// that participants lay out. The server reads them, read-only, with the token it holds, about once a minute while
-    /// someone watches them, and never sends the token to clients, the agent or the logs. Call it after
-    /// [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
-    pub fn with_github(self, github: crate::github::GitHub) -> Self {
-        self.with_cards(
-            crate::github::ENVIRONMENT,
-            crate::github::VERSION,
-            "GitHub",
-            Arc::new(github),
-        )
-    }
-
-    /// Offer the environment `id` at protocol `version`, labelled `label`, whose spaces show the cards `source` reads.
-    pub(crate) fn with_cards(
+    /// Offer `environment`, after those offered before, whose spaces show the cards `source` reads, such as the GitHub environment prototype's, which `tomori-environment-github-server` offers through this. The server reads them, with whatever credential `source` holds, at once when someone first watches them and then about once a minute while someone does, waiting for the source's rate limit when it is nearly used up and backing off after failures, and never sends them to visitors. Each space keeps where its participants put them. Call it after [`Self::with_environments`], which replaces the environments offered. See `design/github.md`.
+    pub fn with_cards(
         mut self,
-        id: &str,
-        version: u32,
-        label: &str,
+        environment: Environment,
         source: Arc<dyn crate::cards::CardSource>,
     ) -> Self {
-        let name = source.source();
-        self.hub.offer_environment(
-            Environment::new(id, label)
-                .with_version(version)
-                .with_instructions(crate::github::instructions(&name)),
-        );
-        self.hub.set_board(crate::cards::Board::new(id, name));
+        self.hub.set_board(crate::cards::Board::new(
+            environment.id(),
+            source.source(),
+            source.service(),
+        ));
+        self.hub.offer_environment(environment);
         self.cards = Some(source);
         self
     }
@@ -292,6 +276,15 @@ impl Server {
     #[cfg(test)]
     pub(crate) fn environments(&self) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.hub.environment_info()
+    }
+
+    /// The labels of the environments offered, in order.
+    #[cfg(test)]
+    pub(crate) fn environment_labels(&self) -> Vec<String> {
+        self.environments()
+            .into_iter()
+            .map(|environment| environment.label)
+            .collect()
     }
 
     /// Offer `environments` unless some are offered already, as a test server does.
@@ -1889,6 +1882,10 @@ mod tests {
             "o/r".to_owned()
         }
 
+        fn service(&self) -> String {
+            "GitHub".to_owned()
+        }
+
         fn fetch(&self) -> Result<crate::cards::Fetched, crate::cards::Failure> {
             if let Some(gate) = &self.gate {
                 let _ = gate.lock().unwrap().recv();
@@ -1964,12 +1961,7 @@ mod tests {
 
     /// A server showing `source`'s cards, with an owner watching them in a space that shows them.
     fn server_with_watcher(source: Arc<dyn crate::cards::CardSource>) -> Server {
-        let server = server().with_cards(
-            crate::github::ENVIRONMENT,
-            crate::github::VERSION,
-            "GitHub",
-            source,
-        );
+        let server = server().with_cards(Environment::new("github", "GitHub"), source);
         let (commands, _receiver) = async_channel::unbounded();
         let request = crate::hub::CreateRequest {
             title: "Cards".to_owned(),
@@ -2021,12 +2013,8 @@ mod tests {
         let live = Cancellation::new();
         // A server without cards reads none.
         block_on(server().refresh_cards(&scheduler, &live));
-        let server = server().with_cards(
-            crate::github::ENVIRONMENT,
-            crate::github::VERSION,
-            "GitHub",
-            scripted(Vec::new()),
-        );
+        let server =
+            server().with_cards(Environment::new("github", "GitHub"), scripted(Vec::new()));
         assert!(
             server
                 .environments()

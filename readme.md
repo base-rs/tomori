@@ -332,6 +332,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-assets`](crates/assets/readme.md): environments' models, loaded at runtime from content-addressed `.glb` assets, read as untrusted input, and drawn skinned on the GPU.
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-environment-sky`](crates/environment-sky/readme.md) and [`tomori-environment-sky-client`](crates/environment-sky-client/readme.md): the Sky environment's identity, which its server and client halves share, and its renderer, which Tomori's own app and spectator register.
+- [`tomori-environment-github`](crates/environment-github/readme.md), [`tomori-environment-github-server`](crates/environment-github-server/readme.md) and [`tomori-environment-github-client`](crates/environment-github-client/readme.md): the GitHub prototype's identity, its server half, with the GitHub client, the token and `--github-repository`, and its client half.
 - [`tomori-server`](crates/server/readme.md): the server library, which another project builds a server of its own on, registering its own backends and environments through `Server::builder()`. [examples/server](examples/server/readme.md) is an example.
 - [`tomori-server-app`](crates/server-app/readme.md): Tomori's own server, the `tomori-server` executable, installed with `cargo install tomori-server-app`, which registers Tomori's own environments on the library's builder.
 - [`tomori-text`](crates/text/readme.md): the bundled fonts and the signed-distance-field glyph atlas that text is drawn from.
@@ -368,14 +369,14 @@ A release APK cannot update a locally built one, or the other way round: they ar
 
 No Tomori crate has been published yet. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
 
-1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment`, `tomori-assets`, `tomori-environment-sky` and `tomori-text`;
+1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment`, `tomori-assets`, `tomori-environment-sky`, `tomori-environment-github` and `tomori-text`;
 2. `tomori-discovery`, `tomori-speech` and `tomori-backend-opencode`;
 3. `tomori-client`;
 4. `tomori-server`;
-5. `tomori-server-app`;
+5. `tomori-environment-github-server`, then `tomori-server-app`;
 6. `tomori-scene`, which depends on `tomori-server` for the test server behind its `testing` feature;
 7. `tomori-render`;
-8. `tomori-environment-sky-client`;
+8. `tomori-environment-sky-client` and `tomori-environment-github-client`;
 9. `tomori-client-desktop`;
 10. `tomori-client-spectator`;
 11. `tomori-client-quest`.

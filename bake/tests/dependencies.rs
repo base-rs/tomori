@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate, or builds one with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them.
+//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate or on an app, in any kind of dependency, development dependencies included, or builds an environment's crate with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them.
 use std::path::Path;
 use std::process::Command;
 
@@ -174,7 +174,7 @@ fn no_core_crate_depends_on_an_environment_or_an_app() {
             let development = dependency["kind"].as_str() == Some("dev");
             match role(dependency_name) {
                 Role::Environment(_) => {
-                    // Only Tomori's own app may name an environment, optionally, through `app` alone, and never as a development dependency.
+                    // Only Tomori's own app may name an environment, optionally, through `app` alone, and never as a development dependency, as the apps' agreement is tested in `tomori-server-app`.
                     let through_app = dependency["optional"].as_bool() == Some(true)
                         && !development
                         && app.contains(&dependency_name)
@@ -184,10 +184,8 @@ fn no_core_crate_depends_on_an_environment_or_an_app() {
                         "{name} depends on {dependency_name}; register environments in an app, not in the core"
                     );
                 }
-                // Tests may run Tomori's own server program, to check that Tomori's own apps agree with it.
-                Role::App => assert!(
-                    development,
-                    "{name} depends on {dependency_name}, which registers environments"
+                Role::App => panic!(
+                    "{name} depends on {dependency_name}, which registers environments; test the apps in the app"
                 ),
                 Role::Core | Role::Exempt => {}
             }
@@ -247,13 +245,13 @@ fn without_their_app_no_core_crate_builds_an_environment() {
             continue;
         }
         checked += 1;
-        // Every feature but `app`, so that a core crate reaching an environment through another crate, such as another core crate's own `app`, fails too.
+        // Every feature but `app`, and its development dependencies too, so that a core crate reaching an environment through another crate, such as another core crate's own `app`, fails too.
         let features = features_without_app(&package).join(",");
         let mut options = vec!["--no-default-features"];
         if !features.is_empty() {
             options.extend_from_slice(&["--features", &features]);
         }
-        let environments: Vec<String> = tree(name, "normal,build", &options)
+        let environments: Vec<String> = tree(name, "normal,build,dev", &options)
             .into_iter()
             .filter(|dependency| matches!(role(dependency), Role::Environment(_)))
             .collect();

@@ -11,10 +11,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use tomori_environment_github_server::{GitHub, Token};
 use tomori_protocol::{Card, Cards, ClientMessage, Pose, Resource, ServerMessage, SpaceState};
 use tomori_security::Grant;
 use tomori_server::fake::FAKE_BACKEND_NAME;
-use tomori_server::github::{GitHub, Token};
 use tomori_server::kept::SpaceStore;
 use tomori_server::test_support::{TestClient, TestServer, eventually};
 
@@ -161,7 +161,7 @@ impl Drop for State {
 fn start(github: GitHub, state: &State) -> TestServer {
     let store = Arc::new(SpaceStore::open(&state.0).expect("the spaces open"));
     TestServer::with_tokens(true, move |server| {
-        server.with_github(github).with_kept_spaces(store)
+        github.offer(server).with_kept_spaces(store)
     })
 }
 

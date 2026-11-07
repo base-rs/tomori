@@ -1056,7 +1056,7 @@ impl SpaceModel {
             tomori_protocol::Resource::Card { card, .. }
                 if card.len() <= limits::IDENTIFIER_BYTES =>
             {
-                let description = cards?.describe(card, crate::github::unix_now())?;
+                let description = cards?.describe(card, crate::cards::unix_now())?;
                 Some(Attended(Resolved::Card {
                     id: card.clone(),
                     description,
@@ -2534,7 +2534,7 @@ mod tests {
                 tomori_backend::WorkerState::Running,
             )],
         });
-        let mut board = crate::cards::Board::new("github", "o/r");
+        let mut board = crate::cards::Board::new("github", "o/r", "GitHub");
         board.fetched(
             Ok(crate::cards::Fetched {
                 cards: vec![crate::cards::tests::card(
