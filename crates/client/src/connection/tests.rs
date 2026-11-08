@@ -2222,7 +2222,7 @@ fn a_catch_up_nobody_asked_for_is_cued_once() {
         heard(&peer, speech(true), connection, session),
         [Earcon::CatchingUp]
     );
-    assert!(heard(&peer, ServerMessage::Left, connection, session).is_empty());
+    assert!(heard(&peer, ServerMessage::LEFT, connection, session).is_empty());
     // A replay asked for is not cued, until it is stopped. Each is asked for before the server answers.
     session.push(Action::Send(ClientMessage::Replay { message: None }));
     connection.poll(true, session);
@@ -2342,7 +2342,7 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
     // What was placed can be read back, as the player was given it.
     assert_eq!(connection.placed().sources, [(2, [1.0; 3]), (3, [1.0; 3])]);
     assert!(connection.placed().mono && connection.placed().listener.is_none());
-    peer.say(ServerMessage::Left, &mut connection, &mut session);
+    peer.say(ServerMessage::LEFT, &mut connection, &mut session);
     assert_eq!(placed(&mut connection), (vec![2, 3], vec![], false));
 }
 

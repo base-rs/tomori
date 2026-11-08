@@ -884,6 +884,29 @@ pub async fn delete_instruction<'scope>(
     Ok(())
 }
 
+/// `DELETE /api/session/:id`: delete a session and its child sessions, which OpenCode answers with no content.
+pub async fn delete_session<'scope>(
+    client: &Client<'scope>,
+    resolved: &Resolved,
+    session_id: &str,
+    cancellation: &Cancellation,
+) -> Result<(), Failure> {
+    let request = Request::new(
+        Method::DELETE,
+        Path::from(format!("/api/session/{}", urlencoding(session_id))),
+        EmptyBody,
+    );
+    let response = exchange(
+        client,
+        request,
+        resolved.authorization_header().as_deref(),
+        cancellation,
+    )
+    .await?;
+    read_json(response, cancellation).await?;
+    Ok(())
+}
+
 /// `POST /api/session/:id/interrupt`: stop the running turn.
 pub async fn interrupt<'scope>(
     client: &Client<'scope>,
@@ -1508,6 +1531,10 @@ pub(crate) mod tests {
                 busy
             );
             assert_eq!(
+                failed(delete_session(client, resolved, "s1", cancellation).await),
+                busy
+            );
+            assert_eq!(
                 failed(open_permissions(client, resolved, "s1", cancellation).await),
                 busy
             );
@@ -2069,6 +2096,10 @@ pub(crate) mod tests {
                 );
                 assert_eq!(
                     failed(interrupt(client, resolved, "s1", cancellation).await).0,
+                    None
+                );
+                assert_eq!(
+                    failed(delete_session(client, resolved, "s1", cancellation).await).0,
                     None
                 );
                 assert_eq!(

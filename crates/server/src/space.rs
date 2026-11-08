@@ -1479,6 +1479,9 @@ impl SpaceModel {
             projection: false,
             // Set by the hub, which knows the board.
             cards: false,
+            // Set by the hub, which knows the backends.
+            deletes: false,
+            deletes_session: false,
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]

@@ -1978,7 +1978,7 @@ fn participants_move_between_spaces_and_the_lobby() {
     bob.space(|state| state.participants.len() == 2);
 
     ada.send(&ClientMessage::Leave);
-    ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    ada.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
     let spaces = ada.wait_for(|message| match message {
         ServerMessage::Spaces { spaces } => Some(spaces.clone()),
         _ => None,
@@ -2089,7 +2089,7 @@ fn leaving_right_after_hello_overrides_the_rejoin() {
     let mut ada = TestClient::open(server.address);
     ada.hello("ada", "Ada");
     ada.send(&ClientMessage::Leave);
-    ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    ada.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
     let spaces = ada.wait_for(|message| match message {
         ServerMessage::Spaces { spaces } => Some(spaces.clone()),
         _ => None,
@@ -2110,7 +2110,7 @@ fn leaving_right_after_hello_overrides_the_rejoin() {
     // Leaving while in the lobby is harmless.
     let mut carol = server.connect("carol", "Carol");
     carol.send(&ClientMessage::Leave);
-    carol.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    carol.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
     carol.wait_for(|message| match message {
         ServerMessage::Spaces { .. } => Some(()),
         ServerMessage::Error { error, .. } => panic!("leaving the lobby failed: {error}"),

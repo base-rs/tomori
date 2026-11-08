@@ -252,6 +252,8 @@ pub struct Conversation {
     next_instructions: Option<String>,
     /// Shown in the lobby after a space you were in or joining has gone, until dismissed with B or another choice.
     ended: Option<String>,
+    /// The title of the space this owner asked to delete, and whether its session too, until the server says what became of them. See `design/spaces.md`.
+    deleting: Option<(String, bool)>,
     /// Which list the lobby shows: the spaces, or one of the creation rings.
     step: LobbyStep,
     /// The selection within the open creation ring.
@@ -412,6 +414,7 @@ impl Conversation {
             microphone_waiting: false,
             next_instructions: None,
             ended: None,
+            deleting: None,
             step: LobbyStep::Spaces,
             menu: 0,
             backends: Vec::new(),
@@ -856,15 +859,30 @@ impl Conversation {
                     self.error = Some("Too late to show those sessions.".into());
                 }
             }
-            ServerMessage::Left => {
+            ServerMessage::Left { deleted } => {
                 let requested = std::mem::take(&mut self.leaving);
                 if self.mode != Mode::Servers {
+                    // The lobby says why, for a space deleted while this participant was in it.
+                    if let Some(deleted) = &deleted {
+                        self.ended = Some(self.deleted(deleted));
+                    }
                     self.close_space();
                     self.mode = Mode::Lobby;
-                    // Leaving on request is followed by a listing; otherwise ask for one.
-                    if !requested {
+                    // Leaving on request, or a deletion, is followed by a listing; otherwise ask for one.
+                    if !requested && deleted.is_none() {
                         self.list();
                     }
+                }
+            }
+            // What became of the session this owner asked to delete with its space.
+            ServerMessage::SessionDeleted { error } => {
+                if let Some((title, true)) = self.deleting.take() {
+                    self.ended = Some(match error {
+                        None => format!("You deleted {title} and its agent session."),
+                        Some(error) => {
+                            format!("You deleted {title}, but its agent session was kept: {error}")
+                        }
+                    });
                 }
             }
             ServerMessage::Error { error, space } => {
@@ -897,6 +915,10 @@ impl Conversation {
                     if self.mode == Mode::Lobby {
                         // A join refused without naming the space is not taken as the space being gone, but it is no longer awaited.
                         self.joining = None;
+                    }
+                    // A deletion refused leaves the space as it was, so no later one is taken for this owner's.
+                    if self.mode == Mode::Space {
+                        self.deleting = None;
                     }
                     self.error = Some(error);
                 }
@@ -1347,6 +1369,8 @@ impl Conversation {
                 walls: self
                     .manages_walls()
                     .then(|| self.nearest_added_wall().is_some()),
+                deletion: (self.role == ConnectionRole::Owner && space.deletes)
+                    .then_some(space.deletes_session),
             }),
             people: space
                 .map(|space| {
@@ -1470,6 +1494,55 @@ impl Conversation {
         self.notice = Some(format!("Changing the environment to {name} for everyone."));
     }
 
+    /// Delete the joined space for everyone in it, and its agent session too if `session`, as an owner, once the hand menu has asked. Only on a server that deletes spaces, and the session only where it can be; the server returns everyone to the lobby, saying who deleted it. See `design/spaces.md`.
+    /// Returns whether it asked; if not, the notice says why.
+    pub fn delete_space(&mut self, session: bool) -> bool {
+        if self.role != ConnectionRole::Owner {
+            self.notice = Some("Only owners can delete a space.".into());
+            return false;
+        }
+        let in_space = self.mode == Mode::Space;
+        let Some(space) = self.space.as_ref().filter(|_| in_space) else {
+            self.notice = Some("Join a space first.".into());
+            return false;
+        };
+        if !space.deletes || (session && !space.deletes_session) {
+            self.notice = Some(if space.deletes {
+                "This space's agent session cannot be deleted from here.".into()
+            } else {
+                "This server does not delete spaces.".into()
+            });
+            return false;
+        }
+        let (id, title) = (space.id.clone(), space.title.clone());
+        // The lobby says what became of it, once the server has deleted it.
+        self.deleting = Some((title, session));
+        self.send(ClientMessage::DeleteSpace { space: id, session })
+    }
+
+    /// What the lobby says of the joined space, deleted as `deleted` says: by this owner, as they asked, or by someone else.
+    fn deleted(&mut self, deleted: &tomori_protocol::SpaceDeletion) -> String {
+        let title = self
+            .space
+            .as_ref()
+            .map_or_else(|| "The space".to_owned(), |space| space.title.clone());
+        match self.deleting.take() {
+            // The session's fate follows.
+            Some((asked, true)) if deleted.session => {
+                self.deleting = Some((asked, true));
+                format!("You deleted {title}; deleting its agent session.")
+            }
+            Some(_) => format!("You deleted {title}."),
+            None if deleted.session => {
+                format!(
+                    "{title} was deleted by {}, with its agent session.",
+                    deleted.by
+                )
+            }
+            None => format!("{title} was deleted by {}.", deleted.by),
+        }
+    }
+
     /// Act on a choice made in the hand menu.
     pub fn choose_menu(&mut self, choice: crate::hand_menu::Choice) {
         match choice {
@@ -1497,6 +1570,9 @@ impl Conversation {
             crate::hand_menu::Choice::AddWall => self.add_wall(),
             crate::hand_menu::Choice::RemoveWall => self.remove_wall(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
+            crate::hand_menu::Choice::Delete { session } => {
+                self.delete_space(session);
+            }
             crate::hand_menu::Choice::Leave => {}
             crate::hand_menu::Choice::Sounds => {
                 self.change_feedback(Some(self.feedback.sounds.next()), None)
@@ -5052,7 +5128,7 @@ mod tests {
         // A space joined on request is not joined again.
         conversation.back();
         conversation.take_actions();
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         listed(&mut conversation, vec![summary(SPACE, "Tomori")]);
         conversation.accept();
         conversation.take_actions();
@@ -5552,7 +5628,7 @@ mod tests {
             }]
         );
         // Knocks belong to the space, and to participants.
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(conversation.knocks().is_empty());
         let mut visitor = connected_securely(ConnectionRole::Visitor, certificate);
         visitor.apply(Event::Message(ServerMessage::Knocks {
@@ -6239,12 +6315,12 @@ mod tests {
         hold_b(&mut conversation);
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert_eq!(conversation.environment(), Environment::MINIMAL);
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert_eq!(conversation.environment(), Environment::MINIMAL);
         // Returning to the servers keeps the grid.
         conversation.apply(space(|_| {}));
         assert_eq!(conversation.environment(), crate::test_support::SKY);
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         conversation.back();
         assert_eq!(conversation.mode(), Mode::Servers);
         assert_eq!(conversation.environment(), Environment::MINIMAL);
@@ -7150,7 +7226,7 @@ mod tests {
         // Leaving the space stops waiting for the name.
         let mut conversation = naming();
         hold_b(&mut conversation);
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(!conversation.menu_model().naming);
         // Watching as a visitor, who cannot record, nothing offers to say it.
         let mut conversation = naming();
@@ -7403,7 +7479,7 @@ mod tests {
         assert_eq!(conversation.mode(), Mode::Lobby);
         // Leaving keeps the client from asking for the space again on the next reconnect; the server lists spaces after it.
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert!(conversation.take_actions().is_empty());
         // The lobby says the space has ended, rather than showing the server's error, and B dismisses it before it leaves the server.
@@ -7428,7 +7504,7 @@ mod tests {
         let mut conversation = joined(|_| {});
         conversation.apply(connected());
         conversation.apply(refused(SPACE));
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(conversation.text().contains("B dismiss"));
         conversation.apply(Event::State(ConnectionState::Connecting { attempt: 2 }));
         let text = conversation.text();
@@ -7524,7 +7600,7 @@ mod tests {
         assert_eq!(conversation.mode(), Mode::Lobby);
         conversation.apply(space(|_| {}));
         assert_eq!(conversation.mode(), Mode::Lobby);
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         // Leaving is followed by a listing, so none is requested.
         assert!(conversation.take_actions().is_empty());
         conversation.apply(space(|_| {}));
@@ -7534,7 +7610,7 @@ mod tests {
     #[test]
     fn being_left_by_the_server_returns_to_the_lobby_and_lists() {
         let mut conversation = joined(|_| {});
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert_eq!(conversation.mode(), Mode::Lobby);
         assert_eq!(sent(&mut conversation), [ClientMessage::ListSpaces]);
     }
@@ -8074,7 +8150,7 @@ mod tests {
         assert_eq!(sent(&mut conversation), [ClientMessage::WatchCards]);
         conversation.apply(cards(SPACE));
         // Leaving forgets them.
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert_eq!(conversation.cards(), None);
     }
 
@@ -8874,6 +8950,175 @@ mod tests {
         conversation.choose_menu(crate::hand_menu::Choice::Leave);
         assert_eq!(sent(&mut conversation), [ClientMessage::Leave]);
         assert!(conversation.joined_space().is_none());
+    }
+
+    /// The server's word that the space was deleted by `by`, with its session if `session`.
+    fn deleted_by(by: &str, session: bool) -> Event {
+        Event::Message(ServerMessage::Left {
+            deleted: Some(tomori_protocol::SpaceDeletion {
+                by: by.into(),
+                session,
+            }),
+        })
+    }
+
+    #[test]
+    fn an_owner_deletes_the_space_from_the_menu_and_the_lobby_says_so() {
+        let deletes = |space: &mut SpaceState| {
+            space.deletes = true;
+            space.deletes_session = true;
+        };
+        let mut conversation = joined(deletes);
+        assert_eq!(
+            conversation.menu_model().space.unwrap().deletion,
+            Some(true)
+        );
+        conversation.choose_menu(crate::hand_menu::Choice::Delete { session: false });
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::DeleteSpace {
+                space: SPACE.into(),
+                session: false,
+            }]
+        );
+        // Still in the space until the server has deleted it.
+        assert!(conversation.joined_space().is_some());
+        conversation.apply(deleted_by("Ada", false));
+        assert!(conversation.joined_space().is_none());
+        assert_eq!(conversation.ended.as_deref(), Some("You deleted Tomori."));
+        // The listing that follows comes unasked.
+        assert!(sent(&mut conversation).is_empty());
+
+        // With its session, the lobby says the session is being deleted, and then what became of it.
+        for (error, said) in [
+            (None, "You deleted Tomori and its agent session."),
+            (
+                Some("the agent is unreachable"),
+                "You deleted Tomori, but its agent session was kept: the agent is unreachable",
+            ),
+        ] {
+            let mut conversation = joined(deletes);
+            conversation.choose_menu(crate::hand_menu::Choice::Delete { session: true });
+            assert_eq!(
+                sent(&mut conversation),
+                [ClientMessage::DeleteSpace {
+                    space: SPACE.into(),
+                    session: true,
+                }]
+            );
+            conversation.apply(deleted_by("Ada", true));
+            assert_eq!(
+                conversation.ended.as_deref(),
+                Some("You deleted Tomori; deleting its agent session.")
+            );
+            conversation.apply(Event::Message(ServerMessage::SessionDeleted {
+                error: error.map(str::to_owned),
+            }));
+            assert_eq!(conversation.ended.as_deref(), Some(said));
+            // Said once: a stray answer later changes nothing.
+            conversation.apply(Event::Message(ServerMessage::SessionDeleted {
+                error: None,
+            }));
+            assert_eq!(conversation.ended.as_deref(), Some(said));
+        }
+
+        // A deletion the server refuses leaves the space as it was, and a later one by someone else is theirs.
+        let mut conversation = joined(deletes);
+        conversation.choose_menu(crate::hand_menu::Choice::Delete { session: true });
+        conversation.apply(Event::Message(ServerMessage::Error {
+            error: "Its agent session is bound to another space too, so nothing was deleted."
+                .into(),
+            space: None,
+        }));
+        assert!(conversation.joined_space().is_some());
+        conversation.apply(deleted_by("Bob", false));
+        assert_eq!(
+            conversation.ended.as_deref(),
+            Some("Tomori was deleted by Bob.")
+        );
+    }
+
+    #[test]
+    fn a_space_deleted_by_someone_else_returns_everyone_to_the_lobby_saying_who() {
+        let mut conversation = joined(|_| {});
+        conversation.apply(deleted_by("Bob", false));
+        assert!(conversation.joined_space().is_none());
+        assert_eq!(
+            conversation.ended.as_deref(),
+            Some("Tomori was deleted by Bob.")
+        );
+        assert!(
+            conversation
+                .lobby_text()
+                .iter()
+                .any(|line| line.contains("Tomori was deleted by Bob."))
+        );
+        let mut conversation = joined(|_| {});
+        conversation.apply(deleted_by("Bob", true));
+        assert_eq!(
+            conversation.ended.as_deref(),
+            Some("Tomori was deleted by Bob, with its agent session.")
+        );
+        // An answer about a session this participant did not ask to delete says nothing.
+        conversation.apply(Event::Message(ServerMessage::SessionDeleted {
+            error: None,
+        }));
+        assert_eq!(
+            conversation.ended.as_deref(),
+            Some("Tomori was deleted by Bob, with its agent session.")
+        );
+        // In the lobby, a late one names no space; on the server list, a stray one changes nothing.
+        let mut conversation = joined(|_| {});
+        conversation.choose_menu(crate::hand_menu::Choice::Leave);
+        conversation.apply(deleted_by("Bob", false));
+        assert_eq!(
+            conversation.ended.as_deref(),
+            Some("The space was deleted by Bob.")
+        );
+        let mut conversation = crate::test_support::conversation("Ada");
+        conversation.apply(deleted_by("Bob", false));
+        assert!(conversation.ended.is_none());
+    }
+
+    #[test]
+    fn only_an_owner_deletes_and_only_what_the_server_deletes() {
+        // A collaborator is offered nothing, and is refused without asking the server.
+        let mut conversation = joined(|space| space.deletes = true);
+        conversation.role = ConnectionRole::Collaborator;
+        assert_eq!(conversation.menu_model().space.unwrap().deletion, None);
+        conversation.choose_menu(crate::hand_menu::Choice::Delete { session: false });
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Only owners can delete a space.")
+        );
+        // An owner on an older server is offered nothing either.
+        let mut conversation = joined(|_| {});
+        assert_eq!(conversation.menu_model().space.unwrap().deletion, None);
+        conversation.choose_menu(crate::hand_menu::Choice::Delete { session: false });
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("This server does not delete spaces.")
+        );
+        // Nor the session, where its backend does not delete sessions.
+        let mut conversation = joined(|space| space.deletes = true);
+        assert_eq!(
+            conversation.menu_model().space.unwrap().deletion,
+            Some(false)
+        );
+        conversation.choose_menu(crate::hand_menu::Choice::Delete { session: true });
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("This space's agent session cannot be deleted from here.")
+        );
+        // Outside a space, there is nothing to delete.
+        conversation.choose_menu(crate::hand_menu::Choice::Leave);
+        sent(&mut conversation);
+        conversation.choose_menu(crate::hand_menu::Choice::Delete { session: false });
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(conversation.notice.as_deref(), Some("Join a space first."));
     }
 
     #[test]
@@ -9705,7 +9950,7 @@ mod tests {
             conversation.apply(connected());
             assert!(sent(&mut conversation).is_empty());
             assert_eq!(conversation.mode(), Mode::Servers);
-            conversation.apply(Event::Message(ServerMessage::Left));
+            conversation.apply(Event::Message(ServerMessage::LEFT));
             assert!(sent(&mut conversation).is_empty());
             assert_eq!(conversation.mode(), Mode::Servers);
         }
@@ -9864,7 +10109,7 @@ mod tests {
             assert_eq!(conversation.recording_phase(Instant::now()), sent_nowhere);
             // Nor once the space is left.
             hold_b(&mut conversation);
-            conversation.apply(Event::Message(ServerMessage::Left));
+            conversation.apply(Event::Message(ServerMessage::LEFT));
             assert_eq!(conversation.mode(), Mode::Lobby);
             assert_eq!(conversation.recording_phase(Instant::now()), sent_nowhere);
         }
@@ -10003,7 +10248,7 @@ mod tests {
             );
             let mut conversation = joined();
             conversation.leaving = true;
-            conversation.apply(Event::Message(ServerMessage::Left));
+            conversation.apply(Event::Message(ServerMessage::LEFT));
             assert_eq!(conversation.mode, Mode::Lobby);
             assert!(conversation.take_actions().is_empty());
         }
@@ -10858,7 +11103,7 @@ mod tests {
         assert!(!conversation.environment_intent("garden", 1, payload(3)));
         conversation.apply(role(ConnectionRole::Owner));
         // Leaving the space forgets its state; outside one there is nothing to take or ask.
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         conversation.apply(event(4));
         conversation.apply(state("garden", 1, 5));
         assert!(conversation.environment_updates("garden", 1).is_empty());
@@ -10965,7 +11210,7 @@ mod tests {
         assert!(conversation.projection().is_none());
         conversation.apply(space(|space| space.projection = true));
         assert!(conversation.projection().is_some());
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(conversation.projection.is_none());
     }
 

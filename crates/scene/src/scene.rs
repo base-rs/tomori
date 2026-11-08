@@ -1350,7 +1350,7 @@ mod tests {
             Action::Send(ClientMessage::EnvironmentIntent { .. })
         )));
         // Leaving, it is gone; joining again, it is made anew.
-        conversation.apply(Event::Message(ServerMessage::Left));
+        conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(
             step.update(&senses, &mut conversation, &mut feedback, now, FRAME)
                 .environment

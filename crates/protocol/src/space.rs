@@ -225,6 +225,14 @@ pub struct SpaceState {
     /// a client sends none of them. See `design/projection.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub projection: bool,
+    /// Whether the server accepts [`crate::ClientMessage::DeleteSpace`] from an owner in the space. False from older
+    /// servers; a client offers deleting the space only when this is set. See `design/spaces.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deletes: bool,
+    /// Whether deleting the space can delete its agent session too, as its backend can. A client offers it only when
+    /// this is set, as well as [`Self::deletes`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deletes_session: bool,
 }
 
 /// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and

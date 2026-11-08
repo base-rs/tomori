@@ -25,7 +25,7 @@ pub use frame::{Frame, FrameDecoder, FrameError, FrameKind, MAX_FRAME_BYTES};
 pub use keepalive::Keepalive;
 pub use message::{
     ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, NO_SPEECH, Pose,
-    Resource, ServerMessage, TranscriptPart, TranscriptStage,
+    Resource, ServerMessage, SpaceDeletion, TranscriptPart, TranscriptStage,
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use projection::{

@@ -902,12 +902,12 @@ mod tests {
     #[test]
     fn an_announcement_other_than_speech_is_played_again_as_it_was() {
         let mut retention = Retention::default();
-        retention.record(1, Item::Announce(ServerMessage::Left));
+        retention.record(1, Item::Announce(ServerMessage::LEFT));
         retention.record(1, frame(1));
         retention.joined("ada", Some(Engagement::Engaged));
         let mut deliveries = Vec::new();
         retention.pace(Instant::now(), &mut deliveries);
-        let Some((_, Delivery::Message(ServerMessage::Left))) = deliveries.first() else {
+        let Some((_, Delivery::Message(ServerMessage::Left { .. }))) = deliveries.first() else {
             unreachable!("the announcement comes first");
         };
     }

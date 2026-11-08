@@ -1638,7 +1638,7 @@ fn a_reply_spoken_while_nobody_listened_is_heard_from_its_start_on_joining_or_re
     assert_eq!(from(&heard, REPLAY_SOURCE), frames);
     // Having heard it, neither hears it again on coming back.
     bob.send(&ClientMessage::Leave);
-    bob.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+    bob.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
     bob.send(&ClientMessage::Join {
         space: ada.space(|_| true).id,
     });

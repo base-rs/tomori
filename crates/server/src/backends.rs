@@ -24,6 +24,7 @@ trait DynamicBackend: Send + Sync {
     fn create(&self, spec: SessionSpec) -> Boxed<'_, AnySession>;
     fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession>;
     fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()>;
+    fn delete_session<'a>(&'a self, id: &'a str) -> Boxed<'a, ()>;
     fn register_tools<'a>(&'a self, directory: &'a str, server: &'a ToolServer) -> Boxed<'a, ()>;
     fn unregister_tools<'a>(&'a self, directory: &'a str, name: &'a str) -> Boxed<'a, ()>;
     fn shutdown(&self);
@@ -54,6 +55,10 @@ impl<B: Backend> DynamicBackend for B {
 
     fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()> {
         Box::pin(Backend::forget_instructions(self, id, keys))
+    }
+
+    fn delete_session<'a>(&'a self, id: &'a str) -> Boxed<'a, ()> {
+        Box::pin(Backend::delete_session(self, id))
     }
 
     fn register_tools<'a>(&'a self, directory: &'a str, server: &'a ToolServer) -> Boxed<'a, ()> {
@@ -177,6 +182,10 @@ impl Backend for AnyBackend {
 
     async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {
         self.0.forget_instructions(id, keys).await
+    }
+
+    async fn delete_session(&self, id: &str) -> Result<()> {
+        self.0.delete_session(id).await
     }
 
     async fn register_tools(&self, directory: &str, server: &ToolServer) -> Result<()> {

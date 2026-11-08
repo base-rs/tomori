@@ -1193,6 +1193,12 @@ pub enum Command {
         keys: Vec<String>,
         reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
+    /// Stop any turn the session `id` is running and delete it, with its child sessions, unless it is attached when
+    /// this is performed: then a space was bound to it again, and it is that space's.
+    DeleteSession {
+        id: String,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
+    },
     /// Register Tomori's MCP server for `directory`, replacing one of its name.
     RegisterTools {
         directory: String,
@@ -1591,6 +1597,7 @@ fn refuse(command: Command, error: tomori_backend::Error) {
         | Command::SetMode { reply, .. }
         | Command::Instruction { reply, .. }
         | Command::ForgetInstructions { reply, .. }
+        | Command::DeleteSession { reply, .. }
         | Command::RegisterTools { reply, .. }
         | Command::UnregisterTools { reply, .. } => {
             let _ = reply.try_send(Err(error));
@@ -1615,6 +1622,7 @@ fn abandoned(command: &Command) -> bool {
         | Command::SetMode { reply, .. }
         | Command::Instruction { reply, .. }
         | Command::ForgetInstructions { reply, .. }
+        | Command::DeleteSession { reply, .. }
         | Command::RegisterTools { reply, .. }
         | Command::UnregisterTools { reply, .. } => reply.is_closed(),
         Command::Close { .. } | Command::Shutdown => {
@@ -2375,7 +2383,8 @@ fn command_session(command: &Command) -> Option<&str> {
         | Command::Answer { id, .. }
         | Command::SetMode { id, .. }
         | Command::Instruction { id, .. }
-        | Command::ForgetInstructions { id, .. } => Some(id),
+        | Command::ForgetInstructions { id, .. }
+        | Command::DeleteSession { id, .. } => Some(id),
         Command::Sessions { .. }
         | Command::Create { .. }
         | Command::Snapshot { .. }
@@ -4126,6 +4135,24 @@ fn prepare_command<'a, S: Timers>(
             let _ = reply.try_send(Ok(()));
             return None;
         }
+        // A session's commands are performed in order, and its space's handle is closed before it is deleted, so an
+        // attachment seen here is a space's that bound it again.
+        Command::DeleteSession { id, reply } if registrations.contains_key(&id) => {
+            let _ = reply.try_send(Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Invalid,
+                "the session is bound to a space again",
+            )));
+            return None;
+        }
+        // Stopped first, so that no turn goes on in a session being deleted; one that no longer exists is already gone.
+        Command::DeleteSession { id, reply } => Box::pin(async move {
+            let result = match removed(api::interrupt(client, resolved, &id, cancellation).await) {
+                Ok(()) => removed(api::delete_session(client, resolved, &id, cancellation).await),
+                failed => failed,
+            };
+            let _ = reply.try_send(result.map_err(map_failure));
+            None
+        }),
         Command::ForgetInstructions { id, keys, reply } => Box::pin(async move {
             let mut result = Ok(());
             for key in keys {
@@ -6820,7 +6847,15 @@ mod tests {
             if fail {
                 *state.failing.get_mut(&id).unwrap() -= 1;
             }
+            // Deleting a session removes it, as OpenCode does with its children, and answers with no content.
+            let deleted =
+                (method == "DELETE" && record).then(|| state.sessions.remove(&id).is_some());
+            if deleted.is_some() {
+                state.actions.push((format!("DELETE {path}"), Value::Null));
+                shared.changed.notify_all();
+            }
             match state.sessions.get(&id) {
+                _ if deleted == Some(true) => ("204 No Content", String::new()),
                 _ if record && state.failing_records.contains(&id) => (
                     "500 Internal Server Error",
                     r#"{"message":"busy"}"#.to_owned(),
@@ -7317,6 +7352,7 @@ mod tests {
                 questions: true,
                 workers: true,
                 instructions: true,
+                delete: true,
                 tools: true,
             }
         );
@@ -7378,6 +7414,30 @@ mod tests {
         assert_eq!(
             shared.state.lock().unwrap().instruction_requests,
             [("DELETE".to_owned(), "gone".to_owned(), "tomori".to_owned())]
+        );
+        // A session attached is a space's, and is not deleted; once closed, it is stopped and deleted, and deleting it
+        // again finds it gone, which is what was asked.
+        let refused = block_on(backend.delete_session("existing")).unwrap_err();
+        assert_eq!(refused.kind, ErrorKind::Invalid);
+        block_on(attached.close()).unwrap();
+        let actions = shared.state.lock().unwrap().actions.len();
+        block_on(backend.delete_session("existing")).unwrap();
+        block_on(backend.delete_session("existing")).unwrap();
+        assert_eq!(
+            shared.state.lock().unwrap().actions[actions..],
+            [
+                ("/api/session/existing/interrupt".to_owned(), json!({})),
+                ("DELETE /api/session/existing".to_owned(), Value::Null),
+                ("DELETE /api/session/existing".to_owned(), Value::Null),
+            ]
+        );
+        assert!(
+            !shared
+                .state
+                .lock()
+                .unwrap()
+                .sessions
+                .contains_key("existing")
         );
         // Tomori's MCP server is registered for a directory, with its headers, without OAuth, and removed again; removing
         // one OpenCode does not have is already done, and a refusal is said.
@@ -7458,6 +7518,7 @@ mod tests {
         refused(block_on(
             backend.forget_instructions("s1", vec!["tomori".into()]),
         ));
+        refused(block_on(backend.delete_session("s1")));
         let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp");
         refused(block_on(backend.register_tools("/tmp", &server)));
         refused(block_on(backend.unregister_tools("/tmp", "tomori")));
@@ -11219,6 +11280,7 @@ mod tests {
                 keys: vec!["k".into()],
                 reply,
             }),
+            answer(|reply| Command::DeleteSession { id: id(), reply }),
             answer(|reply| Command::RegisterTools {
                 directory: "/tmp".into(),
                 server: tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp"),
@@ -11686,6 +11748,14 @@ mod tests {
             Command::ForgetInstructions {
                 id: "s".into(),
                 keys: vec!["first".into(), "second".into()],
+                reply,
+            }
+        });
+        assert_eq!(error.kind, tomori_backend::ErrorKind::Unavailable);
+        // Deleting stops at a stop that fails, and at a deletion that fails.
+        let error = refused_by(unreachable, &mut registrations, |reply| {
+            Command::DeleteSession {
+                id: "s".into(),
                 reply,
             }
         });

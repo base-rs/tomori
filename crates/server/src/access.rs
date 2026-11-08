@@ -97,6 +97,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::ListSessions { .. }
         | ClientMessage::SetInstructions { .. }
         | ClientMessage::SetEnvironment { .. }
+        // Deleting a space, and perhaps its session, ends it for everyone in it. See `design/spaces.md`.
+        | ClientMessage::DeleteSpace { .. }
         // Walls change the space for everyone in it, as its environment does. See `design/projection.md`.
         | ClientMessage::AddWall { .. }
         | ClientMessage::RemoveWall { .. } => owner,
@@ -215,6 +217,10 @@ mod tests {
             ClientMessage::SetEnvironment {
                 environment: "sky".into(),
             },
+            ClientMessage::DeleteSpace {
+                space: "s".into(),
+                session: true,
+            },
             ClientMessage::PairBegin {
                 commitment: "c".into(),
             },
@@ -306,6 +312,7 @@ mod tests {
                     && kind != "list_sessions"
                     && kind != "set_instructions"
                     && kind != "set_environment"
+                    && kind != "delete_space"
                     && kind != "add_wall"
                     && kind != "remove_wall"
             })

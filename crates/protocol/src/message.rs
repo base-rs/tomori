@@ -383,6 +383,17 @@ pub enum ClientMessage {
     SetEnvironment {
         environment: String,
     },
+    /// Delete the current space, `space`, from the server, returning everyone in it to the lobby with a
+    /// [`ServerMessage::Left`] that says who deleted it. With `session`, also delete the agent session bound to it, with
+    /// its conversation and its workers' sessions, which cannot be undone; the server says what became of it with
+    /// [`ServerMessage::SessionDeleted`]. Owners only, and only from inside the space it names, so that a request meant
+    /// for one space never deletes another. Sent only to a server whose [`crate::SpaceState::deletes`] is set, and with
+    /// `session` only when [`crate::SpaceState::deletes_session`] is set too. See `design/spaces.md`.
+    DeleteSpace {
+        space: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        session: bool,
+    },
     /// Start receiving [`ServerMessage::Cards`] for the current space, until leaving it. Participants only. Sent only to
     /// a server whose [`crate::SpaceState::cards`] is set. See `design/github.md`.
     WatchCards,
@@ -485,6 +496,21 @@ pub enum ClientMessage {
 /// The error of a [`ServerMessage::TranscriptFailed`] for a recording with no speech in it, as when X was pressed by accident: nothing the participant said was lost, so a client shows it only briefly, where the words were spoken, and not as a problem. See `design/speech.md`.
 pub const NO_SPEECH: &str = "no speech heard";
 
+/// Who deleted the space a client was in, as [`ServerMessage::Left`] says. See `design/spaces.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceDeletion {
+    /// The display name of the owner who deleted it, as the server knows them.
+    pub by: String,
+    /// Whether its agent session is being deleted too. False from a server that says nothing of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session: bool,
+}
+
+impl ServerMessage {
+    /// Leaving the space, as asked: [`ServerMessage::Left`] for a space that was not deleted.
+    pub const LEFT: Self = Self::Left { deleted: None };
+}
+
 /// Control messages sent by the server.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -529,7 +555,19 @@ pub enum ServerMessage {
     Space {
         state: Box<SpaceState>,
     },
-    Left,
+    /// This client is no longer in a space: it left, or the space it was in was deleted, as `deleted` says. Absent
+    /// from older servers, and an older client, which reads none, takes it as leaving.
+    Left {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deleted: Option<SpaceDeletion>,
+    },
+    /// What became of the agent session that this client asked to delete with its space, with
+    /// [`ClientMessage::DeleteSpace`]: deleted, or kept with the reason, `error`. Sent only to the connection that
+    /// asked. See `design/spaces.md`.
+    SessionDeleted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     Transcript {
         utterance: String,
         text: String,
@@ -1504,6 +1542,82 @@ mod tests {
                 progress: false,
                 naming: false,
                 attention: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn deleting_a_space_is_an_addition_older_peers_read_as_leaving() {
+        assert_eq!(
+            serde_json::to_value(ClientMessage::DeleteSpace {
+                space: "s".into(),
+                session: false,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "delete_space", "space": "s"})
+        );
+        let both = ClientMessage::DeleteSpace {
+            space: "s".into(),
+            session: true,
+        };
+        let json = serde_json::to_value(&both).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "delete_space", "space": "s", "session": true})
+        );
+        assert_eq!(serde_json::from_value::<ClientMessage>(json).unwrap(), both);
+
+        // Leaving as asked is as before, and a deletion says who deleted the space.
+        assert_eq!(
+            serde_json::to_value(ServerMessage::LEFT).unwrap(),
+            serde_json::json!({"type": "left"})
+        );
+        let deleted = ServerMessage::Left {
+            deleted: Some(SpaceDeletion {
+                by: "Ada".into(),
+                session: true,
+            }),
+        };
+        let json = serde_json::to_value(&deleted).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "left", "deleted": {"by": "Ada", "session": true}})
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json.clone()).unwrap(),
+            deleted
+        );
+        // An older client's `left`, which carries nothing, still reads it, as leaving.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Older {
+            Left,
+        }
+        assert_eq!(serde_json::from_value::<Older>(json).unwrap(), Older::Left);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(serde_json::json!({
+                "type": "left", "deleted": {"by": "Ada"}
+            }))
+            .unwrap(),
+            ServerMessage::Left {
+                deleted: Some(SpaceDeletion {
+                    by: "Ada".into(),
+                    session: false,
+                }),
+            }
+        );
+
+        assert_eq!(
+            serde_json::to_value(ServerMessage::SessionDeleted { error: None }).unwrap(),
+            serde_json::json!({"type": "session_deleted"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(serde_json::json!({
+                "type": "session_deleted", "error": "the agent is unreachable"
+            }))
+            .unwrap(),
+            ServerMessage::SessionDeleted {
+                error: Some("the agent is unreachable".into()),
             }
         );
     }

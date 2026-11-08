@@ -254,6 +254,43 @@ fn tools_are_registered_where_spaces_are_open_and_removed_when_none_are() {
 }
 
 #[test]
+fn tools_are_removed_once_the_last_space_open_in_a_directory_is_deleted() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    let first = create(&mut ada, "First");
+    let second = create(&mut ada, "Second");
+    let registered = registrations(&backend, 2);
+    let tools = registered[0]
+        .1
+        .clone()
+        .expect("the first space registers the tools");
+    // While another space is open there, a deleted one leaves them; once none is, they are removed, as when the last
+    // closes.
+    for (space, count) in [(&second, 3), (&first, 4)] {
+        ada.send(&ClientMessage::Join {
+            space: space.clone(),
+        });
+        ada.space(|state| &state.id == space);
+        ada.send(&ClientMessage::DeleteSpace {
+            space: space.clone(),
+            session: false,
+        });
+        ada.wait_for(|message| {
+            matches!(
+                message,
+                tomori_protocol::ServerMessage::Left { deleted: Some(_) }
+            )
+            .then_some(())
+        });
+        registrations(&backend, count);
+    }
+    let tools_now = backend.tools();
+    assert_eq!(tools_now[2], ("/tmp".to_owned(), Some(tools)));
+    assert_eq!(tools_now[3], ("/tmp".to_owned(), None));
+}
+
+#[test]
 fn a_backend_without_tools_registers_none_and_its_agent_is_not_told_of_them() {
     let backend = FakeBackend::new();
     backend.take_no_tools();

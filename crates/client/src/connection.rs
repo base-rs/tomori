@@ -1193,7 +1193,7 @@ impl Connection {
                     control.set_local_source(Some(*source));
                     control.clear();
                 }
-                Event::Message(ServerMessage::Left) => control.clear(),
+                Event::Message(ServerMessage::Left { .. }) => control.clear(),
                 _ => {}
             });
             self.observe(&event);
@@ -1205,7 +1205,7 @@ impl Connection {
                     self.local_source = Some(*source);
                     self.heads.clear();
                 }
-                Event::Message(ServerMessage::Left) => self.heads.clear(),
+                Event::Message(ServerMessage::Left { .. }) => self.heads.clear(),
                 Event::Message(ServerMessage::Name { name }) => {
                     let link = self.link.as_ref().expect("a client is kept with its link");
                     self.names.insert(link.key.clone(), name.clone());
@@ -1288,7 +1288,9 @@ impl Connection {
                 }
             }
             // Live speech stops a replay.
-            Event::Message(ServerMessage::Speech { replay: false, .. } | ServerMessage::Left)
+            Event::Message(
+                ServerMessage::Speech { replay: false, .. } | ServerMessage::Left { .. },
+            )
             | Event::State(_) => self.replay = Replay::default(),
             _ => {}
         }

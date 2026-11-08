@@ -149,7 +149,7 @@ impl<B: ReadableBody> Session<B> {
                             ..Default::default()
                         }),
                     }),
-                    ClientMessage::Leave => self.reply(ServerMessage::Left),
+                    ClientMessage::Leave => self.reply(ServerMessage::LEFT),
                     // Renamed, as a visitor is, without keeping the name.
                     ClientMessage::SetName { name } => self.reply(ServerMessage::Name { name }),
                     ClientMessage::ListSpaces => {
