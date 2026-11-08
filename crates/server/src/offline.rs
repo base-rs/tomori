@@ -3,7 +3,7 @@
 
 //! A [`Transcriber`] that buffers each utterance and decodes it whole, once, with the offline recognizer. See `design/speech.md`.
 //!
-//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so nothing is shown while the participant is still speaking, and the transcript arrives a couple of seconds after they let go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`tomori_speech::stt::MAX_UTTERANCE`].
+//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so the transcript arrives a couple of seconds after the participant lets go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`tomori_speech::stt::MAX_UTTERANCE`]; each part is decoded as soon as the audio decides where it ends, while the participant is still speaking, and the words of the parts decoded so far are shown to them as a partial transcript, so that only the last part, or at most two, is left once they let go.
 use std::{
     collections::HashMap,
     sync::{Mutex, PoisonError},
@@ -23,7 +23,7 @@ const STOPPED: &str =
 
 /// Offline speech recognition for push-to-talk utterances.
 ///
-/// Each utterance's audio is buffered and decoded whole once the participant stops speaking. A recognizer error fails the utterance with a visible message; once a panic has disabled recognition, every utterance fails saying so, until the server restarts.
+/// Each utterance's audio is buffered and decoded whole, a part at a time for a long one, the parts whose ends are decided while the participant is still speaking, and the rest once they stop. A recognizer error fails the utterance with a visible message; once a panic has disabled recognition, every utterance fails saying so, until the server restarts.
 pub struct OfflineTranscriber {
     offline: Mutex<OfflineRecognition>,
     utterances: Mutex<HashMap<UtteranceId, OfflineUtterance>>,
@@ -70,7 +70,7 @@ impl Transcriber for OfflineTranscriber {
         self.utterances().insert(utterance, handle);
     }
 
-    /// Append the utterance's audio; it is buffered on the decode thread until the utterance ends.
+    /// Append the utterance's audio; it is buffered on the decode thread, which decodes each part as soon as the audio decides where it ends.
     fn push(&self, utterance: UtteranceId, frame: &AudioFrame) {
         if let Some(handle) = self.utterances().get_mut(&utterance) {
             handle.push_frame(frame);
@@ -103,8 +103,9 @@ impl Transcriber for OfflineTranscriber {
 /// Tell `sink` of an utterance's `event`.
 fn report(sink: &TranscriptSink, event: tomori_speech::TranscriptEvent) {
     match event {
-        tomori_speech::TranscriptEvent::Partial(_) => {
-            unreachable!("the offline recognizer reports no partials")
+        // The words of the parts decoded so far, all of them committed.
+        tomori_speech::TranscriptEvent::Partial(transcript) => {
+            sink.partial(transcript.committed.trim());
         }
         tomori_speech::TranscriptEvent::Progress(Progress::Waiting) => {
             sink.progress(TranscriptStage::Waiting, None);
@@ -165,6 +166,10 @@ mod tests {
     fn each_outcome_is_told_to_the_utterance() {
         let sink = TranscriptSink::nowhere(UtteranceId(1));
         for event in [
+            tomori_speech::TranscriptEvent::Partial(tomori_speech::stt::Transcript {
+                committed: "Deploy".into(),
+                tentative: String::new(),
+            }),
             tomori_speech::TranscriptEvent::Progress(Progress::Waiting),
             tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part: 1, parts: 1 }),
             tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part: 2, parts: 3 }),

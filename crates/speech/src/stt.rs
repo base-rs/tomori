@@ -88,7 +88,7 @@ pub trait RecognitionStream: Send {
 /// Progress of one utterance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
-    /// The transcript so far, sent while the participant is still speaking.
+    /// The transcript so far, sent while the participant is still speaking. The offline recognizer sends it as each segment of a long utterance but the last is decoded, while the participant speaks and after they stop, with every word committed.
     Partial(Transcript),
     /// The complete transcript. It may be empty if nothing was said.
     Final(String),
