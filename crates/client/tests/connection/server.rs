@@ -24,6 +24,18 @@ use tomori_protocol::{
 /// The source the mini server assigns to echoed audio.
 pub const ECHO_SOURCE: u32 = 99;
 
+/// The image the mini server sends for any image asked for, larger than one chunk, and its hash; a request for
+/// [`BROKEN_IMAGE`] is sent the same bytes under that hash, which they are not.
+pub fn image() -> (String, Vec<u8>) {
+    let bytes: Vec<u8> = (0..tomori_protocol::IMAGE_CHUNK_BYTES + 100)
+        .map(|index| (index % 253) as u8)
+        .collect();
+    let hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&bytes).into();
+    (tomori_protocol::hash_text(&hash), bytes)
+}
+
+pub const BROKEN_IMAGE: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 /// What the client sent, by connection number (counting from one).
 pub type Log = Arc<Mutex<Vec<(u32, Received)>>>;
 
@@ -157,9 +169,27 @@ impl<B: ReadableBody> Session<B> {
                         self.reply(ServerMessage::Spaces { spaces: Vec::new() })
                     }
                     ClientMessage::Ping { nonce } => self.reply(ServerMessage::Pong { nonce }),
+                    ClientMessage::FetchImage { image: asked } => {
+                        let (hash, bytes) = image();
+                        let hash = if asked == BROKEN_IMAGE { asked } else { hash };
+                        let hash = tomori_protocol::hash_bytes(&hash).unwrap();
+                        for chunk in tomori_protocol::ImageChunk::split(hash, &bytes) {
+                            self.output.push_back(Frame::image(&chunk).encode());
+                        }
+                    }
                     // A test hook: end the response, which disconnects the client.
                     ClientMessage::Answer { text, .. } if text == "kick" => self.ended = true,
-                    // A test hook: send part of an image the client never asked for, then name it.
+                    // A test hook: send an image frame too short to hold its header.
+                    ClientMessage::Answer { text, .. } if text == "bad image" => {
+                        self.output.push_back(
+                            Frame {
+                                kind: FrameKind::Image,
+                                payload: vec![0; 3],
+                            }
+                            .encode(),
+                        );
+                    }
+                    // A test hook: send an image that is not what its hash says, then name it.
                     ClientMessage::Answer { text, .. } if text == "image" => {
                         let chunk = tomori_protocol::ImageChunk::new([7; 32], 0, 3, vec![1, 2, 3]);
                         self.output.push_back(Frame::image(&chunk).encode());

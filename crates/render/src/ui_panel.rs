@@ -97,6 +97,11 @@ impl Pipeline {
         }
     }
 
+    /// The layout of a panel's transforms, by which an image over it is drawn too.
+    pub(crate) fn transforms(&self) -> &wgpu::BindGroupLayout {
+        &self.layout
+    }
+
     /// Draw panels from here on with this pipeline and the glyph atlas `glyphs`, from [`Glyphs::binding`](crate::glyphs::Glyphs::binding).
     pub fn set(&self, pass: &mut wgpu::RenderPass<'_>, glyphs: &wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
@@ -122,6 +127,10 @@ pub struct Panel {
     complete: bool,
     /// Whether the mesh's first quad is a backing opaque enough to hide what is behind it.
     occludes: bool,
+    /// The image the canvas shows, by hash, which is drawn over it from [`Self::image_quad`] once its texture is ready.
+    image: Option<String>,
+    /// The image's quad, in the panel's plane, with where in the image each corner is.
+    image_quad: wgpu::Buffer,
 }
 
 impl Panel {
@@ -151,6 +160,12 @@ impl Panel {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let image_quad = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("panel image quad"),
+            size: 6 * 16,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             vertices,
             capacity,
@@ -160,6 +175,8 @@ impl Panel {
             canvas: None,
             complete: false,
             occludes: false,
+            image: None,
+            image_quad,
         }
     }
 
@@ -185,7 +202,39 @@ impl Panel {
         if !mesh.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
         }
+        self.image = canvas
+            .image_rect()
+            .map(|(hash, [left, bottom, right, top])| {
+                let quad: [[f32; 4]; 6] = [
+                    [left, top, 0.0, 0.0],
+                    [right, top, 1.0, 0.0],
+                    [left, bottom, 0.0, 1.0],
+                    [right, top, 1.0, 0.0],
+                    [right, bottom, 1.0, 1.0],
+                    [left, bottom, 0.0, 1.0],
+                ];
+                queue.write_buffer(&self.image_quad, 0, bytemuck::cast_slice(&quad));
+                hash.to_owned()
+            });
         self.canvas = Some(canvas.clone());
+    }
+
+    /// The image its canvas shows, by hash, if any.
+    pub fn image(&self) -> Option<&str> {
+        self.image.as_deref()
+    }
+
+    /// Draw its image's quad for `eye` from `binding`, its texture, with the image pipeline already set on `pass`.
+    pub(crate) fn draw_image(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        binding: &wgpu::BindGroup,
+        eye: usize,
+    ) {
+        pass.set_bind_group(0, &self.bindings[eye], &[]);
+        pass.set_bind_group(1, binding, &[]);
+        pass.set_vertex_buffer(0, self.image_quad.slice(..));
+        pass.draw(0..6, 0..1);
     }
 
     /// Write `eye`'s transform, from the panel's plane to clip space, before the pass that draws it.

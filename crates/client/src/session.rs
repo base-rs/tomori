@@ -319,8 +319,8 @@ async fn exchange(
             projection: true,
             // Every client built with this crate reads whether pairing is open, which it hands on as any other message. See `design/security.md`.
             pairing_window: true,
-            // It does not show image panels yet, so it is sent each as a text panel of its caption.
-            images: false,
+            // And receives image panels' images, which it checks and hands on as events, for its session to fetch and show.
+            images: true,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
@@ -355,9 +355,10 @@ async fn exchange(
             context.learned.set(context.learned.get().or(certificate));
             welcomed.set(Some(context.scheduler.now()));
             let frames = async {
+                let mut receiving = None;
                 loop {
                     let frame = reader.next().await?;
-                    deliver(context, frame, source)?;
+                    deliver(context, frame, source, &mut receiving)?;
                 }
             };
             let keepalive = keepalive(
@@ -476,8 +477,60 @@ fn welcome(
     }
 }
 
-/// Hand one frame to the application. `source` is this client's participant number on this connection.
-fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disconnect> {
+/// An image being received, from its start, in the chunks the server sends one image at a time. See
+/// `design/projection.md`.
+pub(crate) struct Receiving {
+    hash: [u8; 32],
+    total: usize,
+    bytes: Vec<u8>,
+}
+
+/// Take `chunk` of an image, returning the image, its hash as text and its PNG, once it is whole and is what its hash
+/// says. A chunk that does not follow the last, of the same image, begins a new image only at its start, and is
+/// otherwise dropped with what was received of the last; an image that is not what its hash says is dropped.
+pub(crate) fn receive_image(
+    receiving: &mut Option<Receiving>,
+    chunk: tomori_protocol::ImageChunk,
+) -> Option<(String, std::sync::Arc<[u8]>)> {
+    if chunk.offset == 0 {
+        *receiving = Some(Receiving {
+            hash: chunk.hash,
+            total: chunk.total as usize,
+            bytes: Vec::with_capacity(chunk.total as usize),
+        });
+    }
+    let follows = receiving.as_ref().is_some_and(|current| {
+        current.hash == chunk.hash
+            && current.total == chunk.total as usize
+            && current.bytes.len() == chunk.offset as usize
+    });
+    if !follows {
+        log::debug!("Dropped part of an image that did not follow the part before it.");
+        *receiving = None;
+        return None;
+    }
+    let current = receiving.as_mut().expect("follows the last");
+    current.bytes.extend(chunk.data);
+    if current.bytes.len() < current.total {
+        return None;
+    }
+    let whole = receiving.take().expect("whole");
+    let found: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&whole.bytes).into();
+    if found != whole.hash {
+        log::warn!("Dropped an image that is not what its hash says.");
+        return None;
+    }
+    Some((tomori_protocol::hash_text(&whole.hash), whole.bytes.into()))
+}
+
+/// Hand one frame to the application. `source` is this client's participant number on this connection; `receiving` is
+/// the image being received on it, if any.
+fn deliver(
+    context: &Context<'_>,
+    frame: Frame,
+    source: u32,
+    receiving: &mut Option<Receiving>,
+) -> Result<(), Disconnect> {
     let protocol = |error: tomori_protocol::FrameError| Disconnect::Protocol(error.to_string());
     match frame.kind {
         FrameKind::Control => match frame.to_server_message().map_err(protocol)? {
@@ -517,8 +570,12 @@ fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disco
             // Playback is real time: if the application falls behind, newer audio is dropped rather than queued without bound.
             let _ = context.audio.try_send(audio);
         }
-        // This client asks for no images, so a server sends it none; one sent anyway is ignored.
-        FrameKind::Image => {}
+        FrameKind::Image => {
+            if let Some((hash, png)) = receive_image(receiving, frame.to_image().map_err(protocol)?)
+            {
+                context.shared.events.push(Event::Image { hash, png });
+            }
+        }
     }
     Ok(())
 }
@@ -561,6 +618,40 @@ impl FrameReader<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_is_handed_on_whole_and_only_if_it_is_what_its_hash_says() {
+        use tomori_protocol::{IMAGE_CHUNK_BYTES, ImageChunk, hash_text};
+        let png: Vec<u8> = (0..IMAGE_CHUNK_BYTES * 2 + 3)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&png).into();
+        let chunks: Vec<ImageChunk> = ImageChunk::split(hash, &png).collect();
+        let mut receiving = None;
+        assert!(receive_image(&mut receiving, chunks[0].clone()).is_none());
+        assert!(receive_image(&mut receiving, chunks[1].clone()).is_none());
+        let (named, whole) = receive_image(&mut receiving, chunks[2].clone()).unwrap();
+        assert_eq!((named, &whole[..]), (hash_text(&hash), &png[..]));
+        assert!(receiving.is_none());
+        // A chunk that does not follow the last drops what was received; the next image begins at its start.
+        assert!(receive_image(&mut receiving, chunks[0].clone()).is_none());
+        assert!(receive_image(&mut receiving, chunks[2].clone()).is_none());
+        assert!(receiving.is_none());
+        assert!(receive_image(&mut receiving, chunks[1].clone()).is_none());
+        let other = ImageChunk::new([9; 32], 0, png.len() as u32, png[..10].to_vec());
+        assert!(receive_image(&mut receiving, chunks[0].clone()).is_none());
+        assert!(receive_image(&mut receiving, other).is_none());
+        assert!(receive_image(&mut receiving, chunks[1].clone()).is_none());
+        assert!(receiving.is_none());
+        // Whole, but not what its hash says, it is dropped.
+        let mut tampered = chunks.clone();
+        tampered[1].data[0] ^= 1;
+        let handed = tampered
+            .into_iter()
+            .filter_map(|chunk| receive_image(&mut receiving, chunk))
+            .count();
+        assert_eq!(handed, 0);
+    }
 
     /// Timers whose waits fail.
     struct Broken;

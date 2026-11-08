@@ -146,6 +146,8 @@ pub struct Renderer {
     workspace: crate::workspace_graphics::WorkspaceGraphics,
     arrival: crate::arrival_graphics::ArrivalLabels,
     panels: crate::ui_panel::Pipeline,
+    /// Image panels' images, drawn over their faces. See `design/projection.md`.
+    images: crate::panel_images::PanelImages,
     glyphs: crate::glyphs::Glyphs,
 }
 
@@ -311,6 +313,8 @@ impl Renderer {
             samples,
         );
         let panels = crate::ui_panel::Pipeline::new(device, format, &glyphs, samples);
+        let images =
+            crate::panel_images::PanelImages::new(device, format, samples, panels.transforms());
         let blink_pipeline = blink_pipeline(device, format, samples);
         Self {
             // Arrival's grid; a headset follows its conversation from here, and the desktop window chooses its own.
@@ -344,8 +348,25 @@ impl Renderer {
             workspace,
             arrival,
             panels,
+            images,
             glyphs,
         }
+    }
+
+    /// This frame's panels show the images `shown`, by hash, each with its PNG: decode and upload them, within the
+    /// texture budget. See `design/projection.md`.
+    pub fn update_images(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shown: &[(String, std::sync::Arc<[u8]>)],
+    ) {
+        self.images.update(device, queue, shown);
+    }
+
+    /// The images drawn over image panels, and their textures.
+    pub fn images(&mut self) -> &mut crate::panel_images::PanelImages {
+        &mut self.images
     }
 
     /// A panel drawn by this renderer's scene pass, holding at most `capacity` vertices.
@@ -720,6 +741,10 @@ impl Renderer {
                 self.panels.set(&mut pass, &glyphs);
                 for (panel, _) in panels {
                     panel.draw(&mut pass, &self.panels, eye);
+                    // An image panel's image, over its face, before the panels in front of it.
+                    if self.images.draw(&mut pass, panel, eye) {
+                        self.panels.set(&mut pass, &glyphs);
+                    }
                 }
             }
             // Arrival's labels are drawn last: in a space they are the hand menu's, by the hand, nearer than the panels, so
@@ -1025,6 +1050,7 @@ mod tests {
             [
                 "caption.wgsl",
                 "controllers.wgsl",
+                "panel_image.wgsl",
                 "swarm.wgsl",
                 "ui_panel.wgsl",
                 "workspace.wgsl"

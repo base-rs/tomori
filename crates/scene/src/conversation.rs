@@ -323,6 +323,8 @@ pub struct Conversation {
     cards: Option<tomori_protocol::Cards>,
     /// What is projected in the joined space, as the server last sent it. See `design/projection.md`.
     projection: Option<tomori_protocol::Projection>,
+    /// The images of image panels fetched and held, and those asked for. See `design/projection.md`.
+    images: crate::images::Images,
     /// Where the participant's head is in the space's scene, as the frame step last said: where a wall is added, and
     /// which wall is nearest.
     head: Option<tomori_protocol::Pose>,
@@ -466,6 +468,7 @@ impl Conversation {
             object_labels: std::collections::HashMap::new(),
             cards: None,
             projection: None,
+            images: crate::images::Images::default(),
             head: None,
             channel: crate::channel::Replica::default(),
             watching: None,
@@ -674,6 +677,12 @@ impl Conversation {
         match event {
             Event::State(state) => self.connection_changed(state),
             Event::Message(message) => self.receive(message),
+            // An image panel's image, already checked against its hash.
+            Event::Image { hash, png } => {
+                let shown = self.shown_images();
+                self.images
+                    .arrived(hash, png, &shown.iter().collect::<Vec<_>>());
+            }
             // Push-to-talk audio for the words being recorded or sent that could not be delivered. Anything else a later client observes is not this conversation's to apply.
             event => {
                 if let Event::UtteranceFailed(failed) = event
@@ -696,6 +705,8 @@ impl Conversation {
 
     fn connection_changed(&mut self, state: ConnectionState) {
         if !matches!(state, ConnectionState::Connected { .. }) {
+            // What was asked for will not arrive on this connection.
+            self.images.disconnected();
             // A pairing belongs to its connection; the server withdraws it. Whether pairing is open is told again on connecting.
             self.pairing = None;
             self.forget_turn();
@@ -2441,6 +2452,12 @@ impl Conversation {
             self.cancelling = None;
             self.cancel_now(entry);
         }
+        // The images of the panels shown that are not held yet, a few at a time. See `design/projection.md`.
+        let shown = self.shown_images();
+        for hash in self.images.wanted(&shown.iter().collect::<Vec<_>>(), now) {
+            self.actions
+                .push(Action::Send(ClientMessage::FetchImage { image: hash }));
+        }
         // A selected entry that has been sent or cancelled is no longer selected.
         if let Some(selected) = &self.queue_selected
             && !self.waiting().iter().any(|entry| &entry.id == selected)
@@ -3235,6 +3252,23 @@ impl Conversation {
                 .map(crate::projection::name),
             _ => None,
         }
+    }
+
+    /// The images the panels projected in the joined space show, each once.
+    fn shown_images(&self) -> Vec<tomori_protocol::Image> {
+        self.projection()
+            .map(|projection| {
+                crate::images::shown(projection)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The images of image panels held, to draw. See `design/projection.md`.
+    pub fn images(&self) -> &crate::images::Images {
+        &self.images
     }
 
     /// What is projected in the joined space, while the server projects there. See `design/projection.md`.
@@ -12197,6 +12231,71 @@ mod tests {
         assert!(conversation.projection().is_some());
         conversation.apply(Event::Message(ServerMessage::LEFT));
         assert!(conversation.projection.is_none());
+    }
+
+    #[test]
+    fn the_images_of_the_panels_shown_are_fetched_a_few_at_a_time_held_and_asked_for_again_after_reconnecting()
+     {
+        let mut conversation = joined(|space| space.projection = true);
+        let image =
+            |digit: char| tomori_protocol::Image::new(digit.to_string().repeat(64), 64, 48, 100);
+        let on = |slot| tomori_protocol::Place::Wall {
+            wall: tomori_protocol::TOMORI_WALL.into(),
+            slot,
+        };
+        let shown = |images: Vec<tomori_protocol::Image>| {
+            Event::Message(ServerMessage::Projection {
+                projection: Box::new(
+                    tomori_protocol::Projection::new(SPACE, "sky").with_panels(
+                        images
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, image)| {
+                                tomori_protocol::Panel::new(
+                                    format!("panel-{index}"),
+                                    "",
+                                    "",
+                                    on(index as u32),
+                                )
+                                .with_image(image)
+                            })
+                            .collect(),
+                    ),
+                ),
+            })
+        };
+        let fetch = |digit: char| ClientMessage::FetchImage {
+            image: digit.to_string().repeat(64),
+        };
+        let now = Instant::now();
+        // Nothing is fetched before anything is shown.
+        conversation.tick_space(now);
+        assert!(sent(&mut conversation).is_empty());
+        conversation.apply(shown(vec![image('a'), image('b'), image('a'), image('c')]));
+        conversation.tick_space(now);
+        assert_eq!(sent(&mut conversation), [fetch('a'), fetch('b')]);
+        conversation.tick_space(now);
+        assert!(sent(&mut conversation).is_empty());
+        // Once one arrives, the next is asked for, and the one arrived is held to draw.
+        conversation.apply(Event::Image {
+            hash: "a".repeat(64),
+            png: vec![1, 2, 3].into(),
+        });
+        assert_eq!(
+            conversation.images().png(&"a".repeat(64)).unwrap()[..],
+            [1, 2, 3]
+        );
+        conversation.tick_space(now);
+        assert_eq!(sent(&mut conversation), [fetch('c')]);
+        // Reconnected, what had not arrived is asked for again, and what had is held still.
+        conversation.apply(Event::State(ConnectionState::Disconnected {
+            reason: tomori_client::Disconnect::Closed,
+            retry_in: Duration::from_secs(1),
+        }));
+        conversation.apply(shown(vec![image('a'), image('b'), image('c')]));
+        conversation.tick_space(now);
+        assert_eq!(sent(&mut conversation), [fetch('b'), fetch('c')]);
+        assert!(conversation.images().png(&"a".repeat(64)).is_some());
     }
 
     #[test]

@@ -182,6 +182,9 @@ pub struct Frame<'a> {
     /// The space's projection walls and panels, farthest first, the label naming the panel pointed at, and the hint
     /// beside a panel carried, in the scene. See `design/projection.md`.
     pub projection: Vec<controller_ui::Sheet>,
+    /// The images those panels show that the client holds, by hash, each a PNG for the renderer to decode, once each
+    /// however many panels show it. See `design/projection.md`.
+    pub images: Vec<(String, std::sync::Arc<[u8]>)>,
     /// Where a teleport being aimed would land, which is drawn as a ring on the surface; see `design/locomotion.md`.
     pub landing: Option<Vec3>,
     /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -949,6 +952,22 @@ impl Step {
         self.pointed_panel = panel.clone().filter(|_| self.projector.held().is_none());
         // The hint beside a panel carried, over everything else.
         projection.extend(projected.hint);
+        // The images the panels drawn show, of those held, for the renderer to decode and draw over them.
+        let images = projection
+            .iter()
+            .filter_map(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .and_then(|canvas| canvas.image.as_ref())
+            })
+            .filter_map(|image| {
+                conversation
+                    .images()
+                    .png(&image.hash)
+                    .map(|png| (image.hash.clone(), png.clone()))
+            })
+            .collect();
         match (card, worker, &object) {
             // Pointed at, rather than carried, it names the list item the ray meets, if any.
             _ if panel.is_some() => {
@@ -1095,6 +1114,7 @@ impl Step {
             presence,
             cards: board.sheets,
             projection,
+            images,
             landing: travel.landing,
             blink: travel.blink,
             environment: drawn,

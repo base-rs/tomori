@@ -263,18 +263,41 @@ fn a_name_the_server_gives_is_suggested_when_reconnecting() {
 }
 
 #[test]
-fn an_image_this_client_never_asked_for_is_ignored_and_the_connection_kept() {
+fn an_image_asked_for_arrives_whole_and_checked_and_one_that_is_not_what_its_hash_says_never_does()
+{
     let server = MiniServer::start(localhost(), Mode::Normal);
     let client = Client::connect(options(server.address)).unwrap();
     assert_eq!(wait_connected(&client), 1);
-    // It shows no image panels, so its Hello says so.
+    // The client says it shows image panels.
     assert!(matches!(
         server.received(1).first(),
-        Some(Received::Message(ClientMessage::Hello {
-            images: false,
-            ..
-        }))
+        Some(Received::Message(ClientMessage::Hello { images: true, .. }))
     ));
+    client
+        .send(ClientMessage::FetchImage {
+            image: server::BROKEN_IMAGE.into(),
+        })
+        .unwrap();
+    let (hash, bytes) = server::image();
+    client
+        .send(ClientMessage::FetchImage {
+            image: hash.clone(),
+        })
+        .unwrap();
+    // The broken one is dropped, so the first image to arrive is the second asked for.
+    let Event::Image { hash: arrived, png } =
+        wait_for(&client, |event| matches!(event, Event::Image { .. }))
+    else {
+        unreachable!("an image");
+    };
+    assert_eq!((arrived, &png[..]), (hash, &bytes[..]));
+}
+
+#[test]
+fn an_image_not_what_its_hash_says_is_dropped_and_the_connection_kept() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let client = Client::connect(options(server.address)).unwrap();
+    assert_eq!(wait_connected(&client), 1);
     client
         .send(ClientMessage::Answer {
             question: "q".into(),
@@ -285,13 +308,32 @@ fn an_image_this_client_never_asked_for_is_ignored_and_the_connection_kept() {
     let event = wait_for(&client, |event| {
         matches!(
             event,
-            Event::Message(ServerMessage::Name { .. })
+            Event::Image { .. }
+                | Event::Message(ServerMessage::Name { .. })
                 | Event::State(ConnectionState::Disconnected { .. })
         )
     });
     assert!(
         matches!(event, Event::Message(ServerMessage::Name { name }) if name == "After the image")
     );
+}
+
+#[test]
+fn an_image_that_cannot_be_read_ends_the_connection_as_a_protocol_error() {
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let client = Client::connect(options(server.address)).unwrap();
+    assert_eq!(wait_connected(&client), 1);
+    client
+        .send(ClientMessage::Answer {
+            question: "q".into(),
+            field: "f".into(),
+            text: "bad image".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        wait_disconnected(&client),
+        Disconnect::Protocol(reason) if reason.starts_with("invalid image frame")
+    ));
 }
 
 #[test]

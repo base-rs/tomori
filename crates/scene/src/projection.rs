@@ -211,27 +211,16 @@ pub fn item_at(panel: &Panel, model: Mat4, fit: Fit, scroll: usize, point: Vec3)
 /// rows as that takes, within [`FIT_ROWS`]. A code panel's columns are always a slot's, and its rows of code are its
 /// [`CodeLayout`]'s.
 pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
+    if let Some(image) = &panel.image {
+        return image::fit(panel, image, fit);
+    }
     match fit {
         Fit::Slot => (COLUMNS, BODY_ROWS),
         Fit::Text => {
             let widest = body_rows(panel, FIT_COLUMNS.1)
                 .iter()
                 .map(Vec::len)
-                .chain([
-                    cut(
-                        &[crate::ui_text::Span::new(
-                            &panel.title,
-                            Style::plain(BRIGHT),
-                        )],
-                        usize::MAX,
-                    )
-                    .len(),
-                    cut(
-                        &[crate::ui_text::Span::new(about(panel), Style::plain(DIM))],
-                        usize::MAX,
-                    )
-                    .len(),
-                ])
+                .chain([heading_width(panel)])
                 .max()
                 .unwrap_or_default();
             let columns = widest.clamp(FIT_COLUMNS.0, FIT_COLUMNS.1);
@@ -241,6 +230,24 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
             (columns, rows)
         }
     }
+}
+
+/// How many cells `panel`'s title and its metadata row take, the wider of them.
+fn heading_width(panel: &Panel) -> usize {
+    let title = cut(
+        &[crate::ui_text::Span::new(
+            &panel.title,
+            Style::plain(BRIGHT),
+        )],
+        usize::MAX,
+    )
+    .len();
+    let about = cut(
+        &[crate::ui_text::Span::new(about(panel), Style::plain(DIM))],
+        usize::MAX,
+    )
+    .len();
+    title.max(about)
 }
 
 /// The size of `panel`, in metres, sized as `fit` says: a code panel floating is as tall as its code, as its
@@ -356,6 +363,9 @@ fn about(panel: &Panel) -> String {
         parts.extend((!code.language.is_empty()).then(|| code.language.clone()));
         parts.push(length(code));
     }
+    if let Some(image) = &panel.image {
+        parts.push(format!("{} × {}", image.width, image.height));
+    }
     parts.push(crate::board::age(panel.age));
     if panel.code.is_some() && panel.pinned {
         parts.push("pinned".to_owned());
@@ -414,6 +424,9 @@ fn scrolled_face(
         let mut canvas = code_face(panel, layout, fit, scroll);
         canvas.border = border;
         return canvas;
+    }
+    if let Some(image) = &panel.image {
+        return image::face(panel, image, fit, border);
     }
     let (columns, body_count) = self::fit(panel, fit);
     let mut canvas = Canvas::new(columns, PIXEL);
@@ -1664,6 +1677,8 @@ impl Projector {
         size_of(panel, fit, self.layout(&panel.id))
     }
 }
+
+mod image;
 
 #[cfg(test)]
 mod tests;
