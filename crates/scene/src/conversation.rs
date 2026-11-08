@@ -10,6 +10,7 @@ use crate::{
     environment::Environment,
     interaction::{SessionActivity, SpeechActivity},
     locomotion::Locomotion,
+    session_browser::{self, SessionBrowser},
 };
 #[cfg(any(not(target_os = "android"), test))]
 use std::sync::Arc;
@@ -54,9 +55,6 @@ pub const REQUEST_GRACE: Duration = Duration::from_millis(600);
 
 /// The most panel rows the problem line and the queue strip each take.
 const PROBLEM_ROWS: usize = 2;
-/// The existing sessions the session ring shows at once, so that their labels stay apart; "More sessions" shows the next
-/// ones. See `design/arrival.md`.
-pub const SESSION_PAGE: usize = 8;
 const QUEUE_ROWS: usize = 2;
 
 const LOST: &str = "Connection lost; your words were not sent.";
@@ -265,11 +263,9 @@ pub struct Conversation {
     backends: Vec<BackendInfo>,
     /// The directories a space may run in, offered so the client can choose without typing a path.
     roots: Vec<WorkspaceRoot>,
-    /// The answer to [`ClientMessage::ListSessions`], most recently active first, shown on the session ring after "New
-    /// session", [`SESSION_PAGE`] at a time.
-    sessions: Vec<SessionSummary>,
-    /// The first of [`Self::sessions`] the session ring shows.
-    session_page: usize,
+    /// The answer to [`ClientMessage::ListSessions`], shown in the session browser after "New session". See
+    /// `design/arrival.md`.
+    browser: SessionBrowser,
     /// The environments a space may be bound to that the server offers this client, offered on the environment ring when there are several.
     environments: Vec<EnvironmentInfo>,
     /// The environments this build draws; a space bound to another shows the grid, and says so.
@@ -425,8 +421,7 @@ impl Conversation {
             over_grid: Vec::new(),
             locomotion: Vec::new(),
             client_sides: Vec::new(),
-            sessions: Vec::new(),
-            session_page: 0,
+            browser: SessionBrowser::default(),
             menu_backend: None,
             menu_directory: None,
             menu_create: None,
@@ -850,11 +845,7 @@ impl Conversation {
             // The answer to a session list, shown on the session ring after "New session".
             ServerMessage::Sessions { sessions } => {
                 if self.step == LobbyStep::Session {
-                    self.sessions = sessions;
-                    self.session_page = 0;
-                    self.menu = self
-                        .menu
-                        .min(self.step_list(LobbyStep::Session).saturating_sub(1));
+                    self.browser.set_sessions(sessions);
                 } else {
                     self.error = Some("Too late to show those sessions.".into());
                 }
@@ -1768,28 +1759,47 @@ impl Conversation {
             LobbyStep::Spaces => self.spaces.len() + usize::from(self.creates()),
             LobbyStep::Backend => self.backends.len(),
             LobbyStep::Directory => self.roots.len(),
-            // "New session", then a page of the existing sessions, and "More sessions" when they do not fit on one.
-            LobbyStep::Session => {
-                1 + self.paged_sessions().len() + usize::from(self.sessions.len() > SESSION_PAGE)
-            }
+            // "New session", then the existing sessions the browser's list holds.
+            LobbyStep::Session => 1 + self.browser.len(),
             LobbyStep::Environment => self.environments.len(),
         }
     }
 
-    /// The existing sessions the session ring shows now.
-    fn paged_sessions(&self) -> &[SessionSummary] {
-        let start = self.session_page.min(self.sessions.len());
-        &self.sessions[start..(start + SESSION_PAGE).min(self.sessions.len())]
+    /// Whether the session browser is open, which the right stick scrolls. See `design/arrival.md`.
+    pub fn browsing(&self) -> bool {
+        self.mode == Mode::Lobby && self.step == LobbyStep::Session
     }
 
-    /// Show the next page of existing sessions on the session ring, after the last returning to the first, with the
-    /// selection kept on "More sessions".
-    fn next_session_page(&mut self) {
-        self.session_page += SESSION_PAGE;
-        if self.session_page >= self.sessions.len() {
-            self.session_page = 0;
+    /// Scroll the session browser's index, if `folders`, or else its list, by `rows`, later for a positive number.
+    pub fn scroll_sessions(&mut self, rows: i32, folders: bool) {
+        if self.browsing() {
+            self.browser.scroll(rows, folders);
         }
-        self.menu = self.step_list(LobbyStep::Session) - 1;
+    }
+
+    /// Scroll the session browser's index, if `folders`, or else its list, a page towards its `later` end or its start.
+    pub fn page_sessions(&mut self, folders: bool, later: bool) {
+        if self.browsing() {
+            self.browser.page(folders, later);
+        }
+    }
+
+    /// Do what choosing in the session browser asks for.
+    fn browse(&mut self, choice: session_browser::Choice) {
+        match choice {
+            // A new session in a folder chosen in the index runs there.
+            session_browser::Choice::New { directory } => self.create_in(None, Some(directory)),
+            session_browser::Choice::Attach(session) => self.create(Some(session)),
+            session_browser::Choice::Join(space) => {
+                if self.spaces.iter().any(|listed| listed.id == space) {
+                    self.close_menu();
+                    self.join(space);
+                } else {
+                    self.error = Some("Its space is not listed; press Y.".into());
+                }
+            }
+            session_browser::Choice::Shown => {}
+        }
     }
 
     /// Whether the chosen backend can attach to an existing session, so that the session ring is offered.
@@ -1806,8 +1816,7 @@ impl Conversation {
         }
         self.step = LobbyStep::Spaces;
         self.menu = 0;
-        self.sessions.clear();
-        self.session_page = 0;
+        self.browser = SessionBrowser::default();
         self.menu_backend = None;
         self.menu_directory = None;
         self.menu_create = None;
@@ -1998,8 +2007,7 @@ impl Conversation {
                     .position(|root| Some(&root.path) == self.menu_directory.as_ref())
                     .unwrap_or(0);
                 self.menu_directory = None;
-                self.sessions.clear();
-                self.session_page = 0;
+                self.browser = SessionBrowser::default();
             }
             LobbyStep::Environment => {
                 self.menu_create = None;
@@ -2019,22 +2027,35 @@ impl Conversation {
     }
 
     /// A title for a space the client creates, from the backend and the chosen root, since the headset cannot type one.
-    fn lobby_title(&self) -> String {
+    fn lobby_title(&self, directory: &str) -> String {
         let backend = self.menu_backend.as_deref().unwrap_or("agent");
+        // A folder offered by its label, or one beneath it by its name.
         let label = self
             .roots
             .iter()
-            .find(|root| Some(&root.path) == self.menu_directory.as_ref())
-            .map(|root| root.label.as_str())
-            .unwrap_or("");
+            .find(|root| root.path == directory)
+            .map(|root| root.label.clone())
+            .unwrap_or_else(|| {
+                std::path::Path::new(directory)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
         format!("{backend} in {label}")
     }
 
     /// Create the space chosen on the rings, bound to `session` if one was chosen, then choose its environment if the server offers this client more than one.
     fn create(&mut self, session: Option<SessionSummary>) {
-        let (Some(backend), Some(mut directory)) =
-            (self.menu_backend.clone(), self.menu_directory.clone())
-        else {
+        self.create_in(session, None);
+    }
+
+    /// Create the space chosen on the rings, as [`Self::create`] does, a new session running in `folder` rather than the
+    /// folder chosen, when it is given.
+    fn create_in(&mut self, session: Option<SessionSummary>, folder: Option<String>) {
+        let (Some(backend), Some(mut directory)) = (
+            self.menu_backend.clone(),
+            folder.or_else(|| self.menu_directory.clone()),
+        ) else {
             return;
         };
         // An existing session runs in its own directory, which may be beneath the folder chosen; the server checks it
@@ -2047,7 +2068,7 @@ impl Conversation {
         }
         let title = match &session {
             Some(session) if !session.title.trim().is_empty() => session.title.clone(),
-            _ => self.lobby_title(),
+            _ => self.lobby_title(&directory),
         };
         let create = Creation {
             title,
@@ -2108,6 +2129,7 @@ impl Conversation {
                 LobbyStep::Spaces => {
                     self.selected = shift(self.selected, vertical, self.step_list(self.step))
                 }
+                LobbyStep::Session => self.browser.navigate(horizontal, vertical),
                 step => self.menu = shift(self.menu, vertical, self.step_list(step)),
             },
             Mode::Space => {
@@ -2326,6 +2348,7 @@ impl Conversation {
                             if self.attaches() {
                                 self.menu = 0;
                                 self.step = LobbyStep::Session;
+                                self.browser = SessionBrowser::new(&root.path);
                                 self.list_sessions();
                             } else {
                                 self.create(None);
@@ -2333,15 +2356,8 @@ impl Conversation {
                         }
                     }
                     LobbyStep::Session => {
-                        let shown = self.paged_sessions();
-                        match self.menu.checked_sub(1) {
-                            None => self.create(None),
-                            Some(index) if index < shown.len() => {
-                                let session = shown[index].clone();
-                                self.create(Some(session));
-                            }
-                            Some(_) => self.next_session_page(),
-                        }
+                        let choice = self.browser.accept();
+                        self.browse(choice);
                     }
                     LobbyStep::Environment => {
                         let environment = self
@@ -2803,7 +2819,12 @@ impl Conversation {
         if let (Some(backend), Some(directory)) =
             (self.menu_backend.clone(), self.menu_directory.clone())
         {
-            self.send(ClientMessage::ListSessions { backend, directory });
+            // Those already in a space too, so that the browser can offer to join it. See `design/arrival.md`.
+            self.send(ClientMessage::ListSessions {
+                backend,
+                directory,
+                bound: true,
+            });
         }
     }
 
@@ -3679,7 +3700,7 @@ impl Conversation {
             }
             LobbyStep::Backend => "The agent that runs in the space.",
             LobbyStep::Directory => "The folder the agent works in.",
-            LobbyStep::Session if self.sessions.is_empty() => {
+            LobbyStep::Session if self.browser.is_empty() => {
                 "Start a new session; none listed yet."
             }
             LobbyStep::Session => "A new session, or attach to an existing one.",
@@ -3699,9 +3720,14 @@ impl Conversation {
             LobbyStep::Spaces => unreachable!(),
         };
         let count = self.step_list(step);
+        // The browser's list is already as much as it shows, with its own selection.
+        let (position, start) = match step {
+            LobbyStep::Session => (self.browser.selected().0, 0),
+            _ => (self.menu, window(self.menu, count, ROWS - 3)),
+        };
         let mut lines = vec![short(&format!(
             "{label} {}/{}",
-            (self.menu + 1).min(count),
+            (position + 1).min(count),
             count
         ))];
         lines.push(short(
@@ -3710,7 +3736,6 @@ impl Conversation {
                 .unwrap_or_else(|| self.ring_hint(step).to_owned()),
         ));
         let rows = ROWS - 3;
-        let start = window(self.menu, count, rows);
         for item in self.ring_items(step).into_iter().skip(start).take(rows) {
             let marker = if item.selected { '>' } else { ' ' };
             lines.push(short(&format!("{marker} {}", item.label)));
@@ -3759,36 +3784,8 @@ impl Conversation {
                     )
                 })
                 .collect(),
-            LobbyStep::Session => {
-                let folder = self.menu_directory.as_deref().unwrap_or_default();
-                let mut items: Vec<_> =
-                    std::iter::once(choice(arrival::Key::Session(None), "New session", None))
-                        .chain(self.paged_sessions().iter().map(|session| {
-                            let title = if session.title.trim().is_empty() {
-                                &session.id
-                            } else {
-                                &session.title
-                            };
-                            let detail = session_detail(session, folder);
-                            choice(
-                                arrival::Key::Session(Some(session.id.clone())),
-                                title,
-                                detail.as_deref(),
-                            )
-                        }))
-                        .collect();
-                if self.sessions.len() > SESSION_PAGE {
-                    let start = self.session_page.min(self.sessions.len());
-                    let end = (start + SESSION_PAGE).min(self.sessions.len());
-                    let shown = format!("{}-{end} of {}", start + 1, self.sessions.len());
-                    items.push(choice(
-                        arrival::Key::MoreSessions,
-                        "More sessions",
-                        Some(&shown),
-                    ));
-                }
-                items
-            }
+            // The browser marks its own selection.
+            LobbyStep::Session => return self.browser_items().0,
             LobbyStep::Environment => self
                 .environments
                 .iter()
@@ -3805,6 +3802,17 @@ impl Conversation {
             item.selected = true;
         }
         items
+    }
+
+    /// The session browser's list and index.
+    fn browser_items(&self) -> (Vec<arrival::Item>, Vec<arrival::Item>) {
+        let folder = self.menu_directory.as_deref().unwrap_or_default();
+        let label = self
+            .roots
+            .iter()
+            .find(|root| root.path == folder)
+            .map_or(folder, |root| root.label.as_str());
+        self.browser.items(&self.spaces, label)
     }
 
     /// What the headset shows as objects in the world, outside a space. See `design/arrival.md`.
@@ -3914,9 +3922,16 @@ impl Conversation {
                         selected: false,
                     }),
                     items,
-                    ring: ring.map(|step| arrival::Ring {
-                        step,
-                        items: self.ring_items(self.step),
+                    ring: ring.map(|step| match step {
+                        arrival::Step::Session => {
+                            let (items, index) = self.browser_items();
+                            arrival::Ring { step, items, index }
+                        }
+                        step => arrival::Ring {
+                            step,
+                            items: self.ring_items(self.step),
+                            index: Vec::new(),
+                        },
                     }),
                     joining: self
                         .joining
@@ -3983,6 +3998,12 @@ impl Conversation {
                     self.accept();
                 } else {
                     self.back_ring();
+                }
+            }
+            (Mode::Lobby, key) if self.step == LobbyStep::Session => {
+                if let Some(choice) = self.browser.choose(key) {
+                    self.error = None;
+                    self.browse(choice);
                 }
             }
             (Mode::Lobby, key) => {
@@ -4548,22 +4569,6 @@ fn tail(text: &str, width: usize) -> String {
         kept.push(ch);
     }
     std::iter::once('…').chain(kept.into_iter().rev()).collect()
-}
-
-/// What tells an existing session apart beneath its title on the session ring: whether the agent is busy in it, and
-/// its directory relative to the folder chosen, unless it is that folder.
-fn session_detail(session: &SessionSummary, folder: &str) -> Option<String> {
-    let relative = std::path::Path::new(&session.directory)
-        .strip_prefix(folder)
-        .ok()
-        .map(|relative| relative.to_string_lossy().into_owned())
-        .unwrap_or_else(|| session.directory.clone());
-    match (session.busy, relative.is_empty()) {
-        (true, true) => Some("busy".into()),
-        (true, false) => Some(format!("busy, {relative}")),
-        (false, true) => None,
-        (false, false) => Some(relative),
-    }
 }
 
 /// `text` on one row of the panel, as [`crate::ui_text::clip`] cuts it.
@@ -5316,12 +5321,16 @@ mod tests {
                     title: "Tomori opencode support".into(),
                     directory: "/work/tomori".into(),
                     busy: false,
+                    age: None,
+                    space: None,
                 },
                 tomori_protocol::SessionSummary {
                     id: "ses_2".into(),
                     title: "Other work".into(),
                     directory: "/work/tomori".into(),
                     busy: false,
+                    age: None,
+                    space: None,
                 },
             ],
         })
@@ -5766,6 +5775,7 @@ mod tests {
             [ClientMessage::ListSessions {
                 backend: "fake".into(),
                 directory: "/work/tomori".into(),
+                bound: true,
             }]
         );
         let ring = conversation.arrival().unwrap().ring.unwrap();
@@ -5852,25 +5862,56 @@ mod tests {
         );
     }
 
-    /// `count` sessions, the newest first, each beneath the folder but the first, which is in it, and the second busy.
-    fn many_sessions(count: usize) -> Event {
-        Event::Message(ServerMessage::Sessions {
-            sessions: (0..count)
-                .map(|index| tomori_protocol::SessionSummary {
-                    id: format!("ses_{index}"),
-                    title: format!("Session {index}"),
-                    directory: match index {
-                        0 => "/work/tomori".into(),
-                        _ => format!("/work/tomori/crates/c{index}"),
-                    },
-                    busy: index == 1,
-                })
-                .collect(),
-        })
+    /// A session in `directory`, last active `age` seconds ago if known.
+    fn session(id: &str, directory: &str) -> tomori_protocol::SessionSummary {
+        tomori_protocol::SessionSummary {
+            id: id.into(),
+            title: format!("Session {id}"),
+            directory: directory.into(),
+            busy: false,
+            age: None,
+            space: None,
+        }
     }
 
-    /// The session ring's keys, as their session identifiers, with "New session" as `new` and "More sessions" as
-    /// `more`.
+    /// `count` sessions in each of `folders` beneath `/work/tomori`, the newest first, taking turns.
+    fn folders(folders: &[(&str, usize)]) -> Event {
+        let mut sessions = Vec::new();
+        let most = folders.iter().map(|(_, count)| *count).max().unwrap_or(0);
+        for turn in 0..most {
+            for (folder, count) in folders {
+                if turn < *count {
+                    let directory = if folder.is_empty() {
+                        "/work/tomori".to_owned()
+                    } else {
+                        format!("/work/tomori/{folder}")
+                    };
+                    let id = if folder.is_empty() {
+                        format!("root-{turn}")
+                    } else {
+                        format!("{folder}-{turn}")
+                    };
+                    sessions.push(session(&id, &directory));
+                }
+            }
+        }
+        Event::Message(ServerMessage::Sessions { sessions })
+    }
+
+    /// At the session browser of the fake backend in `/work/tomori`, with `listing` applied.
+    fn browsing(listing: Event) -> Conversation {
+        let mut conversation = in_lobby(backends(), roots());
+        listed(&mut conversation, vec![]);
+        conversation.choose_object(&arrival::Key::Create);
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
+        sent(&mut conversation);
+        conversation.apply(listing);
+        conversation
+    }
+
+    /// The browser's list's keys, as their session identifiers, with "New session" as `new` and its pagers as `newer`
+    /// and `older`.
     fn session_ring(conversation: &Conversation) -> Vec<String> {
         conversation
             .arrival()
@@ -5881,111 +5922,318 @@ mod tests {
             .into_iter()
             .map(|item| match item.key {
                 arrival::Key::Session(id) => id.unwrap_or_else(|| "new".into()),
-                // Only "More sessions" is on the ring besides the sessions.
-                _ => "more".into(),
+                arrival::Key::Page { later: true, .. } => "older".into(),
+                _ => "newer".into(),
             })
             .collect()
     }
 
-    /// More sessions than fit on the ring are shown a page at a time, newest first, and "More sessions" steps through
-    /// the pages, after the last returning to the first; every one can be reached and attached, by pointing or the
-    /// stick.
+    /// The browser's index's keys, as their folders, with every folder as `all`.
+    fn session_index(conversation: &Conversation) -> Vec<String> {
+        conversation
+            .arrival()
+            .unwrap()
+            .ring
+            .unwrap()
+            .index
+            .into_iter()
+            .map(|item| {
+                let arrival::Key::Folder(folder) = item.key else {
+                    unreachable!("only folders, as there are few");
+                };
+                folder.map_or("all".into(), |folder| {
+                    folder.trim_start_matches("/work/tomori/").into()
+                })
+            })
+            .collect()
+    }
+
+    /// More sessions than the list shows are scrolled through, by its pagers or the right stick, newest first; every
+    /// one can be reached and attached, in its own directory, and the list stops at either end.
     #[test]
-    fn many_sessions_are_shown_a_page_at_a_time() {
-        let mut conversation = in_lobby(backends(), roots());
-        listed(&mut conversation, vec![]);
-        conversation.choose_object(&arrival::Key::Create);
-        conversation.choose_object(&arrival::Key::Backend("fake".into()));
-        conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
-        sent(&mut conversation);
-        conversation.apply(many_sessions(SESSION_PAGE * 2 + 3));
-        let page = |first: usize, count: usize| {
-            std::iter::once("new".to_owned())
-                .chain((first..first + count).map(|index| format!("ses_{index}")))
-                .chain(std::iter::once("more".to_owned()))
-                .collect::<Vec<_>>()
+    fn many_sessions_scroll_through_the_list() {
+        let mut conversation = browsing(folders(&[("crates/a", 20)]));
+        let ids = |range: std::ops::Range<usize>| {
+            range.map(|n| format!("crates/a-{n}")).collect::<Vec<_>>()
         };
-        assert_eq!(session_ring(&conversation), page(0, SESSION_PAGE));
-        let more = conversation.arrival().unwrap().ring.unwrap().items[SESSION_PAGE + 1].clone();
-        assert_eq!(more.label, "More sessions");
-        assert_eq!(more.detail.as_deref(), Some("1-8 of 19"));
+        let list = |middle: Vec<String>, newer: bool, older: bool| {
+            let mut list = vec!["new".to_owned()];
+            if newer {
+                list.push("newer".into());
+            }
+            list.extend(middle);
+            if older {
+                list.push("older".into());
+            }
+            list
+        };
+        // One folder needs no index.
+        assert!(session_index(&conversation).is_empty());
+        assert_eq!(session_ring(&conversation), list(ids(0..7), false, true));
+        let older = conversation.arrival().unwrap().ring.unwrap().items[8].clone();
+        assert_eq!(older.label, "Older sessions");
+        assert_eq!(older.detail.as_deref(), Some("13 more"));
         assert_fits(&mut conversation);
 
-        conversation.choose_object(&arrival::Key::MoreSessions);
-        assert_eq!(
-            session_ring(&conversation),
-            page(SESSION_PAGE, SESSION_PAGE)
-        );
+        let page = arrival::Key::Page {
+            folders: false,
+            later: true,
+        };
+        conversation.choose_object(&page);
+        assert_eq!(session_ring(&conversation), list(ids(7..13), true, true));
         assert!(sent(&mut conversation).is_empty());
-        // The stick stays on "More sessions", so A steps on, to the last page, then back to the first.
-        conversation.accept();
-        assert_eq!(session_ring(&conversation), page(SESSION_PAGE * 2, 3));
-        assert!(conversation.text().contains("> More sessions"));
-        conversation.accept();
-        assert_eq!(session_ring(&conversation), page(0, SESSION_PAGE));
+        conversation.choose_object(&page);
+        assert_eq!(session_ring(&conversation), list(ids(13..20), true, false));
+        // At the end, the right stick scrolls no further, and back a row at a time.
+        conversation.scroll_sessions(5, false);
+        assert_eq!(session_ring(&conversation), list(ids(13..20), true, false));
+        conversation.scroll_sessions(-1, false);
+        assert_eq!(session_ring(&conversation), list(ids(12..18), true, true));
+        conversation.choose_object(&arrival::Key::Page {
+            folders: false,
+            later: false,
+        });
+        assert_eq!(session_ring(&conversation), list(ids(6..12), true, true));
+        conversation.page_sessions(false, false);
+        assert_eq!(session_ring(&conversation), list(ids(0..7), false, true));
+        conversation.scroll_sessions(-3, false);
+        assert_eq!(session_ring(&conversation), list(ids(0..7), false, true));
 
-        // A session beyond the first page is attached in its own directory, beneath the folder.
-        conversation.choose_object(&arrival::Key::MoreSessions);
-        conversation.choose_object(&arrival::Key::MoreSessions);
-        conversation.choose_object(&arrival::Key::Session(Some("ses_17".into())));
+        // A session beyond the first rows is attached in its own directory, beneath the folder.
+        conversation.scroll_sessions(30, false);
+        conversation.choose_object(&arrival::Key::Session(Some("crates/a-17".into())));
         assert_eq!(
             sent(&mut conversation),
             [ClientMessage::CreateSpace {
-                title: "Session 17".into(),
+                title: "Session crates/a-17".into(),
                 backend: "fake".into(),
-                directory: "/work/tomori/crates/c17".into(),
-                session: Some("ses_17".into()),
+                directory: "/work/tomori/crates/a".into(),
+                session: Some("crates/a-17".into()),
                 environment: Some("sky".into()),
                 instructions: None,
             }]
         );
     }
 
-    /// Each session says beneath its title whether the agent is busy in it and where beneath the folder it is.
+    /// The stick moves the selection down the list, which scrolls to keep it in view, and A attaches it; the right stick
+    /// does nothing outside the browser.
     #[test]
-    fn sessions_show_whether_they_are_busy_and_where_they_are() {
+    fn the_stick_scrolls_the_list_to_its_selection() {
+        let mut conversation = browsing(folders(&[("", 12)]));
+        for _ in 0..9 {
+            conversation.navigate(0, 1);
+        }
+        assert!(conversation.text().contains("> Session root-8"));
+        let ring = session_ring(&conversation);
+        assert!(ring.contains(&"root-8".to_owned()) && ring.contains(&"newer".to_owned()));
+        conversation.accept();
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { session: Some(session), .. }] if session == "root-8"
+        ));
+        assert!(!conversation.browsing());
+        conversation.scroll_sessions(1, false);
+        conversation.page_sessions(false, true);
+    }
+
+    /// Sessions in several folders are indexed by folder, the most recently active first, each saying how many it holds
+    /// and how many are busy; choosing one narrows the list to it, from its start, and a new session runs there.
+    #[test]
+    fn sessions_in_several_folders_are_indexed_by_folder() {
+        let mut listing = folders(&[("apps/web", 3), ("", 1), ("tools/cli", 2)]);
+        let Event::Message(ServerMessage::Sessions { sessions }) = &mut listing else {
+            unreachable!()
+        };
+        sessions[0].busy = true;
+        let mut conversation = browsing(listing);
+        assert_eq!(
+            session_index(&conversation),
+            ["all", "apps/web", "/work/tomori", "tools/cli"]
+        );
+        let index = conversation.arrival().unwrap().ring.unwrap().index;
+        let shown: Vec<_> = index
+            .iter()
+            .map(|item| (item.label.as_str(), item.detail.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("All folders", "6 sessions · 1 busy"),
+                ("web", "apps · 3 · 1 busy"),
+                ("tomori", "1 session"),
+                ("cli", "tools · 2"),
+            ]
+        );
+        assert_eq!(
+            index[0].kind,
+            arrival::Kind::Folder {
+                hue: None,
+                busy: true,
+                chosen: true
+            }
+        );
+        let cli = arrival::Kind::Folder {
+            hue: Some(arrival::hue("/work/tomori/tools/cli")),
+            busy: false,
+            chosen: false,
+        };
+        assert_eq!(index[3].kind, cli);
+        // Every folder's sessions say which folder they are in, except the folder itself.
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        assert_eq!(ring.items[1].detail.as_deref(), Some("busy · apps/web"));
+        assert_eq!(ring.items[2].detail, None);
+        assert_eq!(ring.items[0].detail.as_deref(), Some("in tomori"));
+
+        conversation.choose_object(&arrival::Key::Folder(Some("/work/tomori/tools/cli".into())));
+        assert_eq!(
+            session_ring(&conversation),
+            ["new", "tools/cli-0", "tools/cli-1"]
+        );
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        assert_eq!(ring.items[0].detail.as_deref(), Some("in cli"));
+        // Narrowed to one folder, its sessions need not say so.
+        assert_eq!(ring.items[1].detail, None);
+        let arrival::Kind::Folder { hue, busy, .. } = cli else {
+            unreachable!("a folder");
+        };
+        assert_eq!(
+            ring.index[3].kind,
+            arrival::Kind::Folder {
+                hue,
+                busy,
+                chosen: true
+            }
+        );
+        conversation.choose_object(&arrival::Key::Session(None));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::CreateSpace {
+                title: "fake in cli".into(),
+                backend: "fake".into(),
+                directory: "/work/tomori/tools/cli".into(),
+                session: None,
+                environment: Some("sky".into()),
+                instructions: None,
+            }]
+        );
+    }
+
+    /// The stick moves into the index and back: up and down in it show each folder's sessions at once, and A moves to
+    /// the list.
+    #[test]
+    fn the_stick_moves_between_the_index_and_the_list() {
+        let mut conversation = browsing(folders(&[("a", 2), ("b", 1)]));
+        conversation.navigate(-1, 0);
+        conversation.navigate(0, 1);
+        assert_eq!(session_ring(&conversation), ["new", "a-0", "a-1"]);
+        let selected = |conversation: &Conversation| {
+            let ring = conversation.arrival().unwrap().ring.unwrap();
+            keys(
+                &ring
+                    .index
+                    .into_iter()
+                    .chain(ring.items)
+                    .filter(|item| item.selected)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            selected(&conversation),
+            [arrival::Key::Folder(Some("/work/tomori/a".into()))]
+        );
+        conversation.navigate(0, 1);
+        assert_eq!(session_ring(&conversation), ["new", "b-0"]);
+        // A moves to the list, on "New session"; down and A attach.
+        conversation.accept();
+        assert_eq!(selected(&conversation), [arrival::Key::Session(None)]);
+        assert!(sent(&mut conversation).is_empty());
+        conversation.navigate(0, 1);
+        conversation.navigate(-1, 0);
+        conversation.navigate(1, 0);
+        conversation.accept();
+        assert!(matches!(
+            sent(&mut conversation).as_slice(),
+            [ClientMessage::CreateSpace { session: Some(session), .. }] if session == "b-0"
+        ));
+    }
+
+    /// Each session says beneath its title whether the agent is busy in it, the space it is already in, and how long
+    /// ago it was last active; choosing one already in a space joins that space rather than binding it again.
+    #[test]
+    fn sessions_show_whether_they_are_busy_in_a_space_and_when_active() {
+        let mut busy = session("busy", "/work/tomori");
+        busy.busy = true;
+        busy.age = Some(30);
+        let mut bound = session("bound", "/work/tomori");
+        bound.space = Some(SPACE.into());
+        bound.age = Some(3 * 3600);
+        let mut elsewhere = session("elsewhere", "/work/tomori");
+        elsewhere.space = Some("space-gone".into());
+        let mut untitled = session("untitled", "/work/tomori");
+        untitled.title = " ".into();
         let mut conversation = in_lobby(backends(), roots());
-        listed(&mut conversation, vec![]);
+        listed(&mut conversation, vec![summary(SPACE, "Deploy")]);
         conversation.choose_object(&arrival::Key::Create);
         conversation.choose_object(&arrival::Key::Backend("fake".into()));
         conversation.choose_object(&arrival::Key::Directory("/work/tomori".into()));
         sent(&mut conversation);
-        conversation.apply(many_sessions(3));
-        let details: Vec<_> = conversation.arrival().unwrap().ring.unwrap().items[1..]
+        conversation.apply(Event::Message(ServerMessage::Sessions {
+            sessions: vec![busy, bound, elsewhere, untitled],
+        }));
+        let ring = conversation.arrival().unwrap().ring.unwrap();
+        let rows: Vec<_> = ring.items[1..]
             .iter()
-            .map(|item| item.detail.clone())
+            .map(|item| (item.label.as_str(), item.detail.as_deref()))
             .collect();
         assert_eq!(
-            details,
+            rows,
             [
-                None,
-                Some("busy, crates/c1".into()),
-                Some("crates/c2".into())
+                ("Session busy", Some("busy · just now")),
+                ("Session bound", Some("in Deploy · 3 h ago")),
+                ("Session elsewhere", Some("in a space")),
+                ("untitled", None),
             ]
         );
-        // Fewer than a page need no "More sessions".
+        let hue = arrival::hue("/work/tomori");
         assert_eq!(
-            session_ring(&conversation),
-            ["new", "ses_0", "ses_1", "ses_2"]
-        );
-        let in_folder = |directory: &str, busy| tomori_protocol::SessionSummary {
-            id: "s".into(),
-            title: "t".into(),
-            directory: directory.into(),
-            busy,
-        };
-        assert_eq!(
-            session_detail(&in_folder("/work/tomori", true), "/work/tomori").as_deref(),
-            Some("busy")
+            ring.items[1].kind,
+            arrival::Kind::Session {
+                hue,
+                busy: true,
+                bound: false,
+            }
         );
         assert_eq!(
-            session_detail(&in_folder("/elsewhere", false), "/work/tomori").as_deref(),
-            Some("/elsewhere")
+            ring.items[2].kind,
+            arrival::Kind::Session {
+                hue,
+                busy: false,
+                bound: true,
+            }
         );
-        // A session without a directory is attached in the folder.
-        conversation.apply(Event::Message(ServerMessage::Sessions {
-            sessions: vec![in_folder("", false)],
+        // A space that is not listed cannot be joined, and says so.
+        conversation.choose_object(&arrival::Key::Session(Some("elsewhere".into())));
+        assert!(sent(&mut conversation).is_empty());
+        assert!(conversation.text().contains("not listed"));
+        conversation.choose_object(&arrival::Key::Session(Some("bound".into())));
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::Join {
+                space: SPACE.into()
+            }]
+        );
+        assert_eq!(conversation.arrival().unwrap().ring, None);
+    }
+
+    /// A session without a directory is attached in the folder, and a key that is not the browser's does nothing there.
+    #[test]
+    fn a_session_without_a_directory_is_attached_in_the_folder() {
+        let mut conversation = browsing(Event::Message(ServerMessage::Sessions {
+            sessions: vec![session("s", "")],
         }));
+        conversation.choose_object(&arrival::Key::Backend("fake".into()));
+        conversation.choose_object(&arrival::Key::Session(Some("unknown".into())));
+        assert!(sent(&mut conversation).is_empty());
         conversation.choose_object(&arrival::Key::Session(Some("s".into())));
         assert!(matches!(
             sent(&mut conversation).as_slice(),
@@ -10788,12 +11036,17 @@ mod tests {
             // A session without a title is listed by its identifier.
             conversation.error = None;
             conversation.step = LobbyStep::Session;
-            conversation.sessions = vec![tomori_protocol::SessionSummary {
-                id: "ses_1".into(),
-                title: "  ".into(),
-                directory: "/tmp".into(),
-                busy: false,
-            }];
+            conversation.browser = SessionBrowser::new("/tmp");
+            conversation
+                .browser
+                .set_sessions(vec![tomori_protocol::SessionSummary {
+                    id: "ses_1".into(),
+                    title: "  ".into(),
+                    directory: "/tmp".into(),
+                    busy: false,
+                    age: None,
+                    space: None,
+                }]);
             assert!(conversation.text().contains("ses_1"));
         }
 

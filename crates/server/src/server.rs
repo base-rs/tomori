@@ -1024,6 +1024,7 @@ impl Server {
                     participant,
                     backend,
                     directory,
+                    bound,
                 }) => {
                     let places = Places {
                         roots: &roots,
@@ -1033,9 +1034,12 @@ impl Server {
                     spaces.push(Box::pin(list_sessions(
                         scheduler,
                         self.hub.clone(),
-                        participant,
-                        backend,
-                        directory,
+                        Listing {
+                            participant,
+                            backend,
+                            directory,
+                            bound,
+                        },
                         places,
                         cancellation,
                     )) as Pin<Box<dyn Future<Output = ()>>>);
@@ -1520,36 +1524,54 @@ async fn run_session(
     drop(receiver);
 }
 
-/// List a backend's existing sessions in `directory` for `participant`, resolving the directory first so the backend sees it in canonical form. A directory that is not available, an unknown backend, or a backend failure is reported to `participant` as an error.
-async fn list_sessions<S: Timers>(
-    scheduler: &S,
-    hub: Arc<Hub>,
+/// A participant's request for a backend's sessions in a directory, and those already bound to a space if `bound`.
+struct Listing {
     participant: String,
     backend: String,
     directory: String,
+    bound: bool,
+}
+
+/// List a backend's existing sessions in a directory for a participant, as `listing` asks, resolving the directory first so the backend sees it in canonical form. A directory that is not available, an unknown backend, or a backend failure is reported to `participant` as an error.
+async fn list_sessions<S: Timers>(
+    scheduler: &S,
+    hub: Arc<Hub>,
+    listing: Listing,
     places: Places<'_>,
     cancellation: &Cancellation,
 ) {
+    let Listing {
+        participant,
+        backend,
+        directory,
+        bound,
+    } = listing;
     let directory = match resolve(scheduler, &places, &directory, cancellation).await {
         Some(directory) => directory,
         None => {
             hub.sessions(
                 &participant,
                 &backend,
+                bound,
                 Err(DIRECTORY_UNAVAILABLE.to_owned()),
             );
             return;
         }
     };
     let Some(found) = hub.backends.get(&backend) else {
-        hub.sessions(&participant, &backend, Err("Unknown backend.".to_owned()));
+        hub.sessions(
+            &participant,
+            &backend,
+            bound,
+            Err("Unknown backend.".to_owned()),
+        );
         return;
     };
     let sessions = found
         .sessions(&directory)
         .await
         .map_err(|error| error.message);
-    hub.sessions(&participant, &backend, sessions);
+    hub.sessions(&participant, &backend, bound, sessions);
 }
 
 /// The canonical form of a client's directory, checked on its own thread for at most [`RESOLVE_TIMEOUT`] so that a slow file system cannot stall the server, or `None` if it is refused.
@@ -2909,9 +2931,12 @@ mod tests {
             block_on(list_sessions(
                 &supervision.scheduler,
                 supervision.hub.clone(),
-                "/ada".to_owned(),
-                backend.to_owned(),
-                directory.to_owned(),
+                Listing {
+                    participant: "/ada".to_owned(),
+                    backend: backend.to_owned(),
+                    directory: directory.to_owned(),
+                    bound: false,
+                },
                 supervision.places(),
                 &live,
             ));

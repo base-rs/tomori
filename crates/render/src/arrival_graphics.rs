@@ -27,6 +27,8 @@ pub use tomori_scene::pointing::Beam;
 /// The colour of the participant cubes around a space, distinct from the swarm's blues so that people read differently from the agent.
 const PARTICIPANT: [f32; 3] = [1.0, 0.55, 0.75];
 const HOVER: [f32; 3] = [0.45, 0.95, 1.0];
+/// The mark of a session the agent is busy in, the status pill's colour for running.
+const BUSY: [f32; 3] = [0.3, 0.85, 0.95];
 const TEXT: [f32; 3] = [0.92, 0.95, 1.0];
 const MUTED: [f32; 3] = [0.48, 0.72, 0.85];
 const BACKGROUND: [f32; 3] = [0.012, 0.024, 0.045];
@@ -247,6 +249,46 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
             let turn = face * Quat::from_rotation_z(FRAC_PI_4);
             out.push(cube(p, Vec3::splat(s * 1.2), [0.7, 0.85, 1.0], turn));
         }
+        // The session browser's rows: a diamond in the colour of the folder, which turns quickly while the agent is busy
+        // in it, with a dot above it in the colour of running, and a cube below it in the participants' colour for a session
+        // already in a space; a folder whose sessions the list shows is joined to the list by a bar along its right edge.
+        Kind::Folder { hue, busy, chosen } => {
+            let color = hue.map_or([0.85, 0.9, 1.0], |hue| hsv(hue, 0.6, 0.95));
+            row_marker(p, s, face, color, busy, time, out);
+            if chosen && let Some(area) = object.panel {
+                let x = area.rect.max.x;
+                out.extend(bar(
+                    area.plane.at(glam::Vec2::new(x, area.rect.max.y - s * 0.6)),
+                    area.plane.at(glam::Vec2::new(x, area.rect.min.y + s * 0.6)),
+                    s * 0.5,
+                    color,
+                ));
+            }
+        }
+        Kind::Session { hue, busy, bound } => {
+            row_marker(p, s, face, hsv(hue, 0.6, 0.95), busy, time, out);
+            if bound {
+                out.push(cube(
+                    p + face * Vec3::new(0.0, -s * 2.0, 0.0),
+                    Vec3::splat(s * 0.7),
+                    PARTICIPANT,
+                    face,
+                ));
+            }
+        }
+        // A chevron pointing the way the pager scrolls.
+        Kind::Pager { later } => {
+            let tip = if later { -s } else { s };
+            let color = [0.7, 0.85, 1.0];
+            for side in [-1.0, 1.0] {
+                out.extend(bar(
+                    p + face * Vec3::new(side * s * 1.1, -tip * 0.5, 0.0),
+                    p + face * Vec3::new(0.0, tip * 0.6, 0.0),
+                    s * 0.3,
+                    color,
+                ));
+            }
+        }
         Kind::Menu(kind) => {
             let pulse = 0.6 + 0.4 * (time * 6.0).sin().abs();
             match kind {
@@ -307,6 +349,31 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
     }
 }
 
+/// A row's marker at `p`, of half-size `s`, facing as `face` does: a diamond of `color`, turning quickly and with a dot
+/// above it while `busy`.
+fn row_marker(
+    p: Vec3,
+    s: f32,
+    face: Quat,
+    color: [f32; 3],
+    busy: bool,
+    time: f32,
+    out: &mut Vec<Cube>,
+) {
+    let speed = if busy { 1.6 } else { 0.0 };
+    let diamond = face * Quat::from_rotation_z(FRAC_PI_4 + time * speed);
+    out.push(cube(p, Vec3::splat(s * 1.2), color, diamond));
+    if busy {
+        let pulse = 0.75 + 0.25 * (time * 3.0).sin();
+        out.push(cube(
+            p + face * Vec3::new(0.0, s * 2.0, 0.0),
+            Vec3::splat(s * 0.7),
+            BUSY.map(|value| value * pulse),
+            face,
+        ));
+    }
+}
+
 fn brighten(color: [f32; 3], amount: f32) -> [f32; 3] {
     color.map(|v| v + (1.0 - v) * amount)
 }
@@ -344,13 +411,24 @@ pub fn cubes(frame: &Frame) -> Vec<Cube> {
                 ));
             }
         }
+        // The stick's selection: a bar beneath an object, or along the left edge of a row of a panel.
         if object.selected && object.choosable {
-            out.push(cube(
-                object.position - Vec3::Y * object.size * 1.45,
-                Vec3::new(object.size * 2.0, 0.006, 0.006),
-                [0.9, 0.92, 1.0],
-                face,
-            ));
+            match object.panel {
+                Some(area) => out.extend(bar(
+                    area.plane
+                        .at(glam::Vec2::new(area.rect.min.x, area.rect.max.y)),
+                    area.plane
+                        .at(glam::Vec2::new(area.rect.min.x, area.rect.min.y)),
+                    0.004,
+                    [0.9, 0.92, 1.0],
+                )),
+                None => out.push(cube(
+                    object.position - Vec3::Y * object.size * 1.45,
+                    Vec3::new(object.size * 2.0, 0.006, 0.006),
+                    [0.9, 0.92, 1.0],
+                    face,
+                )),
+            }
         }
     }
     if let Some(beam) = frame.ray {
@@ -955,6 +1033,140 @@ mod tests {
                 .all(|value| value.is_finite())
         }));
         cubes
+    }
+
+    /// The session browser's rows: a diamond in the folder's colour, with a dot in the colour of running while busy and a
+    /// cube in the participants' colour while in a space; a chevron for a pager; a bar joining the folder shown to the
+    /// list; and the stick's selection along a row's left edge.
+    #[test]
+    fn the_session_browsers_rows_show_what_they_are() {
+        let colours = |cubes: &[Cube]| cubes.iter().map(|cube| cube.color).collect::<Vec<_>>();
+        let plain = drawn(
+            Kind::Session {
+                hue: 0.3,
+                busy: false,
+                bound: false,
+            },
+            0.0,
+        );
+        assert_eq!(plain.len(), 1);
+        let busy = drawn(
+            Kind::Session {
+                hue: 0.3,
+                busy: true,
+                bound: true,
+            },
+            0.0,
+        );
+        assert_eq!(busy.len(), 3);
+        assert!(colours(&busy).contains(&PARTICIPANT));
+        // The busy dot is the colour of running, pulsing.
+        assert!(busy.iter().any(|cube| {
+            let pulse = cube.color[2] / BUSY[2];
+            (0.4..=1.0).contains(&pulse)
+                && (0..3).all(|channel| (cube.color[channel] - BUSY[channel] * pulse).abs() < 1e-4)
+        }));
+        // A busy marker turns; a still one does not.
+        assert_ne!(
+            drawn(
+                Kind::Session {
+                    hue: 0.3,
+                    busy: true,
+                    bound: false
+                },
+                1.0
+            )[0]
+            .orientation,
+            busy[0].orientation
+        );
+        assert_eq!(
+            drawn(
+                Kind::Session {
+                    hue: 0.3,
+                    busy: false,
+                    bound: false
+                },
+                1.0
+            )[0]
+            .orientation,
+            plain[0].orientation
+        );
+        // Every folder is white; a folder has its own colour, the same as its sessions'.
+        let every = drawn(
+            Kind::Folder {
+                hue: None,
+                busy: false,
+                chosen: false,
+            },
+            0.0,
+        );
+        let folder = drawn(
+            Kind::Folder {
+                hue: Some(0.3),
+                busy: true,
+                chosen: false,
+            },
+            0.0,
+        );
+        assert_eq!(every[0].color, [0.85, 0.9, 1.0]);
+        assert_eq!(folder[0].color, plain[0].color);
+        assert_eq!(folder.len(), 2);
+        // Chosen, a folder that is a row is joined to the list by a bar along its right edge.
+        let area = crate::panel::Area {
+            plane: Plane::facing(Vec3::new(0.0, 1.0, -1.2), Vec3::Z),
+            rect: crate::panel::Rect {
+                min: glam::Vec2::new(0.0, -0.056),
+                max: glam::Vec2::new(0.4, 0.0),
+            },
+        };
+        let row = |kind| Object {
+            panel: Some(area),
+            size: 0.01,
+            ..object(kind)
+        };
+        let mut chosen = Vec::new();
+        form(
+            &row(Kind::Folder {
+                hue: Some(0.3),
+                busy: false,
+                chosen: true,
+            }),
+            0.0,
+            Some(HOME),
+            &mut chosen,
+        );
+        assert_eq!(chosen.len(), 2);
+        assert!((chosen[1].position[0] - 0.4).abs() < 1e-4);
+        // Without a row, a chosen folder has nowhere to put its bar.
+        assert_eq!(
+            drawn(
+                Kind::Folder {
+                    hue: None,
+                    busy: false,
+                    chosen: true
+                },
+                0.0
+            )
+            .len(),
+            1
+        );
+        // A pager's chevron points the way it scrolls.
+        let later = drawn(Kind::Pager { later: true }, 0.0);
+        let earlier = drawn(Kind::Pager { later: false }, 0.0);
+        assert_eq!((later.len(), earlier.len()), (2, 2));
+        assert!(later[0].position[1] < earlier[0].position[1]);
+        // The stick's selection runs along a row's left edge.
+        let scene = Scene {
+            objects: vec![Object {
+                selected: true,
+                ..row(Kind::Pager { later: true })
+            }],
+            ..Default::default()
+        };
+        let cubes = frame(&scene, None);
+        let edge = cubes.last().unwrap();
+        assert!(edge.position[0].abs() < 1e-4);
+        assert!((edge.position[1] - (1.0 - 0.028)).abs() < 1e-3);
     }
 
     #[test]
