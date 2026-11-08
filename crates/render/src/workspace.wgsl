@@ -52,6 +52,12 @@ fn coverage(uv: vec2<f32>, weight: f32) -> f32 {
     }
     return sum / f32(n * n);
 }
+// As `ui_panel.wgsl`'s: coverage made opacity so that text keeps one weight at every size where the target blends in linear light.
+override GAMMA: f32 = 1.0;
+fn opacity(covered: f32, color: vec3<f32>) -> f32 {
+    let light = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(1.0 - pow(1.0 - covered, GAMMA), pow(covered, GAMMA), light);
+}
 @fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.color.rgb, input.color.a * coverage(input.uv, input.weight));
+    return vec4<f32>(input.color.rgb, input.color.a * opacity(coverage(input.uv, input.weight), input.color.rgb));
 }

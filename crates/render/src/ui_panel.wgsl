@@ -53,7 +53,14 @@ fn coverage(uv: vec2<f32>, weight: f32) -> f32 {
     }
     return sum / f32(n * n);
 }
+// The exponent that turns coverage into opacity: `glyphs::GAMMA` where the target is sRGB, and so blends in linear light, and 1 where it blends the values it stores.
+override GAMMA: f32 = 1.0;
+// How opaque a pixel `covered` this much is drawn in `color`. Blended in linear light, a partly covered pixel of light text on a dark background shows far brighter than its share, so that small text, whose strokes and counters are all partly covered, grows bolder as it shrinks, and the counters of "e" and "o" fill in; dark text on a light background thins the same way. Light text's coverage is raised to `GAMMA`, and dark text's complement, mixed by the colour's luminance, so that text keeps one weight at every size.
+fn opacity(covered: f32, color: vec3<f32>) -> f32 {
+    let light = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(1.0 - pow(1.0 - covered, GAMMA), pow(covered, GAMMA), light);
+}
 @fragment
 fn fs_main(in: Output) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color.rgb, in.color.a * coverage(in.uv, in.weight));
+    return vec4<f32>(in.color.rgb, in.color.a * opacity(coverage(in.uv, in.weight), in.color.rgb));
 }
