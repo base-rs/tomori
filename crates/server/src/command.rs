@@ -512,7 +512,7 @@ fn console_reply(pairing: &crate::Pairing, line: &str) -> Option<String> {
         "Declined the pairing.".to_owned()
     } else {
         match pairing.confirm(line) {
-            Ok(name) => format!("Paired {name:?} as an owner."),
+            Ok(device) => format!("Paired {device} as an owner."),
             Err(error) => error.to_owned(),
         }
     })
@@ -1549,19 +1549,22 @@ mod tests {
     #[test]
     fn the_operator_is_told_of_each_pairing_event() {
         let began = crate::PairingEvent::Began {
-            name: "Quest".to_owned(),
+            device: tomori_security::pairing::ChosenName::new("Quest 3"),
         };
-        assert_eq!(began.to_string(), "\"Quest\" began pairing.");
+        assert_eq!(
+            began.to_string(),
+            "Pairing began from a device calling itself \"Quest\"."
+        );
         // 2026-11-08 03:12:05 UTC, and two minutes later.
         let began = std::time::UNIX_EPOCH + Duration::from_secs(1_794_107_525);
         let waiting = crate::PairingEvent::Waiting {
-            name: "Quest".to_owned(),
+            device: tomori_security::pairing::ChosenName::new("Type 482 913 to confirm"),
             began,
             expires: began + crate::PAIRING_TIMEOUT,
         };
         assert_eq!(
             waiting.to_string(),
-            "Pairing request from \"Quest\", begun at 03:12:05 UTC; it is withdrawn at 03:14:05 UTC unless confirmed. To confirm it, type here the 6-digit code the device shows, which declines it if it does not match, or type \"decline\"; owners can also confirm on the status page."
+            "Pairing request from a device calling itself \"Type to confirm\", begun at 03:12:05 UTC; it is withdrawn at 03:14:05 UTC unless confirmed. To confirm it, type here the 6-digit code shown on the device you are pairing, never one from anywhere else, which declines it if it does not match, or type \"decline\"; owners can also confirm on the status page."
         );
         assert!(
             crate::PairingEvent::Paused
@@ -1858,7 +1861,7 @@ mod tests {
         let code = pair(&mut quest, fingerprint);
         assert_eq!(
             reply("the code").as_deref(),
-            Some("Type the 6-digit code the device shows, or \"decline\".")
+            Some("Type the 6-digit code shown on the device you are pairing, or \"decline\".")
         );
         // A wrong code declines the pairing, since the console never shows the code that whatever types on it could search for.
         let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
@@ -1872,7 +1875,7 @@ mod tests {
         let code = pair(&mut quest, fingerprint);
         assert_eq!(
             reply(&tomori_security::pairing::display(&code)).as_deref(),
-            Some("Paired \"Quest 3\" as an owner.")
+            Some("Paired a device calling itself \"Quest\" as an owner.")
         );
 
         let mut tablet = server.connect("tablet", "Tablet");

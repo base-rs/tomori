@@ -19,6 +19,7 @@ use tomori_protocol::{
     FrameKind, Gate, Keepalive, PROTOCOL_VERSION, Participant, ServerMessage, SpeechSetting,
     WorkspaceRoot,
 };
+use tomori_security::pairing::ChosenName;
 
 use crate::access::{self, Access, Grant};
 use crate::backends::Backends;
@@ -112,7 +113,8 @@ pub const PAIRING_DECISIONS: usize = 8;
 pub struct PairingView {
     /// Names this pairing, so that the status page confirms the one it showed.
     pub serial: u64,
-    pub name: String,
+    /// The device, by what is left of the name it chose for itself; never the name as it chose it. See `design/security.md`.
+    pub device: ChosenName,
     /// The code, written as the device shows it, once the device has revealed its value.
     pub code: Option<String>,
 }
@@ -123,7 +125,7 @@ impl std::fmt::Debug for PairingView {
         formatter
             .debug_struct("PairingView")
             .field("serial", &self.serial)
-            .field("name", &self.name)
+            .field("device", &self.device)
             .field("code", &self.code.as_ref().map(|_| Redacted))
             .finish()
     }
@@ -165,8 +167,10 @@ struct PendingPairing {
     outbox: Arc<Outbox>,
     /// What pairs the device, which the server has, or it would not begin the pairing.
     setup: PairingSetup,
-    /// The device's display name, which names the token it receives.
-    name: String,
+    /// The device, by what is left of the name it chose for itself, as every display of the pairing shows it. See `design/security.md`.
+    device: ChosenName,
+    /// The name the device chose, as it chose it, which names the token it receives once confirmed, as a token is named; never shown while it pairs.
+    token_name: String,
     commitment: String,
     server: tomori_security::pairing::Nonce,
     code: Option<String>,
@@ -184,10 +188,10 @@ pub struct PairingSetup {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PairingEvent {
     /// A device began pairing.
-    Began { name: String },
+    Began { device: ChosenName },
     /// A pairing waits to be confirmed: the device shows its code. It began at `began`, and is withdrawn at `expires` unless confirmed.
     Waiting {
-        name: String,
+        device: ChosenName,
         began: SystemTime,
         expires: SystemTime,
     },
@@ -201,14 +205,14 @@ pub enum PairingEvent {
 impl std::fmt::Display for PairingEvent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Began { name } => write!(formatter, "{name:?} began pairing."),
+            Self::Began { device } => write!(formatter, "Pairing began from {device}."),
             Self::Waiting {
-                name,
+                device,
                 began,
                 expires,
             } => write!(
                 formatter,
-                "Pairing request from {name:?}, begun at {}; it is withdrawn at {} unless confirmed. To confirm it, type here the 6-digit code the device shows, which declines it if it does not match, or type \"decline\"; owners can also confirm on the status page.",
+                "Pairing request from {device}, begun at {}; it is withdrawn at {} unless confirmed. To confirm it, type here the 6-digit code shown on the device you are pairing, never one from anywhere else, which declines it if it does not match, or type \"decline\"; owners can also confirm on the status page.",
                 clock(*began),
                 clock(*expires)
             ),
@@ -1497,8 +1501,8 @@ impl HubState {
                 Confirmation::Typed(_) | Confirmation::Agent(_) => {
                     if matches!(confirmation, Confirmation::Typed(_)) {
                         log::info!(
-                            "Declined the pairing of {:?}, since the code typed did not match the one it shows.",
-                            pairing.name
+                            "Declined the pairing of {}, since the code typed did not match the one it shows.",
+                            pairing.device
                         );
                     }
                     self.end_pairing(
@@ -1951,7 +1955,7 @@ impl Hub {
         let pairing = state.pairing.as_ref()?;
         Some(PairingView {
             serial: pairing.serial,
-            name: pairing.name.clone(),
+            device: pairing.device.clone(),
             code: pairing
                 .code
                 .as_deref()
@@ -1959,28 +1963,31 @@ impl Hub {
         })
     }
 
-    /// Confirm the pairing waiting, issuing its device an owner token. Returns the device's name.
-    pub fn confirm_pairing(&self, confirmation: Confirmation<'_>) -> Result<String, &'static str> {
+    /// Confirm the pairing waiting, issuing its device an owner token. Returns the device, as pairing shows it.
+    pub fn confirm_pairing(
+        &self,
+        confirmation: Confirmation<'_>,
+    ) -> Result<ChosenName, &'static str> {
         let pairing = self.lock().take_confirmed(confirmation)?;
         self.issue_pairing(pairing)
     }
 
-    /// Issue the device of `pairing`, which was confirmed, an owner token, telling it. Returns the device's name. The token is issued outside the hub's lock, since issuing writes the token store.
-    fn issue_pairing(&self, pairing: PendingPairing) -> Result<String, &'static str> {
+    /// Issue the device of `pairing`, which was confirmed, an owner token, telling it. Returns the device, as pairing shows it. The token is issued outside the hub's lock, since issuing writes the token store.
+    fn issue_pairing(&self, pairing: PendingPairing) -> Result<ChosenName, &'static str> {
         let outbox = pairing.outbox.clone();
         let issued = pairing
             .setup
             .tokens
-            .issue(&pairing.name, tomori_security::Grant::Owner)
+            .issue(&pairing.token_name, tomori_security::Grant::Owner)
             .map_err(|error| {
                 log::error!("Could not issue a token for a pairing: {error}.");
                 "The token could not be issued."
             });
         match issued {
             Ok((entry, token)) => {
-                log::info!("Paired {:?} as owner token {}.", pairing.name, entry.id);
+                log::info!("Paired {} as owner token {}.", pairing.device, entry.id);
                 outbox.message(ServerMessage::Paired { token });
-                Ok(pairing.name)
+                Ok(pairing.device)
             }
             Err(error) => {
                 outbox.message(ServerMessage::PairFailed {
@@ -2004,10 +2011,10 @@ impl Hub {
     /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
     pub fn decline_pairing(&self, serial: Option<u64>) -> bool {
         let mut state = self.lock();
-        let name = state.pairing.as_ref().map(|pairing| pairing.name.clone());
+        let device = state.pairing.as_ref().map(|pairing| pairing.device.clone());
         let declined = state.decline_pairing(serial);
-        if declined && let Some(name) = name {
-            log::info!("Declined the pairing of {name:?}.");
+        if declined && let Some(device) = device {
+            log::info!("Declined the pairing of {device}.");
         }
         declined
     }
@@ -3206,17 +3213,20 @@ impl Hub {
                 state.pairing_attempts.push_back(now);
                 state.next_pairing += 1;
                 let server = tomori_security::pairing::Nonce::generate();
-                let name = state.participants[participant].name.clone();
-                log::info!("{name:?} began pairing.");
+                // The name the device chose enters pairing here, made safe to show once, so that every display of the pairing shows the same; see `design/security.md`.
+                let token_name = state.participants[participant].name.clone();
+                let device = ChosenName::new(&token_name);
+                log::info!("Pairing began from {device}.");
                 deferred.push(Deferred::PairingPrompt(PairingEvent::Began {
-                    name: name.clone(),
+                    device: device.clone(),
                 }));
                 state.pairing = Some(PendingPairing {
                     serial: state.next_pairing,
                     connection,
                     outbox: outbox.clone(),
                     setup,
-                    name,
+                    device,
+                    token_name,
                     commitment: commitment.to_ascii_lowercase(),
                     server,
                     code: None,
@@ -3249,12 +3259,12 @@ impl Hub {
                     device,
                     pairing.server,
                 );
-                let name = pairing.name.clone();
+                let device = pairing.device.clone();
                 pairing.code = Some(code);
                 outbox.message(ServerMessage::PairWaiting);
                 // Never the code: the log and the console may be read by others on the server's machine, such as its agents, and the operator confirms with the code the device shows. See `design/security.md`.
                 log::info!(
-                    "Pairing request from {name:?}: it waits to be confirmed with the code its device shows."
+                    "Pairing request from {device}: it waits to be confirmed with the code its device shows."
                 );
                 let timeout = *self.pairing_timeout.read().expect("never left poisoned");
                 let now = SystemTime::now();
@@ -3262,7 +3272,7 @@ impl Hub {
                     .checked_sub(Instant::now().saturating_duration_since(pairing.started))
                     .unwrap_or(now);
                 deferred.push(Deferred::PairingPrompt(PairingEvent::Waiting {
-                    name,
+                    device,
                     began,
                     // Only a library's timeout too long for any clock could not be added.
                     expires: began.checked_add(timeout).unwrap_or(began),

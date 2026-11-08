@@ -3215,7 +3215,10 @@ mod served {
             code.is_some()
         });
         let digits: String = code.unwrap().chars().filter(char::is_ascii_digit).collect();
-        assert_eq!(pairing.confirm(&digits), Ok("Ada".to_owned()));
+        assert_eq!(
+            pairing.confirm(&digits),
+            Ok(tomori_security::pairing::ChosenName::new("Ada"))
+        );
         until(connection, session, done);
     }
 

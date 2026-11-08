@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tomori_protocol::{ClientMessage, ConnectionRole, ServerMessage};
 use tomori_security::Fingerprint;
-use tomori_security::pairing::{Nonce, code, display};
+use tomori_security::pairing::{ChosenName, Nonce, code, display};
 use tomori_server::test_support::{TIMEOUT, TestClient, TestServer};
 
 /// The certificate fingerprint the test servers pair with. The test clients speak plain HTTP, so the fingerprint is only what the code is derived from.
@@ -71,7 +71,8 @@ fn the_operator_types_the_code_to_pair_a_device_as_an_owner() {
     assert_eq!(quest.role, ConnectionRole::Visitor);
     let code = pair(&mut quest);
     let pending = pairing.pending().unwrap();
-    assert_eq!(pending.name, "Quest 3");
+    // Shown by what is left of the name it chose, without its digits.
+    assert_eq!(pending.device.as_str(), Some("Quest"));
     assert_eq!(pending.code, Some(display(&code)));
 
     // A wrong code confirms nothing and declines the pairing, telling the device, so that the right code is no use afterwards.
@@ -89,11 +90,12 @@ fn the_operator_types_the_code_to_pair_a_device_as_an_owner() {
     assert!(server.tokens.as_ref().unwrap().entries().is_empty());
 
     let code = pair(&mut quest);
-    assert_eq!(pairing.confirm(&code), Ok("Quest 3".to_owned()));
+    assert_eq!(pairing.confirm(&code), Ok(ChosenName::new("Quest 3")));
     let token = paired(&quest);
     assert_eq!(pairing.pending(), None);
     let entries = server.tokens.as_ref().unwrap().entries();
     assert_eq!(entries.len(), 1);
+    // The token is named as the device named itself, as any token is, which pairing never shows.
     assert_eq!(entries[0].name, "Quest 3");
     assert_eq!(entries[0].grant, tomori_security::Grant::Owner);
 
@@ -137,7 +139,7 @@ fn one_pairing_waits_at_a_time() {
     );
     assert_eq!(pairing.pending().unwrap().code, Some(display(&code)));
     // The first is unaffected.
-    assert_eq!(pairing.confirm(&code), Ok("First".to_owned()));
+    assert_eq!(pairing.confirm(&code), Ok(ChosenName::new("First")));
     paired(&first);
 }
 
@@ -189,7 +191,10 @@ fn a_device_that_does_not_reveal_in_time_is_withdrawn() {
     quest.wait_for(|message| matches!(message, ServerMessage::PairNonce { .. }).then_some(()));
     // Shown, so that it can be declined, though it has no code yet.
     let pending = pairing.pending().unwrap();
-    assert_eq!((pending.name.as_str(), pending.code), ("Quest 3", None));
+    assert_eq!(
+        (pending.device.as_str(), pending.code),
+        (Some("Quest"), None)
+    );
     let deadline = std::time::Instant::now() + tomori_server::REVEAL_TIMEOUT + TIMEOUT;
     let error = loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -385,17 +390,23 @@ fn an_owner_confirms_a_pairing_on_the_status_page() {
     );
     let owner = format!("__Host-tomori-token={owner}");
     let collaborator = format!("__Host-tomori-token={collaborator}");
-    let mut quest = server.connect("quest", "Quest 3");
+    // A device whose name carries digits, in any script, and number words.
+    let mut quest = server.connect("quest", "Quest ٤٨٢ 913 four ２");
     let code = pair(&mut quest);
 
     let page = get(&server, "/", &owner);
     assert!(
         page.contains(&format!(
-            "Quest 3 asks to pair with code <strong>{}</strong>",
+            "Pairing request from a device calling itself &quot;Quest&quot;, with code <strong>{}</strong>. Confirm only if the device you are pairing shows the same code.",
             display(&code)
         )),
         "{page}"
     );
+    // No digit of the name is on the page, but the code's own.
+    let (_, request) = page.split_once("Pairing request from").unwrap();
+    let (device, _) = request.split_once("with code").unwrap();
+    assert!(!device.chars().any(char::is_numeric), "{device}");
+    assert!(!device.contains("four"), "{device}");
 
     let serial = format!("pairing={}", pairing.pending().unwrap().serial);
 

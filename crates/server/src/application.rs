@@ -225,7 +225,7 @@ impl Application {
                 .hub
                 .confirm_pairing(crate::hub::Confirmation::Shown(serial))
             {
-                Ok(name) => log::info!("Confirmed pairing {name:?} from the status page."),
+                Ok(device) => log::info!("Confirmed pairing {device} from the status page."),
                 Err(error) => log::info!("Could not confirm a pairing: {error}"),
             }
         } else {

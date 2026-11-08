@@ -81,11 +81,14 @@ impl Pairing {
         self.0.upgrade()?.pending_pairing()
     }
 
-    /// Confirm the pairing waiting, if `typed` is the code its device shows, with or without spaces. Returns the device's name. Six other digits decline the pairing; text that is not six digits changes nothing. See `design/security.md`.
-    pub fn confirm(&self, typed: &str) -> Result<String, &'static str> {
+    /// Confirm the pairing waiting, if `typed` is the code its device shows, with or without spaces. Returns the device, as pairing shows it. Six other digits decline the pairing; text that is not six digits changes nothing. See `design/security.md`.
+    pub fn confirm(
+        &self,
+        typed: &str,
+    ) -> Result<tomori_security::pairing::ChosenName, &'static str> {
         let hub = self.0.upgrade().ok_or("The server has stopped.")?;
         let code = tomori_security::pairing::typed(typed)
-            .ok_or("Type the 6-digit code the device shows, or \"decline\".")?;
+            .ok_or("Type the 6-digit code shown on the device you are pairing, or \"decline\".")?;
         hub.confirm_pairing(crate::hub::Confirmation::Typed(&code))
     }
 

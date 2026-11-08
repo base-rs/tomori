@@ -818,7 +818,7 @@ fn an_agent_s_confirmation_whose_token_cannot_be_issued_says_so() {
     assert_eq!(
         hub.status().pairing_decisions,
         [format!(
-            "The agent of space {space} (\"Space\"), session session, confirmed pairing for \"quest\" with nobody in the space, but the token could not be issued."
+            "The agent of space {space} (\"Space\"), session session, confirmed the pairing waiting with nobody in the space, but the token could not be issued."
         )]
     );
 }

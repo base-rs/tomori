@@ -8,7 +8,7 @@ Authentication, tokens, pairing and certificate pinning for [Tomori](https://git
 cargo add tomori-security
 ```
 
-A client pins the server's self-signed certificate by its `Fingerprint`, and builds a `rustls` configuration that accepts only that certificate, or the first one seen when none is pinned yet, with `client_config(Pinned::new(pin))`. The `pairing` module derives the code both sides show while pairing a device with a server.
+A client pins the server's self-signed certificate by its `Fingerprint`, and builds a `rustls` configuration that accepts only that certificate, or the first one seen when none is pinned yet, with `client_config(Pinned::new(pin))`. The `pairing` module derives the code both sides show while pairing a device with a server, and its `ChosenName` makes the name a pairing device chose for itself safe to show, carrying no numeral or number word.
 
 The `issue` feature adds the server's side: the `TokenStore`, which issues, lists, revokes and authenticates tokens, and the server's `ServerCertificate`. Authenticators report who a connection is, as a `Principal`, never what it may do; the server keeps roles against principals.
 
