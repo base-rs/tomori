@@ -934,9 +934,11 @@ impl Conversation {
             ServerMessage::Speech { segment, text, .. } => {
                 log::info!("Agent speech {segment}: {text}");
             }
-            // Presence comes with the presence work.
+            // Presence comes with the presence work, and the scene does not draw what is projected yet, which this
+            // client does not ask the server to send.
             ServerMessage::Welcome { .. }
             | ServerMessage::Presence { .. }
+            | ServerMessage::Projection { .. }
             | ServerMessage::Ping { .. }
             | ServerMessage::Pong { .. } => {}
         }

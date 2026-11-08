@@ -96,7 +96,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         ClientMessage::CreateSpace { .. }
         | ClientMessage::ListSessions { .. }
         | ClientMessage::SetInstructions { .. }
-        | ClientMessage::SetEnvironment { .. } => owner,
+        | ClientMessage::SetEnvironment { .. }
+        // Walls change the space for everyone in it, as its environment does. See `design/projection.md`.
+        | ClientMessage::AddWall { .. }
+        | ClientMessage::RemoveWall { .. } => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
         | ClientMessage::UtteranceEnd { .. }
@@ -115,7 +118,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::WatchCards
         | ClientMessage::PlaceCard { .. }
         // Visitors watch an environment, but ask nothing of it. See `design/environments.md`.
-        | ClientMessage::EnvironmentIntent { .. } => participant,
+        | ClientMessage::EnvironmentIntent { .. }
+        // Visitors see what is projected, but move and dismiss nothing.
+        | ClientMessage::PlacePanel { .. }
+        | ClientMessage::DismissPanel { .. } => participant,
     };
     if permitted {
         None
@@ -142,6 +148,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },
@@ -224,6 +231,20 @@ mod tests {
                 version: 1,
                 intent: tomori_protocol::Payload::new(serde_json::json!({})),
             },
+            ClientMessage::AddWall {
+                pose: Pose::default(),
+            },
+            ClientMessage::RemoveWall {
+                wall: "wall-1".into(),
+            },
+            ClientMessage::PlacePanel {
+                panel: "panel-1".into(),
+                wall: None,
+                pose: Some(Pose::default()),
+            },
+            ClientMessage::DismissPanel {
+                panel: "panel-1".into(),
+            },
         ]
     }
 
@@ -284,6 +305,8 @@ mod tests {
                     && kind != "list_sessions"
                     && kind != "set_instructions"
                     && kind != "set_environment"
+                    && kind != "add_wall"
+                    && kind != "remove_wall"
             })
             .collect();
         assert_eq!(permitted(ConnectionRole::Collaborator), collaborating);

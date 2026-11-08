@@ -16,6 +16,33 @@ pub struct Pose {
     pub orientation: [f32; 4],
 }
 
+impl Pose {
+    /// An upright pose at `position`, turned about the vertical so that its +Z faces `towards`, as a wall or panel
+    /// stands facing someone. Facing straight up or down, or itself, it is not turned.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    ///
+    /// let wall = Pose::upright_facing([0.0, 1.5, -2.0], [0.0, 1.6, 0.0]);
+    /// assert_eq!(wall.orientation, [0.0, 0.0, 0.0, 1.0]);
+    /// let behind = Pose::upright_facing([0.0, 1.5, 2.0], [0.0, 1.6, 0.0]);
+    /// assert!((behind.orientation[1].abs() - 1.0).abs() < 1e-6);
+    /// ```
+    pub fn upright_facing(position: [f32; 3], towards: [f32; 3]) -> Self {
+        let (x, z) = (towards[0] - position[0], towards[2] - position[2]);
+        let yaw = if x == 0.0 && z == 0.0 {
+            0.0
+        } else {
+            x.atan2(z)
+        };
+        let (sin, cos) = (yaw / 2.0).sin_cos();
+        Self {
+            position,
+            orientation: [0.0, sin, 0.0, cos],
+        }
+    }
+}
+
 /// A participant's decision on a pending tool permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +84,10 @@ pub enum Resource {
     /// while the space is in that environment. See `design/environments.md`.
     #[non_exhaustive]
     Object { object: String },
+    /// A panel projected in the space, by its [`crate::Panel::id`]. The server describes it from its own store of the
+    /// space's panels. See `design/projection.md`.
+    #[non_exhaustive]
+    Panel { panel: String },
     #[serde(other)]
     Unknown,
 }
@@ -78,6 +109,13 @@ impl Resource {
     pub fn object(object: impl Into<String>) -> Self {
         Self::Object {
             object: object.into(),
+        }
+    }
+
+    /// The projected panel whose [`crate::Panel::id`] is `panel`.
+    pub fn panel(panel: impl Into<String>) -> Self {
+        Self::Panel {
+            panel: panel.into(),
         }
     }
 }
@@ -218,6 +256,10 @@ pub enum ClientMessage {
         /// `design/environments.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         environment_state: bool,
+        /// Whether this client reads [`ServerMessage::Projection`]. Absent from older clients, which would refuse it and
+        /// are never sent it. See `design/projection.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        projection: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
@@ -349,6 +391,32 @@ pub enum ClientMessage {
         card: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placement: Option<Pose>,
+    },
+    /// Add a projection wall at `pose`, in the space's coordinates, to the current space's environment, for everyone in
+    /// the space. Owners only. Sent only to a server whose [`crate::SpaceState::projection`] is set. See
+    /// `design/projection.md`.
+    AddWall {
+        pose: Pose,
+    },
+    /// Remove the wall `wall`, one an owner added, from the current space's environment, with the panels on it. Owners
+    /// only, and only to a server whose [`crate::SpaceState::projection`] is set.
+    RemoveWall {
+        wall: String,
+    },
+    /// Put the panel `panel` onto the wall `wall`, which takes it into its layout, or, without a wall, leave it floating
+    /// at `pose`, in the space's coordinates, for everyone in the space. Participants only, and only to a server whose
+    /// [`crate::SpaceState::projection`] is set.
+    PlacePanel {
+        panel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wall: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pose: Option<Pose>,
+    },
+    /// Dismiss the panel `panel`, for everyone in the space. Participants only, and only to a server whose
+    /// [`crate::SpaceState::projection`] is set.
+    DismissPanel {
+        panel: String,
     },
     /// Ask to pair, committing to a random value: the SHA-256 of the value [`ClientMessage::PairReveal`] sends, as 64 hexadecimal digits. The server answers with [`ServerMessage::PairNonce`]. See `design/security.md`.
     PairBegin {
@@ -514,6 +582,11 @@ pub enum ServerMessage {
     /// whenever they or their placements change. See `design/github.md`.
     Cards {
         cards: Box<crate::Cards>,
+    },
+    /// What is projected in the current space, sent on joining and whenever it changes, only to a client whose Hello
+    /// set `projection`. See `design/projection.md`.
+    Projection {
+        projection: Box<crate::Projection>,
     },
     /// The server's random value for a pairing, as 64 hexadecimal digits, sent once the device has committed to its own.
     PairNonce {
@@ -1158,6 +1231,7 @@ mod tests {
             names: false,
             environments,
             environment_state: false,
+            projection: false,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -1268,6 +1342,7 @@ mod tests {
             names: false,
             environments: None,
             environment_state: true,
+            projection: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["environment_state"], true);
@@ -1336,6 +1411,7 @@ mod tests {
             names: false,
             environments: None,
             environment_state: false,
+            projection: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -1353,6 +1429,7 @@ mod tests {
             names: true,
             environments: None,
             environment_state: false,
+            projection: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -1373,6 +1450,7 @@ mod tests {
                 names: false,
                 environments: None,
                 environment_state: false,
+                projection: false,
             }
         );
 

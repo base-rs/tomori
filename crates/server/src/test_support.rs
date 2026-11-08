@@ -432,6 +432,7 @@ impl TestClient {
             names: false,
             environments: presents,
             environment_state: false,
+            projection: false,
         });
         // The welcome is the first reply to hello.
         let environments;

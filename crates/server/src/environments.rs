@@ -28,6 +28,10 @@ pub struct Environment {
     version: u32,
     instructions: String,
     side: Option<Arc<dyn ServerSide>>,
+    /// Where Tomori's own wall stands in it, its `stage` anchor, if it says. See `design/projection.md`.
+    stage: Option<tomori_protocol::Pose>,
+    /// The projection walls of its own.
+    walls: Vec<tomori_protocol::Pose>,
 }
 
 impl fmt::Debug for Environment {
@@ -39,17 +43,21 @@ impl fmt::Debug for Environment {
             .field("version", &self.version)
             .field("instructions", &self.instructions)
             .field("server_side", &self.side.is_some())
+            .field("stage", &self.stage)
+            .field("walls", &self.walls)
             .finish()
     }
 }
 
-/// Equal when they offer the same identifier, label, version and instructions, and the same server side, which is the same one rather than one like it.
+/// Equal when they offer the same identifier, label, version, instructions, stage and walls, and the same server side, which is the same one rather than one like it.
 impl PartialEq for Environment {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.label == other.label
             && self.version == other.version
             && self.instructions == other.instructions
+            && self.stage == other.stage
+            && self.walls == other.walls
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
                 (None, None) => true,
@@ -69,6 +77,8 @@ impl Environment {
             version: 1,
             instructions: String::new(),
             side: None,
+            stage: None,
+            walls: Vec::new(),
         }
     }
 
@@ -142,6 +152,51 @@ impl Environment {
     pub fn instructions(&self) -> &str {
         &self.instructions
     }
+
+    /// The environment, with Tomori's own projection wall standing at `stage`, its `stage` anchor, in the space's
+    /// coordinates, upright and facing along the pose's +Z. Without one, the wall stands front right of home, beside the
+    /// swarm. The wall and what is on it belong to the space, so they move here with the space. See
+    /// `design/projection.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_server::Environment;
+    ///
+    /// let stage = Pose { position: [0.0, 1.6, -3.0], orientation: [0.0, 0.0, 0.0, 1.0] };
+    /// assert_eq!(Environment::new("observe", "Observe").with_stage(stage).stage(), Some(stage));
+    /// assert_eq!(Environment::new("observe", "Observe").stage(), None);
+    /// ```
+    pub fn with_stage(mut self, stage: tomori_protocol::Pose) -> Self {
+        self.stage = Some(stage);
+        self
+    }
+
+    /// Where Tomori's own wall stands in it, if it says.
+    pub fn stage(&self) -> Option<tomori_protocol::Pose> {
+        self.stage
+    }
+
+    /// The environment, with projection walls of its own at `walls`, in the space's coordinates, each upright and facing
+    /// along its pose's +Z, of which the server uses at most six. The agent projects onto them, as onto the Tomori wall,
+    /// for whoever asks nearest them, and what is on them is kept for the space in this environment, hidden while the
+    /// space is in another. See `design/projection.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_server::Environment;
+    ///
+    /// let board = Pose { position: [3.0, 1.4, -4.0], orientation: [0.0, 0.0, 0.0, 1.0] };
+    /// assert_eq!(Environment::new("observe", "Observe").with_walls([board]).walls(), [board]);
+    /// ```
+    pub fn with_walls(mut self, walls: impl IntoIterator<Item = tomori_protocol::Pose>) -> Self {
+        self.walls = walls.into_iter().collect();
+        self
+    }
+
+    /// Its own projection walls.
+    pub fn walls(&self) -> &[tomori_protocol::Pose] {
+        &self.walls
+    }
 }
 
 /// The environments a server offers, in order: the first is the one a space whose creator names none is bound to. None by default: an application registers those it offers, each by the identity in its own crate. See `design/environments.md`.
@@ -197,6 +252,20 @@ impl Environments {
     /// The protocol version of the environment `id`, or `None` when it is not offered.
     pub fn version(&self, id: &str) -> Option<u32> {
         self.get(id).map(Environment::version)
+    }
+
+    /// Where the projection walls stand in a space in the environment `id`: the Tomori wall at the environment's
+    /// `stage` anchor, or else at [`crate::stage::default_stage`], and the environment's own walls, none when it is not
+    /// offered. See `design/projection.md`.
+    pub(crate) fn walls<'a>(&'a self, id: &'a str) -> crate::stage::Walls<'a> {
+        let environment = self.get(id);
+        crate::stage::Walls {
+            environment: id,
+            tomori: environment
+                .and_then(Environment::stage)
+                .unwrap_or_else(crate::stage::default_stage),
+            declared: environment.map_or(&[], Environment::walls),
+        }
     }
 
     /// The environments offered to a client that `presents` these, in order: those it lists with the same identifier and version, or every one for a client that lists none, as one from before versions. See `design/environments.md`.
@@ -326,6 +395,11 @@ mod tests {
         assert_ne!(plain, with);
         assert_ne!(with, plain);
         assert_ne!(plain, Environment::new("observe", "Other"));
+        // And when their projection walls stand in the same places.
+        let pose = tomori_protocol::Pose::default();
+        assert_ne!(plain, plain.clone().with_stage(pose));
+        assert_ne!(plain, plain.clone().with_walls([pose]));
+        assert!(format!("{:?}", plain.clone().with_walls([pose])).contains("walls: [Pose"));
     }
 
     #[test]

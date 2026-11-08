@@ -84,7 +84,20 @@ pub struct SpaceModel {
     /// What each waiting queue entry's speaker attended to as they began speaking, by entry key, as the space knew it
     /// then. Told to the agent with the entry. See `design/spaces.md`.
     attending: BTreeMap<String, Vec<Attended>>,
+    /// Where each waiting queue entry's speaker's head was as they began speaking, by entry key. See
+    /// `design/projection.md`.
+    origins: BTreeMap<String, [f32; 3]>,
+    /// Where the speaker of the input delivered last stood as they began speaking, if the space knows: what the agent
+    /// projects in its turn goes onto the wall nearest there.
+    origin: Option<[f32; 3]>,
+    /// The panels of replies completed since the hub last took them, each with where its asker stood.
+    projected: Vec<(crate::stage::Content, Option<[f32; 3]>)>,
+    /// The latest replies whose panels were taken, so that none is projected twice.
+    projected_replies: VecDeque<String>,
 }
+
+/// How many replies the space remembers having projected the panels of; more than the conversation keeps.
+const PROJECTED_REPLIES: usize = 2 * MESSAGE_LIMIT;
 
 /// A resource a participant attended to as they began speaking, as the space knew it then: never as their client
 /// described it. Made only by [`SpaceModel::attended`], from an identity the space has, so that nothing else can
@@ -98,7 +111,8 @@ impl Attended {
         match (&self.0, &other.0) {
             (Resolved::Worker { id, .. }, Resolved::Worker { id: other, .. })
             | (Resolved::Card { id, .. }, Resolved::Card { id: other, .. })
-            | (Resolved::Object { id, .. }, Resolved::Object { id: other, .. }) => id == other,
+            | (Resolved::Object { id, .. }, Resolved::Object { id: other, .. })
+            | (Resolved::Panel { id, .. }, Resolved::Panel { id: other, .. }) => id == other,
             _ => false,
         }
     }
@@ -115,6 +129,8 @@ enum Resolved {
     /// Something the space's environment presents, as its server side last described it as the utterance began. See
     /// `design/environments.md`.
     Object { id: String, description: String },
+    /// A panel projected in the space, as the stage described it as the utterance began. See `design/projection.md`.
+    Panel { id: String, description: String },
 }
 
 /// The longest worker title told to the agent, in characters.
@@ -147,6 +163,8 @@ fn describe(backend: &str, attended: &Attended, workers: &[tomori_protocol::Work
         Attended(Resolved::Card { description, .. }) => return description.clone(),
         // Cleaned as the side described it; its identity, which a client gave, is not told.
         Attended(Resolved::Object { description, .. }) => return description.clone(),
+        // As the stage described it, from its own store.
+        Attended(Resolved::Panel { description, .. }) => return description.clone(),
     };
     let session = one_line(id, limits::SESSION_BYTES);
     let backend = one_line(backend, limits::NAME_BYTES);
@@ -403,6 +421,10 @@ impl SpaceModel {
             takes_instructions: false,
             instructions_error: None,
             attending: BTreeMap::new(),
+            origins: BTreeMap::new(),
+            origin: None,
+            projected: Vec::new(),
+            projected_replies: VecDeque::new(),
         };
         model.load_messages(snapshot.messages);
         for permission in snapshot.permissions {
@@ -462,6 +484,16 @@ impl SpaceModel {
                 .any(|message| is_reply(message) && !replied.contains(&message.id))
         {
             self.unheard = true;
+        }
+        // And their panels, never seen, are projected.
+        let completed: Vec<usize> = (0..self.messages.len())
+            .filter(|index| {
+                let message = &self.messages[*index];
+                is_reply(message) && !replied.contains(&message.id)
+            })
+            .collect();
+        for index in completed {
+            self.project_reply(index);
         }
         for message in self
             .messages
@@ -637,6 +669,8 @@ impl SpaceModel {
         let (unattended, unheard) = (self.unattended, self.unheard);
         self.resynchronize(snapshot);
         (self.unattended, self.unheard) = (unattended, unheard);
+        // Nor is it projected again: its panels were projected when it was written.
+        self.projected.clear();
     }
 
     /// The space's own instructions are `space`, and its backend takes instructions if `takes`. A space whose backend
@@ -835,6 +869,12 @@ impl SpaceModel {
                     if replied && self.participants.is_empty() {
                         self.unheard = true;
                     }
+                    let index = self
+                        .messages
+                        .iter()
+                        .rposition(|shown| shown.id == message)
+                        .expect("found or added just above");
+                    self.project_reply(index);
                 }
             }
             Event::ToolStarted {
@@ -967,6 +1007,9 @@ impl SpaceModel {
                     // Its end, and so a reply, may only now be known, after a gap that lost its events.
                     let replied = !was_reply && is_reply(&restored);
                     self.messages[index] = restored;
+                    if replied {
+                        self.project_reply(index);
+                    }
                     if replied && self.participants.is_empty() {
                         self.unheard = true;
                         if self.busy == Some(false) {
@@ -997,6 +1040,7 @@ impl SpaceModel {
                 // Nothing waiting can be delivered any more, so say so rather than leave it queued.
                 self.queue.fail_waiting();
                 self.attending.clear();
+                self.origins.clear();
                 // A closed session can no longer receive decisions or answers.
                 self.approvals.clear();
                 self.deciding.clear();
@@ -1032,11 +1076,24 @@ impl SpaceModel {
     /// attended to it; `None` if the space does not have it, whatever a client claims, for an oversized identity, or
     /// for a kind this server does not know. A card is looked up on `cards`, the board, given only for a space that
     /// shows it, and described as it is now.
+    #[cfg(test)]
     pub fn attended(
         &self,
         resource: &tomori_protocol::Resource,
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
+    ) -> Option<Attended> {
+        self.attended_with(resource, cards, objects, &|_| None)
+    }
+
+    /// The resource `resource` identifies, as [`Self::attended`] says, with a panel described by `panels`, the stage's
+    /// description of the panel it has with that identity, if any.
+    pub fn attended_with(
+        &self,
+        resource: &tomori_protocol::Resource,
+        cards: Option<&crate::cards::Board>,
+        objects: Option<&crate::channel::Channel>,
+        panels: &dyn Fn(&str) -> Option<String>,
     ) -> Option<Attended> {
         match resource {
             tomori_protocol::Resource::Worker { worker, .. }
@@ -1074,6 +1131,15 @@ impl SpaceModel {
                     description: description.to_owned(),
                 }))
             }
+            // A panel's identity is only looked up: the stage describes the panel it has.
+            tomori_protocol::Resource::Panel { panel, .. }
+                if panel.len() <= limits::IDENTIFIER_BYTES =>
+            {
+                Some(Attended(Resolved::Panel {
+                    id: panel.clone(),
+                    description: panels(panel)?,
+                }))
+            }
             _ => None,
         }
     }
@@ -1081,17 +1147,30 @@ impl SpaceModel {
     /// What `attention` identifies, as [`Self::attended`] resolves each of its first
     /// [`tomori_protocol::ATTENTION_LIMIT`] resources, cards on `cards`, without those the space does not have or
     /// repeats.
+    #[cfg(test)]
     pub fn resolve(
         &self,
         attention: &[tomori_protocol::Resource],
         cards: Option<&crate::cards::Board>,
         objects: Option<&crate::channel::Channel>,
     ) -> Vec<Attended> {
+        self.resolve_with(attention, cards, objects, &|_| None)
+    }
+
+    /// What `attention` identifies, as [`Self::resolve`] says, with panels described by `panels`, as in
+    /// [`Self::attended_with`].
+    pub fn resolve_with(
+        &self,
+        attention: &[tomori_protocol::Resource],
+        cards: Option<&crate::cards::Board>,
+        objects: Option<&crate::channel::Channel>,
+        panels: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<Attended> {
         let mut resolved: Vec<Attended> = Vec::new();
         for attended in attention
             .iter()
             .take(tomori_protocol::ATTENTION_LIMIT)
-            .filter_map(|resource| self.attended(resource, cards, objects))
+            .filter_map(|resource| self.attended_with(resource, cards, objects, panels))
         {
             if !resolved.iter().any(|known| known.is(&attended)) {
                 resolved.push(attended);
@@ -1128,7 +1207,43 @@ impl SpaceModel {
     pub fn cancel(&mut self, key: &str) -> Result<(), &'static str> {
         self.queue.cancel(key)?;
         self.attending.remove(key);
+        self.origins.remove(key);
         Ok(())
+    }
+
+    /// The speaker of the waiting entry `key` stood at `origin` as they began speaking, so that what the agent projects
+    /// in answer goes onto the wall nearest there. See `design/projection.md`.
+    pub fn originate(&mut self, key: &str, origin: [f32; 3]) {
+        if self
+            .queue
+            .entries()
+            .iter()
+            .any(|entry| entry.id == key && entry.state == QueueState::Queued)
+        {
+            self.origins.insert(key.to_owned(), origin);
+        }
+    }
+
+    /// The panels of the replies completed since this was last called, each with where whoever asked for it stood, if
+    /// the space knows. See `design/projection.md`.
+    pub fn take_projected(&mut self) -> Vec<(crate::stage::Content, Option<[f32; 3]>)> {
+        std::mem::take(&mut self.projected)
+    }
+
+    /// Lift the panel blocks out of the reply at `index`, once, for the hub to project.
+    fn project_reply(&mut self, index: usize) {
+        let message = &self.messages[index];
+        if !is_reply(message) || self.projected_replies.contains(&message.id) {
+            return;
+        }
+        if self.projected_replies.len() == PROJECTED_REPLIES {
+            self.projected_replies.pop_front();
+        }
+        self.projected_replies.push_back(message.id.clone());
+        let origin = self.origin;
+        let panels = crate::stage::panels(&message.text);
+        self.projected
+            .extend(panels.into_iter().map(|content| (content, origin)));
     }
 
     /// The next prompt to deliver, if the agent is idle, nothing is pending and input is queued. Marks the entry as sending.
@@ -1149,6 +1264,8 @@ impl SpaceModel {
             .remove(&key)
             .and_then(|attention| context(&self.backend, &attention, &self.workers));
         let text = contextual(&entry.speaker, context, &entry.text, attribution);
+        // What the agent projects in its turn goes onto the wall nearest where they stood, or the Tomori wall.
+        self.origin = self.origins.remove(&key);
         // Entries that failed or were dropped without being delivered take their attention with them.
         let waiting: HashSet<&str> = self
             .queue
@@ -1159,6 +1276,7 @@ impl SpaceModel {
             .collect();
         self.attending
             .retain(|key, _| waiting.contains(key.as_str()));
+        self.origins.retain(|key, _| waiting.contains(key.as_str()));
         let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
         Some(prompt)
@@ -1357,6 +1475,8 @@ impl SpaceModel {
             speech: self.speech,
             voice_answers: true,
             environment_changes: true,
+            // Set by the hub.
+            projection: false,
             // Set by the hub, which knows the board.
             cards: false,
             error: {
@@ -3209,5 +3329,161 @@ mod tests {
                 assert_eq!(worker(backend_worker("w", state), "fake-1").state, shown);
             }
         }
+    }
+
+    const PANEL: &str = "```panel\ntitle: Status\n---\nGreen.\n```";
+
+    /// The titles of the panels taken, with where each asker stood.
+    fn projected(space: &mut SpaceModel) -> Vec<(String, Option<[f32; 3]>)> {
+        space
+            .take_projected()
+            .into_iter()
+            .map(|(content, origin)| (content.title, origin))
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_s_panels_are_taken_once_with_where_whoever_asked_stood() {
+        let mut space = model();
+        // With nobody asking, there is nowhere they stood.
+        reply(&mut space, "m0", PANEL);
+        assert_eq!(projected(&mut space), [("Status".to_owned(), None)]);
+        assert!(space.take_projected().is_empty());
+        // Where the speaker of the input delivered stood, for each panel of the replies in their turn.
+        space.enqueue("a".into(), 1, "Ada".into(), "status?".into());
+        space.enqueue("b".into(), 2, "Bob".into(), "and?".into());
+        space.originate("a", [1.0, 1.6, 0.0]);
+        space.originate("b", [2.0, 1.6, 0.0]);
+        // Only a waiting entry's speaker is kept.
+        space.originate("unknown", [9.0, 1.6, 0.0]);
+        assert_eq!(space.origins.len(), 2);
+        let prompt = space.next_prompt().unwrap();
+        space.sent(&prompt.key, Ok(()));
+        reply(&mut space, "m1", &format!("{PANEL}\n\n{PANEL}"));
+        assert_eq!(
+            projected(&mut space),
+            [
+                ("Status".to_owned(), Some([1.0, 1.6, 0.0])),
+                ("Status".to_owned(), Some([1.0, 1.6, 0.0]))
+            ]
+        );
+        // Completed again, a reply projects nothing more; a message of tool calls alone projects nothing.
+        space.apply(Event::MessageCompleted {
+            message: "m1".into(),
+        });
+        space.apply(Event::MessageStarted {
+            message: "tools".into(),
+            role: tomori_backend::Role::Assistant,
+        });
+        space.apply(Event::MessageCompleted {
+            message: "tools".into(),
+        });
+        assert!(space.take_projected().is_empty());
+        // A cancelled entry, and those of a closed space, take where they stood with them.
+        space.cancel("b").unwrap();
+        assert!(space.origins.is_empty());
+        space.enqueue("c".into(), 1, "Ada".into(), "x".into());
+        space.originate("c", [0.0; 3]);
+        space.apply(Event::Closed { reason: None });
+        assert!(space.origins.is_empty());
+    }
+
+    #[test]
+    fn an_entry_delivered_without_where_its_speaker_stood_projects_onto_the_tomori_wall() {
+        let mut space = model();
+        space.enqueue("a".into(), 1, "Ada".into(), "one".into());
+        space.originate("a", [1.0, 1.6, 0.0]);
+        let prompt = space.next_prompt().unwrap();
+        space.sent(&prompt.key, Ok(()));
+        space.apply(Event::Idle);
+        space.enqueue("b".into(), 1, "Ada".into(), "two".into());
+        let prompt = space.next_prompt().unwrap();
+        space.sent(&prompt.key, Ok(()));
+        reply(&mut space, "m1", PANEL);
+        assert_eq!(projected(&mut space), [("Status".to_owned(), None)]);
+    }
+
+    #[test]
+    fn panels_of_replies_completed_during_a_gap_are_projected_but_history_is_not() {
+        let mut space = model();
+        reply(&mut space, "seen", PANEL);
+        space.take_projected();
+        space.apply(Event::Reconnecting {
+            reason: "Lost the connection.".into(),
+        });
+        // Read again: the reply already seen is not projected again; one completed in the gap is.
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                busy: Some(false),
+                messages: vec![
+                    assistant("seen", PANEL, true),
+                    assistant("gap", PANEL, true),
+                    assistant("writing", PANEL, false),
+                ],
+                ..Snapshot::default()
+            },
+        });
+        assert_eq!(projected(&mut space).len(), 1);
+        // Restored complete, the one still being written is projected then.
+        space.apply(Event::MessageRestored {
+            message: assistant("writing", PANEL, true),
+        });
+        assert_eq!(projected(&mut space).len(), 1);
+        space.apply(Event::MessageRestored {
+            message: assistant("writing", PANEL, true),
+        });
+        assert!(space.take_projected().is_empty());
+        // A space bound again after a restart reads its history, which is not projected.
+        let mut restored = model();
+        restored.bind(
+            "fake-1".into(),
+            Snapshot {
+                messages: vec![assistant("old", PANEL, true)],
+                ..Snapshot::default()
+            },
+        );
+        assert!(restored.take_projected().is_empty());
+    }
+
+    #[test]
+    fn the_space_remembers_a_bounded_number_of_replies_projected() {
+        let mut space = model();
+        for index in 0..=PROJECTED_REPLIES {
+            reply(&mut space, &format!("m{index}"), "Plain.");
+        }
+        assert_eq!(space.projected_replies.len(), PROJECTED_REPLIES);
+        assert_eq!(
+            space.projected_replies.front().map(String::as_str),
+            Some("m1")
+        );
+    }
+
+    #[test]
+    fn a_panel_attended_to_is_described_as_the_stage_describes_it_once() {
+        let space = model();
+        let describe = |panel: &str| (panel == "panel-1").then(|| "panel \"Status\"".to_owned());
+        let panel = tomori_protocol::Resource::panel("panel-1");
+        let attention = space.resolve_with(
+            &[
+                panel.clone(),
+                panel,
+                tomori_protocol::Resource::panel("panel-2"),
+                tomori_protocol::Resource::panel("x".repeat(limits::IDENTIFIER_BYTES + 1)),
+            ],
+            None,
+            None,
+            &describe,
+        );
+        assert_eq!(attention.len(), 1);
+        assert_eq!(
+            context("fake", &attention, &[]).as_deref(),
+            Some("[Pointing at panel \"Status\"]")
+        );
+        // Without the stage, a panel is not resolved.
+        assert!(
+            space
+                .attended(&tomori_protocol::Resource::panel("panel-1"), None, None)
+                .is_none()
+        );
     }
 }

@@ -215,6 +215,12 @@ pub struct SpaceState {
     /// [`crate::ClientMessage::PlaceCard`]. False from older servers and in other environments. See `design/github.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cards: bool,
+    /// Whether the server projects panels in the space, sending [`crate::ServerMessage::Projection`] to a client whose
+    /// Hello set `projection`, and taking [`crate::ClientMessage::AddWall`], [`crate::ClientMessage::RemoveWall`],
+    /// [`crate::ClientMessage::PlacePanel`] and [`crate::ClientMessage::DismissPanel`]. False from older servers, which
+    /// a client sends none of them. See `design/projection.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub projection: bool,
 }
 
 /// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and

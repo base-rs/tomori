@@ -10,6 +10,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::stage::Stage;
+
 /// The file the spaces are kept in, within the state directory.
 pub const SPACES_FILE: &str = "spaces.json";
 
@@ -39,6 +41,10 @@ pub struct KeptSpace {
     /// Where its participants put its cards, by card, in a space whose environment shows cards. See `design/github.md`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub placements: std::collections::BTreeMap<String, tomori_protocol::Pose>,
+    /// Its projection walls and the panels on them or floating, in a format of their own with its version. See
+    /// `design/projection.md`.
+    #[serde(default, skip_serializing_if = "Stage::is_empty")]
+    pub stage: Stage,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,6 +190,7 @@ mod tests {
             closed: None,
             closed_order: None,
             placements: Default::default(),
+            stage: Stage::default(),
         }
     }
 

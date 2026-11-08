@@ -85,6 +85,9 @@ pub const TROUGH_HEIGHT: f32 = 0.38;
 pub const FEEDER: Vec2 = Vec2::new(0.8, -6.8);
 pub const FEEDER_RADIUS: f32 = 0.28;
 pub const GRAIN_RADIUS: f32 = 0.9;
+/// Where the farmyard's own projection wall stands: on the right of the yard, short of the trough, at eye height, facing
+/// home, for what the agent projects for whoever asks from that side of the yard. See `design/projection.md`.
+pub const NOTICEBOARD: Vec3 = Vec3::new(3.6, 1.5, -5.4);
 /// The hay bales, stacked in the back corner.
 pub const HAY: Footprint = Footprint::new([3.0, -10.7], [4.6, -9.5]);
 

@@ -39,6 +39,7 @@ mod recognition;
 mod retention;
 mod server;
 mod space;
+mod stage;
 mod system;
 mod transcriber;
 mod voice;

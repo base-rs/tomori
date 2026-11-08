@@ -73,6 +73,7 @@ impl Participant {
             names: false,
             environments: None,
             environment_state: false,
+            projection: false,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),
