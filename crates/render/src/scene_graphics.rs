@@ -538,7 +538,7 @@ mod tests {
                 tomori_protocol::Panel::new(
                     "panel-3",
                     "Summary",
-                    "Projection walls hold **text panels** the agent writes in `panel` blocks. Anyone can pull one off, put it back, or point and press B to dismiss it.",
+                    "Projection walls hold **text panels** the agent writes in `panel` blocks. Anyone can pull one off, put it back, or carry it and press B to throw it away.",
                     place(3),
                 )
                 .with_meta(vec![tomori_protocol::Meta::new("issue", "#82")])
@@ -747,6 +747,278 @@ mod tests {
             image::imageops::replace(&mut sheet, &moved, 0, (2 * HEIGHT).into());
             image::imageops::replace(&mut sheet, &highlighted, 0, (3 * HEIGHT).into());
             crate::test_support::preview("TOMORI_PROJECTION_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// What `texture`, `width` by `height`, holds once drawn.
+    fn read_back(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        (width, height): (u32, u32),
+    ) -> image::RgbaImage {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test readback"),
+            size: (width * height * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+            },
+            texture.size(),
+        );
+        queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        receiver.recv().unwrap().unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+        buffer.unmap();
+        image::RgbaImage::from_raw(width, height, data).unwrap()
+    }
+
+    /// Set `TOMORI_CARRY_HINT_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: a
+    /// panel carried 1.6 m ahead, with the hint below it saying what each control does, then carried over a wall's slot,
+    /// the hint saying it would swap, and a Rust code panel on the Tomori wall whose long lines wrap under a hanging
+    /// indent, close up from 0.5 m, then the same from home.
+    #[test]
+    fn a_panel_carried_shows_its_hint_and_a_code_panel_wraps_its_long_lines() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("carry hint test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            // Lines of Rust longer than a code panel's 45 columns, with spans of their kinds that cross where they wrap.
+            let rust = [
+                "async fn fetch(client: &Client, request: Request) -> Result<()> {",
+                "    let response = client.send(request, timeout(30)).await?;",
+                "    log::info!(\"sent {} and got {}\", response.id, response.code);",
+                "    Ok(())",
+                "}",
+            ]
+            .join("\n");
+            let mut spans = Vec::new();
+            let mut from = 0;
+            for (text, kind) in [
+                ("async", tomori_protocol::TokenKind::Keyword),
+                ("fn", tomori_protocol::TokenKind::Keyword),
+                ("fetch", tomori_protocol::TokenKind::Function),
+                ("Client", tomori_protocol::TokenKind::Type),
+                ("Request", tomori_protocol::TokenKind::Type),
+                ("Result", tomori_protocol::TokenKind::Type),
+                ("let", tomori_protocol::TokenKind::Keyword),
+                ("send", tomori_protocol::TokenKind::Function),
+                ("timeout", tomori_protocol::TokenKind::Function),
+                ("30", tomori_protocol::TokenKind::Number),
+                ("await", tomori_protocol::TokenKind::Keyword),
+                ("info!", tomori_protocol::TokenKind::Function),
+                ("\"sent {} and got {}\"", tomori_protocol::TokenKind::String),
+                ("Ok", tomori_protocol::TokenKind::Type),
+            ] {
+                let at = from + rust[from..].find(text).unwrap();
+                spans.push(tomori_protocol::Span::new(
+                    rust[..at].chars().count() as u32,
+                    text.chars().count() as u32,
+                    kind,
+                ));
+                from = at + text.len();
+            }
+            assert!(tomori_protocol::valid_spans(&rust, &spans));
+            let code = tomori_protocol::Panel::new(
+                "panel-2",
+                "rust",
+                rust.clone(),
+                tomori_protocol::Place::Wall {
+                    wall: tomori_protocol::TOMORI_WALL.into(),
+                    slot: 2,
+                },
+            )
+            .with_code(tomori_protocol::Code::new("rust", 5).with_spans(spans))
+            .with_age(5);
+            let ahead = arrival::HOME + Vec3::new(0.0, -0.1, -1.6);
+            let shown = vec![
+                tomori_protocol::Panel::new(
+                    "panel-1",
+                    "Steps to release",
+                    "1. Bump the version.\n2. Run `cargo bake test:coverage`.\n3. Tag and push.",
+                    tomori_protocol::Place::Free {
+                        pose: tomori_protocol::Pose::upright_facing(
+                            ahead.to_array(),
+                            arrival::HOME.to_array(),
+                        ),
+                    },
+                )
+                .with_age(60),
+                code.clone(),
+            ];
+            let mut conversation = joined();
+            show_projection(&mut conversation, Vec::new(), shown);
+            let wall = tomori_wall();
+            let wall_frame = Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            );
+            let slots = tomori_scene::projection::slot_frames(&wall, wall_frame);
+            let slot = |index: usize| slots[index].w_axis.truncate();
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(0.0),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, ahead - arrival::HOME),
+                ..Default::default()
+            };
+            let mut step = Step::default();
+            let now = Instant::now();
+            // About the headset's field of view and resolution, to judge the text as it would be read.
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            // Pulled off and carried, the hint shows below it.
+            step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+            let carried = Senses {
+                grip: Some(1.0),
+                ..senses
+            };
+            step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
+            let frame = step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
+            let hint = frame.projection.last().unwrap().canvas.as_ref().unwrap();
+            let text = |canvas: &tomori_scene::canvas::Canvas| {
+                canvas
+                    .rows
+                    .iter()
+                    .map(|row| row.plain())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            assert!(text(hint).contains("throw away, for all"));
+            let hint_at = frame
+                .projection
+                .last()
+                .unwrap()
+                .model
+                .unwrap()
+                .w_axis
+                .truncate();
+            assert!(hint_at.y < ahead.y);
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let looking = ahead - Vec3::Y * 0.2;
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y);
+            let hinted = capture(&renderer, &panels, from_home);
+            // Without its hint, the same frame differs: the hint draws, and its warm row with it.
+            let mut bare = frame.projection.clone();
+            bare.pop();
+            let without = tomori_scene::scene::Frame {
+                projection: bare,
+                ..frame
+            };
+            draw(&mut renderer, &device, &queue, &mut panels, &without);
+            let unhinted = capture(&renderer, &panels, from_home);
+            assert_ne!(hinted, unhinted, "the hint must draw");
+            let warm = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        let [r, g, b, _] = pixel.0.map(i32::from);
+                        r > 150 && g + 25 < r && b + 25 < g
+                    })
+                    .count()
+            };
+            assert!(
+                warm(&hinted) > 20 + warm(&unhinted),
+                "the throw row is warm"
+            );
+            // Carried over the wall's slot holding the code panel, the hint says the two would change places.
+            let over = Senses {
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, slot(2) - arrival::HOME),
+                ..carried
+            };
+            let frame = step.update(&over, &mut conversation, &mut felt(), now, 0.01);
+            let hint = frame.projection.last().unwrap().canvas.as_ref().unwrap();
+            let said = text(hint);
+            assert!(said.ends_with("swap with that one"), "{said}");
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let toward = lens * Mat4::look_at_rh(arrival::HOME, slot(2) + Vec3::Y * 0.25, Vec3::Y);
+            let swapping = capture(&renderer, &panels, toward);
+            // The code panel on its own, close up, from 0.5 m, and from home.
+            let mut code_only = joined();
+            show_projection(&mut code_only, Vec::new(), vec![code]);
+            let away = Senses {
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..senses
+            };
+            let mut code_step = Step::default();
+            let frame = code_step.update(&away, &mut code_only, &mut felt(), now, 0.01);
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let facing = slots[2].transform_vector3(Vec3::Z).normalize();
+            let close = lens * Mat4::look_at_rh(slot(2) + facing * 0.5, slot(2), Vec3::Y);
+            let wrapped = capture(&renderer, &panels, close);
+            let from_home =
+                lens * Mat4::look_at_rh(arrival::HOME, slot(2) + Vec3::Y * 0.1, Vec3::Y);
+            let wrapped_from_home = capture(&renderer, &panels, from_home);
+            // The string's green carries onto the row its line wraps onto.
+            let green = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        let [r, g, b, _] = pixel.0.map(i32::from);
+                        g > 120 && r + 15 < g && b + 20 < g
+                    })
+                    .count()
+            };
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 4);
+            image::imageops::replace(&mut sheet, &hinted, 0, 0);
+            image::imageops::replace(&mut sheet, &swapping, 0, HEIGHT.into());
+            image::imageops::replace(&mut sheet, &wrapped, 0, (2 * HEIGHT).into());
+            image::imageops::replace(&mut sheet, &wrapped_from_home, 0, (3 * HEIGHT).into());
+            crate::test_support::preview("TOMORI_CARRY_HINT_PREVIEW", &sheet);
+            assert!(green(&wrapped) > 20, "the string is coloured");
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }

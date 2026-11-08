@@ -51,6 +51,7 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         nearer: f32::INFINITY,
         stick: Vec2::ZERO,
         straighten: false,
+        controls: Controls::Controllers,
         now,
         dt: 1.0 / 72.0,
     }
@@ -222,6 +223,137 @@ fn a_code_panel_shows_its_lines_numbered_and_coloured_by_kind() {
     );
 }
 
+/// The text of `row`'s cells, without the second cells of wide characters.
+fn row_text(row: &crate::ui_text::Row) -> String {
+    crate::ui_text::plain(&row.cells)
+}
+
+#[test]
+fn a_long_line_of_code_wraps_under_a_hanging_indent_with_its_highlighting() {
+    use tomori_protocol::Span;
+    // Indented by four, as the block's other lines are, and longer than the panel's 45 columns of code.
+    let line = "    let total = compute(alpha, beta, \"gamma delta\", epsilon);";
+    let body = format!("fn main() {{\n{line}\n    short();\n}}");
+    let start = body.find("\"gamma").unwrap();
+    let start = body[..start].chars().count() as u32;
+    let panel = Panel::new("c", "rust", body, Place::Unknown).with_code(
+        Code::new("rust", 4).with_spans(vec![
+            Span::new(0, 2, TokenKind::Keyword),
+            Span::new(start, 13, TokenKind::String),
+        ]),
+    );
+    let canvas = face(&panel, false, false, Fit::Slot);
+    let rows: Vec<String> = canvas.rows.iter().map(row_text).collect();
+    // Lines that fit are as they were.
+    assert_eq!(rows[3], " 1 fn main() {");
+    // The long line breaks at a space within the row, its number on the first row only, and continues under a
+    // hanging indent of one more step, marked as continued in the gutter, without the space it broke at.
+    assert_eq!(rows[4], " 2     let total = compute(alpha, beta, \"gamma");
+    assert_eq!(rows[5], " ↪         delta\", epsilon);");
+    assert!(
+        rows.iter()
+            .all(|row| crate::ui_text::width(row) <= CODE_COLUMNS)
+    );
+    // The marker is dim, and the string's colour carries across the break.
+    assert_eq!(colours(&canvas.rows[5], "↪"), [CONTINUED_COLOR]);
+    assert_eq!(
+        colours(&canvas.rows[4], "\"gamma"),
+        [palette(TokenKind::String); 6]
+    );
+    assert_eq!(
+        colours(&canvas.rows[5], "delta\""),
+        [palette(TokenKind::String); 6]
+    );
+    assert_eq!(colours(&canvas.rows[5], ", epsilon"), [TEXT; 9]);
+    // The lines after it follow, numbered as before.
+    assert_eq!(rows[6], " 3     short();");
+    assert_eq!(rows[7], " 4 }");
+}
+
+#[test]
+fn code_breaks_at_spaces_or_punctuation_and_hard_breaks_a_long_token_never_through_a_wide_character()
+ {
+    let cells = |text: &str| {
+        cut(
+            &[crate::ui_text::Span::new(text, Style::plain(TEXT))],
+            usize::MAX,
+        )
+    };
+    let rows = |text: &str, room, step| -> Vec<String> {
+        wrap_code(&cells(text), room, step)
+            .iter()
+            .map(|row| crate::ui_text::plain(row))
+            .collect()
+    };
+    // A line that fits is one row, untouched, spaces and all.
+    assert_eq!(rows("  a  b", 20, 2), ["  a  b"]);
+    assert_eq!(rows("", 20, 2), [""]);
+    // Spaces left after a break are dropped, however many.
+    assert_eq!(rows(&format!("abc{}", " ".repeat(30)), 20, 4), ["abc"]);
+    // After punctuation, where there is no space in the latter half of the row.
+    assert_eq!(
+        rows("call(first,second,third,fourth)", 20, 4),
+        ["call(first,second,", "    third,fourth)"]
+    );
+    // Never between a punctuation mark and the one closing it.
+    assert_eq!(
+        rows("aaaaaaaaaaaaaaaaa();b", 20, 4),
+        ["aaaaaaaaaaaaaaaaa();", "    b"]
+    );
+    // A token longer than the row breaks at the row's end, and its rest at each later row's.
+    let token = "x".repeat(50);
+    let wrapped = rows(&token, 20, 4);
+    assert_eq!(wrapped[0], "x".repeat(20));
+    assert_eq!(wrapped[1], format!("    {}", "x".repeat(16)));
+    assert_eq!(wrapped.concat().replace(' ', ""), token);
+    // A wide character that would be cut by the row's end starts the next.
+    let wide = format!("{}日本", "x".repeat(19));
+    let wrapped = wrap_code(&cells(&wide), 20, 4);
+    assert_eq!(crate::ui_text::plain(&wrapped[0]), "x".repeat(19));
+    assert!(wrapped.iter().all(|row| crate::ui_text::whole(row)));
+    // The hanging indent keeps some room for code, however deeply the line is indented.
+    let deep = format!("{}{}", " ".repeat(40), "y ".repeat(20));
+    let wrapped = wrap_code(&cells(&deep), 45, 4);
+    assert!(
+        wrapped[1..]
+            .iter()
+            .all(|row| { row.iter().take_while(|(c, _)| *c == ' ').count() == 45 - CODE_ROOM })
+    );
+    // The indent step is the least indentation the block's lines have, of two to four.
+    assert_eq!(indent_step(&["a", "  b", "    c"]), 2);
+    assert_eq!(indent_step(&["a", "\tb", "        c"]), 4);
+    assert_eq!(indent_step(&["a", " b"]), 2);
+    assert_eq!(indent_step(&["a", "", "b"]), 4);
+}
+
+#[test]
+fn a_first_line_of_code_taller_than_the_panel_is_cut_and_says_there_is_more() {
+    // Wide characters, which take two cells each, wrap onto more rows than the panel has with a hanging indent this
+    // deep.
+    let line = format!("{}{}", " ".repeat(28), "語".repeat(200));
+    let panel = Panel::new("c", "text", format!("{line}\nnext"), Place::Unknown)
+        .with_code(Code::new("", 2));
+    let canvas = face(&panel, false, false, Fit::Slot);
+    let rows: Vec<String> = canvas.rows.iter().map(row_text).collect();
+    assert_eq!(rows.len(), CODE_ROWS);
+    // Every row of code is the first line's, the last ending with a dim "…", and the next line counted as more.
+    assert!(rows[3].starts_with(" 1 "));
+    assert!(
+        rows[4..3 + CODE_LINES]
+            .iter()
+            .all(|row| row.starts_with(" ↪ "))
+    );
+    let last = &canvas.rows[3 + CODE_LINES - 1];
+    assert_eq!(last.cells.last().unwrap(), &('…', Style::plain(DIM)));
+    assert!(
+        canvas
+            .rows
+            .iter()
+            .all(|row| crate::ui_text::whole(&row.cells))
+    );
+    assert_eq!(rows[CODE_ROWS - 1].trim_end(), "…1 more line");
+}
+
 #[test]
 fn a_code_panel_keeps_a_slots_size_floating() {
     let panel = code_panel("c", 3);
@@ -234,8 +366,8 @@ fn a_code_panel_keeps_a_slots_size_floating() {
 }
 
 #[test]
-fn a_long_code_panel_says_how_many_more_lines_it_has_and_cuts_long_lines() {
-    let long = "x".repeat(tomori_protocol::CODE_LINE_CHARS);
+fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
+    let long = "x".repeat(tomori_protocol::CODE_LINE_CHARS - 1);
     let body = std::iter::once(format!("{long}…"))
         .chain((2..=CODE_LINES).map(|line| format!("line {line}")))
         .collect::<Vec<_>>()
@@ -247,10 +379,26 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_cuts_long_lines() {
     let text = canvas.plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines[1].trim_end(), "40 lines · 0m · pinned");
-    // Cut to the panel, with a dim "…".
+    // A line cut by the server wraps onto a second row, the panel's width, and ends with a dim "…".
     assert_eq!(lines[3].chars().count(), CODE_COLUMNS);
-    assert!(lines[3].ends_with('…'));
-    assert_eq!(canvas.rows[3].cells.last().unwrap().1.color, DIM);
+    assert_eq!(
+        lines[3],
+        format!(" 1 {}", "x".repeat(CODE_COLUMNS - GUTTER))
+    );
+    assert!(lines[4].starts_with(" ↪     x"), "{}", lines[4]);
+    assert!(lines[4].ends_with('…'));
+    assert_eq!(canvas.rows[4].cells.last().unwrap().1.color, DIM);
+    // So the last line no longer fits, and is counted among those not shown.
+    assert_eq!(lines[3 + CODE_LINES - 1].trim_end(), "15 line 15");
+    assert_eq!(lines[CODE_ROWS - 1].trim_end(), "…25 more lines");
+    // Without the long line, every line fits, and the rest are counted.
+    let body = (1..=CODE_LINES)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    panel.body = body;
+    let text = face(&panel, false, false, Fit::Slot).plain();
+    let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines[3 + CODE_LINES - 1].trim_end(), "16 line 16");
     assert_eq!(lines[CODE_ROWS - 1].trim_end(), "…24 more lines");
     // One more line is said as one.
@@ -1192,4 +1340,230 @@ fn a_floating_panel_fits_its_text_within_bounds_and_takes_a_slot_s_size_on_a_wal
         output.sheets[0].canvas.as_ref().unwrap().size(),
         fitted_size(&shown.panels[0], Fit::Text)
     );
+}
+
+#[test]
+fn the_hint_says_what_each_control_does_to_a_panel_carried_and_what_letting_go_would_do() {
+    let text = |controls, release| hint(controls, release).plain();
+    assert_eq!(
+        text(Controls::Controllers, Release::Float),
+        [
+            "Stick ↕  further / closer",
+            "Stick ↔  turn",
+            "Click    square up",
+            "B        throw away, for all",
+            "Let go   leave it floating",
+        ]
+        .join("\n")
+    );
+    // Letting go says where the panel would go: into the slot outlined, or changing places with the panel in it.
+    assert!(text(Controls::Controllers, Release::Slot).ends_with("Let go   put it in the slot"));
+    assert!(text(Controls::Controllers, Release::Swap).ends_with("Let go   swap with that one"));
+    // The desktop window names the keys that stand for the controls.
+    assert_eq!(
+        text(Controls::Keyboard, Release::Float),
+        [
+            "PgUp PgDn  further / closer",
+            "[ ]        turn",
+            "R          square up",
+            "Backspace  throw away, for all",
+            "Let go G   leave it floating",
+        ]
+        .join("\n")
+    );
+    // Every row fits, and throwing away, which is for everyone, is in a colour of its own.
+    for controls in [Controls::Controllers, Controls::Keyboard] {
+        let canvas = hint(controls, Release::Swap);
+        assert!(
+            canvas
+                .rows
+                .iter()
+                .all(|row| row.cells.len() <= canvas.columns)
+        );
+        assert!(!canvas.plain().contains('…'));
+        assert!(
+            canvas.rows[3]
+                .cells
+                .iter()
+                .all(|(_, style)| style.color == THROW)
+        );
+        assert!(
+            canvas.rows[0]
+                .cells
+                .iter()
+                .all(|(_, style)| style.color != THROW)
+        );
+    }
+}
+
+#[test]
+fn the_hint_shows_only_while_a_panel_is_carried_beside_it_and_legible_at_any_distance() {
+    let shown = projection(vec![
+        panel("a", on(TOMORI_WALL, 0)),
+        panel("b", on(TOMORI_WALL, 1)),
+    ]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let ray = at(slot_centre(&shown, 1));
+    // Pointed at, a panel has no hint.
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert!(output.pointed.is_some());
+    assert_eq!(output.hint, None);
+    // Carried, it has, below it, facing the viewer, and naming what letting go would do, from the frame after it is
+    // pulled off, once where it would go is known.
+    let output = projector.update(input(&shown, ray, 1.0, now));
+    assert!(output.picked);
+    assert_eq!(output.hint, None);
+    let held = |projector: &Projector| projector.held.as_ref().unwrap().model;
+    let text = |output: &Output| {
+        output
+            .hint
+            .as_ref()
+            .unwrap()
+            .canvas
+            .as_ref()
+            .unwrap()
+            .plain()
+    };
+    // Still over its own slot, from the next frame, letting go puts it back there.
+    let output = projector.update(input(&shown, ray, 1.0, now));
+    assert!(
+        text(&output).ends_with("put it in the slot"),
+        "{}",
+        text(&output)
+    );
+    // Over the other panel's slot, they would change places.
+    let output = projector.update(input(&shown, at(slot_centre(&shown, 0)), 1.0, now));
+    assert!(
+        text(&output).ends_with("swap with that one"),
+        "{}",
+        text(&output)
+    );
+    // Away from the walls, it would float.
+    let away = at(HOME + Vec3::new(-2.0, 0.0, -1.0));
+    for distance in [0.0, 2.0] {
+        let mut projector = Projector::default();
+        projector.update(input(&shown, ray, 0.0, now));
+        projector.update(input(&shown, ray, 1.0, now));
+        let output = projector.update(Input {
+            stick: Vec2::new(0.0, distance),
+            dt: 0.5,
+            ..input(&shown, away, 1.0, now)
+        });
+        assert!(text(&output).ends_with("leave it floating"));
+        let hint = output.hint.as_ref().unwrap();
+        let model = hint.model.unwrap();
+        let canvas = hint.canvas.as_ref().unwrap();
+        let centre = held(&projector).w_axis.truncate();
+        let at = model.w_axis.truncate();
+        let far = centre.distance(HOME);
+        // Below the panel's lower edge, clear of it, and just under its middle.
+        let (_, panel_height) = fitted_size(&shown.panels[1], Fit::Text);
+        let (width, height) = canvas.size();
+        assert!(
+            at.y + height / 2.0 < centre.y - panel_height / 2.0,
+            "{at} {centre}"
+        );
+        assert!(at.y + height / 2.0 > centre.y - panel_height / 2.0 - 0.05 * far);
+        assert!(Vec2::new(at.x - centre.x, at.z - centre.z).length() < 1e-3);
+        // Facing the viewer.
+        let normal = model.z_axis.truncate().normalize();
+        assert!(normal.dot((HOME - at).normalize()) > 0.999);
+        // Its font pixel takes the same angle from the eyes however far it is carried, an x-height of about half a
+        // degree, and it is not too wide to take in at a glance.
+        assert!((canvas.pixel / at.distance(HOME) - HINT_ANGLE).abs() < HINT_ANGLE * 0.1);
+        let x_height = (canvas.pixel * 5.6 / at.distance(HOME)).to_degrees();
+        assert!(x_height >= 0.45, "{x_height}");
+        assert!((width / at.distance(HOME)).atan().to_degrees() < 25.0);
+        // Drawn only while the panels take the ray and grip.
+        let inactive = projector.update(Input {
+            active: false,
+            ..input(&shown, away, 1.0, now)
+        });
+        assert_eq!(inactive.hint, None);
+    }
+    // Let go, it goes.
+    let mut projector = Projector::default();
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert!(output.placed.is_some());
+    assert_eq!(output.hint, None);
+}
+
+#[test]
+fn the_hint_stands_above_a_panel_carried_low_where_below_would_be_hidden() {
+    let shown = projection(vec![panel("a", on(TOMORI_WALL, 0))]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let ray = at(slot_centre(&shown, 0));
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    // Carried low and near, far below the eyes, the hint goes above it.
+    let low = at(HOME + Vec3::new(0.0, -1.3, -0.6));
+    let output = projector.update(input(&shown, low, 1.0, now));
+    let centre = projector.held.as_ref().unwrap().model.w_axis.truncate();
+    let hint = output.hint.unwrap().model.unwrap().w_axis.truncate();
+    assert!(hint.y > centre.y, "{hint} {centre}");
+    // Ahead at the eyes' height, it is below.
+    let ahead = at(HOME + Vec3::new(0.0, 0.0, -2.0));
+    let output = projector.update(input(&shown, ahead, 1.0, now));
+    let centre = projector.held.as_ref().unwrap().model.w_axis.truncate();
+    let hint = output.hint.unwrap().model.unwrap().w_axis.truncate();
+    assert!(hint.y < centre.y, "{hint} {centre}");
+}
+
+#[test]
+fn a_panel_thrown_away_is_no_longer_carried_put_down_or_drawn_while_the_server_agrees() {
+    let shown = projection(vec![
+        panel("a", on(TOMORI_WALL, 0)),
+        panel("b", on(TOMORI_WALL, 1)),
+    ]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    // Nothing carried, nothing is thrown.
+    assert_eq!(projector.throw(now), None);
+    let ray = at(slot_centre(&shown, 1));
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(projector.throw(now), Some("b".into()));
+    assert_eq!(projector.held(), None);
+    // Not drawn, pointed at or put down as the grip is let go.
+    let drawn = |output: &Output| {
+        output
+            .sheets
+            .iter()
+            .filter(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .unwrap()
+                    .plain()
+                    .starts_with("Panel b")
+            })
+            .count()
+    };
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert_eq!(
+        (&output.placed, &output.pointed, &output.hint),
+        (&None, &None, &None)
+    );
+    assert_eq!(drawn(&output), 0);
+    // Once the server no longer shows it, it is forgotten; were the server to show it after all, it is drawn again
+    // after a while.
+    let output = projector.update(input(&shown, ray, 0.0, now + PENDING));
+    assert_eq!(drawn(&output), 1);
+    projector.update(input(&shown, ray, 1.0, now + PENDING));
+    projector.throw(now + PENDING);
+    let gone = projection(vec![panel("a", on(TOMORI_WALL, 0))]);
+    projector.update(input(&gone, ray, 0.0, now + PENDING));
+    assert_eq!(projector.thrown, None);
+    // Without a projection, nothing is remembered.
+    projector.update(input(&shown, ray, 1.0, now + PENDING));
+    projector.throw(now + PENDING);
+    projector.update(Input {
+        projection: None,
+        ..input(&shown, ray, 0.0, now)
+    });
+    assert_eq!(projector.thrown, None);
 }

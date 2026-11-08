@@ -90,6 +90,27 @@ const WALL_DROP: f32 = 0.1;
 const LABEL_COLUMNS: usize = 32;
 const LABEL_PIXEL: f32 = 0.0017;
 
+/// How large the hint beside a panel carried is drawn, as the angle a font pixel takes from the participant's eyes,
+/// whatever its distance: an x-height of about 0.48°, comfortably above the 0.45° text reads at (see `design/text.md`).
+pub const HINT_ANGLE: f32 = 0.0015;
+/// The gap between a panel carried and its hint, as an angle from the eyes.
+const HINT_GAP: f32 = 0.012;
+/// How far below the eye line the hint may stand, as the tangent of the angle, before it goes above the panel instead.
+const HINT_LOWEST: f32 = 0.84;
+/// How far below the eyes the floor is taken to be, below which the hint never stands, in metres.
+const HINT_FLOOR: f32 = 1.5;
+/// The hint's columns of what each control does, after the controls' own and a gap of [`HINT_SPACE`].
+const HINT_ACTIONS: usize = 19;
+const HINT_SPACE: usize = 2;
+/// A throw's colour, as it takes the panel away for everyone.
+const THROW: [f32; 4] = [1.0, 0.62, 0.3, 1.0];
+
+/// The fewest cells a wrapped line of code keeps beside its hanging indent.
+const CODE_ROOM: usize = 16;
+/// The continuation marker, drawn in the gutter of a line of code's later rows.
+const CONTINUED: char = '↪';
+const CONTINUED_COLOR: [f32; 4] = [0.42, 0.47, 0.55, 0.8];
+
 const FRAME: [f32; 4] = [0.32, 0.38, 0.46, 0.9];
 const NEWEST: [f32; 4] = [0.3, 0.75, 0.95, 1.0];
 const HIGHLIGHT: [f32; 4] = [0.35, 0.95, 1.0, 1.0];
@@ -310,9 +331,11 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas 
 }
 
 /// A code panel's face: its title, bold, its language, length and age, a rule, and its lines in monospace, each after
-/// its number, coloured by kind as [`palette`] colours them, a line longer than the panel ending with "…", then how many
-/// more lines its block has. Spans that are not valid for its body, as `valid_spans` checks them, are ignored, and the
-/// code drawn plain.
+/// its number, coloured by kind as [`palette`] colours them, then how many more lines its block has. A line longer than
+/// the panel wraps, as [`wrap_code`] wraps it, onto rows that hang an indent step under it, each marked as continued in
+/// the gutter; lines that do not all fit are left for the row saying how many more there are, and the first line, were
+/// it alone too long, ends with "…". Spans that are not valid for its body, as `valid_spans` checks them, are ignored,
+/// and the code drawn plain.
 fn code_face(panel: &Panel, code: &Code) -> Canvas {
     let mut canvas = Canvas::new(CODE_COLUMNS, CODE_PIXEL);
     canvas.padding = CODE_PADDING;
@@ -331,29 +354,60 @@ fn code_face(panel: &Panel, code: &Code) -> Canvas {
     }
     let mut at = 0;
     let lines: Vec<&str> = panel.body.split('\n').collect();
+    let step = indent_step(&lines);
+    let room = CODE_COLUMNS - GUTTER;
+    let mut shown = 0;
     for (number, line) in lines.iter().enumerate().take(CODE_LINES) {
-        let mut spans = vec![crate::ui_text::Span::new(
-            format!("{:>width$} ", number + 1, width = GUTTER - 1),
-            Style::plain(DIM),
-        )];
+        let mut spans: Vec<crate::ui_text::Span> = Vec::new();
         for (index, c) in line.chars().enumerate() {
             let style = Style::plain(palette(kinds[at + index]));
-            // Joined to the run before, of the same kind, but never to the line's number.
-            if spans.len() > 1 && spans[spans.len() - 1].style == style {
-                spans.last_mut().expect("a run before").text.push(c);
-            } else {
-                spans.push(crate::ui_text::Span::new(c.to_string(), style));
+            // Joined to the run before, of the same kind.
+            match spans.last_mut() {
+                Some(last) if last.style == style => last.text.push(c),
+                _ => spans.push(crate::ui_text::Span::new(c.to_string(), style)),
             }
         }
         at += line.chars().count() + 1;
-        let mut cells = cut(&spans, CODE_COLUMNS);
-        // A line cut, here or by the server, ends with a dim "…".
-        if let Some(last) = cells.last_mut().filter(|(c, _)| *c == '…') {
+        let mut wrapped = wrap_code(&cut(&spans, usize::MAX), room, step);
+        // A line cut by the server ends with a dim "…".
+        if let Some(last) = wrapped
+            .last_mut()
+            .and_then(|row| row.last_mut())
+            .filter(|(c, _)| *c == '…')
+        {
             last.1 = Style::plain(DIM);
         }
-        rows.push(Row::new(cells));
+        let left = CODE_ROWS - 1 - rows.len();
+        if wrapped.len() > left {
+            // A line that does not fit is left for the row saying how many more there are, unless it is the first,
+            // which shows what fits, ending with "…".
+            if shown > 0 {
+                break;
+            }
+            // Cut, the last row ends with "…", dim, as there are always rows left for the first line.
+            crate::ui_text::fit(&mut wrapped, left, room);
+            let row = wrapped.len() - 1;
+            let end = wrapped[row].len() - 1;
+            wrapped[row][end].1 = Style::plain(DIM);
+        }
+        for (index, cells) in wrapped.into_iter().enumerate() {
+            // The line's number on its first row only; its later rows are marked as continued.
+            let gutter = match index {
+                0 => crate::ui_text::Span::new(
+                    format!("{:>width$} ", number + 1, width = GUTTER - 1),
+                    Style::plain(DIM),
+                ),
+                _ => crate::ui_text::Span::new(
+                    format!("{CONTINUED:>width$} ", width = GUTTER - 1),
+                    Style::plain(CONTINUED_COLOR),
+                ),
+            };
+            let mut row = cut(&[gutter], GUTTER);
+            row.extend(cells);
+            rows.push(Row::new(row));
+        }
+        shown += 1;
     }
-    let shown = lines.len().min(CODE_LINES);
     rows.resize(CODE_ROWS - 1, Row::default());
     let more = (code.lines as usize).saturating_sub(shown);
     rows.push(match more {
@@ -367,6 +421,77 @@ fn code_face(panel: &Panel, code: &Code) -> Canvas {
     });
     canvas.rows = rows;
     canvas
+}
+
+/// The indent step of code's `lines`: the least indentation any line has, of two to four spaces, or four where none is
+/// indented.
+fn indent_step(lines: &[&str]) -> usize {
+    lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take_while(|c| *c == ' ').count())
+        .filter(|indent| *indent > 0)
+        .min()
+        .map_or(4, |step| step.clamp(2, 4))
+}
+
+/// Whether a line of code may break between `before` and `after`: after a space, or after punctuation that ends or
+/// opens a part of it, such as a comma, an operator or an opening bracket, unless a closing one follows.
+fn code_breaks(before: char, after: char) -> bool {
+    before == ' '
+        || (",;([{.:=&|+-*/<>!?".contains(before) && !")]}>,;.:".contains(after) && after != ' ')
+}
+
+/// One line of code's `cells`, as drawn, on rows of `room` cells: as it is where it fits, and otherwise broken where
+/// [`code_breaks`] allows, in the latter half of the row, or else at the row's end, never through a wide character.
+/// Its later rows hang one indent `step` under its own indentation, keeping at least [`CODE_ROOM`] cells for its code,
+/// and the spaces at each break are dropped. Each cell keeps its style, so that highlighting carries across a break.
+fn wrap_code(
+    cells: &[crate::ui_text::Cell],
+    room: usize,
+    step: usize,
+) -> Vec<Vec<crate::ui_text::Cell>> {
+    use crate::ui_text::WIDE;
+    let indent = cells.iter().take_while(|(c, _)| *c == ' ').count();
+    let hanging = (indent + step).min(room.saturating_sub(CODE_ROOM));
+    let mut rows = Vec::new();
+    let mut rest = cells;
+    let mut width = room;
+    loop {
+        let prefix = if rows.is_empty() { 0 } else { hanging };
+        if rest.len() <= width {
+            rows.push(blank(prefix).chain(rest.iter().copied()).collect());
+            return rows;
+        }
+        // The last break the line allows in the latter half of the row, after its indentation, or else the row's end,
+        // before a wide character that would not fit.
+        let first = (width / 2).max(if rows.is_empty() { indent + 1 } else { 1 });
+        let at = (first..=width)
+            .rev()
+            .find(|&at| rest[at].0 != WIDE && code_breaks(rest[at - 1].0, rest[at].0))
+            .unwrap_or(if rest[width].0 == WIDE {
+                width - 1
+            } else {
+                width
+            });
+        let mut row: Vec<_> = blank(prefix).chain(rest[..at].iter().copied()).collect();
+        while row.len() > prefix && row.last().is_some_and(|(c, _)| *c == ' ') {
+            row.pop();
+        }
+        rows.push(row);
+        rest = &rest[at..];
+        let spaces = rest.iter().take_while(|(c, _)| *c == ' ').count();
+        rest = &rest[spaces..];
+        if rest.is_empty() {
+            return rows;
+        }
+        width = room - hanging;
+    }
+}
+
+/// `count` plain spaces.
+fn blank(count: usize) -> impl Iterator<Item = crate::ui_text::Cell> {
+    std::iter::repeat_n((' ', Style::plain(TEXT)), count)
 }
 
 /// The colour of a wall's frame, and its slots' on a curved wall.
@@ -531,6 +656,108 @@ pub fn label(panel: &Panel, at: Vec3, viewer: Vec3) -> Sheet {
             viewer,
             1.0,
         )),
+        canvas: Some(canvas),
+    }
+}
+
+/// Which controls the participant has, which the hint beside a panel carried names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Controls {
+    /// A headset's controllers.
+    #[default]
+    Controllers,
+    /// The desktop window's keyboard and mouse, as `design/desktop.md` maps them.
+    Keyboard,
+}
+
+/// What letting go of a panel carried would do now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Release {
+    /// Put it in the empty slot outlined.
+    Slot,
+    /// Put it in the slot outlined, changing places with the panel there.
+    Swap,
+    /// Leave it floating where it is.
+    Float,
+}
+
+/// The hint beside a panel carried: what each control does to it, for someone carrying one for the first time, in a
+/// few short rows of the control and what it does, as `controls` name them, the last saying what letting go would do
+/// now, `release`.
+pub fn hint(controls: Controls, release: Release) -> Canvas {
+    let let_go = match release {
+        Release::Slot => "put it in the slot",
+        Release::Swap => "swap with that one",
+        Release::Float => "leave it floating",
+    };
+    let rows: [(&str, &str); 5] = match controls {
+        Controls::Controllers => [
+            ("Stick ↕", "further / closer"),
+            ("Stick ↔", "turn"),
+            ("Click", "square up"),
+            ("B", "throw away, for all"),
+            ("Let go", let_go),
+        ],
+        Controls::Keyboard => [
+            ("PgUp PgDn", "further / closer"),
+            ("[ ]", "turn"),
+            ("R", "square up"),
+            ("Backspace", "throw away, for all"),
+            ("Let go G", let_go),
+        ],
+    };
+    let keys = rows
+        .iter()
+        .map(|(control, _)| crate::ui_text::width(control))
+        .max()
+        .unwrap_or_default()
+        + HINT_SPACE;
+    let columns = keys + HINT_ACTIONS;
+    let mut canvas = Canvas::new(columns, HINT_ANGLE);
+    canvas.padding = (5, 4);
+    canvas.background = [0.0, 0.0, 0.0, 0.82];
+    canvas.border = Some(FRAME);
+    canvas.rows = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (control, action))| {
+            let (key, text) = match index {
+                3 => (Style::bold(THROW), Style::plain(THROW)),
+                _ => (Style::bold(BRIGHT), Style::plain(TEXT)),
+            };
+            let control = crate::ui_text::pad(control, keys);
+            Row::new(cut(
+                &[
+                    crate::ui_text::Span::new(control, key),
+                    crate::ui_text::Span::new(*action, text),
+                ],
+                columns,
+            ))
+        })
+        .collect();
+    canvas
+}
+
+/// The hint beside a panel carried with `model`, `size` large, seen from `viewer`: just below it, or above it where
+/// below would be under the floor or far below the eyes, facing the viewer, drawn at [`HINT_ANGLE`] a font pixel
+/// whatever its distance, so that it reads alike at arm's length and across the room.
+fn hint_sheet(mut canvas: Canvas, model: Mat4, (_, height): (f32, f32), viewer: Vec3) -> Sheet {
+    let centre = model.w_axis.truncate();
+    let distance = centre.distance(viewer).max(0.1);
+    canvas.pixel = HINT_ANGLE * distance;
+    let (_, tall) = canvas.size();
+    let offset = height / 2.0 + HINT_GAP * distance + tall / 2.0;
+    let below = centre - Vec3::Y * offset;
+    let bottom = below.y - tall / 2.0;
+    let level = Vec2::new(below.x - viewer.x, below.z - viewer.z).length();
+    let hidden = bottom < viewer.y - HINT_FLOOR || viewer.y - bottom > HINT_LOWEST * level;
+    let at = if hidden {
+        centre + Vec3::Y * offset
+    } else {
+        below
+    };
+    Sheet {
+        model: Some(facing(at, viewer, 1.0)),
         canvas: Some(canvas),
     }
 }
@@ -701,6 +928,8 @@ pub struct Input<'a> {
     pub stick: Vec2,
     /// The right stick was clicked while a panel was carried: it turns back to face the participant square.
     pub straighten: bool,
+    /// The controls the hint beside a panel carried names.
+    pub controls: Controls,
     pub now: Instant,
     /// Seconds since the last frame.
     pub dt: f32,
@@ -723,6 +952,8 @@ pub struct Output {
     pub preview: Option<(String, u32)>,
     /// Where the ray ends on a panel: where it meets the panel pointed at, or the middle of the one carried.
     pub end: Option<Vec3>,
+    /// The hint beside the panel carried, saying what each control does to it, drawn over everything else.
+    pub hint: Option<Sheet>,
 }
 
 /// The panels across frames: the one carried, the slot it would be put in, and the one let go that the server has not
@@ -733,6 +964,9 @@ pub struct Projector {
     held: Option<Held>,
     aim: Option<Aim>,
     pending: Option<Pending>,
+    /// A panel thrown away, hidden from when it was until the server's projection no longer shows it, or [`PENDING`]
+    /// passes.
+    thrown: Option<(String, Instant)>,
 }
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
@@ -748,8 +982,15 @@ impl Projector {
             self.held = None;
             self.aim = None;
             self.pending = None;
+            self.thrown = None;
             return Output::default();
         };
+        if let Some((panel, since)) = &self.thrown
+            && (projection.panel(panel).is_none()
+                || input.now.saturating_duration_since(*since) >= PENDING)
+        {
+            self.thrown = None;
+        }
         if let Some(pending) = &self.pending {
             let confirmed = projection
                 .panel(&pending.panel)
@@ -874,7 +1115,43 @@ impl Projector {
             viewer,
             output.pointed.as_ref().map(|(id, ..)| id.as_str()),
         );
+        // While a panel is carried, the hint beside it says what each control does to it, and what letting go would do,
+        // from the frame after it is pulled off, once where it would go is known.
+        let carried = self
+            .held
+            .as_ref()
+            .filter(|_| input.active && !output.picked);
+        // The panel carried is always shown, as one no longer shown is no longer carried.
+        output.hint = carried
+            .and_then(|held| projection.panel(&held.panel).map(|panel| (held, panel)))
+            .map(|(held, panel)| {
+                let release = match &self.aim {
+                    None => Release::Float,
+                    Some(aim) => {
+                        let taken = projection.panels.iter().any(|other| {
+                            other.id != held.panel
+                                && matches!(&other.place, Place::Wall { wall, slot } if *wall == aim.wall && *slot == aim.slot)
+                        });
+                        if taken { Release::Swap } else { Release::Slot }
+                    }
+                };
+                hint_sheet(
+                    hint(input.controls, release),
+                    held.model,
+                    fitted_size(panel, Fit::Text),
+                    viewer,
+                )
+            });
         output
+    }
+
+    /// Throw away the panel carried, at `now`: it is no longer carried, nor let go anywhere, and is hidden until the
+    /// server's projection no longer shows it, or for [`PENDING`]. Returns its identity, if one was carried.
+    pub fn throw(&mut self, now: Instant) -> Option<String> {
+        let held = self.held.take()?;
+        self.aim = None;
+        self.thrown = Some((held.panel.clone(), now));
+        Some(held.panel)
     }
 
     /// What to draw: each wall with the panels in its layout, and the outline of the slot a panel carried would take,
@@ -984,9 +1261,16 @@ impl Projector {
 
     /// Where `panel` stands, and how its face is sized: carried, fitting its text; let go but not yet confirmed, in the
     /// slot it was put in, or floating where it was let go; or where the server says it is, in its wall's slot, or
-    /// floating, fitting its text. `None` for a panel on a wall not shown, in a slot past the last, or in a place this
-    /// client does not know.
+    /// floating, fitting its text. `None` for a panel thrown away, on a wall not shown, in a slot past the last, or in a
+    /// place this client does not know.
     fn stands(&self, panel: &Panel, walls: &[(&Wall, Mat4)]) -> Option<(Mat4, Fit)> {
+        if self
+            .thrown
+            .as_ref()
+            .is_some_and(|(thrown, _)| *thrown == panel.id)
+        {
+            return None;
+        }
         match (&self.held, &self.pending) {
             (Some(held), _) if held.panel == panel.id => return Some((held.model, Fit::Text)),
             (_, Some(pending)) if pending.panel == panel.id => {
