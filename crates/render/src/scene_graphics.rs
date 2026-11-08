@@ -87,7 +87,8 @@ impl Panels {
 
     /// The panels to draw, each with its model in the eyes' space, which `scene_to_space` takes the scene to: the
     /// projection's walls and panels, then the inbox and cards, in the order the frame step gave them, farthest first, so
-    /// that a nearer card covers one behind it, as panels do not write depth; then the pill, card, badge and transcript.
+    /// that a nearer card blends over one behind it, as panels write depth only once drawn (`design/rendering.md`); then
+    /// the pill, card, badge and transcript.
     pub fn list(&self, scene_to_space: Mat4) -> Vec<(&Panel, Mat4)> {
         let cards = self
             .cards
@@ -1194,6 +1195,237 @@ mod tests {
                 after_ink > before_ink + 200,
                 "what was cut is drawn: {after_ink} against {before_ink}"
             );
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_DEPTH_ORDER_PREVIEW` to a PNG path to save what this renders, each eye side by side: the hand menu with
+    /// a panel floating behind it, then in front of it, and the status pill with a panel behind it, then in front of it.
+    #[test]
+    fn what_is_nearer_covers_a_panel_behind_it_and_a_panel_covers_what_is_behind_it() {
+        const WIDTH: u32 = 512;
+        const HEIGHT: u32 = 512;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let textures: [wgpu::Texture; 2] = std::array::from_fn(|_| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("depth order test eye"),
+                    size: wgpu::Extent3d {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            });
+            let views = textures
+                .each_ref()
+                .map(|texture| texture.create_view(&Default::default()));
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let head = Mat4::from_translation(arrival::HOME);
+            let left_palm = Palm {
+                wrist: arrival::HOME + Vec3::new(-0.06, -0.2, -0.45),
+                normal: Vec3::Y,
+            };
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            // A text panel floating at `at`, facing home.
+            let floating = |at: Vec3| {
+                tomori_protocol::Panel::new(
+                    "panel-1",
+                    "Steps to release",
+                    "1. Bump the version.\n2. Run `cargo bake test:coverage`.\n3. Tag and push.\n4. Upload the APK.",
+                    tomori_protocol::Place::Free {
+                        pose: tomori_protocol::Pose::upright_facing(
+                            at.to_array(),
+                            arrival::HOME.to_array(),
+                        ),
+                    },
+                )
+            };
+            // Hand `show` the frame with the panel at `at`, if any, and with the hand menu, as `menu` says, from a frame step
+            // held past the menu's dwell.
+            let frame_with = |at: Option<Vec3>, menu: bool, show: &mut dyn FnMut(&Frame<'_>)| {
+                let mut conversation = joined();
+                show_projection(
+                    &mut conversation,
+                    Vec::new(),
+                    at.map(floating).into_iter().collect(),
+                );
+                let senses = Senses {
+                    left_palm: menu.then_some(left_palm),
+                    ..senses
+                };
+                let mut step = Step::default();
+                let start = Instant::now();
+                step.update(&senses, &mut conversation, &mut felt(), start, 0.01);
+                let frame =
+                    step.update(&senses, &mut conversation, &mut felt(), start + HOLD, 0.01);
+                assert_eq!(
+                    frame.arrival.is_some(),
+                    menu,
+                    "the menu shows only when asked for"
+                );
+                show(&frame);
+            };
+            // Where the menu and the pill stand: the middle of the menu's rows, and the pill's middle.
+            let mut menu_at = Vec3::ZERO;
+            frame_with(None, true, &mut |frame| {
+                let objects = &frame.arrival.as_ref().unwrap().scene.objects;
+                assert!(!objects.is_empty());
+                menu_at = objects.iter().map(|object| object.position).sum::<Vec3>()
+                    / objects.len() as f32;
+            });
+            let mut pill_at = Vec3::ZERO;
+            frame_with(None, false, &mut |frame| {
+                pill_at = frame
+                    .panels
+                    .pill
+                    .model
+                    .expect("the pill shows")
+                    .w_axis
+                    .truncate();
+            });
+            // Both eyes, 64 mm apart, looking at `target`.
+            let eyes = |target: Vec3| {
+                let lens = Mat4::perspective_rh(1.2, 1.0, 0.05, 50.0);
+                [-0.032, 0.032].map(|x| {
+                    let eye = arrival::HOME + Vec3::X * x;
+                    lens * Mat4::look_at_rh(eye, target + Vec3::X * x, Vec3::Y)
+                })
+            };
+            // Each eye's image of the frame with the panel at `at`, the menu, as `menu` says, and the pill where it shows, as
+            // `pill` says, seen looking at `target`.
+            let mut capture = |at: Option<Vec3>, menu: bool, pill: bool, target: Vec3| {
+                frame_with(at, menu, &mut |frame| {
+                    draw(&mut renderer, &device, &queue, &mut panels, frame);
+                });
+                renderer.render(
+                    &device,
+                    &queue,
+                    &views,
+                    &eyes(target),
+                    Mat4::IDENTITY,
+                    &panels
+                        .list(Mat4::IDENTITY)
+                        .into_iter()
+                        .filter(|(panel, _)| pill || !std::ptr::eq(*panel, &panels.pill))
+                        .collect::<Vec<_>>(),
+                );
+                textures
+                    .each_ref()
+                    .map(|texture| read_back(&device, &queue, texture, (WIDTH, HEIGHT)))
+            };
+            // Of the pixels where `near` and `far` each draw over the `bare` scene without the other, differently, how many
+            // look like `near`, which should cover `far`, and how many like `far`, where both draw.
+            let covering = |bare: &image::RgbaImage,
+                            near: &image::RgbaImage,
+                            far: &image::RgbaImage,
+                            both: &image::RgbaImage| {
+                let distance = |a: &image::Rgba<u8>, b: &image::Rgba<u8>| {
+                    a.0.iter()
+                        .zip(b.0)
+                        .map(|(a, b)| (i32::from(*a) - i32::from(b)).abs())
+                        .sum::<i32>()
+                };
+                let (mut nearer, mut farther) = (0, 0);
+                for (((bare, near), far), both) in bare
+                    .pixels()
+                    .zip(near.pixels())
+                    .zip(far.pixels())
+                    .zip(both.pixels())
+                {
+                    // Both draw here, and differently.
+                    if distance(bare, near) > 60
+                        && distance(bare, far) > 60
+                        && distance(near, far) > 60
+                    {
+                        if distance(both, near) < distance(both, far) {
+                            nearer += 1;
+                        } else {
+                            farther += 1;
+                        }
+                    }
+                }
+                (nearer, farther)
+            };
+            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 4);
+            let mut row = 0;
+            let mut check = |name: &str, near_first: bool, at: Vec3, menu: bool, target: Vec3| {
+                // Neither, either alone, and both.
+                let bare = capture(None, false, false, target);
+                let thing = capture(None, menu, true, target);
+                let panel = capture(Some(at), false, false, target);
+                let both = capture(Some(at), menu, true, target);
+                for eye in 0..2 {
+                    let (near, far) = if near_first {
+                        (&thing[eye], &panel[eye])
+                    } else {
+                        (&panel[eye], &thing[eye])
+                    };
+                    let (nearer, farther) = covering(&bare[eye], near, far, &both[eye]);
+                    image::imageops::replace(
+                        &mut sheet,
+                        &both[eye],
+                        i64::from(eye as u32 * WIDTH),
+                        i64::from(row * HEIGHT),
+                    );
+                    let overlapping = nearer + farther;
+                    assert!(overlapping > 100, "{name}, eye {eye}: they must overlap");
+                    assert!(
+                        farther * 20 < nearer,
+                        "{name}, eye {eye}: the nearer must cover the farther, but {farther} of {overlapping} pixels show the farther"
+                    );
+                }
+                row += 1;
+            };
+            let menu_ray = menu_at - arrival::HOME;
+            let pill_ray = pill_at - arrival::HOME;
+            check(
+                "the menu in front of a panel",
+                true,
+                arrival::HOME + menu_ray * 3.0,
+                true,
+                menu_at,
+            );
+            check(
+                "a panel in front of the menu",
+                false,
+                arrival::HOME + menu_ray * 0.6,
+                true,
+                menu_at,
+            );
+            check(
+                "the pill in front of a panel",
+                true,
+                arrival::HOME + pill_ray * 1.1,
+                false,
+                pill_at,
+            );
+            check(
+                "a panel in front of the pill",
+                false,
+                arrival::HOME + pill_ray * 0.6,
+                false,
+                pill_at,
+            );
+            crate::test_support::preview("TOMORI_DEPTH_ORDER_PREVIEW", &sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }

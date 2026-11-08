@@ -436,8 +436,8 @@ impl Board {
             canvas: Some(tray(&cards.source, inboxed, cards.status.as_deref())),
             model: Some(frame),
         });
-        // Panels do not write depth, so the cards are drawn farthest from the viewer first, and a nearer card covers
-        // one behind it; the inbox, behind all of its own, comes first.
+        // Panels blend over what is drawn before them, and write depth only once drawn, so the cards are drawn farthest
+        // from the viewer first, and a nearer card covers one behind it; the inbox, behind all of its own, comes first.
         let mut order: Vec<usize> = (0..models.len()).collect();
         let distance = |index: &usize| models[*index].0.w_axis.truncate().distance(viewer);
         order.sort_by(|a, b| distance(b).total_cmp(&distance(a)));

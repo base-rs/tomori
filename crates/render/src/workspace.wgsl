@@ -61,3 +61,17 @@ fn opacity(covered: f32, color: vec3<f32>) -> f32 {
 @fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(input.color.rgb, input.color.a * opacity(coverage(input.uv, input.weight), input.color.rgb));
 }
+// As `ui_panel.wgsl`'s: a backing drawn into depth alone, a little behind where it is, its colour not written.
+override TIE: f32 = 0.0;
+@vertex fn vs_occlude(
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) weight: f32,
+) -> @builtin(position) vec4<f32> {
+    let at = camera.matrix * vec4<f32>(position, 1.0);
+    return vec4<f32>(at.xy, min(at.z + TIE * at.w, at.w), at.w);
+}
+@fragment fn fs_occlude() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}

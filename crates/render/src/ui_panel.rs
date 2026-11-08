@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Panels of styled text in their own local space, drawn in the scene pass with depth testing and alpha blending, so that a hand or controller in front of one covers it.
+//! Panels of styled text in their own local space, drawn in the scene pass with depth testing and alpha blending, so that a hand or controller in front of one covers it, and then, where a panel's backing is opaque enough, its backing again into depth alone, so that whatever is behind it is hidden though drawn after it (see [`occlusion`](crate::occlusion)).
 //!
 //! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up, its glyphs drawn from the [`Glyphs`](crate::glyphs::Glyphs) atlas and its filled quads from the atlas's solid block; it needs no GPU, so that layouts are tested without one. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame.
 use glam::Mat4;
@@ -11,9 +11,10 @@ pub use tomori_scene::canvas::{Canvas, Vertex};
 const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32];
 
-/// The pipeline every panel is drawn with, in the scene pass: depth tested against the scene without writing depth, and alpha blended, so that panels are translucent and a nearer hand covers them.
+/// The pipelines every panel is drawn with, in the scene pass: depth tested against the scene without writing depth, and alpha blended, so that panels are translucent and a nearer hand covers them; and then its backing into depth alone.
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
+    occluder: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -50,11 +51,7 @@ impl Pipeline {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &ATTRIBUTES,
-                })],
+                buffers: &[Some(VERTICES)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -84,7 +81,20 @@ impl Pipeline {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        let occluder = crate::occlusion::occluder(
+            device,
+            "panel backing occluder",
+            &pipeline_layout,
+            &shader,
+            VERTICES,
+            format,
+            samples,
+        );
+        Self {
+            pipeline,
+            occluder,
+            layout,
+        }
     }
 
     /// Draw panels from here on with this pipeline and the glyph atlas `glyphs`, from [`Glyphs::binding`](crate::glyphs::Glyphs::binding).
@@ -93,6 +103,12 @@ impl Pipeline {
         pass.set_bind_group(1, glyphs, &[]);
     }
 }
+
+const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<Vertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &ATTRIBUTES,
+};
 
 /// One panel's canvas on the GPU, with a transform for each eye.
 pub struct Panel {
@@ -104,6 +120,8 @@ pub struct Panel {
     canvas: Option<Canvas>,
     /// Whether the mesh has every glyph, rather than lacking some that waited for a later frame's budget.
     complete: bool,
+    /// Whether the mesh's first quad is a backing opaque enough to hide what is behind it.
+    occludes: bool,
 }
 
 impl Panel {
@@ -141,6 +159,7 @@ impl Panel {
             bindings,
             canvas: None,
             complete: false,
+            occludes: false,
         }
     }
 
@@ -161,6 +180,8 @@ impl Panel {
             mesh.truncate(self.capacity - self.capacity % 6);
         }
         self.count = mesh.len() as u32;
+        // A canvas's mesh starts with its backing, unless the backing is wholly transparent.
+        self.occludes = crate::occlusion::occludes(canvas.background[3]) && mesh.len() >= 6;
         if !mesh.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
         }
@@ -176,14 +197,20 @@ impl Panel {
         );
     }
 
-    /// Draw for `eye`, with [`Pipeline::set`] already called on `pass`.
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
+    /// Draw for `eye`, with [`Pipeline::set`] already called on `pass` with `pipeline`, which it is again once drawn: the
+    /// panel, then its backing into depth alone, if it is opaque enough to hide what is behind it.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, pipeline: &Pipeline, eye: usize) {
         if self.count == 0 {
             return;
         }
         pass.set_bind_group(0, &self.bindings[eye], &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.count, 0..1);
+        if self.occludes {
+            pass.set_pipeline(&pipeline.occluder);
+            pass.draw(0..6, 0..1);
+            pass.set_pipeline(&pipeline.pipeline);
+        }
     }
 }
 
@@ -300,7 +327,7 @@ mod tests {
                 });
                 glyphs.sync(&gpu.device, &gpu.queue);
                 pipeline.set(&mut pass, &glyphs.binding());
-                panel.draw(&mut pass, 0);
+                panel.draw(&mut pass, &pipeline, 0);
             }
             gpu.queue.submit([encoder.finish()]);
         });

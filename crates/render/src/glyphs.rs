@@ -450,7 +450,7 @@ mod tests {
                 ..Default::default()
             });
             pipeline.set(&mut pass, &glyphs.binding());
-            panel.draw(&mut pass, 0);
+            panel.draw(&mut pass, &pipeline, 0);
         }
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
