@@ -630,7 +630,10 @@ impl Step {
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),
             ray: senses.ray,
-            grip: senses.grip.filter(|_| self.board.held().is_none()),
+            // Only a participant pulls panels off; a visitor only looks at them and points.
+            grip: senses
+                .grip
+                .filter(|_| self.board.held().is_none() && conversation.role().participates()),
             viewer: senses.viewer,
             active: in_space && self.board.held().is_none(),
             nearer: self.card_reach,
@@ -1515,6 +1518,16 @@ mod tests {
             utterance.attention.clone()
         };
         assert_eq!(attending(&mut conversation), [Resource::panel("panel-1")]);
+        // A visitor's squeeze pulls nothing off.
+        let role = |role| tomori_client::Event::Message(ServerMessage::Role { role });
+        conversation.apply(role(ConnectionRole::Visitor));
+        senses.grip = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.held(), None);
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        conversation.apply(role(ConnectionRole::Owner));
+        conversation.take_actions();
         // Squeezed, it is pulled off and carried; let go, it floats where it was left, for everyone.
         senses.grip = Some(1.0);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);

@@ -407,7 +407,9 @@ impl Projector {
         if let Some(held) = &mut self.held
             && let Some(ray) = input.ray.filter(|_| input.active)
         {
-            held.model = facing(ray.at(held.distance), viewer, 1.0);
+            // Upright, as it floats: facing the viewer turned only about the vertical.
+            let at = ray.at(held.distance);
+            held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0);
         }
         // Let go, or taken by something else, it snaps onto a wall near it, or floats where it is.
         if (released || !input.active)
@@ -491,6 +493,8 @@ impl Projector {
                 .panels
                 .iter()
                 .filter(|other| matches!(&other.place, Place::Wall { wall: on, .. } if on == wall))
+                // Of those projected together, the last the server lists, as it lists them in the order it put them.
+                .rev()
                 .min_by_key(|other| other.age)
                 .is_some_and(|other| other.id == panel.id),
             _ => false,

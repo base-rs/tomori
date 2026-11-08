@@ -39,6 +39,10 @@ pub const MICROPHONE_REQUEST: &str = "Waiting for microphone permission...";
 /// How long B must be held to leave a space, so that a press meant for something else never leaves. See `design/interaction.md`.
 pub const LEAVE_HOLD: Duration = Duration::from_secs(1);
 
+/// How briefly B must be pressed, and let go, to dismiss the projected panel pointed at, so that a hold meant to leave
+/// the space never dismisses one. See `design/projection.md`.
+pub const DISMISS_PRESS: Duration = Duration::from_millis(400);
+
 /// How long a queued entry's cancellation can be undone before it is sent.
 pub const CANCEL_UNDO: Duration = Duration::from_secs(3);
 
@@ -326,6 +330,8 @@ pub struct Conversation {
     cancelling: Option<(String, Instant)>,
     /// How long B has been held in a space, while it is, and whether that hold has already left.
     leave_hold: Option<(Duration, bool)>,
+    /// The projected panel pointed at as B was pressed, dismissed if B is let go within [`DISMISS_PRESS`].
+    dismissing: Option<String>,
     /// When the approval or question shown appeared, until [`REQUEST_GRACE`] has passed.
     request_at: Option<Instant>,
     capture_generation: u64,
@@ -442,6 +448,7 @@ impl Conversation {
             queue_selected: None,
             cancelling: None,
             leave_hold: None,
+            dismissing: None,
             request_at: None,
             capture_generation: 0,
             utterance_limit: None,
@@ -2085,6 +2092,16 @@ impl Conversation {
 
     /// B held in a space for `held`, or released (`None`). Holding it for [`LEAVE_HOLD`] leaves the space, once per hold. Returns whether this call left.
     pub fn hold_back(&mut self, held: Option<Duration>) -> bool {
+        // Let go soon enough, B dismisses the panel pointed at as it was pressed; held longer, it does not.
+        match held {
+            None => {
+                if let Some(panel) = self.dismissing.take() {
+                    self.dismiss_panel(&panel);
+                }
+            }
+            Some(held) if held >= DISMISS_PRESS => self.dismissing = None,
+            Some(_) => {}
+        }
         let Some(held) = held.filter(|_| self.mode == Mode::Space) else {
             self.leave_hold = None;
             return false;
@@ -2658,11 +2675,16 @@ impl Conversation {
                     self.dismissed = Some(error);
                     return;
                 }
-                // With nothing else to back out of, B dismisses the panel pointed at. See `design/projection.md`.
-                if let Some(tomori_protocol::Resource::Panel { panel, .. }) =
-                    self.pointing_at.clone()
-                    && self.dismiss_panel(&panel)
+                // With nothing else to back out of, B dismisses the panel pointed at, once it is let go soon enough to be
+                // a press rather than a hold to leave (see `Self::hold_back`). Only a participant does. See
+                // `design/projection.md`.
+                if let Some(tomori_protocol::Resource::Panel { panel, .. }) = &self.pointing_at
+                    && self.role.participates()
+                    && self
+                        .projection()
+                        .is_some_and(|projection| projection.panel(panel).is_some())
                 {
+                    self.dismissing = Some(panel.clone());
                     return;
                 }
                 self.notice = Some("Hold B to leave the space.".into());
@@ -10729,8 +10751,13 @@ mod tests {
         // A problem shown is dismissed first.
         conversation.error = Some("Something failed.".into());
         conversation.back();
+        conversation.hold_back(None);
         assert!(sent(&mut conversation).is_empty());
+        // Pressed, it dismisses the panel only once let go, and only if let go soon enough to be a press.
         conversation.back();
+        conversation.hold_back(Some(Duration::ZERO));
+        assert!(sent(&mut conversation).is_empty());
+        conversation.hold_back(None);
         assert_eq!(
             sent(&mut conversation),
             [ClientMessage::DismissPanel {
@@ -10738,9 +10765,25 @@ mod tests {
             }]
         );
         assert!(conversation.notice.is_none());
+        // Held, as to leave the space, it dismisses nothing, whether it leaves or is let go first.
+        for held in [DISMISS_PRESS, LEAVE_HOLD] {
+            conversation.back();
+            conversation.hold_back(Some(Duration::ZERO));
+            conversation.hold_back(Some(held));
+            conversation.hold_back(None);
+            assert!(
+                !sent(&mut conversation)
+                    .iter()
+                    .any(|message| matches!(message, ClientMessage::DismissPanel { .. }))
+            );
+        }
         // A visitor, who dismisses nothing, is told to hold B to leave, as with nothing pointed at.
+        let mut conversation = joined(|space| space.projection = true);
+        conversation.apply(projected(SPACE));
+        conversation.point(Some(tomori_protocol::Resource::panel("panel-1")));
         conversation.apply(role(ConnectionRole::Visitor));
         conversation.back();
+        conversation.hold_back(None);
         assert!(sent(&mut conversation).is_empty());
         assert_eq!(
             conversation.notice.as_deref(),

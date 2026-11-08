@@ -209,6 +209,20 @@ fn panels_are_drawn_in_their_slots_wall_by_wall_and_floating_ones_where_they_flo
     // The newest on the Tomori wall is framed in blue.
     let border = |index: usize| output.sheets[index].canvas.as_ref().unwrap().border;
     assert_eq!((border(3), border(4)), (Some(FRAME), Some(NEWEST)));
+    // Of panels projected together, the last listed, the last the server put there, is the newest.
+    let together = projection(vec![
+        panel("a", on(TOMORI_WALL, 0)),
+        panel("b", on(TOMORI_WALL, 1)),
+    ]);
+    let output = Projector::default().update(input(&together, None, 0.0, Instant::now()));
+    let borders: Vec<_> = output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_ref())
+        .filter(|canvas| canvas.plain().starts_with("Panel"))
+        .map(|canvas| canvas.border)
+        .collect();
+    assert_eq!(borders, [Some(FRAME), Some(NEWEST)]);
     // Without a projection, nothing is drawn.
     let none = Input {
         projection: None,
@@ -253,6 +267,8 @@ fn a_panel_is_pointed_at_pulled_off_carried_and_left_floating() {
     };
     assert_eq!(panel_id, "b");
     assert!(Vec3::from_array(left.position).distance(held_at) < 1e-4);
+    // Upright, though it was carried below the eyes: turned only about the vertical.
+    assert!(left.orientation[0].abs() < 1e-5 && left.orientation[2].abs() < 1e-5);
     let drawn_at = |output: &Output, title: &str| {
         output
             .sheets
