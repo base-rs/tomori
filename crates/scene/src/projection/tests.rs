@@ -270,6 +270,215 @@ fn a_long_line_of_code_wraps_under_a_hanging_indent_with_its_highlighting() {
     assert_eq!(rows[7], " 4 }");
 }
 
+/// The block the maintainer looked at on the Quest 3, whose sixth line showed cut with "…" by the server.
+const MAINTAINERS_BLOCK: &str = r#"use std::collections::HashMap;
+
+fn summarise(orders: &[(String, u32, f64)]) -> HashMap<String, (u32, f64)> {
+    let mut totals = HashMap::new();
+    for (customer, quantity, price) in orders {
+        let entry = totals.entry(customer.clone()).or_insert((0, 0.0));
+        entry.0 += quantity;
+        entry.1 += *quantity as f64 * price; // running total of what each customer has spent across every order so far
+    }
+    totals
+}"#;
+
+/// The rows of code of `canvas`, as drawn, without its header and its last row.
+fn code_rows(canvas: &Canvas) -> Vec<String> {
+    canvas.rows[3..CODE_ROWS - 1].iter().map(row_text).collect()
+}
+
+/// Each line of code `rows` show: its number, and the code of each of its rows, without the gutter, and the later rows
+/// without their hanging indent.
+fn joined(rows: &[String]) -> Vec<(usize, Vec<String>)> {
+    let mut lines: Vec<(usize, Vec<String>)> = Vec::new();
+    for row in rows.iter().filter(|row| !row.is_empty()) {
+        let (gutter, code) = row.split_at(
+            row.char_indices()
+                .nth(GUTTER)
+                .map_or(row.len(), |(at, _)| at),
+        );
+        match gutter.trim() {
+            "↪" => lines
+                .last_mut()
+                .unwrap()
+                .1
+                .push(code.trim_start().to_owned()),
+            number => lines.push((number.parse().unwrap(), vec![code.to_owned()])),
+        }
+    }
+    lines
+}
+
+#[test]
+fn the_maintainers_block_wraps_every_line_whole_onto_as_many_rows_as_it_needs() {
+    use tomori_protocol::Span;
+    let comment = MAINTAINERS_BLOCK.find("// running").unwrap();
+    let start = MAINTAINERS_BLOCK[..comment].chars().count() as u32;
+    let length = MAINTAINERS_BLOCK[comment..].find('\n').unwrap() as u32;
+    let panel = Panel::new("c", "rust", MAINTAINERS_BLOCK, on(TOMORI_WALL, 0)).with_code(
+        Code::new("rust", 11).with_spans(vec![Span::new(start, length, TokenKind::Comment)]),
+    );
+    // In a slot, as on the headset.
+    let canvas = face(&panel, false, false, Fit::Slot);
+    let rows = code_rows(&canvas);
+    assert_eq!(
+        rows,
+        [
+            " 1 use std::collections::HashMap;",
+            " 2 ",
+            " 3 fn summarise(orders: &[(String, u32, f64)])",
+            " ↪     -> HashMap<String, (u32, f64)> {",
+            " 4     let mut totals = HashMap::new();",
+            " 5     for (customer, quantity, price) in",
+            " ↪         orders {",
+            " 6         let entry = totals.entry(customer.",
+            " ↪             clone()).or_insert((0, 0.0));",
+            " 7         entry.0 += quantity;",
+            " 8         entry.1 += *quantity as f64 * price;",
+            " ↪             // running total of what each",
+            " ↪             customer has spent across every",
+            " ↪             order so far",
+            " 9     }",
+            "10     totals",
+        ]
+    );
+    // Nothing is cut mid-line: every line shown is whole, and the last, which no longer fits, is counted.
+    assert!(rows.iter().all(|row| !row.contains('…')), "{rows:#?}");
+    let source: Vec<&str> = MAINTAINERS_BLOCK.lines().collect();
+    for (number, parts) in joined(&rows) {
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            words(&parts.join(" ")).replace(". clone", ".clone"),
+            words(source[number - 1])
+        );
+    }
+    assert_eq!(row_text(&canvas.rows[CODE_ROWS - 1]), "…1 more line");
+    // Every row, its gutter and hanging indent counted, is within the panel's columns, and the comment's colour carries
+    // across each of its rows, the marker dim.
+    assert!(
+        canvas
+            .rows
+            .iter()
+            .all(|row| row.cells.len() <= CODE_COLUMNS)
+    );
+    for row in &canvas.rows[3 + 11..3 + 14] {
+        assert_eq!(colours(row, "↪"), [CONTINUED_COLOR]);
+        let code = row_text(row);
+        let text = code.trim_start_matches([' ', '↪']);
+        assert!(
+            colours(row, text)
+                .iter()
+                .all(|colour| *colour == palette(TokenKind::Comment))
+        );
+    }
+}
+
+#[test]
+fn a_line_of_code_wraps_onto_as_many_rows_as_it_needs_within_the_panel_s_columns() {
+    // Words, then a token wider than a whole row, which breaks hard at each row's end rather than being cut.
+    let words = vec!["word"; 40].join(" ");
+    let token = "t".repeat(100);
+    let line = format!("    call({words}, {token});");
+    let panel = Panel::new(
+        "c",
+        "rust",
+        format!(
+            "fn f() {{
+{line}
+}}"
+        ),
+        Place::Unknown,
+    )
+    .with_code(Code::new("rust", 3));
+    let canvas = face(&panel, false, false, Fit::Slot);
+    let rows = code_rows(&canvas);
+    let lines = joined(&rows);
+    assert_eq!(
+        lines.iter().map(|(number, _)| *number).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    // The long line takes many rows, each after the first marked and hanging one step under it, its gutter and
+    // indent counted in the panel's columns, and every character of it is shown, none cut with "…".
+    let parts = &lines[1].1;
+    assert!(parts.len() >= 7, "{rows:#?}");
+    let later: Vec<&String> = rows.iter().filter(|row| row.starts_with(" ↪ ")).collect();
+    assert_eq!(later.len(), parts.len() - 1);
+    assert!(
+        later
+            .iter()
+            .all(|row| row.starts_with(&format!(" ↪ {}", " ".repeat(8))))
+    );
+    assert!(
+        later
+            .iter()
+            .all(|row| !row[" ↪ ".len()..].starts_with(&" ".repeat(9)))
+    );
+    assert!(
+        rows.iter()
+            .all(|row| crate::ui_text::width(row) <= CODE_COLUMNS)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| crate::ui_text::width(row) == CODE_COLUMNS)
+    );
+    assert!(!canvas.plain().contains('…'));
+    assert_eq!(
+        parts.concat().replace(' ', ""),
+        line.replace(' ', ""),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn where_the_server_cuts_code_is_never_shown_but_as_the_panel_running_out() {
+    // The server cuts a code panel's lines where they reach as many characters together as its rows can show.
+    // Lines cut so, however long and however many, and however deeply indented: the "…" the cut ends with is never
+    // drawn but as the first line's last cell, where it alone is too tall for the panel, and every line drawn is whole.
+    for (lines, length, indent) in [
+        (1, 2_000, 0),
+        (1, 2_000, 12),
+        (2, 400, 4),
+        (3, 300, 8),
+        (16, 60, 4),
+        (16, 45, 0),
+        (5, 200, 40),
+    ] {
+        let mut left = tomori_protocol::CODE_CHARS;
+        let mut body = Vec::new();
+        for _ in 0..lines {
+            if left == 0 {
+                break;
+            }
+            let line = format!("{}{}", " ".repeat(indent), vec!["ab"; length].join(" "));
+            let line: String = line.chars().take(length).collect();
+            let kept: String = line.chars().take(left).collect();
+            left -= kept.chars().count();
+            let cut = kept.chars().count() < line.chars().count();
+            body.push(if cut { format!("{kept}…") } else { kept });
+            if cut {
+                break;
+            }
+        }
+        let shown = body.len();
+        let cut = body.last().unwrap().ends_with('…');
+        let panel = Panel::new("c", "text", body.join("\n"), Place::Unknown)
+            .with_code(Code::new("", lines as u32 + u32::from(cut)));
+        let canvas = face(&panel, false, false, Fit::Slot);
+        let rows = code_rows(&canvas);
+        let drawn = joined(&rows);
+        for (row, text) in rows.iter().enumerate() {
+            assert!(
+                !text.contains('…') || (drawn.len() == 1 && row == CODE_LINES - 1),
+                "{lines} × {length}: {rows:#?}"
+            );
+        }
+        if cut {
+            assert!(drawn.len() < shown || shown == 1, "{rows:#?}");
+        }
+    }
+}
+
 #[test]
 fn code_breaks_at_spaces_or_punctuation_and_hard_breaks_a_long_token_never_through_a_wide_character()
  {
@@ -376,7 +585,8 @@ fn a_code_panel_keeps_a_slots_size_floating() {
 
 #[test]
 fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
-    let long = "x".repeat(tomori_protocol::CODE_LINE_CHARS - 1);
+    // An older server cut each line to 64 characters.
+    let long = "x".repeat(63);
     let body = std::iter::once(format!("{long}…"))
         .chain((2..=CODE_LINES).map(|line| format!("line {line}")))
         .collect::<Vec<_>>()
@@ -388,7 +598,7 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_wraps_long_lines() {
     let text = canvas.plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines[1].trim_end(), "40 lines · 0m · pinned");
-    // A line cut by the server wraps onto a second row, the panel's width, and ends with a dim "…".
+    // A line cut by an older server wraps onto a second row, the panel's width, and ends with a dim "…".
     assert_eq!(lines[3].chars().count(), CODE_COLUMNS);
     assert_eq!(
         lines[3],

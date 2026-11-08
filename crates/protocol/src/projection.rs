@@ -174,8 +174,12 @@ impl Meta {
 /// There is no scrolling yet, so a longer block shows "…N more lines" after them.
 pub const CODE_LINES: usize = 16;
 
-/// The longest line of a code panel, in characters, after which it is cut with "…".
-pub const CODE_LINE_CHARS: usize = 64;
+/// The most characters of a code panel's lines together, not counting the breaks between them, after which they are cut
+/// with "…" and the lines after left out: as many as a headset's code panel, 16 rows of 45 columns of code, can show of
+/// them, however they wrap, so that where they are cut is never shown. A line is never cut short of that, however long,
+/// and one cut is always too tall for what is left of the panel: it is counted in "…N more lines", or, the first line,
+/// shows what fits and ends with "…".
+pub const CODE_CHARS: usize = 720;
 
 /// The most spans of a code panel; text past the last is drawn plain.
 pub const CODE_SPANS: usize = 256;

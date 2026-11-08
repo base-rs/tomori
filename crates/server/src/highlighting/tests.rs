@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use futures_lite::future::block_on;
 use tomori_protocol::{
-    CODE_LINES, ClientMessage, PROTOCOL_VERSION, Projection, ServerMessage, TokenKind,
+    CODE_CHARS, CODE_LINES, ClientMessage, PROTOCOL_VERSION, Projection, ServerMessage, TokenKind,
 };
 
 use super::*;
@@ -208,13 +208,16 @@ fn only_the_code_of_the_last_reply_with_any_is_highlighted_and_within_bounds() {
     let (recording, given) = recording();
     let replies = block_on(highlight(Projecting::new(replies), recording));
     // Only the oversized reply's code is highlighted, since its code panels replace the earlier reply's as they are
-    // projected together, and only as much of each block as is kept: its first lines, each cut.
+    // projected together, and only as much of each block as is kept: its first lines, cut.
     let given = given.lock().unwrap();
     assert_eq!(given.len(), 4);
     for (language, text) in given.iter() {
         assert_eq!(language, "rust");
-        assert_eq!(text.lines().count(), CODE_LINES);
-        assert!(text.lines().all(|line| line.chars().count() == 256));
+        // More than is shown, so that what is shown is highlighted as it continues, and no more than the highlighter
+        // takes.
+        let characters = text.chars().filter(|c| *c != '\n').count();
+        assert!(characters > CODE_CHARS && characters <= 2 * CODE_CHARS);
+        assert!(text.lines().count() <= CODE_LINES);
         assert!(text.len() <= tomori_highlight::INPUT_BYTES);
     }
     assert!(replies[0].0[0].code.as_ref().unwrap().spans.is_empty());
