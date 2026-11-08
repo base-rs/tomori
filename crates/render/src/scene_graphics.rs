@@ -486,8 +486,9 @@ mod tests {
         });
     }
 
-    /// Set `TOMORI_PROJECTION_PREVIEW` to a PNG path to save what this renders: the Tomori wall with four panels, from
-    /// home, then with one pointed at and named on the ray, and one pulled off and carried.
+    /// Set `TOMORI_PROJECTION_PREVIEW` to a PNG path to save what this renders: the Tomori wall with four text panels and
+    /// two code panels, from home, then with one pointed at and named on the ray, one pulled off and carried, and the
+    /// code panels close up, highlighted.
     #[test]
     fn a_projection_wall_and_its_panels_render_over_the_scene() {
         const WIDTH: u32 = 960;
@@ -549,6 +550,61 @@ mod tests {
                 )
                 .with_age(10),
             ];
+            // Two code panels, as the server highlights them, with spans of every kind.
+            let span = tomori_protocol::Span::new;
+            use tomori_protocol::TokenKind as Kind;
+            let rust = "#[derive(Debug)]\nstruct Point { x: f32 }\n\n/// The origin.\nfn origin() -> Point {\n    let x = 0.0 + 1.5 * 2.0; // half\n    println!(\"{x}\");\n    Point { x: X_MIN }\n}";
+            let code = vec![
+                tomori_protocol::Panel::new("panel-5", "rust", rust, place(2))
+                    .with_code(tomori_protocol::Code::new("rust", 9).with_spans(vec![
+                        span(0, 16, Kind::Attribute),
+                        span(17, 6, Kind::Keyword),
+                        span(24, 5, Kind::Type),
+                        span(30, 1, Kind::Punctuation),
+                        span(32, 1, Kind::Variable),
+                        span(35, 3, Kind::Type),
+                        span(42, 15, Kind::Comment),
+                        span(58, 2, Kind::Keyword),
+                        span(61, 6, Kind::Function),
+                        span(70, 2, Kind::Operator),
+                        span(73, 5, Kind::Type),
+                        span(85, 3, Kind::Keyword),
+                        span(91, 1, Kind::Operator),
+                        span(93, 3, Kind::Number),
+                        span(97, 1, Kind::Operator),
+                        span(99, 3, Kind::Number),
+                        span(103, 1, Kind::Operator),
+                        span(105, 3, Kind::Number),
+                        span(108, 1, Kind::Punctuation),
+                        span(110, 7, Kind::Comment),
+                        span(122, 8, Kind::Function),
+                        span(131, 5, Kind::String),
+                        span(143, 5, Kind::Type),
+                        span(154, 5, Kind::Constant),
+                    ]))
+                    .with_age(5),
+                tomori_protocol::Panel::new(
+                    "panel-6",
+                    "python",
+                    (1..=16)
+                        .map(|line| format!("total += values[{line}]  # step {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    place(5),
+                )
+                .with_code(tomori_protocol::Code::new("python", 40))
+                .with_pinned(true)
+                .with_age(60),
+            ];
+            let plain: Vec<tomori_protocol::Panel> = shown
+                .iter()
+                .cloned()
+                .chain(code.iter().cloned().map(|mut panel| {
+                    panel.code = Some(tomori_protocol::Code::new("rust", 9));
+                    panel
+                }))
+                .collect();
+            let shown: Vec<tomori_protocol::Panel> = shown.into_iter().chain(code).collect();
             let mut conversation = joined();
             show_projection(&mut conversation, Vec::new(), shown);
             let head = Mat4::from_translation(arrival::HOME);
@@ -572,10 +628,14 @@ mod tests {
             };
             let mut step = Step::default();
             let now = Instant::now();
-            let capture = |renderer: &Renderer, panels: &Panels| {
-                // About the field of view the headset gives the wall, to judge its text at the headset's resolution.
-                let matrix = Mat4::perspective_rh(0.9, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
-                    * Mat4::look_at_rh(arrival::HOME, wall_at, Vec3::Y);
+            // About the field of view the headset gives the wall, to judge its text at the headset's resolution.
+            let lens = Mat4::perspective_rh(0.9, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, wall_at, Vec3::Y);
+            // Close up: the code panels, from 1.4 m in front of the slots between them.
+            let between = (slot(2) + slot(5)) / 2.0 + wall_frame.transform_vector3(Vec3::X * 0.3);
+            let facing = wall_frame.transform_vector3(Vec3::Z);
+            let close = lens * Mat4::look_at_rh(between + facing * 1.3, between, Vec3::Y);
+            let capture_from = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
                     &queue,
@@ -616,6 +676,8 @@ mod tests {
                 buffer.unmap();
                 image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
             };
+            let capture =
+                |renderer: &Renderer, panels: &Panels| capture_from(renderer, panels, from_home);
             let bare = capture(&renderer, &panels);
             // Looking at the wall, pointing at nothing.
             let away = Senses {
@@ -623,13 +685,33 @@ mod tests {
                 ..senses
             };
             let frame = step.update(&away, &mut conversation, &mut felt(), now, 0.01);
-            assert_eq!(frame.projection.len(), 1 + 4, "the wall and its panels");
+            assert_eq!(frame.projection.len(), 1 + 6, "the wall and its panels");
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let wall_drawn = capture(&renderer, &panels);
             assert_ne!(wall_drawn, bare, "the wall must draw over the bare scene");
+            let highlighted = capture_from(&renderer, &panels, close);
+            // The same code without its spans is drawn plain, which differs: its kinds are coloured.
+            let mut plain_conversation = joined();
+            show_projection(&mut plain_conversation, Vec::new(), plain);
+            let mut plain_step = Step::default();
+            let frame = plain_step.update(&away, &mut plain_conversation, &mut felt(), now, 0.01);
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let unhighlighted = capture_from(&renderer, &panels, close);
+            assert_ne!(highlighted, unhighlighted, "code must be coloured by kind");
+            // Coloured pixels, such as the keywords' violet, where plain code has none.
+            let violet = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| {
+                        let [r, g, b, _] = pixel.0.map(i32::from);
+                        b > 150 && r > 120 && g + 30 < r
+                    })
+                    .count()
+            };
+            assert!(violet(&highlighted) > 20 + violet(&unhighlighted));
             // Pointing at the first panel names it on the ray.
             let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
-            assert_eq!(frame.projection.len(), 1 + 4 + 1, "with the label");
+            assert_eq!(frame.projection.len(), 1 + 6 + 1, "with the label");
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let pointed = capture(&renderer, &panels);
             assert_ne!(pointed, wall_drawn);
@@ -650,10 +732,11 @@ mod tests {
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let moved = capture(&renderer, &panels);
             assert_ne!(moved, pointed);
-            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 4);
             image::imageops::replace(&mut sheet, &wall_drawn, 0, 0);
             image::imageops::replace(&mut sheet, &pointed, 0, HEIGHT.into());
             image::imageops::replace(&mut sheet, &moved, 0, (2 * HEIGHT).into());
+            image::imageops::replace(&mut sheet, &highlighted, 0, (3 * HEIGHT).into());
             crate::test_support::preview("TOMORI_PROJECTION_PREVIEW", &sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
