@@ -143,7 +143,7 @@ fn replies_are_projected_in_order_however_long_each_takes_to_highlight() {
 }
 
 /// The panels of a reply of `text`, with nobody asking.
-fn found(text: &str) -> Vec<(Vec<Found>, Option<[f32; 3]>)> {
+fn found(text: &str) -> Vec<(Vec<Found>, Option<tomori_protocol::Pose>)> {
     vec![(crate::stage::panels(text), None)]
 }
 
@@ -171,7 +171,7 @@ fn panels_without_code_are_projected_without_highlighting() {
     let (recording, given) = recording();
     let projecting = Projecting::new(found("```panel\nNotes.\n```\n"));
     let replies = block_on(highlight(projecting, recording));
-    assert_eq!(replies[0].0[0].body, "Notes.");
+    assert_eq!(replies[0].0[0].0.body, "Notes.");
     assert!(given.lock().unwrap().is_empty());
 }
 
@@ -183,14 +183,14 @@ fn code_is_plain_when_it_cannot_be_highlighted() {
     let projecting = Projecting::new(found(&code_reply("fn f() {}")));
     let replies = block_on(highlight(projecting, recording));
     assert!(given.lock().unwrap().is_empty());
-    let code = replies[0].0[0].code.as_ref().unwrap();
+    let code = replies[0].0[0].0.code.as_ref().unwrap();
     assert!(code.spans.is_empty());
     assert_eq!(code.lines, 2);
     // When the highlighter fails.
     let failing: Highlighter = Arc::new(|_: &str, _: &str| panic!("the highlighter failed"));
     let projecting = Projecting::new(found(&code_reply("fn f() {}")));
     let replies = block_on(highlight(projecting, failing));
-    assert!(replies[0].0[0].code.as_ref().unwrap().spans.is_empty());
+    assert!(replies[0].0[0].0.code.as_ref().unwrap().spans.is_empty());
 }
 
 #[test]
@@ -200,9 +200,13 @@ fn only_the_code_of_the_last_reply_with_any_is_highlighted_and_within_bounds() {
     let block = format!("```rust\n{}```\n", format!("{line}\n").repeat(300));
     let huge = block.repeat(6);
     // Then a reply with a text panel alone, which replaces no code panels.
+    let asker = tomori_protocol::Pose {
+        position: [1.0, 0.0, 0.0],
+        orientation: [0.0, 0.0, 0.0, 1.0],
+    };
     let replies = vec![
         (crate::stage::panels(&code_reply("fn earlier() {}")), None),
-        (crate::stage::panels(&huge), Some([1.0, 0.0, 0.0])),
+        (crate::stage::panels(&huge), Some(asker)),
         (crate::stage::panels("```panel\nNotes.\n```\n"), None),
     ];
     let (recording, given) = recording();
@@ -220,9 +224,9 @@ fn only_the_code_of_the_last_reply_with_any_is_highlighted_and_within_bounds() {
         assert!(text.lines().count() <= CODE_LINES);
         assert!(text.len() <= tomori_highlight::INPUT_BYTES);
     }
-    assert!(replies[0].0[0].code.as_ref().unwrap().spans.is_empty());
-    assert_eq!(replies[1].1, Some([1.0, 0.0, 0.0]));
-    for content in &replies[1].0 {
+    assert!(replies[0].0[0].0.code.as_ref().unwrap().spans.is_empty());
+    assert_eq!(replies[1].1, Some(asker));
+    for (content, _) in &replies[1].0 {
         let code = content.code.as_ref().unwrap();
         assert_eq!(code.lines, 300);
         assert!(
@@ -232,5 +236,5 @@ fn only_the_code_of_the_last_reply_with_any_is_highlighted_and_within_bounds() {
         );
         assert!(tomori_protocol::valid_spans(&content.body, &code.spans));
     }
-    assert_eq!(replies[2].0[0].body, "Notes.");
+    assert_eq!(replies[2].0[0].0.body, "Notes.");
 }

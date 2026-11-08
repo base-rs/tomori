@@ -342,6 +342,19 @@ fn tools() -> Value {
             "annotations": read,
         },
         {
+            "name": "move_panel",
+            "description": "Move a panel you projected in your space, for everyone in it, by its identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall. near, looking and front alone are about whoever asked. A panel a participant put where it is stays there.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "panel": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["panel", "place"],
+            },
+            "annotations": change,
+        },
+        {
             "name": "set_speech",
             "description": "Set how much of each of your replies is spoken in your space, from the next reply on, for everyone in it: full, or brief, which speaks the start of each message and leaves the rest on the panel. Only when someone in the space asks; then tell them.",
             "inputSchema": {
@@ -473,6 +486,7 @@ async fn call(
         "spaces" => Ok(structured(hub.tool_spaces())),
         "space" => session.and_then(|session| hub.tool_space(session).map(structured)),
         "presence" => session.and_then(|session| hub.tool_presence(session).map(structured)),
+        "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
         "pairing" => session.and_then(|session| hub.tool_pairing(session).map(structured)),
@@ -503,6 +517,15 @@ fn changed(changed: Changed, setting: (&str, &str), announcement: String) -> Val
             "It was already so, so nothing changed and there is nothing to tell.".to_owned()
         },
     }))
+}
+
+/// The `move_panel` tool.
+fn move_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let panel = text(arguments, "panel")?;
+    let place = text(arguments, "place")?;
+    crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
+    crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
+    hub.agent_move_panel(session, panel, place).map(structured)
 }
 
 /// The `set_speech` tool.

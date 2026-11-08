@@ -429,6 +429,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "spaces",
             "space",
             "presence",
+            "move_panel",
             "set_speech",
             "set_environment",
             "pairing",
@@ -522,8 +523,14 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         }],
     });
     ada.space(|state| state.workers.len() == 1);
-    for tool in ["space", "presence", "set_speech", "set_environment"] {
-        let arguments = json!({"speech": "brief", "environment": "minimal"});
+    for tool in [
+        "space",
+        "presence",
+        "move_panel",
+        "set_speech",
+        "set_environment",
+    ] {
+        let arguments = json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest"});
         assert_eq!(
             failure(&call(&server, &token, None, tool, arguments.clone())),
             "Tomori's space tools act on the space of the agent session that calls them, and this call names no session.",
@@ -606,14 +613,20 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
             .as_bool()
             .filter(|refused| *refused)
     });
-    for tool in ["space", "presence", "set_speech", "set_environment"] {
+    for tool in [
+        "space",
+        "presence",
+        "move_panel",
+        "set_speech",
+        "set_environment",
+    ] {
         assert_eq!(
             failure(&call(
                 &server,
                 &token,
                 Some(&one),
                 tool,
-                json!({"speech": "brief", "environment": "minimal"})
+                json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest"})
             )),
             "This session is bound to more than one open Tomori space, so Tomori cannot tell which one to act on.",
             "{tool}"
@@ -1177,5 +1190,166 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
     assert_eq!(
         moved["people"][0]["presence"],
         "Their client has not reported where they are."
+    );
+}
+
+/// The agent of `session` completes the reply `message`, of `text`.
+fn agent_replies(session: &FakeSession, message: &str, text: &str) {
+    session.emit(Event::MessageStarted {
+        message: message.into(),
+        role: tomori_backend::Role::Assistant,
+    });
+    session.emit(Event::TextDelta {
+        message: message.into(),
+        text: text.into(),
+    });
+    session.emit(Event::MessageCompleted {
+        message: message.into(),
+    });
+}
+
+#[test]
+fn the_agent_moves_a_panel_it_projected_near_someone_or_where_they_look_but_not_one_put_by_hand() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    let space = create(&mut ada, "Studio");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let sessions = backend.started();
+    let session = id(&sessions[0]);
+    let slots = tomori_slots();
+    let home = [0.0, 1.6, 0.0];
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, slots[4]),
+        left: None,
+        right: None,
+        hands: None,
+    });
+    // Asked by nobody, two panels go onto the Tomori wall's first slots.
+    agent_replies(
+        &sessions[0],
+        "m1",
+        "Two.\n\n```panel\ntitle: Build status\n---\nGreen.\n```\n\n```panel\ntitle: Notes\n---\nSome.\n```\n",
+    );
+    let walls = |session: &str| {
+        call(&server, &token, Some(session), "presence", json!({}))["structuredContent"]["walls"]
+            .clone()
+    };
+    let projected = eventually(|| {
+        let walls = walls(&session);
+        (walls[0]["used"].as_array()?.len() == 2).then_some(walls)
+    });
+    let notes = projected[0]["used"][1]["panel"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let move_panel = |panel: &str, place: &str| {
+        call(
+            &server,
+            &token,
+            Some(&session),
+            "move_panel",
+            json!({ "panel": panel, "place": place }),
+        )
+    };
+
+    // By its title, onto the empty slot Ada is looking at; again, nothing moves.
+    let moved = move_panel("build status", "looking Ada");
+    assert_ne!(moved["isError"], true, "{moved}");
+    let content = &moved["structuredContent"];
+    assert_eq!(content["space"], space);
+    assert_eq!(content["moved"], true);
+    assert_eq!(
+        content["place"],
+        json!({"kind": "wall", "wall": "tomori", "slot": 4})
+    );
+    let build = content["panel"].as_str().unwrap().to_owned();
+    assert_eq!(
+        move_panel(&build, "looking:Ada")["structuredContent"]["moved"],
+        false
+    );
+    // By its identity, floating in front of her.
+    let front = &move_panel(&notes, "front Ada")["structuredContent"];
+    assert_eq!(front["moved"], true);
+    assert_eq!(front["place"]["kind"], "free");
+    assert!(front["place"]["pose"]["position"][2].as_f64().unwrap() < -1.0);
+    let after = eventually(|| {
+        let walls = walls(&session);
+        (walls[0]["used"].as_array()?.len() == 1).then_some(walls)
+    });
+    assert_eq!(after[0]["used"][0]["slot"], 4);
+    assert_eq!(after[0]["free"], json!([0, 1, 2, 3, 5]));
+
+    // What it cannot do, it says, and changes nothing.
+    assert!(
+        failure(&move_panel(&build, "behind Ada"))
+            .starts_with("Tomori does not know where \"behind Ada\" is")
+    );
+    assert_eq!(
+        failure(&move_panel(&build, "near")),
+        "Nobody asked for this as they spoke, so name whom it is for."
+    );
+    assert_eq!(
+        failure(&move_panel(&build, "near Zed")),
+        "Nobody called \"Zed\" in this space has reported where they are."
+    );
+    assert_eq!(
+        failure(&move_panel(&build, "wall attic")),
+        "There is no wall called \"attic\" here."
+    );
+    assert_eq!(
+        failure(&move_panel("panel-99", "nearest")),
+        "There is no such panel here."
+    );
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            Some(&session),
+            "move_panel",
+            json!({"panel": "x"})
+        )),
+        "This tool needs place, as text."
+    );
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            Some(&session),
+            "move_panel",
+            json!({"place": "nearest"})
+        )),
+        "This tool needs panel, as text."
+    );
+    assert_eq!(
+        failure(&move_panel(&"x".repeat(2_000), "nearest")),
+        "The panel is too long; the limit is 1024 bytes."
+    );
+    assert_eq!(
+        failure(&move_panel(&build, &"x".repeat(2_000))),
+        "The place is too long; the limit is 1024 bytes."
+    );
+    agent_replies(
+        &sessions[0],
+        "m2",
+        "```panel\ntitle: Notes\n---\nMore.\n```\n",
+    );
+    eventually(|| (walls(&session)[0]["used"].as_array()?.len() == 2).then_some(()));
+    assert_eq!(
+        failure(&move_panel("Notes", "wall tomori")),
+        "More than one panel here has that title, so name it by its identity, as presence lists it."
+    );
+
+    // Once Ada puts it somewhere herself, it stays there.
+    ada.send(&ClientMessage::PlacePanel {
+        panel: build.clone(),
+        wall: Some("tomori".into()),
+        slot: Some(5),
+        pose: None,
+    });
+    eventually(|| (walls(&session)[0]["used"][1]["slot"] == 5).then_some(()));
+    assert_eq!(
+        failure(&move_panel(&build, "wall tomori")),
+        "A participant put that panel where it is, so it stays there."
     );
 }

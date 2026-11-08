@@ -239,9 +239,12 @@ impl Hub {
                     meta: vec![("source".to_owned(), "Tomori".to_owned())],
                     code: None,
                 };
-                let panel = record
-                    .stage
-                    .project(&walls, content, None, crate::cards::unix_now());
+                let panel = record.stage.project_to(
+                    &walls,
+                    content,
+                    &crate::stage::Destination::Tomori,
+                    crate::cards::unix_now(),
+                );
                 log::info!("Space {space} projected {panel}.");
                 record.model.title.clone()
             })

@@ -703,9 +703,9 @@ struct UtteranceRecord {
     /// What the participant attended to as the utterance began, as the space knew it then. Their client names only
     /// identities. See `design/spaces.md`.
     attention: Vec<crate::space::Attended>,
-    /// Where the participant's head was as the utterance began, so that what the agent projects in answer goes onto the
-    /// wall nearest them. See `design/projection.md`.
-    origin: Option<[f32; 3]>,
+    /// Where the participant's head was, and the way it faced, as the utterance began, so that what the agent projects
+    /// in answer goes where they were looking, or onto the wall nearest them. See `design/projection.md`.
+    origin: Option<tomori_protocol::Pose>,
     /// The connection whose client asked for [`ServerMessage::TranscriptProgress`] as it began the utterance, if it did. Progress is sent only there, as the participant may reconnect with an older client, which would refuse it.
     progress: Option<ConnectionId>,
     /// When its end arrived, and with it the last of its audio, from which the time it takes to transcribe is logged.
@@ -1095,6 +1095,22 @@ impl HubState {
                     .sent(&key, Err("the agent session has stopped".to_owned()));
             }
         }
+    }
+
+    /// The names of the participants in `space` and where their heads are, as they last reported, for placing what its
+    /// agent projects near them or where they look. Visitors send no presence.
+    fn heads(&self, space: &str) -> Vec<(String, tomori_protocol::Pose)> {
+        self.space(space).map_or_else(Vec::new, |record| {
+            record
+                .model
+                .participants
+                .iter()
+                .filter_map(|key| self.participants.get(key))
+                .filter_map(|participant| {
+                    Some((participant.name.clone(), participant.seen.as_ref()?.head))
+                })
+                .collect()
+        })
     }
 
     fn participants(&self, space: &SpaceModel) -> Vec<Participant> {
@@ -2946,7 +2962,7 @@ impl Hub {
                 let origin = state.participants[participant]
                     .seen
                     .as_ref()
-                    .map(|seen| seen.head.position);
+                    .map(|seen| seen.head);
                 state.next_utterance += 1;
                 let id = UtteranceId(state.next_utterance);
                 state.utterances.insert(
@@ -4532,10 +4548,12 @@ impl Hub {
         (!replies.is_empty()).then(|| crate::stage::Projecting::new(replies))
     }
 
-    /// Project the panels of `replies`, which events of `space` completed, highlighted: each reply's onto the wall
-    /// nearest whoever asked for it, or else the Tomori wall, its code panels replacing those of the replies before.
+    /// Project the panels of `replies`, which events of `space` completed, highlighted: each where its block says, near
+    /// or where someone in the space is looking, or on a wall, or else where whoever asked for it was looking, or else
+    /// the Tomori wall, its code panels replacing those of the replies before. See `design/projection.md`.
     pub(crate) fn project(&self, space: &str, replies: crate::stage::Replies) {
         let mut state = self.lock();
+        let people = state.heads(space);
         let Some(record) = state.space_mut(space) else {
             return;
         };
@@ -4543,7 +4561,28 @@ impl Hub {
         let walls = environments.walls(&record.model.environment);
         let now = crate::cards::unix_now();
         for (contents, origin) in replies {
-            for id in record.stage.project_reply(&walls, contents, origin, now) {
+            let projection = record.stage.view(space, &walls, now);
+            let placed = contents
+                .into_iter()
+                .map(|(content, place)| {
+                    // A placement that names someone who has not reported, or a wall not here, is as none.
+                    let to = place
+                        .and_then(|place| {
+                            crate::presence::destination(
+                                &place,
+                                origin.as_ref(),
+                                &people,
+                                &projection,
+                            )
+                            .ok()
+                        })
+                        .unwrap_or_else(|| {
+                            crate::presence::by_default(origin.as_ref(), &projection)
+                        });
+                    (content, to)
+                })
+                .collect();
+            for id in record.stage.project_placed(&walls, placed, now) {
                 log::info!("Space {space} projected {id}.");
             }
         }
