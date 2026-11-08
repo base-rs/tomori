@@ -5555,6 +5555,10 @@ impl Hub {
                 state.anchors = environments.anchors(&space.model.environment);
                 state.summoned = space.summoned;
                 state.summons = true;
+                // The avatar its environment names, or else its backend's, for everyone in it. See `design/avatars.md`.
+                state.avatar = environments
+                    .avatar(&space.model.environment)
+                    .or_else(|| self.backends.avatar(&space.model.backend));
                 // Every space projects. See `design/projection.md`.
                 state.projection = true;
                 // Participants adjust walls, and an owner's removal leaves a wall's panels floating.

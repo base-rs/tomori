@@ -90,7 +90,7 @@ pub trait Scenery {
 }
 
 /// Makes a scenery for a renderer's target.
-type Create = Arc<dyn Fn(&Target) -> Box<dyn Scenery> + Send + Sync>;
+pub(crate) type Create = Arc<dyn Fn(&Target) -> Box<dyn Scenery> + Send + Sync>;
 
 /// The sceneries a client can draw, by the identifiers spaces name them by, in the order they were registered, with the locomotion each environment allows, and the environments it presents over the grid without a scenery of their own. The Minimal grid is built in, and is not registered. It starts empty: an application registers the environments it presents, each through its own crate, such as Sky's `tomori_environment_sky_client::register`. See `design/environments.md`.
 #[derive(Clone, Default)]
@@ -100,6 +100,8 @@ pub struct Sceneries {
     over_grid: Vec<Environment>,
     client_sides: Vec<(Environment, tomori_scene::client_side::Factory)>,
     worker_placements: Vec<(Environment, tomori_scene::anchors::Placement)>,
+    avatars: Vec<(&'static str, tomori_scene::avatar::Factory, Create)>,
+    avatar_failures: tomori_scene::avatar::Failures,
     licenses: Vec<(&'static str, &'static str)>,
 }
 
@@ -191,6 +193,45 @@ impl Sceneries {
     /// The worker placements registered for each environment, for the conversation.
     pub fn worker_placements(&self) -> Vec<(Environment, tomori_scene::anchors::Placement)> {
         self.worker_placements.clone()
+    }
+
+    /// Show the agent as the avatar `id`, in a space whose backend names it, with what `avatar` makes for each such space
+    /// and the scenery `scenery` makes for a renderer, which draws what the avatar shows, in place of any registered
+    /// before under the same identifier. A renderer makes the scenery only when the avatar shows, anew for each space it
+    /// is made for, and drops it when it no longer shows. The swarm is built in, as [`tomori_scene::avatar::SWARM`];
+    /// registering that identifier shows this avatar only in a space whose backend names `swarm`, and the built-in swarm
+    /// everywhere else. See `design/avatars.md`.
+    pub fn set_avatar(
+        &mut self,
+        id: &'static str,
+        avatar: impl Fn(&str) -> Box<dyn tomori_scene::avatar::Avatar> + Send + Sync + 'static,
+        scenery: impl Fn(&Target) -> Box<dyn Scenery> + Send + Sync + 'static,
+    ) {
+        self.avatars.retain(|(registered, _, _)| *registered != id);
+        self.avatars.push((id, Arc::new(avatar), Arc::new(scenery)));
+    }
+
+    /// The avatars registered, by identifier, in the order they were registered, for the conversation.
+    pub fn avatars(&self) -> Vec<(String, tomori_scene::avatar::Factory)> {
+        self.avatars
+            .iter()
+            .map(|(id, avatar, _)| ((*id).to_owned(), avatar.clone()))
+            .collect()
+    }
+
+    /// The avatars whose scenery panicked in a renderer made with these sceneries, shared with it, for the conversation,
+    /// which then shows the swarm in their place. See `design/avatars.md`.
+    pub fn avatar_failures(&self) -> tomori_scene::avatar::Failures {
+        self.avatar_failures.clone()
+    }
+
+    /// What makes each registered avatar's scenery, by the avatar's identifier, for a renderer, which makes one only
+    /// when the avatar shows.
+    pub(crate) fn avatar_sceneries(&self) -> Vec<(&'static str, Create)> {
+        self.avatars
+            .iter()
+            .map(|(id, _, create)| (*id, create.clone()))
+            .collect()
     }
 
     /// The locomotion declared for each environment, for the conversation.
@@ -387,6 +428,235 @@ mod tests {
                 .place(origin, &tomori_scene::anchors::Placing::new("ses_1", 0)),
             origin.position
         );
+    }
+
+    /// An avatar that stands still at the default place.
+    struct Still;
+
+    impl tomori_scene::avatar::Avatar for Still {
+        fn update(&mut self, _input: &tomori_scene::avatar::Input) {}
+
+        fn voices(&self, voices: &mut Vec<[f32; 3]>) {
+            voices.push(tomori_scene::swarm::CENTER.to_array());
+        }
+
+        fn departures(&self, departures: &mut Vec<[f32; 3]>) {
+            self.voices(departures);
+        }
+
+        fn bounds(&self) -> crate::arrival_motion::Sphere {
+            crate::arrival_motion::Sphere {
+                centre: tomori_scene::swarm::CENTER,
+                radius: 0.5,
+            }
+        }
+    }
+
+    fn still(_space: &str) -> Box<dyn tomori_scene::avatar::Avatar> {
+        Box::new(Still)
+    }
+
+    #[test]
+    fn avatars_are_registered_by_identifier_and_none_by_default() {
+        assert!(Sceneries::default().avatars().is_empty());
+        let mut sceneries = Sceneries::empty();
+        sceneries.set_avatar("river", still, test::blank);
+        sceneries.set_avatar("fox", still, test::blank);
+        // Registering an identifier again replaces it, at the end.
+        sceneries.set_avatar("river", still, test::blank);
+        let registered = sceneries.avatars();
+        let ids: Vec<&str> = registered.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["fox", "river"]);
+        let mut made = (registered[1].1)("space-1");
+        made.update(&tomori_scene::avatar::Input::new(
+            Default::default(),
+            tomori_scene::anchors::Anchor::AGENT,
+            0.01,
+        ));
+        let mut departures = Vec::new();
+        made.departures(&mut departures);
+        assert_eq!(departures, [tomori_scene::swarm::CENTER.to_array()]);
+        assert_eq!(made.bounds().radius, 0.5);
+    }
+
+    /// What every [`Watched`] scenery did, shared between them: how many were made, the pose each was drawn with in each
+    /// eye, translucently too, and how often one was cut off or resized.
+    #[derive(Clone, Default)]
+    struct Log {
+        made: Arc<std::sync::atomic::AtomicUsize>,
+        drawn: Arc<std::sync::Mutex<Vec<Option<usize>>>>,
+        translucent: Arc<std::sync::atomic::AtomicUsize>,
+        revealed: Arc<std::sync::atomic::AtomicUsize>,
+        resized: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// A scenery that draws the pose its avatar last showed it, a number, which panics when shown `0`.
+    struct Watched {
+        pose: Option<usize>,
+        log: Log,
+    }
+
+    impl Log {
+        fn make(&self) -> Box<dyn Scenery> {
+            self.made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::new(Watched {
+                pose: None,
+                log: self.clone(),
+            })
+        }
+    }
+
+    impl Scenery for Watched {
+        fn animate(
+            &mut self,
+            _device: &wgpu::Device,
+            _queue: &wgpu::Queue,
+            drawn: &(dyn std::any::Any + Send + Sync),
+        ) {
+            let pose = *drawn.downcast_ref::<usize>().unwrap();
+            assert_ne!(pose, 0, "the scenery cannot show nothing");
+            self.pose = Some(pose);
+        }
+
+        fn prepare(&self, _queue: &wgpu::Queue, _eye: usize, _scene_to_clip: Mat4) {}
+
+        fn draw(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {
+            self.log.drawn.lock().unwrap().push(self.pose);
+        }
+
+        fn draw_translucent(&self, _pass: &mut wgpu::RenderPass<'_>, _eye: usize) {
+            self.log
+                .translucent
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn set_reveal(&mut self, _reveal: Option<(Vec3, f32)>) {
+            self.log
+                .revealed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+            self.log
+                .resized
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_renderer_makes_the_scenery_of_the_avatar_shown_for_each_space_and_draws_only_it() {
+        use crate::graphics::Renderer;
+        use std::sync::atomic::Ordering;
+        use tomori_scene::avatar::Shown;
+        let river = Log::default();
+        let fox = test::Counted::default();
+        let mut sceneries = Sceneries::empty();
+        {
+            let river = river.clone();
+            sceneries.set_avatar("river", still, move |_| river.make());
+        }
+        {
+            let fox = fox.clone();
+            sceneries.set_avatar("fox", still, move |_| fox.create());
+        }
+        let heron = Log::default();
+        {
+            let heron = heron.clone();
+            sceneries.set_avatar("heron", still, move |_| heron.make());
+        }
+        sceneries.set_avatar("owl", still, |_| -> Box<dyn Scenery> {
+            panic!("the owl's scenery cannot be made")
+        });
+        crate::test_gpu::with(|crate::test_gpu::Gpu { device, queue, .. }| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let mut renderer =
+                Renderer::with_sceneries(&device, &queue, format, 8, 8, 1, &sceneries);
+            // Nothing is made until it shows.
+            assert_eq!(river.made.load(Ordering::Relaxed), 0);
+            assert_eq!(fox.created(), 0);
+            let view = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("avatar eye"),
+                    size: wgpu::Extent3d {
+                        width: 8,
+                        height: 8,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            let show = |renderer: &mut Renderer, shown: Option<Shown<'_>>| {
+                renderer.set_avatar(&device, &queue, shown.as_ref());
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[Mat4::IDENTITY],
+                    Mat4::IDENTITY,
+                    &[],
+                );
+            };
+            let shown = |avatar, space, drawn: Option<usize>| {
+                Some(Shown {
+                    avatar,
+                    space,
+                    drawn: drawn.map(|drawn| Arc::new(drawn) as tomori_scene::client_side::Drawn),
+                })
+            };
+            // While the swarm shows, no avatar's scenery is drawn.
+            show(&mut renderer, None);
+            assert!(river.drawn.lock().unwrap().is_empty());
+            // The avatar shown is made, given what it shows, and drawn, before the scene and translucently after it;
+            // showing nothing new, it is drawn as it was, without being made again.
+            show(&mut renderer, shown("river", "space-1", Some(7)));
+            show(&mut renderer, shown("river", "space-1", None));
+            assert_eq!(river.made.load(Ordering::Relaxed), 1);
+            assert_eq!(*river.drawn.lock().unwrap(), [Some(7), Some(7)]);
+            assert_eq!(river.translucent.load(Ordering::Relaxed), 2);
+            // Made anew for another space, it draws nothing of the last one's.
+            show(&mut renderer, shown("river", "space-2", None));
+            assert_eq!(river.made.load(Ordering::Relaxed), 2);
+            assert_eq!(river.drawn.lock().unwrap().last(), Some(&None));
+            // Another avatar, which is made and drawn in its place.
+            show(&mut renderer, shown("fox", "space-2", None));
+            assert_eq!((fox.created(), fox.drawn()), (1, 1));
+            assert_eq!(river.drawn.lock().unwrap().len(), 3);
+            // One this renderer has no scenery for draws nothing, and so does one whose scenery panics as it is made,
+            // which is never made again.
+            show(&mut renderer, shown("badger", "space-2", Some(1)));
+            show(&mut renderer, shown("owl", "space-2", Some(1)));
+            show(&mut renderer, shown("owl", "space-3", Some(1)));
+            assert_eq!(fox.drawn(), 1);
+            assert_eq!(river.drawn.lock().unwrap().len(), 3);
+            // A changing environment never cuts it off.
+            show(&mut renderer, shown("river", "space-2", Some(3)));
+            renderer.set_scenery(crate::arrival_motion::Scenery {
+                environment: Environment::MINIMAL,
+                reveal: Some(crate::arrival_motion::Sphere {
+                    centre: Vec3::ZERO,
+                    radius: 1.0,
+                }),
+            });
+            assert_eq!(river.revealed.load(Ordering::Relaxed), 0);
+            // Though it would count them.
+            river.make().set_reveal(None);
+            assert_eq!(river.revealed.load(Ordering::Relaxed), 1);
+            // One whose scenery panics as it is given what its avatar shows is dropped, and never made again.
+            let made = river.made.load(Ordering::Relaxed);
+            show(&mut renderer, shown("river", "space-2", Some(0)));
+            show(&mut renderer, shown("river", "space-4", Some(5)));
+            assert_eq!(river.made.load(Ordering::Relaxed), made);
+            assert_eq!(river.drawn.lock().unwrap().last(), Some(&Some(3)));
+            // The eyes' targets resizing resizes the one shown.
+            show(&mut renderer, shown("heron", "space-5", None));
+            renderer.resize(&device, 16, 16);
+            assert_eq!(heron.resized.load(Ordering::Relaxed), 1);
+        });
     }
 
     #[test]

@@ -2040,6 +2040,8 @@ impl SpaceModel {
             anchors: tomori_protocol::Anchors::default(),
             summoned: None,
             summons: false,
+            // Set by the hub, which knows the backends.
+            avatar: None,
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]

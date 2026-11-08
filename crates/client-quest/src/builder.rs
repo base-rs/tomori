@@ -107,6 +107,20 @@ impl Builder {
         self
     }
 
+    /// Show the agent as the avatar `id` in a space whose backend names it, rather than as the swarm, with what `avatar`
+    /// makes for each such space and the scenery `scenery` makes, which draws it, in place of any registered under the
+    /// same identifier. A build without it shows the swarm and names the avatar it lacks. Tomori's own build registers
+    /// none. See `design/avatars.md`.
+    pub fn avatar(
+        mut self,
+        id: &'static str,
+        avatar: impl Fn(&str) -> Box<dyn tomori_scene::avatar::Avatar> + Send + Sync + 'static,
+        scenery: impl Fn(&Target) -> Box<dyn Scenery> + Send + Sync + 'static,
+    ) -> Self {
+        self.sceneries.set_avatar(id, avatar, scenery);
+        self
+    }
+
     /// The sceneries registered so far, to register more.
     pub fn sceneries(&mut self) -> &mut Sceneries {
         &mut self.sceneries
@@ -132,6 +146,8 @@ impl Builder {
         conversation.set_locomotion(self.sceneries.locomotion());
         conversation.set_client_sides(self.sceneries.client_sides());
         conversation.set_worker_placements(self.sceneries.worker_placements());
+        conversation.set_avatars(self.sceneries.avatars());
+        conversation.set_avatar_failures(self.sceneries.avatar_failures());
         (conversation, connection)
     }
 
@@ -347,6 +363,24 @@ mod tests {
                 .1
                 .place(origin, &tomori_scene::anchors::Placing::new("ses_1", 0)),
             origin.position
+        );
+    }
+
+    #[test]
+    fn a_build_registers_avatars_and_its_participant_shows_them() {
+        assert!(Builder::default().sceneries().avatars().is_empty());
+        let builder = Builder::empty().avatar(
+            "river",
+            |_| Box::new(tomori_scene::avatar::SwarmAvatar::default()),
+            blank,
+        );
+        let (conversation, _connection) = builder.participant(crate::Overrides::default());
+        let avatars = conversation.avatars();
+        assert_eq!(avatars.len(), 1);
+        assert_eq!(avatars[0].0, "river");
+        assert_eq!(
+            (avatars[0].1)("space-1").bounds().radius,
+            tomori_scene::avatar::SWARM_RADIUS
         );
     }
 

@@ -320,6 +320,9 @@ pub struct SpaceInfo {
     pub title: String,
     /// The backend and the directory's last part, such as "opencode in tomori".
     pub running: String,
+    /// The avatar the space's backend names that this build lacks, so that the swarm shows instead, on a row of its
+    /// own; `None` otherwise. See `design/avatars.md`.
+    pub missing_avatar: Option<String>,
     /// What the agent is doing, in a word.
     pub activity: String,
     /// The agent's modes, in order: id, name, description, and whether it is the current one.
@@ -557,6 +560,14 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     MenuKind::Text,
                     row(&[Part::Cut(&space.running)]),
                 );
+                // The avatar this build lacks, on a row of its own, its words kept and only its identifier cut.
+                if let Some(avatar) = &space.missing_avatar {
+                    text(
+                        &mut items,
+                        MenuKind::Text,
+                        row(&[Part::Kept("Unknown avatar: "), Part::Cut(avatar)]),
+                    );
+                }
                 // Who named it, if not its session, and, for an owner, renaming it aloud, since typing on the headset is
                 // not practical yet, or letting it follow its session again. See `design/hand-menu.md`.
                 if let Some(by) = &space.renamed_by {
@@ -1795,6 +1806,7 @@ mod tests {
             space: Some(SpaceInfo {
                 title: "Fix the parser in the lexer before the release goes out".into(),
                 running: "opencode in tomori".into(),
+                missing_avatar: None,
                 activity: "running".into(),
                 modes: vec![
                     (
@@ -1836,6 +1848,37 @@ mod tests {
             ],
             pill: true,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_space_section_names_the_avatar_this_build_lacks_on_a_row_of_its_own_within_the_width() {
+        let mut model = in_space(ConnectionRole::Owner);
+        // None, no row.
+        assert!(
+            !rows(Some(Section::Space), &model)
+                .iter()
+                .any(|row| row.contains("avatar"))
+        );
+        let space = model.space.as_mut().unwrap();
+        space.running = format!("opencode in {}", "a-very-long-folder-name".repeat(3));
+        space.missing_avatar = Some("river".into());
+        let shown = rows(Some(Section::Space), &model);
+        // Beneath what the space runs, which is cut to the width as ever, it is named in full.
+        let running = shown
+            .iter()
+            .position(|row| row.starts_with("opencode in"))
+            .unwrap();
+        assert_eq!(crate::ui_text::width(&shown[running]), WIDTH);
+        assert_eq!(shown[running + 1], "Unknown avatar: river");
+        // An identifier as long as any is cut, its words kept, within the width.
+        for long in ["r".repeat(tomori_protocol::AVATAR_BYTES), "川".repeat(42)] {
+            model.space.as_mut().unwrap().missing_avatar = Some(long.clone());
+            let shown = rows(Some(Section::Space), &model);
+            let row = &shown[running + 1];
+            assert!(row.starts_with("Unknown avatar: "), "{row}");
+            assert!(row.ends_with('…'), "{row}");
+            assert!(crate::ui_text::width(row) <= WIDTH, "{row}");
         }
     }
 

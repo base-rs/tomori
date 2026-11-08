@@ -507,6 +507,16 @@ pub trait Backend: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
+    /// The avatar that represents this backend's agent in a space, by the identifier a client's build registers it
+    /// under, such as `river`; `None`, the default, for the swarm. The server sends it to clients, which show the swarm
+    /// for an avatar they lack; an identifier that is empty, longer than 128 bytes, or holds a control character, a
+    /// bidirectional control or an invisible formatting character is sent as none. The server reads it each time it
+    /// sends a space's state and each `Welcome`, so a change reaches clients with the next of those, not at once. See
+    /// `design/avatars.md`.
+    fn avatar(&self) -> Option<&str> {
+        None
+    }
+
     /// Existing sessions that can be attached, in `directory` or beneath it, most recently active first. Empty when
     /// attaching is unsupported.
     fn sessions(&self, directory: &str)

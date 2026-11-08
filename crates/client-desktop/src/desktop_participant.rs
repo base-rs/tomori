@@ -97,6 +97,8 @@ impl Participant {
         conversation.set_locomotion(sceneries.locomotion());
         conversation.set_client_sides(sceneries.client_sides());
         conversation.set_worker_placements(sceneries.worker_placements());
+        conversation.set_avatars(sceneries.avatars());
+        conversation.set_avatar_failures(sceneries.avatar_failures());
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,

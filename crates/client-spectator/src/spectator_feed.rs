@@ -30,6 +30,7 @@ use std::{
 };
 use tomori_protocol::{Hand, ServerMessage};
 use tomori_render::scenery::Sceneries;
+use tomori_scene::avatar::Coordinator;
 
 /// A participant's latest presence report, as relayed by the server.
 #[derive(Clone)]
@@ -41,20 +42,35 @@ struct ParticipantPresence {
 }
 
 /// Animate the coordinator from the space's observed activity and the agent
-/// speech the spectator itself plays, as the headset does. Presence does not
-/// currently carry the headset's swarm or attractor, so this is a local
-/// simulation rather than an exact copy of its particles.
+/// speech the spectator itself plays, as the headset does: the swarm, or the
+/// avatar the space's backend names where the spectator's sceneries register
+/// it. Presence does not currently carry the headset's swarm or attractor, so
+/// this is a local simulation rather than an exact copy of its particles.
 struct SwarmAnimation {
     signals: interaction::Signals,
-    swarm: Swarm,
+    coordinator: Coordinator,
+    /// Where the agent stands, as the space's environment puts it.
+    anchor: tomori_scene::anchors::Anchor,
+    /// The followed participant's head, which an avatar may face.
+    head: Option<Vec3>,
+    /// Whether the agent appears at its anchor this frame, rather than gliding there.
+    appear: bool,
 }
 
 impl SwarmAnimation {
     fn new() -> Self {
         Self {
             signals: interaction::Signals::default(),
-            swarm: Swarm::default(),
+            coordinator: Coordinator::default(),
+            anchor: tomori_scene::anchors::Anchor::AGENT,
+            head: None,
+            appear: false,
         }
+    }
+
+    /// The swarm to draw: the coordinator's, or none while another avatar shows.
+    fn swarm(&self) -> &Swarm {
+        self.coordinator.swarm()
     }
 
     fn update(
@@ -71,8 +87,12 @@ impl SwarmAnimation {
             },
             dt,
         );
-        self.swarm.set_visual(visual, dt);
-        self.swarm.step(dt, None);
+        self.coordinator.update(
+            &tomori_scene::avatar::Input::new(visual, self.anchor, dt)
+                .appearing(std::mem::take(&mut self.appear))
+                .speaking(speech.playing)
+                .head(self.head),
+        );
     }
 }
 
@@ -215,6 +235,9 @@ impl Feed {
         self.conversation.set_over_grid(sceneries.over_grid());
         self.conversation
             .set_worker_placements(sceneries.worker_placements());
+        self.conversation.set_avatars(sceneries.avatars());
+        self.conversation
+            .set_avatar_failures(sceneries.avatar_failures());
         self.environment = Environment::initial(&sceneries.environments());
         self.sceneries = sceneries;
         self
@@ -222,7 +245,13 @@ impl Feed {
 
     /// Where its swarm stands and faces, as the joined space's environment puts it, for the renderer's rings about it.
     pub fn swarm_anchor(&self) -> tomori_scene::anchors::Anchor {
-        self.swarm.swarm.anchor()
+        self.swarm.swarm().anchor()
+    }
+
+    /// The registered avatar shown in place of the swarm, if any, and what it shows, for its scenery to draw. See
+    /// `design/avatars.md`.
+    pub fn avatar(&self) -> Option<tomori_scene::avatar::Shown<'_>> {
+        self.swarm.coordinator.shown()
     }
 
     /// The carriage from the joined space's environment's own coordinates, in which its scenery draws, into the
@@ -273,7 +302,7 @@ impl Feed {
         crate::spatial_audio::listen(
             &mut self.connection,
             Some(listener),
-            crate::spatial_audio::centre(&frame.agents),
+            self.swarm.coordinator.voice(),
             &self.conversation,
         );
 
@@ -366,18 +395,19 @@ impl Feed {
 
         // The swarm and the workers stand where the space's environment puts them, by the same rule as the headset. See `design/spectator.md`.
         let arrangement = self.conversation.arrangement();
-        if arrangement.home != self.agent_home {
-            self.agent_home = arrangement.home;
-            self.swarm.swarm.appear_at(arrangement.agent);
-        } else {
-            self.swarm.swarm.set_anchor(arrangement.agent);
-        }
+        // It appears at a new home, as a space opens or changes environment, as the headset's does.
+        self.swarm.appear = arrangement.home != self.agent_home;
+        self.agent_home = arrangement.home;
+        self.swarm.anchor = arrangement.agent;
+        self.swarm.head = head.map(|head| Vec3::from_array(head.position));
+        // The avatar the space's backend names, by the same rule as the headset. See `design/avatars.md`.
+        self.swarm.coordinator.choose(self.conversation.avatar());
         // Use the same activity-driven swarm simulation as the headset.
         self.swarm
             .update(self.conversation.activity(), self.conversation.speech(), dt);
         let agents: Vec<[f32; 3]> = self
             .swarm
-            .swarm
+            .swarm()
             .agents
             .iter()
             .map(|agent| agent.position.to_array())
@@ -386,7 +416,8 @@ impl Feed {
         let environment = self.environment();
         // Worker transitions depart from the animated coordinator, as on XR.
         let (root, workspace) = self.workers.update(self.conversation.joined_space());
-        self.scene.set_coordinator_samples(&agents);
+        self.scene
+            .set_coordinator_samples(self.swarm.coordinator.departures());
         self.scene
             .arrange(arrangement.workers, arrangement.placement);
         self.scene.update(root, workspace, dt);
@@ -413,7 +444,7 @@ impl Feed {
             attracting: false,
             caption,
             recording_ms: None,
-            interaction: self.swarm.swarm.visual,
+            interaction: self.swarm.coordinator.visual(),
             worker_cubes: self.scene.cubes().to_vec(),
             worker_stations: self.scene.stations().to_vec(),
             workspace: workspace.clone(),
@@ -814,6 +845,148 @@ mod tests {
     }
 
     #[test]
+    fn the_spectator_shows_the_avatar_the_space_s_backend_names_as_the_headset_does() {
+        use tomori_scene::avatar::{Avatar, Input};
+        /// A figure at its anchor, heard from above it, sending workers from beside it.
+        struct Figure(tomori_scene::anchors::Anchor);
+        impl Avatar for Figure {
+            fn update(&mut self, input: &Input) {
+                self.0 = input.anchor;
+            }
+            fn voices(&self, voices: &mut Vec<[f32; 3]>) {
+                voices.push((self.0.position + Vec3::Y).to_array());
+            }
+            fn departures(&self, departures: &mut Vec<[f32; 3]>) {
+                departures.push((self.0.position + Vec3::X).to_array());
+            }
+            fn bounds(&self) -> tomori_scene::arrival_motion::Sphere {
+                tomori_scene::arrival_motion::Sphere {
+                    centre: self.0.position,
+                    radius: 1.0,
+                }
+            }
+        }
+        let mut sceneries = Sceneries::empty();
+        sceneries.set_avatar(
+            "figure",
+            |_| Box::new(Figure(tomori_scene::anchors::Anchor::AGENT)),
+            tomori_render::scenery::test::blank,
+        );
+        let mut feed = Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        )
+        .with_sceneries(sceneries);
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Visitor,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        let state = |avatar: &str| {
+            Event::Message(ServerMessage::Space {
+                state: Box::new(SpaceState {
+                    id: "space".into(),
+                    environment: "minimal".into(),
+                    avatar: Some(avatar.into()),
+                    ..Default::default()
+                }),
+            })
+        };
+        feed.conversation.apply(state("figure"));
+        let frame = feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        // The figure shows in place of the swarm, which is not drawn.
+        assert_eq!(feed.avatar().unwrap().avatar, "figure");
+        assert!(frame.agents.is_empty());
+        // Its audience hears the agent from it.
+        assert_eq!(
+            feed.swarm.coordinator.voice(),
+            (CENTER + Vec3::Y).to_array()
+        );
+        // Workers fly from it and back to it.
+        assert_eq!(
+            feed.swarm.coordinator.departures(),
+            [(CENTER + Vec3::X).to_array()]
+        );
+        assert_eq!(feed.swarm.coordinator.bounds().radius, 1.0);
+        tomori_render::test_gpu::with(|gpu| {
+            let mut renderer = crate::graphics::Renderer::with_sceneries(
+                &gpu.device,
+                &gpu.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                64,
+                48,
+                1,
+                feed.sceneries(),
+            );
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("spectator avatar"),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 48,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let mut swarm = Swarm::default();
+            let mut view = crate::spectator_view::SpectatorView::new(feed);
+            let mut render = |swarm: &mut Swarm| {
+                view.render(crate::spectator_view::RenderInputs {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    renderer: &mut renderer,
+                    swarm,
+                    target: target.create_view(&Default::default()),
+                    aspect: 4.0 / 3.0,
+                })
+            };
+            // The view draws no swarm while the figure shows.
+            render(&mut swarm);
+            assert!(swarm.agents.is_empty());
+        });
+        // A space whose backend names an avatar the spectator lacks shows the swarm.
+        let mut plain = Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        );
+        plain
+            .conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        plain
+            .conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Visitor,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        plain.conversation.apply(state("figure"));
+        let frame = plain.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0);
+        assert!(plain.avatar().is_none());
+        assert_eq!(frame.agents.len(), crate::swarm::AGENT_COUNT);
+    }
+
+    #[test]
     fn hello_lists_the_environments_the_spectator_draws() {
         use tomori_client::connection::Session;
         let feed = feed(SpectatorOptions::default());
@@ -850,7 +1023,7 @@ mod tests {
     #[test]
     fn swarm_animates_with_space_activity() {
         let mut animation = SwarmAnimation::new();
-        let initial = animation.swarm.agents[0].position;
+        let initial = animation.swarm().agents[0].position;
         for _ in 0..120 {
             animation.update(
                 interaction::SessionActivity::Working,
@@ -858,9 +1031,9 @@ mod tests {
                 1.0 / 60.0,
             );
         }
-        assert_eq!(animation.swarm.visual.mode, interaction::Mode::Working);
-        assert!(animation.swarm.visual.working);
-        assert!(animation.swarm.agents[0].position.distance(initial) > 0.01);
+        assert_eq!(animation.swarm().visual.mode, interaction::Mode::Working);
+        assert!(animation.swarm().visual.working);
+        assert!(animation.swarm().agents[0].position.distance(initial) > 0.01);
 
         // The agent speaks while the speech the spectator plays does, though its session is idle.
         for _ in 0..60 {
@@ -874,8 +1047,8 @@ mod tests {
                 1.0 / 60.0,
             );
         }
-        assert_eq!(animation.swarm.visual.mode, interaction::Mode::Speaking);
-        assert!(animation.swarm.visual.level > 0.0);
+        assert_eq!(animation.swarm().visual.mode, interaction::Mode::Speaking);
+        assert!(animation.swarm().visual.level > 0.0);
 
         for _ in 0..120 {
             animation.update(
@@ -884,9 +1057,9 @@ mod tests {
                 1.0 / 60.0,
             );
         }
-        assert_eq!(animation.swarm.visual.mode, interaction::Mode::Ready);
-        assert!(!animation.swarm.visual.working);
-        assert!(animation.swarm.visual.time > 0.0);
+        assert_eq!(animation.swarm().visual.mode, interaction::Mode::Ready);
+        assert!(!animation.swarm().visual.working);
+        assert!(animation.swarm().visual.time > 0.0);
     }
 
     #[test]
@@ -920,8 +1093,8 @@ mod tests {
                 headset.step(dt, None);
             }
         }
-        assert_eq!(animation.swarm.visual, headset.visual);
-        for (spectator, headset) in animation.swarm.agents.iter().zip(&headset.agents) {
+        assert_eq!(animation.swarm().visual, headset.visual);
+        for (spectator, headset) in animation.swarm().agents.iter().zip(&headset.agents) {
             assert_eq!(spectator.position, headset.position);
         }
     }

@@ -97,6 +97,7 @@ pub const REQUEST_GRACE: Duration = Duration::from_millis(600);
 
 /// The most panel rows the problem line and the queue strip each take.
 const PROBLEM_ROWS: usize = 2;
+/// What names the avatar a space's backend names that this build lacks, on a row of its own, before its identifier.
 /// The existing sessions the session ring shows at once, so that their labels stay apart; "More sessions" shows the next
 /// ones. See `design/arrival.md`.
 pub const SESSION_PAGE: usize = 8;
@@ -346,6 +347,10 @@ pub struct Conversation {
     client_sides: Vec<(Environment, crate::client_side::Factory)>,
     /// The worker placements this build registers, by environment. See `design/environments.md`.
     worker_placements: Vec<(Environment, crate::anchors::Placement)>,
+    /// The avatars this build registers, by identifier. See `design/avatars.md`.
+    avatars: Vec<(String, crate::avatar::Factory)>,
+    /// The avatars whose scenery failed in this build's renderer. See `design/avatars.md`.
+    avatar_failures: crate::avatar::Failures,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
@@ -499,6 +504,8 @@ impl Conversation {
             locomotion: Vec::new(),
             client_sides: Vec::new(),
             worker_placements: Vec::new(),
+            avatars: Vec::new(),
+            avatar_failures: crate::avatar::Failures::default(),
             sessions: Vec::new(),
             session_page: 0,
             menu_backend: None,
@@ -1543,6 +1550,12 @@ impl Conversation {
                         .next()
                         .unwrap_or_default()
                 ),
+                // The avatar this build lacks, as the swarm is shown instead, on a row of its own: a diagnostic for
+                // owners alone, since everyone else sees the default swarm and can do nothing about it.
+                missing_avatar: self
+                    .missing_avatar(space)
+                    .filter(|_| self.role == ConnectionRole::Owner)
+                    .map(str::to_owned),
                 activity: activity_label(space.activity).into(),
                 modes: space
                     .modes
@@ -2184,6 +2197,60 @@ impl Conversation {
     #[cfg(any(test, feature = "testing"))]
     pub fn worker_placements(&self) -> &[(Environment, crate::anchors::Placement)] {
         &self.worker_placements
+    }
+
+    /// Show the agent as each avatar `avatars` names, by identifier, in a space whose backend names it, rather than as
+    /// the swarm. See `design/avatars.md`.
+    pub fn set_avatars(&mut self, avatars: Vec<(String, crate::avatar::Factory)>) {
+        self.avatars = avatars;
+    }
+
+    /// Show as the swarm each avatar whose scenery `failures` says panicked in this build's renderer, which shares them,
+    /// as `tomori-render`'s `Sceneries::avatar_failures` does. See `design/avatars.md`.
+    pub fn set_avatar_failures(&mut self, failures: crate::avatar::Failures) {
+        self.avatar_failures = failures;
+    }
+
+    /// The avatars this build registers, as [`Self::set_avatars`] gave them.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn avatars(&self) -> &[(String, crate::avatar::Factory)] {
+        &self.avatars
+    }
+
+    /// The avatar to show in the joined space, when its state names one this build registers; otherwise, as outside a
+    /// space, none, the swarm. See `design/avatars.md`.
+    pub fn avatar(&self) -> Option<crate::avatar::Choice<'_>> {
+        let (space, _) = self.joined_space()?;
+        let avatar = Self::named_avatar(space)?;
+        self.avatars
+            .iter()
+            .find(|(registered, _)| registered == avatar)
+            .map(|(_, factory)| crate::avatar::Choice {
+                space: &space.id,
+                avatar,
+                factory,
+                failures: &self.avatar_failures,
+            })
+    }
+
+    /// The avatar `space`'s state names, if it names one a client reads.
+    fn named_avatar(space: &SpaceState) -> Option<&str> {
+        space
+            .avatar
+            .as_deref()
+            .filter(|avatar| tomori_protocol::valid_avatar(avatar))
+    }
+
+    /// The avatar `space`'s state names that this build lacks, when it shows the swarm instead. See
+    /// `design/avatars.md`.
+    fn missing_avatar<'a>(&self, space: &'a SpaceState) -> Option<&'a str> {
+        let avatar = Self::named_avatar(space)?;
+        let lacks = avatar != crate::avatar::SWARM
+            && !self
+                .avatars
+                .iter()
+                .any(|(registered, _)| registered == avatar);
+        lacks.then_some(avatar)
     }
 
     /// Where the agent and the workers stand now: in a space, the agent where a participant summoned it, or else at
@@ -5266,10 +5333,12 @@ mod tests {
             BackendInfo {
                 name: "fake".into(),
                 attach: true,
+                avatar: None,
             },
             BackendInfo {
                 name: "plain".into(),
                 attach: false,
+                avatar: None,
             },
         ]
     }
@@ -7417,6 +7486,101 @@ mod tests {
         );
         assert!(!conversation.arrangement().summoned());
         assert!(!conversation.menu_model().agent_away);
+    }
+
+    #[test]
+    fn a_space_shows_the_avatar_its_backend_names_where_this_build_has_it_and_says_which_it_lacks()
+    {
+        use crate::avatar::{Avatar, Factory};
+        let factory: Factory = std::sync::Arc::new(|_: &str| -> Box<dyn Avatar> {
+            Box::new(crate::avatar::SwarmAvatar::default())
+        });
+        let missing =
+            |conversation: &Conversation| conversation.menu_model().space.unwrap().missing_avatar;
+        let river = |state: &mut SpaceState| {
+            state.avatar = Some("river".into());
+            state.speech = SpeechSetting::Brief;
+        };
+        // Outside a space, none: the swarm.
+        let mut lobby = in_lobby(Vec::new(), Vec::new());
+        lobby.set_avatars(vec![("river".into(), factory.clone())]);
+        assert!(lobby.avatar().is_none());
+        // A space whose backend names none shows the swarm, and says nothing of it.
+        let mut conversation = joined(|_| {});
+        assert!(conversation.avatar().is_none());
+        assert!(!conversation.text().contains("avatar"));
+        assert_eq!(missing(&conversation), None);
+        // One this build lacks: the swarm, named only in an owner's hand menu, on a row of its own, as a diagnostic, and
+        // never on the panel, whose status line says what it always says.
+        conversation.apply(space(river));
+        assert!(conversation.avatar().is_none());
+        let text = conversation.text();
+        assert!(text.contains("Mic off | Brief | 1 here\n"), "{text}");
+        assert!(!text.contains("avatar"), "{text}");
+        assert_fits(&mut conversation);
+        assert_eq!(missing(&conversation).as_deref(), Some("river"));
+        assert_eq!(
+            conversation.menu_model().space.unwrap().running,
+            "opencode in tomori"
+        );
+        // A collaborator or a visitor sees the default swarm, and is told nothing of it.
+        for role in [ConnectionRole::Collaborator, ConnectionRole::Visitor] {
+            let mut other = crate::test_support::conversation("Bo");
+            other.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+            other.apply(Event::State(ConnectionState::Connected {
+                source: 2,
+                server: "studio".into(),
+                role,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: sky(),
+                utterance_limit: None,
+                name: None,
+            }));
+            other.apply(space(river));
+            assert!(other.avatar().is_none());
+            assert_eq!(missing(&other), None, "{role:?}");
+            assert!(!other.text().contains("avatar"));
+        }
+        conversation.apply(space(river));
+        // Registered, it is chosen for the space, and the notice goes.
+        conversation.set_avatars(vec![("river".into(), factory.clone())]);
+        assert_eq!(conversation.avatars().len(), 1);
+        let choice = conversation.avatar().expect("this build has it");
+        assert_eq!((choice.space, choice.avatar), (SPACE, "river"));
+        assert!(std::sync::Arc::ptr_eq(choice.factory, &factory));
+        assert!(!choice.failures.contains("river"));
+        // The renderer's failures, shared with it, go with the choice, for the coordinator to fall back on.
+        let failures = crate::avatar::Failures::default();
+        conversation.set_avatar_failures(failures.clone());
+        failures.report("river");
+        let choice = conversation.avatar().expect("this build has it");
+        assert!(choice.failures.contains("river"));
+        assert_eq!(
+            (choice.factory)(SPACE).bounds().radius,
+            crate::avatar::SWARM_RADIUS
+        );
+        assert!(!conversation.text().contains("avatar"));
+        assert_eq!(missing(&conversation), None);
+        // The swarm, named, is built in: shown without a notice, unless the build registers its own.
+        conversation.apply(space(|state| state.avatar = Some("swarm".into())));
+        assert!(conversation.avatar().is_none());
+        assert!(!conversation.text().contains("avatar"));
+        conversation.set_avatars(vec![("swarm".into(), factory.clone())]);
+        assert_eq!(conversation.avatar().unwrap().avatar, "swarm");
+        // An identifier a client does not read is none.
+        for unreadable in ["river\n", "riv\u{202E}er", "river\u{200B}"] {
+            conversation.apply(space(|state| state.avatar = Some(unreadable.into())));
+            assert!(conversation.avatar().is_none());
+            assert!(!conversation.text().contains("avatar"));
+        }
+        // Leaving, none.
+        conversation.set_avatars(vec![("river".into(), factory)]);
+        conversation.apply(space(river));
+        assert!(conversation.avatar().is_some());
+        hold_b(&mut conversation);
+        assert!(conversation.avatar().is_none());
     }
 
     #[test]
