@@ -1,0 +1,193 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! Code blocks: the fenced code blocks of any language but `panel` in the agent's replies, which the server projects as
+//! code panels, titled with their info string and highlighted here, on the server, never on a headset. Everything in
+//! them is untrusted, so each is bounded and cleaned: only a block's first [`CODE_LINES`] lines are kept, each cut to
+//! [`CODE_LINE_CHARS`] characters, with at most [`CODE_SPANS`] spans. See `design/projection.md`.
+//!
+//! A block of a single line, such as a command, is left in the transcript and not projected: it reads as well there,
+//! and a panel for each would crowd the walls and replace the code panels of the reply before.
+use tomori_protocol::{CODE_LINE_CHARS, CODE_LINES, CODE_SPANS, Code, Span};
+
+use super::Content;
+use super::blocks::{META_KEY_CHARS, TITLE_CHARS};
+
+/// The most code panels projected from one reply; later blocks stay only in the transcript.
+pub const CODE_PER_REPLY: usize = 4;
+
+/// The longest line highlighted, in characters: more than is shown, so that a line cut where it is shown is still
+/// highlighted as it continues, as a string that closes after the cut.
+const HIGHLIGHTED_CHARS: usize = 256;
+
+/// The longest info string kept, in characters, more than a title shows.
+const INFO_CHARS: usize = 2 * TITLE_CHARS;
+
+/// How far apart tab stops are, in columns.
+const TAB: usize = 4;
+
+/// The title of a code panel whose block names no language.
+const UNTITLED: &str = "code";
+
+/// A code block's info string and its first lines, gathered as the block is read, bounded however long it is.
+#[derive(Debug)]
+pub struct Lines {
+    info: String,
+    /// Its first [`CODE_LINES`] lines, from the first that is not blank, each cut to [`HIGHLIGHTED_CHARS`].
+    kept: Vec<String>,
+    /// How many lines it has, from the first that is not blank, and how many of the last are blank.
+    total: u32,
+    blank: u32,
+}
+
+impl Lines {
+    /// A block whose info string is `info`.
+    pub fn new(info: &str) -> Self {
+        Self {
+            info: info.chars().take(INFO_CHARS).collect(),
+            kept: Vec::new(),
+            total: 0,
+            blank: 0,
+        }
+    }
+
+    /// The block's next line, `line`.
+    pub fn push(&mut self, line: &str) {
+        let blank = line.trim().is_empty();
+        if self.total == 0 && blank {
+            return;
+        }
+        self.total = self.total.saturating_add(1);
+        self.blank = if blank {
+            self.blank.saturating_add(1)
+        } else {
+            0
+        };
+        if self.kept.len() < CODE_LINES {
+            self.kept
+                .push(line.chars().take(HIGHLIGHTED_CHARS).collect());
+        }
+    }
+
+    /// The code panel the block makes, or `None` for a block of one line or none, without its blank lines at either
+    /// end.
+    pub fn content(self) -> Option<Content> {
+        let total = self.total - self.blank;
+        if total <= 1 {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .kept
+            .iter()
+            .take(total as usize)
+            .map(|line| clean(line))
+            .collect();
+        let title = tomori_protocol::text::one_line(&self.info, TITLE_CHARS)
+            .trim()
+            .to_owned();
+        let language = self
+            .info
+            .split_whitespace()
+            .next()
+            .map(|language| {
+                tomori_protocol::text::one_line(language, META_KEY_CHARS).to_lowercase()
+            })
+            .unwrap_or_default();
+        let found = spans(&language, &lines.join("\n"));
+        let (body, spans) = shown(&lines, found);
+        Some(Content {
+            title: if title.is_empty() {
+                UNTITLED.to_owned()
+            } else {
+                title
+            },
+            body,
+            meta: Vec::new(),
+            code: Some(Code::new(language, total).with_spans(spans)),
+        })
+    }
+}
+
+/// `line` as a code panel shows it: tabs expanded to the next stop, format characters removed, since they reorder or
+/// hide text, and control characters and every other kind of space a plain space, without the spaces it ends with.
+fn clean(line: &str) -> String {
+    let mut cleaned = String::with_capacity(line.len());
+    let mut column = 0;
+    for c in line.chars() {
+        match c {
+            '\t' => {
+                let stop = (column / TAB + 1) * TAB;
+                cleaned.extend(std::iter::repeat_n(' ', stop - column));
+                column = stop;
+            }
+            c if tomori_protocol::text::is_format(c) => {}
+            c => {
+                cleaned.push(if c.is_control() || c.is_whitespace() {
+                    ' '
+                } else {
+                    c
+                });
+                column += 1;
+            }
+        }
+    }
+    cleaned.truncate(cleaned.trim_end().len());
+    cleaned
+}
+
+/// How long highlighting a block may take, once its grammar is ready: the highlighters' own budget, or, in the server's
+/// tests, longer, so that what they check does not depend on how busy the machine running them is.
+#[cfg(feature = "highlight")]
+const BUDGET: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(10)
+} else {
+    tomori_highlight::BUDGET
+};
+
+/// The spans of `text`, code in `language`, by the server's highlighters.
+#[cfg(feature = "highlight")]
+fn spans(language: &str, text: &str) -> Vec<Span> {
+    tomori_highlight::highlight_within(language, text, BUDGET).spans
+}
+
+/// Without the server's highlighters, code is plain.
+#[cfg(not(feature = "highlight"))]
+fn spans(_language: &str, _text: &str) -> Vec<Span> {
+    Vec::new()
+}
+
+/// `lines` as a code panel shows them, each cut to [`CODE_LINE_CHARS`] with "…", and `found`, their spans over the
+/// lines joined, as spans over what is shown, at most [`CODE_SPANS`]: a span's part past a cut is dropped.
+fn shown(lines: &[String], found: Vec<Span>) -> (String, Vec<Span>) {
+    let mut body = String::new();
+    let mut spans = Vec::new();
+    let mut found = found.into_iter().peekable();
+    // Where the line starts in the lines joined, and in what is shown.
+    let (mut from, mut at) = (0_u32, 0_u32);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            body.push('\n');
+        }
+        let length = line.chars().count() as u32;
+        let kept = length.min(CODE_LINE_CHARS as u32);
+        body.extend(line.chars().take(kept as usize));
+        let cut = length > kept;
+        if cut {
+            body.push('…');
+        }
+        // The highlighters' spans never cross a line break, so each is inside one line.
+        while let Some(span) = found.next_if(|span| span.start < from + length) {
+            let start = span.start.saturating_sub(from);
+            let end = (start + span.length).min(kept);
+            if start < end && spans.len() < CODE_SPANS {
+                spans.push(Span::new(at + start, end - start, span.kind));
+            }
+        }
+        from += length + 1;
+        at += kept + u32::from(cut) + 1;
+    }
+    (body, spans)
+}
+
+#[cfg(test)]
+mod tests;

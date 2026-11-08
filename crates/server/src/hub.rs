@@ -4115,16 +4115,18 @@ impl Hub {
         let resynchronized = matches!(event, Event::Resynchronized { .. });
         let was_open = !record.model.is_closed();
         record.model.apply(event);
-        // The panels of a reply it completed go onto the wall nearest whoever asked, or else the Tomori wall.
-        let panels = record.model.take_projected();
-        let projected = !panels.is_empty();
+        // The panels of a reply it completed go onto the wall nearest whoever asked, or else the Tomori wall, its code
+        // panels replacing those of the replies before.
+        let replies = record.model.take_projected();
+        let projected = !replies.is_empty();
         if projected {
             let environments = self.environments();
             let walls = environments.walls(&record.model.environment);
             let now = crate::cards::unix_now();
-            for (content, origin) in panels {
-                let id = record.stage.project(&walls, content, origin, now);
-                log::info!("Space {space} projected {id}.");
+            for (contents, origin) in replies {
+                for id in record.stage.project_reply(&walls, contents, origin, now) {
+                    log::info!("Space {space} projected {id}.");
+                }
             }
         }
         if resynchronized {

@@ -28,7 +28,10 @@ pub use message::{
     Resource, ServerMessage, TranscriptPart, TranscriptStage,
 };
 pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
-pub use projection::{Meta, Panel, Place, Projection, TOMORI_WALL, WALL_SLOTS, Wall, WallKind};
+pub use projection::{
+    CODE_LINE_CHARS, CODE_LINES, CODE_SPANS, Code, Meta, Panel, Place, Projection, Span,
+    TOMORI_WALL, TokenKind, WALL_SLOTS, Wall, WallKind, valid_spans,
+};
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,
     Engagement, EnvironmentInfo, EnvironmentVersion, KnockRequest, KnockState, Message, Mode,

@@ -3236,6 +3236,56 @@ fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
     assert!(old.projections().is_empty());
 }
 
+const CODE_REPLY: &str = "This adds them.\n\n```rust\nfn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n```\n\nRun `cargo test`:\n\n```sh\ncargo test\n```\n";
+
+#[test]
+fn a_reply_s_code_blocks_are_code_panels_that_the_next_reply_s_replace_unless_pinned() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    reply(&hub, &space, "m0", CODE_REPLY);
+    // The block of three lines is a code panel, highlighted; the command of one line stays in the transcript only.
+    let projection = ada.projection();
+    assert_eq!(projection.panels.len(), 1);
+    let panel = &projection.panels[0];
+    assert_eq!(panel.title, "rust");
+    assert_eq!(panel.body, "fn add(a: u32, b: u32) -> u32 {\n    a + b\n}");
+    let code = panel.code.as_ref().expect("a code panel");
+    assert_eq!((code.language.as_str(), code.lines), ("rust", 3));
+    assert!(tomori_protocol::valid_spans(&panel.body, &code.spans));
+    assert!(code.spans.contains(&tomori_protocol::Span::new(
+        0,
+        2,
+        tomori_protocol::TokenKind::Keyword
+    )));
+    assert!(!panel.pinned);
+    // The reply stays in the transcript as the agent wrote it.
+    let state = hub.render(ada.connection, Outgoing::Space);
+    assert!(matches!(
+        state,
+        Some(ServerMessage::Space { state }) if state.messages.iter().any(|message| message.text.trim_end() == CODE_REPLY.trim_end())
+    ));
+    // The next reply's code panel replaces it.
+    let first = panel.id.clone();
+    reply(&hub, &space, "m1", CODE_REPLY);
+    let projection = ada.projection();
+    assert_eq!(projection.panels.len(), 1);
+    assert_ne!(projection.panels[0].id, first);
+    // Unless a participant has put it back on its wall, pinning it there, or pulled it off.
+    let pinned = projection.panels[0].id.clone();
+    ada.send(ClientMessage::PlacePanel {
+        panel: pinned.clone(),
+        wall: Some(tomori_protocol::TOMORI_WALL.into()),
+        pose: None,
+    });
+    assert!(ada.projection().panel(&pinned).unwrap().pinned);
+    reply(&hub, &space, "m2", CODE_REPLY);
+    let projection = ada.projection();
+    assert_eq!(projection.panels.len(), 2);
+    assert!(projection.panel(&pinned).is_some());
+}
+
 #[test]
 fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() {
     let (hub, _jobs) = hub_waiting();
