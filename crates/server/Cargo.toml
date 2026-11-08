@@ -47,6 +47,10 @@ name = "instructions"
 required-features = ["fake"]
 
 [[test]]
+name = "mcp"
+required-features = ["fake"]
+
+[[test]]
 name = "workspaces"
 required-features = ["fake"]
 

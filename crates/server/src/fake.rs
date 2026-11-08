@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use base_scheduler::Cancellation;
 use tomori_backend::{
     AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Permission,
-    Prompt, Question, Result, Role, Session, SessionSpec, SessionSummary, Snapshot,
+    Prompt, Question, Result, Role, Session, SessionSpec, SessionSummary, Snapshot, ToolServer,
 };
 
 /// The backend name used in `CreateSpace` requests.
@@ -62,6 +62,12 @@ struct FakeShared {
     instruction_failure: Arc<AtomicBool>,
     /// The sessions whose instruction entries were forgotten, with the keys, in order.
     forgotten: Mutex<Vec<(String, Vec<String>)>>,
+    /// The backend takes no tools; see [`FakeBackend::take_no_tools`].
+    no_tools: AtomicBool,
+    /// Registering and unregistering tools fails; see [`FakeBackend::fail_tools`].
+    tool_failure: AtomicBool,
+    /// Each registration of tools, with its directory and server, and each removal, with its directory and `None`.
+    tools: Mutex<Vec<(String, Option<ToolServer>)>>,
 }
 
 impl FakeBackend {
@@ -102,6 +108,43 @@ impl FakeBackend {
         self.shared
             .instruction_failure
             .store(fail, Ordering::SeqCst);
+    }
+
+    /// Take no tools, as a backend without [`Capabilities::tools`].
+    pub fn take_no_tools(&self) {
+        self.shared.no_tools.store(true, Ordering::SeqCst);
+    }
+
+    /// Make registering and unregistering tools fail, as an agent whose endpoint for them changed would.
+    pub fn fail_tools(&self, fail: bool) {
+        self.shared.tool_failure.store(fail, Ordering::SeqCst);
+    }
+
+    /// Each registration of tools the server asked for, with its directory and server, and each removal, with its
+    /// directory and `None`, in order, including those that failed.
+    pub fn tools(&self) -> Vec<(String, Option<ToolServer>)> {
+        self.shared.tools.lock().unwrap().clone()
+    }
+
+    /// Record a registration or removal of tools, failing it if told to, as an agent might, repeating what it was given.
+    fn record_tools(&self, directory: &str, server: Option<ToolServer>) -> Result<()> {
+        let given: Vec<String> = server
+            .iter()
+            .flat_map(|server| &server.headers)
+            .map(|(name, value)| format!(", refusing {name}: {value}"))
+            .collect();
+        self.shared
+            .tools
+            .lock()
+            .unwrap()
+            .push((directory.to_owned(), server));
+        if self.shared.tool_failure.load(Ordering::SeqCst) {
+            return Err(Error::new(
+                ErrorKind::Unavailable,
+                format!("the tools went away{}", given.concat()),
+            ));
+        }
+        Ok(())
     }
 
     /// The sessions whose instruction entries the server forgot, with the keys, in order.
@@ -211,7 +254,16 @@ impl Backend for FakeBackend {
             questions: true,
             workers: true,
             instructions: !self.shared.no_instructions.load(Ordering::SeqCst),
+            tools: !self.shared.no_tools.load(Ordering::SeqCst),
         }
+    }
+
+    async fn register_tools(&self, directory: &str, server: &ToolServer) -> Result<()> {
+        self.record_tools(directory, Some(server.clone()))
+    }
+
+    async fn unregister_tools(&self, directory: &str, _name: &str) -> Result<()> {
+        self.record_tools(directory, None)
     }
 
     async fn forget_instructions(&self, id: &str, keys: Vec<String>) -> Result<()> {

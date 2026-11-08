@@ -30,6 +30,8 @@ use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
+pub(crate) mod tools;
+
 pub type ConnectionId = u64;
 
 /// A registered connection: its identifier, its outbox, the flag it sets when data arrives, and where it reports its writes. See [`Hub::connect`].
@@ -286,6 +288,8 @@ pub struct Hub {
     pairing_prompt: RwLock<Option<PairingPrompt>>,
     pairing_timeout: RwLock<Duration>,
     knock_timeout: RwLock<Duration>,
+    /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
+    tools: tools::Tools,
     this: Weak<Hub>,
 }
 
@@ -1449,6 +1453,7 @@ impl Hub {
             pairing_prompt: RwLock::new(None),
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
+            tools: tools::Tools::default(),
             this: this.clone(),
         });
         let this = Arc::downgrade(&hub);
@@ -1568,6 +1573,31 @@ impl Hub {
                 record.channel = None;
             }
         }
+    }
+
+    /// Move the space `space` to `environment`, one the server offers, for everyone in it, as an owner or its agent asked: whether it changed, or why it cannot, as for a closed space. Keeping the change is the caller's. See `design/environments.md` and `design/mcp.md`.
+    fn move_space(
+        &self,
+        state: &mut HubState,
+        space: &str,
+        environment: String,
+    ) -> Result<bool, &'static str> {
+        let record = state.space_mut(space).expect("the caller found it");
+        let left = record.model.environment.clone();
+        if !record.model.set_environment(environment)? {
+            return Ok(false);
+        }
+        // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
+        record.stage.leave(&left);
+        // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
+        record.instruct(true);
+        // Its server side, if it has one, runs for the space, and the previous environment's stops.
+        self.reconcile_server_sides(state);
+        // Everyone in the space, and the lobby's listing, see the change.
+        state.touch_space(space);
+        // The Tomori wall moves to where the new environment puts it, and that environment's walls show.
+        state.touch_projection(space);
+        Ok(true)
     }
 
     /// The server has begun serving: run the server sides of the spaces that were bound while it was being configured, and of those bound from now on. A kept space listed again waits until it is bound to its session again; see [`Hub::bound`].
@@ -3282,24 +3312,17 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
-                let record = state.space_mut(&space).expect("checked above");
-                let left = record.model.environment.clone();
-                match record.model.set_environment(environment) {
+                match self.move_space(state, &space, environment) {
                     Ok(true) => {
                         log::info!(
                             "Space {space} is now in the {} environment.",
-                            record.model.environment
+                            state
+                                .space(&space)
+                                .expect("checked above")
+                                .model
+                                .environment
                         );
-                        // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
-                        record.stage.leave(&left);
-                        // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
-                        record.instruct(true);
-                        // Its server side, if it has one, runs for the space, and the previous environment's stops.
-                        self.reconcile_server_sides(state);
-                        // Everyone in the space, and the lobby's listing, see the change; it is kept across a restart.
-                        state.touch_space(&space);
-                        // The Tomori wall moves to where the new environment puts it, and that environment's walls show.
-                        state.touch_projection(&space);
+                        // It is kept across a restart.
                         deferred.push(Deferred::Keep);
                     }
                     Ok(false) => {}
@@ -3859,6 +3882,8 @@ impl Hub {
             channel: None,
             stage: crate::stage::Stage::default(),
         });
+        // Tomori's tools are registered for its directory, if they are not already.
+        self.tools_due(state.shutting_down, &request.backend, &request.directory);
         // Given before any input, so that the agent has them for its first turn.
         state.spaces.last().expect("pushed above").instruct(true);
         // The environment's server side, if it has one, runs for the space from when it is bound.
@@ -4012,6 +4037,8 @@ impl Hub {
         // Its directory has been resolved within the workspace roots again, so its environment's server side runs for it as for a space just created.
         record.restoring = false;
         self.reconcile_server_sides(&mut state);
+        let model = &state.space(id).expect("found above").model;
+        self.tools_due(state.shutting_down, &model.backend, &model.directory);
         state.pump(id);
         state.touch_space(id);
         drop(state);
@@ -4081,6 +4108,7 @@ impl Hub {
 
     pub(crate) fn space_event(&self, space: &str, event: Event) {
         let mut state = self.lock();
+        let shutting_down = state.shutting_down;
         let Some(record) = state.space_mut(space) else {
             return;
         };
@@ -4102,6 +4130,12 @@ impl Hub {
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
             record.instruct(true);
+            // It forgets Tomori's tools when it restarts, too.
+            self.tools_due(
+                shutting_down,
+                &record.model.backend,
+                &record.model.directory,
+            );
         }
         // Stamped now rather than when the snapshot is sent, so a level that ends and starts again within one
         // snapshot interval starts its age again.
@@ -4351,6 +4385,10 @@ impl Hub {
         let mut entries = record
             .model
             .instruction_entries(self.environments().instructions(&record.model.environment));
+        // Only with the other layers, which a closed space or a backend without instructions is not given.
+        if !entries.is_empty() {
+            entries.extend(self.tools_entry(&record.model.backend));
+        }
         if !all {
             entries.retain(|(key, _)| key == crate::instructions::SPACE_KEY);
         }
@@ -4378,6 +4416,9 @@ impl Hub {
         record.waker = None;
         // A closed space no longer runs its environment's server side.
         self.reconcile_server_sides(&mut state);
+        // Nor needs Tomori's tools, unless another space in its directory does.
+        let model = &state.space(space).expect("found above").model;
+        self.tools_due(state.shutting_down, &model.backend, &model.directory);
         // Forgotten before the lobby listing that touching the space produces.
         state.forget_closed();
         state.touch_space(space);

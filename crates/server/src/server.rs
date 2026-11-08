@@ -41,7 +41,7 @@ use crate::workspace::{
 ///
 /// [`run`](Self::run) serves until cancelled or serving fails. All work is owned by that one future: connections, space drivers and the keepalive sweep are joined by it. No detached tasks are created. Speech recognition and synthesis run on the speech crate's own threads, which outlive a space only to finish speech already queued.
 pub struct Server {
-    hub: Arc<Hub>,
+    pub(crate) hub: Arc<Hub>,
     jobs: async_channel::Receiver<Job>,
     application: Application,
     voices: Voices,
@@ -435,6 +435,22 @@ impl Server {
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
     {
+        self.run_serving(scheduler, listener, None, cancellation)
+            .await
+    }
+
+    /// Serve `listener`, and Tomori's MCP endpoint on its listener if given, until cancelled; see [`Self::run`].
+    async fn run_serving<S>(
+        &self,
+        scheduler: &S,
+        listener: S::Socket,
+        tools: Option<(crate::mcp::Endpoint, S::Socket)>,
+        cancellation: &Cancellation,
+    ) -> Result<Statistics, Error>
+    where
+        S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
+        S::Socket: 'static,
+    {
         // Environments' server sides may run now, for the spaces bound while the server was configured.
         self.hub.serving();
         // The counts when serving starts, taken before any connection is accepted: the publisher is polled after serving begins, and a client served before then would otherwise be counted as the starting point, so its arrival would never be published.
@@ -442,21 +458,46 @@ impl Server {
         // Ends the spaces, the sweep and the pacing once serving has ended for any reason.
         let services = cancellation.child();
         let serving = async {
-            let served = self.serve(scheduler, listener, cancellation).await;
+            let served = self
+                .serve(
+                    scheduler,
+                    &self.application,
+                    self.tls.as_ref(),
+                    listener,
+                    cancellation,
+                )
+                .await;
             services.cancel();
             served
         };
-        let (served, ((), ((), ((), ((), ()))))) = zip(
+        let tools = async {
+            if let Some((endpoint, listener)) = tools {
+                // Serving Tomori's tools ends with the server's serving; failing alone, it is only said, and spaces work on without them.
+                if let Err(error) = self
+                    .serve(scheduler, &endpoint, None, listener, &services)
+                    .await
+                {
+                    log::error!("Tomori's MCP endpoint stopped: {}.", describe(&error));
+                }
+            }
+        };
+        let (served, ((), ((), ((), ((), ((), ((), ()))))))) = zip(
             serving,
             zip(
-                self.supervise(scheduler, &services),
+                tools,
                 zip(
-                    self.sweep(scheduler, &services),
+                    self.register_tools(&services),
                     zip(
-                        self.pace(scheduler, &services),
+                        self.supervise(scheduler, &services),
                         zip(
-                            self.publish(scheduler, counts, &services),
-                            self.refresh_cards(scheduler, &services),
+                            self.sweep(scheduler, &services),
+                            zip(
+                                self.pace(scheduler, &services),
+                                zip(
+                                    self.publish(scheduler, counts, &services),
+                                    self.refresh_cards(scheduler, &services),
+                                ),
+                            ),
                         ),
                     ),
                 ),
@@ -464,6 +505,82 @@ impl Server {
         )
         .await;
         served
+    }
+
+    /// Serve `listener`, and Tomori's MCP endpoint on `tools`, as [`Self::run`] serves `listener` alone. The endpoint admits only requests carrying a bearer token made for this run, and it is registered with the backends that take tools, for each directory with a space, with that token, at its address on `tools`, which should be a loopback address, since it serves plain HTTP: headsets, visitors and other machines have no business with it. See `design/mcp.md`.
+    pub async fn run_with_tools<S>(
+        &self,
+        scheduler: &S,
+        listener: S::Socket,
+        tools: S::Socket,
+        cancellation: &Cancellation,
+    ) -> Result<Statistics, Error>
+    where
+        S: SocketAccept
+            + SocketStreamReading
+            + SocketStreamWriting
+            + SocketClose
+            + Timers
+            + base_scheduler::SocketLocalAddress,
+        S::Socket: 'static,
+    {
+        let address = scheduler
+            .socket_local_address(&tools)
+            .expect("a bound listener has an address");
+        let url = tools_url(address);
+        let token = tomori_security::generate_token();
+        log::info!("Tomori's MCP endpoint is listening on {url}.");
+        if !address.ip().is_loopback() {
+            log::warn!(
+                "Tomori's MCP endpoint listens on {address}, beyond this machine, over plain HTTP: anyone who can reach it and learns its token can use Tomori's tools."
+            );
+        }
+        self.hub.serve_tools(
+            tomori_backend::ToolServer::new(crate::mcp::NAME, url)
+                .with_header("Authorization", format!("Bearer {token}")),
+        );
+        let endpoint = crate::mcp::Endpoint::new(self.hub.clone(), &token);
+        self.run_serving(scheduler, listener, Some((endpoint, tools)), cancellation)
+            .await
+    }
+
+    /// Register Tomori's MCP server with the backends that take tools, in each directory where a space is open, and remove it from each where none is any more, one at a time, as spaces there change, until cancelled. A registration that fails is said, and tried again when a space there is next bound or read again. See `design/mcp.md`.
+    async fn register_tools(&self, cancellation: &Cancellation) {
+        loop {
+            let listener = self.hub.listen_tools();
+            let Some(registration) = self.hub.next_registration() else {
+                if let Either::Right(_) =
+                    select(pin!(listener), pin!(cancellation.cancelled())).await
+                {
+                    return;
+                }
+                continue;
+            };
+            let crate::hub::tools::Registration {
+                backend,
+                directory,
+                server,
+            } = registration;
+            let found = self
+                .hub
+                .backends
+                .get(&backend)
+                .expect("only a backend the server has is due");
+            let (done, result) = match &server {
+                Some(server) => ("registered", found.register_tools(&directory, server).await),
+                None => (
+                    "removed",
+                    found.unregister_tools(&directory, crate::mcp::NAME).await,
+                ),
+            };
+            match result {
+                Ok(()) => log::info!("Tomori's tools are {done} for {backend} in {directory}."),
+                Err(error) => log::warn!(
+                    "Tomori's tools could not be {done} for {backend} in {directory}: {}",
+                    redacted(error.message, server.as_ref())
+                ),
+            }
+        }
     }
 
     /// Report changes from `published`, the counts when serving started, to the [`with_counts`](Self::with_counts) callback, at most once per interval. A change waits until the interval since the last report, or since starting, has passed, and then the latest counts are reported, unless they have changed back.
@@ -573,19 +690,22 @@ impl Server {
     /// Transient accept errors, such as a peer that reset before it was accepted or running out of descriptors, are logged and accepting continues, pausing for [`ACCEPT_BACKOFF`] when out of resources. Only cancellation or another accept error, such as a closed scheduler or a broken listener, ends serving. Either way, the listener is closed first, so that new peers are refused rather than left queued with nobody accepting, and then the connections are cancelled and given the drain timeout to finish before they are abandoned.
     ///
     /// TODO(upstream): this follows `base_http_server::serve`, which passes every handler one cancellation shared by all connections. The keepalive sweep must end one silent connection, including a response write blocked on a peer that is gone, so each connection here gets its own child cancellation. `serve` also ends on any accept error, and joins its connections without a time limit before closing its listener. Use `serve` again once it offers per-connection cancellation, keeps accepting after transient accept errors, and closes its listener before a bounded drain.
-    async fn serve<S>(
+    async fn serve<S, H>(
         &self,
         scheduler: &S,
+        handler: &H,
+        tls: Option<&Arc<rustls::ServerConfig>>,
         listener: S::Socket,
         cancellation: &Cancellation,
     ) -> Result<Statistics, Error>
     where
         S: SocketAccept + SocketStreamReading + SocketStreamWriting + SocketClose + Timers,
         S::Socket: 'static,
+        H: base_http_server::Handler<Error = std::convert::Infallible>,
     {
         let server_options = base_http_server::Options::default();
         let options = server_options.http1.clone();
-        let acceptor = self.tls.as_ref().map(|config| {
+        let acceptor = tls.map(|config| {
             let mut config = (**config).clone();
             config.alpn_protocols = server_options.protocols.alpn_protocols();
             RustlsAcceptor::new(Arc::new(config))
@@ -678,7 +798,7 @@ impl Server {
                 );
                 log::debug!("Accepted connection {serial} from {peer}.");
                 let handler = Admitted {
-                    application: &self.application,
+                    application: handler,
                     watch,
                 };
                 connections.push(async move {
@@ -940,6 +1060,31 @@ impl Server {
             );
         }
     }
+}
+
+/// `message`, from an agent that refused a registration of `server`, without the values of its headers, or any long word of them, such as its bearer token without `Bearer`, which an agent might repeat in saying what it refused.
+fn redacted(mut message: String, server: Option<&tomori_backend::ToolServer>) -> String {
+    for (_, value) in server.iter().flat_map(|server| &server.headers) {
+        message = message.replace(value.as_str(), "(secret)");
+        for word in value.split_whitespace().filter(|word| word.len() >= 16) {
+            message = message.replace(word, "(secret)");
+        }
+    }
+    message
+}
+
+/// The URL of Tomori's MCP endpoint listening on `address`: on the loopback address of its family when it listens on every address, since OpenCode runs on this machine.
+fn tools_url(address: SocketAddr) -> String {
+    let host = match address.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    format!(
+        "http://{}{}",
+        SocketAddr::new(host, address.port()),
+        crate::mcp::PATH
+    )
 }
 
 /// The workspace roots of the current directory, or none if it cannot be read, so that every directory is refused.
@@ -1789,6 +1934,79 @@ mod tests {
             cancellation,
             finished,
         }
+    }
+
+    #[test]
+    fn a_refusal_is_said_without_the_registration_s_secrets() {
+        let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:1/mcp")
+            .with_header("Authorization", "Bearer tomori_0123456789abcdef");
+        assert_eq!(
+            redacted(
+                "refused Bearer tomori_0123456789abcdef, then tomori_0123456789abcdef".to_owned(),
+                Some(&server)
+            ),
+            "refused (secret), then (secret)"
+        );
+        // A short word, such as the scheme, is left, and so is everything without a registration.
+        assert_eq!(
+            redacted("Bearer tokens only".to_owned(), Some(&server)),
+            "Bearer tokens only"
+        );
+        assert_eq!(redacted("lost".to_owned(), None), "lost");
+    }
+
+    #[test]
+    fn the_tools_url_names_a_loopback_address_for_every_address() {
+        for (listening, url) in [
+            ("0.0.0.0:8766", "http://127.0.0.1:8766/mcp"),
+            ("[::]:8766", "http://[::1]:8766/mcp"),
+            ("127.0.0.1:1", "http://127.0.0.1:1/mcp"),
+            ("[::1]:2", "http://[::1]:2/mcp"),
+        ] {
+            assert_eq!(tools_url(listening.parse().unwrap()), url);
+        }
+    }
+
+    #[test]
+    fn a_tools_endpoint_that_cannot_accept_leaves_the_server_serving() {
+        // So that the warning and the error are written, whichever test runs first.
+        log::set_max_level(log::LevelFilter::Trace);
+        let scheduler = NativeScheduler::new().unwrap();
+        let cancellation = Cancellation::new();
+        let (sender, address) = channel();
+        let serving = std::thread::spawn({
+            let cancellation = cancellation.clone();
+            move || {
+                let server = Server::new(Backends::new(), Arc::new(NullTranscriber::new()))
+                    .with_workspace_roots(WorkspaceRoots::none());
+                let result = block_on(async {
+                    let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+                    let listener = bind(&scheduler, address, &cancellation).await.unwrap();
+                    sender
+                        .send(scheduler.socket_local_address(&listener).unwrap())
+                        .unwrap();
+                    // Bound but never listening, so that accepting on it fails at once, and on every address, which is warned of.
+                    let every: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                    let tools = scheduler
+                        .socket_open(every.into(), SocketType::Stream, None, &cancellation)
+                        .await
+                        .unwrap();
+                    scheduler
+                        .socket_bind(&tools, every, &cancellation)
+                        .await
+                        .unwrap();
+                    server
+                        .run_with_tools(&scheduler, listener, tools, &cancellation)
+                        .await
+                });
+                block_on(scheduler.shutdown());
+                result
+            }
+        });
+        let address = address.recv().unwrap();
+        assert!(health(address).contains("\"status\":\"ok\""));
+        cancellation.cancel();
+        assert!(serving.join().unwrap().is_ok());
     }
 
     /// Request `/health` and return the response, reading only as far as the end of its body, so that a socket the server never closes does not matter.

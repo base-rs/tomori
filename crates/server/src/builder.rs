@@ -398,7 +398,7 @@ mod tests {
         // `--help` lists it after Tomori's own, in the synopsis and among the options, each line of its help indented.
         let usage = builder.usage();
         assert!(usage.contains(
-            "[--max-visitors COUNT] [--state-directory PATH]\n                     [--fleet NAME]\n       tomori-server auth"
+            "[--max-visitors COUNT] [--state-directory PATH] [--mcp-bind ADDRESS]\n                     [--no-mcp]\n                     [--fleet NAME]\n       tomori-server auth"
         ));
         assert!(usage.contains(
             "  --fleet NAME\n                       Offer the Observe environment, showing this fleet.\n                       The fleet must exist.\n  --help               Show this help."

@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 
 use tomori_backend::{
     AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Prompt, Result, Session,
-    SessionSpec, SessionSummary, Snapshot,
+    SessionSpec, SessionSummary, Snapshot, ToolServer,
 };
 
 /// The result of a future that is ready at once, as every future here is.
@@ -118,6 +118,25 @@ fn a_backend_without_instructions_refuses_them_as_unsupported() {
     );
     // Shutting down needs nothing from a backend that holds no connection.
     backend.shutdown();
+}
+
+#[test]
+fn a_backend_without_tools_refuses_them_as_unsupported() {
+    let backend = Minimal;
+    assert!(!backend.capabilities().tools);
+    let unsupported = Error::new(
+        ErrorKind::Unsupported,
+        "the backend does not take Tomori's tools",
+    );
+    let server = ToolServer::new("tomori", "http://127.0.0.1:1/mcp");
+    assert_eq!(
+        now(backend.register_tools("/tmp", &server)),
+        Err(unsupported.clone())
+    );
+    assert_eq!(
+        now(backend.unregister_tools("/tmp", "tomori")),
+        Err(unsupported)
+    );
 }
 
 #[test]

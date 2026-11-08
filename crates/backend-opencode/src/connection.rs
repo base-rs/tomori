@@ -1193,6 +1193,18 @@ pub enum Command {
         keys: Vec<String>,
         reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
+    /// Register Tomori's MCP server for `directory`, replacing one of its name.
+    RegisterTools {
+        directory: String,
+        server: tomori_backend::ToolServer,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
+    },
+    /// Remove the MCP server `name` from `directory`; one OpenCode does not have is already removed.
+    UnregisterTools {
+        directory: String,
+        name: String,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
+    },
     /// Close `id`'s registration without deleting its OpenCode session.
     Close {
         id: String,
@@ -1578,7 +1590,9 @@ fn refuse(command: Command, error: tomori_backend::Error) {
         | Command::Answer { reply, .. }
         | Command::SetMode { reply, .. }
         | Command::Instruction { reply, .. }
-        | Command::ForgetInstructions { reply, .. } => {
+        | Command::ForgetInstructions { reply, .. }
+        | Command::RegisterTools { reply, .. }
+        | Command::UnregisterTools { reply, .. } => {
             let _ = reply.try_send(Err(error));
         }
         // Closing needs no connection; see `hold`.
@@ -1600,7 +1614,9 @@ fn abandoned(command: &Command) -> bool {
         | Command::Answer { reply, .. }
         | Command::SetMode { reply, .. }
         | Command::Instruction { reply, .. }
-        | Command::ForgetInstructions { reply, .. } => reply.is_closed(),
+        | Command::ForgetInstructions { reply, .. }
+        | Command::RegisterTools { reply, .. }
+        | Command::UnregisterTools { reply, .. } => reply.is_closed(),
         Command::Close { .. } | Command::Shutdown => {
             unreachable!("a close or shutdown is never held or waiting")
         }
@@ -2363,6 +2379,8 @@ fn command_session(command: &Command) -> Option<&str> {
         Command::Sessions { .. }
         | Command::Create { .. }
         | Command::Snapshot { .. }
+        | Command::RegisterTools { .. }
+        | Command::UnregisterTools { .. }
         | Command::Close { .. }
         | Command::Shutdown => None,
     }
@@ -3874,6 +3892,28 @@ fn prepare_command<'a, S: Timers>(
             );
             return None;
         }
+        Command::RegisterTools {
+            directory,
+            server,
+            reply,
+        } => Box::pin(async move {
+            let result = api::put_mcp(client, resolved, &directory, &server, cancellation)
+                .await
+                .map_err(map_failure);
+            let _ = reply.try_send(result);
+            None
+        }),
+        Command::UnregisterTools {
+            directory,
+            name,
+            reply,
+        } => Box::pin(async move {
+            let result =
+                removed(api::delete_mcp(client, resolved, &directory, &name, cancellation).await)
+                    .map_err(map_failure);
+            let _ = reply.try_send(result);
+            None
+        }),
         Command::Sessions { directory, reply } => Box::pin(async move {
             let result = api::list_sessions(client, resolved, &directory, cancellation)
                 .await
@@ -4123,8 +4163,8 @@ fn prepare_command<'a, S: Timers>(
     Some(request)
 }
 
-/// The outcome of removing an instruction entry: OpenCode answers not found when the session, and so the entry, no
-/// longer exists, which is what removing it asked for.
+/// The outcome of removing an instruction entry or an MCP server: OpenCode answers not found when the session, and so
+/// the entry, or the server no longer exists, which is what removing it asked for.
 fn removed(result: Result<(), Failure>) -> Result<(), Failure> {
     match result {
         Err(Failure {
@@ -6315,6 +6355,13 @@ mod tests {
         instructions: HashMap<String, BTreeMap<String, Value>>,
         /// The instruction requests received, as method, session and key.
         instruction_requests: Vec<(String, String, String)>,
+        /// The MCP servers registered at runtime, by their path, naming the server and its directory, with their
+        /// configuration.
+        mcp: BTreeMap<String, Value>,
+        /// The MCP registration requests received, as method and path.
+        mcp_requests: Vec<(String, String)>,
+        /// While set, MCP registrations fail.
+        failing_mcp: bool,
         /// The agents listed for every directory, if not none.
         agents: Option<Value>,
         /// Each reply, interruption and agent switch received, as path and body.
@@ -6601,6 +6648,27 @@ mod tests {
             }
         } else if path.starts_with("/api/session?directory=") {
             ("200 OK", r#"{"data":[]}"#.to_owned())
+        } else if path.starts_with("/api/experimental/mcp/") {
+            let mut state = shared.state.lock().unwrap();
+            state.mcp_requests.push((method.clone(), path.clone()));
+            if state.failing_mcp {
+                (
+                    "500 Internal Server Error",
+                    r#"{"message":"lost"}"#.to_owned(),
+                )
+            } else if method == "PUT" {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                state.mcp.insert(path.clone(), body["config"].clone());
+                ("204 No Content", String::new())
+            } else if state.mcp.remove(&path).is_some() {
+                ("204 No Content", String::new())
+            } else {
+                (
+                    "404 Not Found",
+                    r#"{"_tag":"McpServerNotFoundError","message":"MCP server not found: tomori"}"#
+                        .to_owned(),
+                )
+            }
         } else if let Some(rest) = path.strip_prefix("/api/experimental/session/") {
             let mut state = shared.state.lock().unwrap();
             let (id, key) = rest
@@ -7148,6 +7216,7 @@ mod tests {
                 questions: true,
                 workers: true,
                 instructions: true,
+                tools: true,
             }
         );
         assert_eq!(block_on(backend.sessions("/tmp")).unwrap(), []);
@@ -7209,6 +7278,44 @@ mod tests {
             shared.state.lock().unwrap().instruction_requests,
             [("DELETE".to_owned(), "gone".to_owned(), "tomori".to_owned())]
         );
+        // Tomori's MCP server is registered for a directory, with its headers, without OAuth, and removed again; removing
+        // one OpenCode does not have is already done, and a refusal is said.
+        let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp")
+            .with_header("Authorization", "Bearer tomori_secret");
+        block_on(backend.register_tools("/work/a b", &server)).unwrap();
+        let path = "/api/experimental/mcp/tomori?location%5Bdirectory%5D=%2Fwork%2Fa%20b";
+        assert_eq!(
+            shared.state.lock().unwrap().mcp,
+            BTreeMap::from([(
+                path.to_owned(),
+                json!({
+                    "type": "remote",
+                    "url": "http://127.0.0.1:9/mcp",
+                    "headers": {"Authorization": "Bearer tomori_secret"},
+                    "oauth": false,
+                })
+            )])
+        );
+        block_on(backend.unregister_tools("/work/a b", "tomori")).unwrap();
+        block_on(backend.unregister_tools("/work/a b", "tomori")).unwrap();
+        assert!(shared.state.lock().unwrap().mcp.is_empty());
+        shared.update(|state| state.failing_mcp = true);
+        let failed = block_on(backend.register_tools("/work/a b", &server)).unwrap_err();
+        assert_eq!(failed.message, "lost");
+        let failed = block_on(backend.unregister_tools("/work/a b", "tomori")).unwrap_err();
+        assert_eq!(failed.message, "lost");
+        assert_eq!(
+            shared.state.lock().unwrap().mcp_requests,
+            [
+                ("PUT", path),
+                ("DELETE", path),
+                ("DELETE", path),
+                ("PUT", path),
+                ("DELETE", path)
+            ]
+            .map(|(method, path)| (method.to_owned(), path.to_owned()))
+        );
+
         // A session that is gone is no longer the service's to act on.
         let unknown = block_on(backend.attach("missing", "/tmp"))
             .map(drop)
@@ -7250,6 +7357,9 @@ mod tests {
         refused(block_on(
             backend.forget_instructions("s1", vec!["tomori".into()]),
         ));
+        let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp");
+        refused(block_on(backend.register_tools("/tmp", &server)));
+        refused(block_on(backend.unregister_tools("/tmp", "tomori")));
         // Shutting down again changes nothing.
         backend.shutdown();
         refused(block_on(backend.sessions("/tmp")).map(drop));
@@ -11006,6 +11116,16 @@ mod tests {
             answer(|reply| Command::ForgetInstructions {
                 id: id(),
                 keys: vec!["k".into()],
+                reply,
+            }),
+            answer(|reply| Command::RegisterTools {
+                directory: "/tmp".into(),
+                server: tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp"),
+                reply,
+            }),
+            answer(|reply| Command::UnregisterTools {
+                directory: "/tmp".into(),
+                name: "tomori".into(),
                 reply,
             }),
         ]
