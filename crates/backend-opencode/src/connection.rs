@@ -7295,7 +7295,16 @@ mod tests {
                 busy: true,
             }]
         );
+        // A listing OpenCode refuses fails, with its reason.
         shared.update(|state| {
+            state.failing_children.insert("null".into());
+        });
+        assert_eq!(
+            block_on(backend.sessions("/tmp")).unwrap_err().message,
+            "lost"
+        );
+        shared.update(|state| {
+            state.failing_children.clear();
             state.children.remove("null");
             state.active.clear();
         });

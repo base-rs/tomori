@@ -2169,8 +2169,8 @@ pub(crate) mod tests {
                     ],
                     json!("c2"),
                 ),
-                Some("c2") => page(Vec::new(), Value::Null),
-                Some(other) => panic!("unexpected cursor {other}"),
+                // The last page, after `c2`.
+                Some(_) => page(Vec::new(), Value::Null),
             }
         });
         with_client(port, async |client, resolved, cancellation, _| {

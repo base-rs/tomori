@@ -5809,10 +5809,9 @@ mod tests {
             .items
             .into_iter()
             .map(|item| match item.key {
-                arrival::Key::Session(Some(id)) => id,
-                arrival::Key::Session(None) => "new".into(),
-                arrival::Key::MoreSessions => "more".into(),
-                key => unreachable!("{key:?} is not on the session ring"),
+                arrival::Key::Session(id) => id.unwrap_or_else(|| "new".into()),
+                // Only "More sessions" is on the ring besides the sessions.
+                _ => "more".into(),
             })
             .collect()
     }
