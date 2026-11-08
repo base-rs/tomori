@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tomori_protocol::SpeechSetting;
 
 use crate::application::{ResponseBody, response};
+use crate::hub::agent_workers::{Outcome, REMOVAL_LIMIT, Removal};
 use crate::hub::tools::Changed;
 use crate::hub::{Decision, Hub};
 
@@ -225,7 +226,7 @@ impl Handler for Endpoint {
                         .pointer("/params/_meta")
                         .map_or_else(|| "none".to_owned(), logged),
                 );
-                match handle(&self.hub, &message) {
+                match handle(&self.hub, &message).await {
                     Some(reply) => (200, reply),
                     None => return Ok(refuse(202, "")),
                 }
@@ -242,7 +243,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// The answer to one JSON-RPC message, or `None` for a notification or a response, which need none.
-pub(crate) fn handle(hub: &Hub, message: &Value) -> Option<Value> {
+pub(crate) async fn handle(hub: &Hub, message: &Value) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(error(
             Value::Null,
@@ -280,7 +281,7 @@ pub(crate) fn handle(hub: &Hub, message: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-            match call(hub, name, &arguments, caller(&params)) {
+            match call(hub, name, &arguments, caller(&params)).await {
                 Some(Ok(result)) => result,
                 Some(Err(message)) => json!({
                     "content": [{ "type": "text", "text": message }],
@@ -392,6 +393,35 @@ fn tools() -> Value {
                 "openWorldHint": false,
             },
         },
+        {
+            "name": "workers",
+            "description": "Your space's workers, the sub-agent sessions everyone in it sees: each one's session, title, state (running, waiting, idle, completed, failed, stopped or unknown), whether it has finished and how long ago Tomori saw it finish, and its parent, the worker that started it, or null for one you started.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": read,
+        },
+        {
+            "name": "remove_workers",
+            "description": "Remove workers of your space, with their own workers: those named in sessions, or every finished one with finished. Only your space's own workers are removed, never your own session or one bound to a space. A worker still running is refused unless force is given, which stops it first; use force only when someone asks to stop it. Tomori notes the removal on the space's wall. The result says which were removed, refused and failed, and why.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sessions": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": crate::limits::SESSION_BYTES },
+                        "maxItems": REMOVAL_LIMIT,
+                        "description": "The session identifiers of the workers to remove, as the workers tool lists them.",
+                    },
+                    "finished": { "type": "boolean", "description": "Also remove every worker of this space that has finished." },
+                    "force": { "type": "boolean", "description": "Also remove workers still running, stopping them first. Only when someone in the space asks to stop them." },
+                },
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+            },
+        },
     ])
 }
 
@@ -426,7 +456,7 @@ fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
 }
 
 /// Call the tool `name` with `arguments`, from the agent session `session`: `None` when there is no such tool, and otherwise its result, or the error to show the agent. The global tools need no session.
-fn call(
+async fn call(
     hub: &Hub,
     name: &str,
     arguments: &Value,
@@ -443,6 +473,11 @@ fn call(
         "decline_pairing" => {
             session.and_then(|session| decide_pairing(hub, session, Decision::Decline))
         }
+        "workers" => session.and_then(|session| hub.tool_workers(session).map(structured)),
+        "remove_workers" => match session {
+            Ok(session) => remove_workers(hub, session, arguments).await,
+            Err(error) => Err(error),
+        },
         _ => return None,
     };
     Some(result)
@@ -514,6 +549,87 @@ fn decide_pairing(hub: &Hub, session: &str, decision: Decision<'_>) -> Result<Va
         "confirmed": decided.confirmed,
         "next": format!("Tell everyone in the space that {did}."),
     })))
+}
+
+/// The boolean argument `name` of `arguments`, false when it is not given.
+fn flag(arguments: &Value, name: &str) -> Result<bool, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("{name} is true or false.")),
+    }
+}
+
+/// The `remove_workers` tool.
+async fn remove_workers(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let sessions = match arguments.get("sessions") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(sessions)) if sessions.len() <= REMOVAL_LIMIT => sessions
+            .iter()
+            .map(|session| {
+                session
+                    .as_str()
+                    .filter(|session| {
+                        !session.is_empty() && session.len() <= crate::limits::SESSION_BYTES
+                    })
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        "Each of sessions is a worker's session identifier, as text.".to_owned()
+                    })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(Value::Array(_)) => {
+            return Err(format!(
+                "Tomori removes at most {REMOVAL_LIMIT} workers in one call."
+            ));
+        }
+        Some(_) => return Err("sessions is a list of session identifiers.".to_owned()),
+    };
+    let removal = Removal {
+        sessions,
+        finished: flag(arguments, "finished")?,
+        force: flag(arguments, "force")?,
+    };
+    let outcome = hub.agent_remove_workers(session, removal).await?;
+    Ok(structured(removed(outcome)))
+}
+
+/// The result of `remove_workers`: what it removed, refused and failed to remove, and what the agent is to do next.
+fn removed(outcome: Outcome) -> Value {
+    let removed: Vec<Value> = outcome
+        .removed
+        .iter()
+        .map(|gone| {
+            json!({
+                "session": gone.session,
+                "title": gone.title,
+                "stopped": gone.stopped,
+                "with": gone.with,
+            })
+        })
+        .collect();
+    let reasons = |list: &[(String, String)]| -> Vec<Value> {
+        list.iter()
+            .map(|(session, reason)| json!({ "session": session, "reason": reason }))
+            .collect()
+    };
+    let mut next = Vec::new();
+    if !outcome.removed.is_empty() {
+        next.push("Tomori has put a notice of the removal on the space's wall, so there is no need to announce it unless someone asked.");
+    }
+    if !outcome.refused.is_empty() || !outcome.failed.is_empty() {
+        next.push("If someone asked for those not removed, tell them which and why.");
+    }
+    if next.is_empty() {
+        next.push("There was nothing to remove, so nothing changed.");
+    }
+    json!({
+        "space": outcome.space,
+        "removed": removed,
+        "refused": reasons(&outcome.refused),
+        "failed": reasons(&outcome.failed),
+        "next": next.join(" "),
+    })
 }
 
 #[cfg(test)]

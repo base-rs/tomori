@@ -53,6 +53,9 @@ pub struct SpaceModel {
     submitting: Vec<PendingQuestion>,
     workers: Vec<tomori_protocol::Worker>,
     workers_authoritative: bool,
+    /// When this space saw each of its workers finish, in seconds since the epoch: only those it saw go from not
+    /// finished to finished, and only while they stay finished. See `design/mcp.md`.
+    finished: HashMap<String, u64>,
     attribution: bool,
     /// How much of each reply is spoken; see `design/speech.md`.
     speech: SpeechSetting,
@@ -321,6 +324,15 @@ fn worker(worker: tomori_backend::Worker, session: &str) -> tomori_protocol::Wor
     }
 }
 
+/// Whether a worker in `state` has finished: completed, failed or stopped. See `design/mcp.md`.
+pub fn worker_finished(state: tomori_protocol::WorkerState) -> bool {
+    use tomori_protocol::WorkerState;
+    matches!(
+        state,
+        WorkerState::Completed | WorkerState::Error | WorkerState::Stopped
+    )
+}
+
 /// `update`, the workers a backend now lists in its own order, oldest first as far as the space has seen: those in
 /// `known`, the workers it already had, keep their places, and new ones follow in the order the backend gave, so that
 /// trimming a snapshot drops the oldest workers first. See `design/server.md`.
@@ -407,6 +419,7 @@ impl SpaceModel {
             workers,
             // A list the backend is still completing never authorizes a departure.
             workers_authoritative: snapshot.workers_incomplete.is_none(),
+            finished: HashMap::new(),
             attribution: true,
             speech: SpeechSetting::Full,
             modes: snapshot.modes,
@@ -653,6 +666,49 @@ impl SpaceModel {
         }
     }
 
+    /// The space's workers, as everyone in it sees them, oldest first.
+    pub fn workers(&self) -> &[tomori_protocol::Worker] {
+        &self.workers
+    }
+
+    /// Whether a worker missing from [`Self::workers`] is known to have left, and why the list may be incomplete.
+    pub fn workers_complete(&self) -> (bool, Option<&str>) {
+        (self.workers_authoritative, self.worker_error.as_deref())
+    }
+
+    /// When this space saw the worker `id` finish, in seconds since the epoch, if it did and it is still finished.
+    pub fn worker_finished_at(&self, id: &str) -> Option<u64> {
+        self.finished.get(id).copied()
+    }
+
+    /// Take the workers `removed` out of the space, as removed on its agent's behalf, before the backend reports them
+    /// gone. See `design/mcp.md`.
+    pub fn remove_workers(&mut self, removed: &HashSet<String>) {
+        self.workers.retain(|worker| !removed.contains(&worker.id));
+        self.finished.retain(|id, _| !removed.contains(id));
+    }
+
+    /// Replace the space's workers with `workers`, the backend's latest list, noting when each that was not finished has
+    /// finished.
+    fn replace_workers(&mut self, workers: Vec<tomori_protocol::Worker>) {
+        let now = crate::cards::unix_now();
+        for worker in &workers {
+            if !worker_finished(worker.state) {
+                self.finished.remove(&worker.id);
+            } else if self
+                .workers
+                .iter()
+                .any(|known| known.id == worker.id && !worker_finished(known.state))
+            {
+                self.finished.insert(worker.id.clone(), now);
+            }
+        }
+        self.workers = oldest_first(&self.workers, workers);
+        let workers = &self.workers;
+        self.finished
+            .retain(|id, _| workers.iter().any(|worker| &worker.id == id));
+    }
+
     /// Bind a space listed again after a restart, which waits as reconnecting, to its session as the backend read it: like reading it again after a gap, but with the workers it reports, since none of their events were seen. See `design/spaces.md`.
     pub fn bind(&mut self, session: String, snapshot: Snapshot) {
         self.workers = snapshot
@@ -661,6 +717,7 @@ impl SpaceModel {
             .cloned()
             .map(|entry| worker(entry, &session))
             .collect();
+        self.finished.clear();
         self.workers_authoritative = snapshot.workers_incomplete.is_none();
         self.worker_error.clone_from(&snapshot.workers_incomplete);
         self.session = session;
@@ -946,7 +1003,7 @@ impl SpaceModel {
                     .into_iter()
                     .map(|entry| worker(entry, &self.session))
                     .collect();
-                self.workers = oldest_first(&self.workers, workers);
+                self.replace_workers(workers);
                 self.workers_authoritative = true;
                 self.worker_error = None;
             }
@@ -955,7 +1012,7 @@ impl SpaceModel {
                     .into_iter()
                     .map(|entry| worker(entry, &self.session))
                     .collect();
-                self.workers = oldest_first(&self.workers, workers);
+                self.replace_workers(workers);
                 self.workers_authoritative = false;
                 self.worker_error = Some(message);
             }
@@ -1048,6 +1105,7 @@ impl SpaceModel {
                 self.submitting.clear();
                 // The agent process has ended, so nothing it was running is running any more, whatever the backend
                 // last reported.
+                let now = crate::cards::unix_now();
                 for worker in &mut self.workers {
                     if matches!(
                         worker.state,
@@ -1055,6 +1113,7 @@ impl SpaceModel {
                             | tomori_protocol::WorkerState::Waiting
                     ) {
                         worker.state = tomori_protocol::WorkerState::Stopped;
+                        self.finished.insert(worker.id.clone(), now);
                     }
                 }
             }
@@ -1535,6 +1594,72 @@ mod tests {
                 ..Snapshot::default()
             },
         )
+    }
+
+    #[test]
+    fn a_space_notes_when_it_saw_each_worker_finish_until_it_runs_again_or_leaves() {
+        let worker = |id: &str, state| tomori_backend::Worker {
+            id: id.into(),
+            parent: None,
+            title: id.into(),
+            state,
+        };
+        use tomori_backend::WorkerState::{Completed, Error, Running};
+        let mut space = model();
+        space.apply(Event::WorkersChanged {
+            workers: vec![
+                worker("a", Running),
+                worker("b", Completed),
+                worker("c", Running),
+            ],
+        });
+        assert_eq!(space.worker_finished_at("a"), None);
+        space.apply(Event::WorkersChanged {
+            workers: vec![
+                worker("a", Completed),
+                worker("b", Completed),
+                worker("c", Running),
+            ],
+        });
+        // Seen to finish, a is noted; b had finished before it was seen.
+        assert!(space.worker_finished_at("a").is_some());
+        assert_eq!(space.worker_finished_at("b"), None);
+        // Running again, it is no longer finished; finishing again, it is noted again; once gone, forgotten.
+        space.apply(Event::WorkersPartial {
+            workers: vec![worker("a", Running), worker("c", Running)],
+            message: "Still finding.".into(),
+        });
+        assert_eq!(space.worker_finished_at("a"), None);
+        space.apply(Event::WorkersChanged {
+            workers: vec![worker("a", Error), worker("c", Running)],
+        });
+        assert!(space.worker_finished_at("a").is_some());
+        // Removed, it leaves the space at once.
+        space.remove_workers(&HashSet::from(["a".to_owned()]));
+        assert_eq!(space.worker_finished_at("a"), None);
+        let ids: Vec<&str> = space
+            .workers()
+            .iter()
+            .map(|shown| shown.id.as_str())
+            .collect();
+        assert_eq!(ids, ["c"]);
+        // The session ending stops what was running, which has then finished.
+        space.apply(Event::Closed { reason: None });
+        assert_eq!(
+            space.workers()[0].state,
+            tomori_protocol::WorkerState::Stopped
+        );
+        assert!(space.worker_finished_at("c").is_some());
+        // Bound again, as after a restart, it knows nothing of when they finished.
+        space.bind(
+            "fake-1".into(),
+            Snapshot {
+                workers: vec![worker("c", Completed)],
+                ..Snapshot::default()
+            },
+        );
+        assert_eq!(space.worker_finished_at("c"), None);
+        assert_eq!(space.workers_complete(), (true, None));
     }
 
     #[test]

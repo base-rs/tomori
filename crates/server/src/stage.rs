@@ -304,6 +304,9 @@ pub struct Stage {
     /// What is kept for each environment, by its identifier.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     rooms: BTreeMap<String, Room>,
+    /// The latest of each kind of Tomori's own notices, by kind, as [`Stage::project_notice`] projected it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    notices: BTreeMap<String, String>,
 }
 
 fn schema() -> u32 {
@@ -317,6 +320,7 @@ impl Default for Stage {
             next: 0,
             tomori: Vec::new(),
             rooms: BTreeMap::new(),
+            notices: BTreeMap::new(),
         }
     }
 }
@@ -624,6 +628,29 @@ impl Stage {
         id
     }
 
+    /// Project `content`, one of Tomori's own notices of `kind`, such as that workers were removed, at `now` onto the
+    /// Tomori wall, as [`Stage::project`] does when nobody asked. The previous notice of the same kind is taken off
+    /// first, unless a participant has put it where it is, so that repeated notices take one slot rather than push the
+    /// agent's panels off the wall. Returns its identity.
+    pub(crate) fn project_notice(
+        &mut self,
+        walls: &Walls<'_>,
+        kind: &str,
+        content: Content,
+        now: u64,
+    ) -> String {
+        if let Some(previous) = self.notices.remove(kind) {
+            let unmoved = |kept: &Kept| kept.id == previous && !kept.pinned;
+            self.tomori.retain(|kept| !unmoved(kept));
+            for room in self.rooms.values_mut() {
+                room.panels.retain(|kept| !unmoved(kept));
+            }
+        }
+        let id = self.project(walls, content, None, now);
+        self.notices.insert(kind.to_owned(), id.clone());
+        id
+    }
+
     /// Project the panels of one reply, `contents`, at `now`, as [`Stage::project`] projects each. If the reply has code
     /// panels, they replace the code panels of the replies before, on any wall, but those a participant has pulled off
     /// or put where they are: those are taken off first. Returns the panels' identities.
@@ -893,6 +920,38 @@ mod tests {
         let view = kept.view("s", &walls, 0);
         assert_eq!(view.walls[0].pose, default_stage());
         assert_eq!(view.panel(&id).unwrap().place, on(TOMORI_WALL, 0));
+    }
+
+    #[test]
+    fn a_notice_replaces_the_last_of_its_kind_unless_a_participant_put_it_somewhere() {
+        let mut stage = Stage::default();
+        let reply = stage.project(&SKY, content("reply"), None, 0);
+        let first = stage.project_notice(&SKY, "workers", content("Workers"), 0);
+        let second = stage.project_notice(&SKY, "workers", content("Workers"), 0);
+        let other = stage.project_notice(&SKY, "pairing", content("Pairing"), 0);
+        let ids = |stage: &Stage| -> Vec<String> {
+            stage
+                .view("s", &SKY, 0)
+                .panels
+                .into_iter()
+                .map(|panel| panel.id)
+                .collect()
+        };
+        // The agent's panel, and one notice of each kind, on the Tomori wall.
+        assert_eq!(ids(&stage), [reply.clone(), second.clone(), other.clone()]);
+        assert!(!ids(&stage).contains(&first));
+        // One a participant put somewhere stays when the next comes, and is no longer replaced.
+        stage
+            .place(&SKY, &second, Target::Free(pose(1.0, 1.0)))
+            .unwrap();
+        let third = stage.project_notice(&SKY, "workers", content("Workers"), 0);
+        let fourth = stage.project_notice(&SKY, "workers", content("Workers"), 0);
+        assert!(ids(&stage).contains(&second));
+        assert!(!ids(&stage).contains(&third));
+        assert!(ids(&stage).contains(&fourth));
+        // Notices are kept with the stage.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept, stage);
     }
 
     #[test]

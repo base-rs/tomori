@@ -1,0 +1,492 @@
+// Released under the MIT License.
+// Copyright, 2026, by Samuel Williams.
+
+//! What Tomori's worker tools read and remove: the workers of the space bound to the calling session, as everyone in it sees them, and their removal, which only ever reaches the space's own workers. See `design/mcp.md`.
+use std::collections::HashSet;
+
+use serde_json::{Value, json};
+use tomori_backend::{Backend, ErrorKind};
+use tomori_protocol::{Worker, WorkerState};
+
+use super::{Hub, HubState};
+use crate::space::worker_finished;
+
+/// The most workers one call removes, those it names or finds; the rest are refused, to be asked for again.
+pub const REMOVAL_LIMIT: usize = 64;
+
+/// The kind of the notice of removed workers on the space's Tomori wall, of which only the latest is shown.
+const NOTICE: &str = "workers";
+
+/// The most workers a notice names; the rest are counted.
+const NOTICE_NAMES: usize = 5;
+
+/// What the agent asked `remove_workers` to remove: the workers it names in `sessions`, every finished worker of the space with `finished`, and, with `force`, those still running, stopped first.
+#[derive(Debug, Default)]
+pub(crate) struct Removal {
+    pub sessions: Vec<String>,
+    pub finished: bool,
+    pub force: bool,
+}
+
+/// A worker that left the space when it was removed.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Gone {
+    pub session: String,
+    pub title: String,
+    /// It had finished, as the space last saw it.
+    pub finished: bool,
+    /// It was running, as the space last saw it, and was stopped to remove it.
+    pub stopped: bool,
+    /// The worker whose removal took it, when it was one of that worker's own.
+    pub with: Option<String>,
+}
+
+/// What removing workers did, for the tool's result: each worker removed, and each one refused or failed, with why.
+#[derive(Debug, Default)]
+pub(crate) struct Outcome {
+    pub space: String,
+    pub removed: Vec<Gone>,
+    pub refused: Vec<(String, String)>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// One worker to remove, and its own workers, which go with it, the worker first.
+struct Target {
+    family: Vec<Worker>,
+}
+
+/// The removals decided before the backend is asked: which space, its backend and session, what to remove and what was refused.
+struct Plan {
+    space: String,
+    backend: String,
+    session: String,
+    targets: Vec<Target>,
+    outcome: Outcome,
+    force: bool,
+}
+
+/// Whether a worker in `state` is still at work, so that removing it would stop it.
+fn running(state: WorkerState) -> bool {
+    matches!(state, WorkerState::Running | WorkerState::Waiting)
+}
+
+/// How a worker in `state` is described to the agent.
+fn state_name(state: WorkerState) -> &'static str {
+    match state {
+        WorkerState::Running => "running",
+        WorkerState::Waiting => "waiting",
+        WorkerState::Idle => "idle",
+        WorkerState::Completed => "completed",
+        WorkerState::Error => "failed",
+        WorkerState::Stopped => "stopped",
+        WorkerState::Unknown => "unknown",
+    }
+}
+
+/// `worker` and its own workers in `workers`, at any depth, `worker` first, as the space knows them.
+fn family(workers: &[Worker], worker: &Worker) -> Vec<Worker> {
+    let mut family = vec![worker.clone()];
+    let mut index = 0;
+    while let Some(parent) = family.get(index).map(|member| member.id.clone()) {
+        family.extend(
+            workers
+                .iter()
+                .filter(|other| other.parent.as_deref() == Some(parent.as_str()))
+                .filter(|other| !family.iter().any(|member| member.id == other.id))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        index += 1;
+    }
+    family
+}
+
+/// `count` workers, in words.
+fn workers(count: usize) -> String {
+    match count {
+        1 => "1 worker".to_owned(),
+        count => format!("{count} workers"),
+    }
+}
+
+/// The notice of `removed` put on the space's Tomori wall, such as "Tomori removed 5 finished workers.", naming the first few.
+fn notice(removed: &[Gone]) -> String {
+    let stopped = removed.iter().filter(|gone| gone.stopped).count();
+    let mut said = if removed.iter().all(|gone| gone.finished) {
+        format!(
+            "Tomori removed {} finished {}.",
+            removed.len(),
+            if removed.len() == 1 {
+                "worker"
+            } else {
+                "workers"
+            }
+        )
+    } else {
+        format!("Tomori removed {}.", workers(removed.len()))
+    };
+    let stopped = match (stopped, removed.len()) {
+        (0, _) => None,
+        (1, 1) => Some("It was still running, and was stopped first.".to_owned()),
+        (1, _) => Some("One was still running, and was stopped first.".to_owned()),
+        (stopped, count) if stopped == count => {
+            Some("They were still running, and were stopped first.".to_owned())
+        }
+        (stopped, _) => Some(format!(
+            "{stopped} were still running, and were stopped first."
+        )),
+    };
+    if let Some(stopped) = stopped {
+        said = format!("{said} {stopped}");
+    }
+    let mut names: Vec<String> = removed
+        .iter()
+        .take(NOTICE_NAMES)
+        .map(|gone| format!("- {}", tomori_protocol::text::one_line(&gone.title, 80)))
+        .collect();
+    if removed.len() > NOTICE_NAMES {
+        names.push(format!("- and {} more", removed.len() - NOTICE_NAMES));
+    }
+    format!("{said}\n\n{}", names.join("\n"))
+}
+
+impl Hub {
+    /// The workers of the space bound to `session`, as everyone in it sees them, for the `workers` tool. See `design/mcp.md`.
+    pub(crate) fn tool_workers(&self, session: &str) -> Result<Value, String> {
+        let state = self.lock();
+        let space = self.calling_space(&state, session)?;
+        let record = state.space(&space).expect("found above");
+        self.reports_workers(&record.model.backend)?;
+        let now = crate::cards::unix_now();
+        let listed: Vec<Value> = record
+            .model
+            .workers()
+            .iter()
+            .map(|worker| {
+                let finished = worker_finished(worker.state);
+                json!({
+                    "session": worker.id,
+                    "title": worker.title,
+                    "state": state_name(worker.state),
+                    "running": running(worker.state),
+                    "finished": finished,
+                    "finished_seconds_ago": record
+                        .model
+                        .worker_finished_at(&worker.id)
+                        .map(|at| now.saturating_sub(at)),
+                    "parent": worker.parent,
+                })
+            })
+            .collect();
+        let (complete, reason) = record.model.workers_complete();
+        Ok(json!({
+            "space": space,
+            "workers": listed,
+            "complete": complete,
+            "incomplete_reason": reason,
+        }))
+    }
+
+    /// Whether the space's backend, `backend`, reports workers, or why there are none.
+    fn reports_workers(&self, backend: &str) -> Result<(), String> {
+        let reports = self
+            .backends
+            .get(backend)
+            .is_some_and(|backend| backend.capabilities().workers);
+        if reports {
+            Ok(())
+        } else {
+            Err(format!(
+                "This space's agent backend, {backend}, does not report workers, so the space has none."
+            ))
+        }
+    }
+
+    /// Decide what removing `removal` from the space bound to `session` would remove, refusing what it must not: the space's own session, any session bound to a space, anything that is not one of the space's workers, and, without `force`, a worker that is still running or has running workers of its own.
+    fn plan_removal(
+        &self,
+        state: &HubState,
+        session: &str,
+        removal: Removal,
+    ) -> Result<Plan, String> {
+        let space = self.calling_space(state, session)?;
+        let record = state.space(&space).expect("found above");
+        let backend = record.model.backend.clone();
+        self.reports_workers(&backend)?;
+        if !self
+            .backends
+            .get(&backend)
+            .is_some_and(|found| found.capabilities().delete)
+        {
+            return Err(format!(
+                "This space's agent backend, {backend}, cannot remove workers."
+            ));
+        }
+        if removal.sessions.is_empty() && !removal.finished {
+            return Err(
+                "Name the workers to remove in sessions, or set finished to remove every finished worker."
+                    .to_owned(),
+            );
+        }
+        let shown = record.model.workers();
+        let root = record.model.session.clone();
+        // Every session any space is bound to, open or closed, whichever space.
+        let bound: HashSet<&str> = state
+            .spaces
+            .iter()
+            .map(|other| other.model.session.as_str())
+            .collect();
+        let mut asked = removal.sessions;
+        if removal.finished {
+            asked.extend(
+                shown
+                    .iter()
+                    .filter(|worker| worker_finished(worker.state))
+                    .map(|worker| worker.id.clone()),
+            );
+        }
+        let mut seen = HashSet::new();
+        asked.retain(|id| seen.insert(id.clone()));
+        let mut outcome = Outcome {
+            space: space.clone(),
+            ..Outcome::default()
+        };
+        let mut targets: Vec<Target> = Vec::new();
+        for id in asked {
+            let refuse = |reason: &str| (id.clone(), reason.to_owned());
+            if id == root {
+                outcome.refused.push(refuse(
+                    "This is this space's own agent session, which is never removed as a worker.",
+                ));
+                continue;
+            }
+            if bound.contains(id.as_str()) {
+                outcome.refused.push(refuse(
+                    "This session is bound to a Tomori space, so it is not a worker to remove.",
+                ));
+                continue;
+            }
+            let Some(worker) = shown.iter().find(|worker| worker.id == id) else {
+                outcome
+                    .refused
+                    .push(refuse("This is not one of this space's workers."));
+                continue;
+            };
+            let family = family(shown, worker);
+            if family
+                .iter()
+                .any(|member| bound.contains(member.id.as_str()))
+            {
+                outcome.refused.push(refuse(
+                    "One of this worker's own workers is bound to a Tomori space, so it is not removed.",
+                ));
+                continue;
+            }
+            if !removal.force {
+                if running(worker.state) {
+                    outcome.refused.push(refuse(
+                        "This worker is still running. Remove it only once it has finished, or, if someone asked to stop it, with force.",
+                    ));
+                    continue;
+                }
+                if family.iter().any(|member| running(member.state)) {
+                    outcome.refused.push(refuse(
+                        "One of this worker's own workers is still running. Remove it only once they have finished, or, if someone asked to stop them, with force.",
+                    ));
+                    continue;
+                }
+            }
+            if targets.len() == REMOVAL_LIMIT {
+                outcome.refused.push(refuse(
+                    "Tomori removes at most 64 workers in one call; ask again for the rest.",
+                ));
+                continue;
+            }
+            targets.push(Target { family });
+        }
+        // A worker within another one removed goes with it, so only the outermost of each family is asked for.
+        let within = |target: &Target, other: &Target| {
+            !std::ptr::eq(target, other)
+                && other.family[1..]
+                    .iter()
+                    .any(|member| member.id == target.family[0].id)
+        };
+        let outermost: Vec<bool> = targets
+            .iter()
+            .map(|target| !targets.iter().any(|other| within(target, other)))
+            .collect();
+        let targets = targets
+            .into_iter()
+            .zip(outermost)
+            .filter_map(|(target, outermost)| outermost.then_some(target))
+            .collect();
+        Ok(Plan {
+            space,
+            backend,
+            session: root,
+            targets,
+            outcome,
+            force: removal.force,
+        })
+    }
+
+    /// Remove `removal` from the space bound to `session`, as its agent asked, and only that space's own workers: each one the space shows is checked here, and again by the backend against the agent's own records as it is removed. Everyone in the space sees them leave, with a notice on its Tomori wall. See `design/mcp.md`.
+    pub(crate) async fn agent_remove_workers(
+        &self,
+        session: &str,
+        removal: Removal,
+    ) -> Result<Outcome, String> {
+        let plan = self.plan_removal(&self.lock(), session, removal)?;
+        let backend = self
+            .backends
+            .get(&plan.backend)
+            .expect("a space's backend is the server's");
+        let mut outcome = plan.outcome;
+        for target in plan.targets {
+            let worker = &target.family[0];
+            match backend
+                .delete_worker(&plan.session, &worker.id, plan.force)
+                .await
+            {
+                Ok(()) => outcome
+                    .removed
+                    .extend(target.family.iter().map(|member| Gone {
+                        session: member.id.clone(),
+                        title: member.title.clone(),
+                        finished: worker_finished(member.state),
+                        stopped: running(member.state),
+                        with: (member.id != worker.id).then(|| worker.id.clone()),
+                    })),
+                Err(error) if matches!(error.kind, ErrorKind::Busy) => outcome.refused.push((
+                    worker.id.clone(),
+                    format!(
+                        "The agent says this worker, or one of its own, is still running: {}. Remove it only once it has finished, or, if someone asked to stop it, with force.",
+                        error.message
+                    ),
+                )),
+                Err(error) if matches!(error.kind, ErrorKind::Invalid) => {
+                    outcome.refused.push((
+                        worker.id.clone(),
+                        format!(
+                            "The agent refused to remove it as one of this space's workers: {}.",
+                            error.message
+                        ),
+                    ));
+                }
+                Err(error) => outcome.failed.push((
+                    worker.id.clone(),
+                    format!("It could not be removed: {}.", error.message),
+                )),
+            }
+        }
+        self.removed_workers(&plan.space, &outcome.removed);
+        Ok(outcome)
+    }
+
+    /// The workers `removed` left the space `space`: everyone in it sees them go, and a notice on its Tomori wall says so, replacing the last one. Kept and logged.
+    fn removed_workers(&self, space: &str, removed: &[Gone]) {
+        if removed.is_empty() {
+            return;
+        }
+        let ids: HashSet<String> = removed.iter().map(|gone| gone.session.clone()).collect();
+        let mut state = self.lock();
+        // The space may have been deleted while they were removed.
+        let Some(record) = state.space_mut(space) else {
+            return;
+        };
+        record.model.remove_workers(&ids);
+        let environments = self.environments();
+        let walls = environments.walls(&record.model.environment);
+        let content = crate::stage::Content {
+            title: "Workers".to_owned(),
+            body: notice(removed),
+            meta: vec![("source".to_owned(), "Tomori".to_owned())],
+            code: None,
+        };
+        let panel = record
+            .stage
+            .project_notice(&walls, NOTICE, content, crate::cards::unix_now());
+        drop(environments);
+        let names: Vec<&str> = removed.iter().map(|gone| gone.session.as_str()).collect();
+        let (count, names) = (workers(removed.len()), names.join(", "));
+        log::info!("The agent of space {space} removed {count}: {names}; projected {panel}.");
+        state.touch_space(space);
+        state.touch_projection(space);
+        drop(state);
+        self.keep();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gone(title: &str, finished: bool, stopped: bool) -> Gone {
+        Gone {
+            session: title.to_owned(),
+            title: title.to_owned(),
+            finished,
+            stopped,
+            with: None,
+        }
+    }
+
+    #[test]
+    fn a_notice_counts_what_was_removed_and_names_the_first_few() {
+        assert_eq!(
+            notice(&[gone("Tests", true, false)]),
+            "Tomori removed 1 finished worker.\n\n- Tests"
+        );
+        let many: Vec<Gone> = (1..=7)
+            .map(|number| gone(&format!("Task {number}"), true, false))
+            .collect();
+        let said = notice(&many);
+        assert!(said.starts_with("Tomori removed 7 finished workers.\n\n- Task 1\n"));
+        assert!(said.ends_with("- Task 5\n- and 2 more"), "{said}");
+        assert_eq!(
+            notice(&[gone("Build", false, true)]),
+            "Tomori removed 1 worker. It was still running, and was stopped first.\n\n- Build"
+        );
+        assert_eq!(
+            notice(&[
+                gone("A", false, true),
+                gone("B", false, true),
+                gone("C", true, false)
+            ]),
+            "Tomori removed 3 workers. 2 were still running, and were stopped first.\n\n- A\n- B\n- C"
+        );
+        assert_eq!(
+            notice(&[gone("A", false, true), gone("B", false, true)]),
+            "Tomori removed 2 workers. They were still running, and were stopped first.\n\n- A\n- B"
+        );
+        assert_eq!(
+            notice(&[gone("Idle", false, false)]),
+            "Tomori removed 1 worker.\n\n- Idle"
+        );
+        assert_eq!(
+            notice(&[gone("A", false, true), gone("B", true, false)]),
+            "Tomori removed 2 workers. One was still running, and was stopped first.\n\n- A\n- B"
+        );
+    }
+
+    #[test]
+    fn a_family_takes_every_depth_once() {
+        let worker = |id: &str, parent: Option<&str>| Worker {
+            id: id.to_owned(),
+            parent: parent.map(str::to_owned),
+            title: id.to_owned(),
+            state: WorkerState::Completed,
+        };
+        let workers = [
+            worker("a", None),
+            worker("b", Some("a")),
+            worker("c", Some("b")),
+            worker("d", None),
+        ];
+        let ids: Vec<String> = family(&workers, &workers[0])
+            .into_iter()
+            .map(|member| member.id)
+            .collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+    }
+}

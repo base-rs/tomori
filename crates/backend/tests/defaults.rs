@@ -134,6 +134,19 @@ fn a_backend_that_does_not_delete_sessions_refuses_as_unsupported() {
 }
 
 #[test]
+fn a_backend_that_does_not_remove_workers_refuses_as_unsupported() {
+    let backend = Minimal;
+    assert!(!backend.capabilities().workers);
+    assert_eq!(
+        now(backend.delete_worker("session", "worker", true)),
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "the backend does not remove workers"
+        ))
+    );
+}
+
+#[test]
 fn a_backend_without_tools_refuses_them_as_unsupported() {
     let backend = Minimal;
     assert!(!backend.capabilities().tools);
