@@ -17,6 +17,18 @@ const USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING
     .union(wgpu::TextureUsages::COPY_DST)
     .union(wgpu::TextureUsages::COPY_SRC);
 
+/// What coverage is raised to, as opacity, for light text drawn into an sRGB target, which blends in linear light; dark text's complement is. Blended linearly, small light text on a dark panel drew a third more ink, as the eye sees it, at half a screen pixel to a font pixel than at two, and the counters of "e" and "o" filled in; at 1.8 it draws as much at every size, within a few percent.
+pub const GAMMA: f32 = 1.8;
+
+/// The options for a text pipeline's fragment stage drawing into `format`: [`GAMMA`] where it is sRGB, and otherwise none, as a target that blends the values it stores already blends as the eye sees.
+pub fn compilation(format: wgpu::TextureFormat) -> wgpu::PipelineCompilationOptions<'static> {
+    const SRGB: [(&str, f64); 1] = [("GAMMA", GAMMA as f64)];
+    wgpu::PipelineCompilationOptions {
+        constants: if format.is_srgb() { &SRGB } else { &[] },
+        ..Default::default()
+    }
+}
+
 /// The atlas's texture and the bind group that draws from it.
 pub struct Glyphs {
     layout: wgpu::BindGroupLayout,
@@ -297,6 +309,28 @@ mod tests {
         }
     }
 
+    /// What text is drawn into, and how: the target's format, the text's colour and the panel's background.
+    #[derive(Clone, Copy)]
+    struct Look {
+        format: wgpu::TextureFormat,
+        text: [f32; 4],
+        background: [f32; 4],
+    }
+
+    /// White on black into a linear target, so that what is read back is the coverage.
+    const COVERAGE: Look = Look {
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        text: [1.0; 4],
+        background: [0.0; 4],
+    };
+
+    /// As the headset draws a projection panel's body: its text colour on its background, into an sRGB target, which blends in linear light, so that what is read back is what the display shows.
+    const HEADSET: Look = Look {
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        text: [0.93, 0.96, 1.0, 1.0],
+        background: [0.02, 0.035, 0.06, 0.94],
+    };
+
     /// `lines` drawn white on black by the panel pipeline, a font pixel to [`SCALE`] screen pixels, from a fresh texture of the shared atlas.
     fn draw(gpu: &crate::test_gpu::Gpu, lines: &[(&str, bool)]) -> Drawn {
         draw_at(gpu, lines, SCALE as f32, [0.0; 2])
@@ -309,16 +343,27 @@ mod tests {
         scale: f32,
         shift: [f32; 2],
     ) -> Drawn {
-        let format = wgpu::TextureFormat::Rgba8Unorm;
+        draw_as(gpu, lines, scale, shift, COVERAGE)
+    }
+
+    /// `lines` drawn as [`draw_at`] draws them, as `look` says.
+    fn draw_as(
+        gpu: &crate::test_gpu::Gpu,
+        lines: &[(&str, bool)],
+        scale: f32,
+        shift: [f32; 2],
+        look: Look,
+    ) -> Drawn {
+        let format = look.format;
         let columns = 46;
         let mut canvas = Canvas::new(columns, 1.0);
-        canvas.background = [0.0; 4];
+        canvas.background = look.background;
         canvas.padding = (PAD, PAD);
         for (line, bold) in lines {
             let style = if *bold {
-                Style::bold([1.0; 4])
+                Style::bold(look.text)
             } else {
-                Style::plain([1.0; 4])
+                Style::plain(look.text)
             };
             canvas.rows.push(Row::text(line, style, columns));
             canvas.rows.push(Row::default());
@@ -622,6 +667,161 @@ mod tests {
         let mean = changes.iter().sum::<f32>() / changes.len() as f32;
         let ink = inks.iter().flatten().sum::<f32>() / shifts.len() as f32;
         (worst, mean, ink)
+    }
+
+    /// The middle of a glyph's largest counter, in font pixels from the image's top-left: of its tile's pixels outside its outline that are cut off from the tile's edge, the one farthest from the outline.
+    fn counter(quad: &crate::ui_text::Quad) -> Option<[f32; 2]> {
+        let [x, y, width, height] = quad.tile;
+        let (x, y, width, height) = (x as usize, y as usize, width as usize, height as usize);
+        let field: Vec<u8> = atlas::with(|atlas| {
+            (y..y + height)
+                .flat_map(|row| atlas.pixels()[row * WIDTH as usize + x..][..width].to_vec())
+                .collect()
+        });
+        // Flood the outside from the tile's edge.
+        let mut outside = vec![false; field.len()];
+        let mut stack: Vec<usize> = (0..field.len())
+            .filter(|index| {
+                let (column, row) = (index % width, index / width);
+                column == 0 || row == 0 || column == width - 1 || row == height - 1
+            })
+            .collect();
+        while let Some(index) = stack.pop() {
+            if outside[index] || field[index] >= 128 {
+                continue;
+            }
+            outside[index] = true;
+            let (column, row) = (index % width, index / width);
+            if column > 0 {
+                stack.push(index - 1);
+            }
+            if column + 1 < width {
+                stack.push(index + 1);
+            }
+            if row > 0 {
+                stack.push(index - width);
+            }
+            if row + 1 < height {
+                stack.push(index + width);
+            }
+        }
+        let deepest = (0..field.len())
+            .filter(|index| field[*index] < 128 && !outside[*index])
+            .min_by_key(|index| field[*index])?;
+        let (column, row) = (deepest % width, deepest / width);
+        Some([
+            quad.x + (column as f32 + 0.5) / width as f32 * quad.width,
+            quad.y + (row as f32 + 0.5) / height as f32 * quad.height,
+        ])
+    }
+
+    /// How open the counters of `text`'s glyphs that have one are, drawn as `look` says a font pixel to `scale` screen pixels, at several fractions of a pixel: for each, the brightness at its counter's middle above the panel's background, as a fraction of the brightest of its strokes' above it, averaged over the shifts; 0 is open, 1 filled in.
+    fn counters(
+        gpu: &crate::test_gpu::Gpu,
+        text: &str,
+        scale: f32,
+        look: Look,
+    ) -> Vec<(char, f32)> {
+        let shifts: Vec<[f32; 2]> = (0..4)
+            .map(|step| [step as f32 / 4.0, (step * 3 % 4) as f32 / 4.0])
+            .collect();
+        let draws: Vec<Drawn> = shifts
+            .iter()
+            .map(|shift| draw_as(gpu, &[(text, false)], scale, *shift, look))
+            .collect();
+        draws[0]
+            .glyphs(0)
+            .into_iter()
+            .filter_map(|(ch, _, quad)| Some((ch, quad, counter(&quad)?)))
+            .map(|(ch, quad, middle)| {
+                let filled = draws
+                    .iter()
+                    .zip(&shifts)
+                    .map(|(drawn, shift)| {
+                        // The pixel the counter's middle falls in, and the glyph's brightest.
+                        let (cx, cy) = (
+                            (middle[0] * scale + shift[0]) as usize,
+                            (middle[1] * scale + shift[1]) as usize,
+                        );
+                        let background = drawn.at(drawn.width / 2, 1);
+                        let left = (quad.x * scale + shift[0]).floor() as usize;
+                        let right = ((quad.x + quad.width) * scale + shift[0]).ceil() as usize;
+                        let top = (quad.y * scale + shift[1]).floor() as usize;
+                        let bottom = ((quad.y + quad.height) * scale + shift[1]).ceil() as usize;
+                        let peak = (top..bottom.min(drawn.height))
+                            .flat_map(|y| (left..right.min(drawn.width)).map(move |x| (x, y)))
+                            .map(|(x, y)| drawn.at(x, y))
+                            .fold(0.0, f32::max);
+                        ((drawn.at(cx, cy) - background) / (peak - background).max(1e-3))
+                            .clamp(0.0, 1.0)
+                    })
+                    .sum::<f32>()
+                    / shifts.len() as f32;
+                (ch, filled)
+            })
+            .collect()
+    }
+
+    /// The ink `text` draws as the headset draws it, a font pixel to `scale` screen pixels, as the eye sees it: each pixel's brightness above the panel's background, summed, in font pixels.
+    fn seen(gpu: &crate::test_gpu::Gpu, text: &str, scale: f32) -> (f32, Drawn) {
+        let drawn = draw_as(gpu, &[(text, false)], scale, [0.0; 2], HEADSET);
+        let background = drawn.at(drawn.width / 2, 1);
+        let ink = drawn
+            .coverage
+            .iter()
+            .map(|value| (value - background).max(0.0))
+            .sum::<f32>()
+            / (scale * scale);
+        (ink, drawn)
+    }
+
+    /// Set `TOMORI_SMALL_TEXT_PREVIEW` to a PNG path to save "projection" as the headset draws it, a font pixel to two, one, three quarters and a half of a screen pixel, each magnified to the same size.
+    #[test]
+    fn small_text_keeps_its_weight_and_its_counters_open() {
+        crate::test_gpu::with(|gpu| {
+            let text = "projection";
+            // A projection panel's text from 2.8 m is about half a pixel of a Quest 3's eye image to a font pixel. Blended in linear light, its ink grew by more than a third from two screen pixels to a font pixel to a half, as the eye sees it, and the counter of "e" was nearly half filled at three quarters; drawn as the eye sees it, the ink keeps within a tenth.
+            let scales = [2.0, 1.0, 0.75, 0.5];
+            let seen: Vec<(f32, Drawn)> = scales
+                .iter()
+                .map(|scale| seen(&gpu, text, *scale))
+                .collect();
+            let (large, small) = (seen[0].0, seen[3].0);
+            assert!((small - large).abs() < large * 0.1, "{small} of {large}");
+            let counters = counters(&gpu, text, 0.75, HEADSET);
+            let found: String = counters.iter().map(|(ch, _)| *ch).collect();
+            assert_eq!(found, "poeo");
+            for (ch, filled) in counters {
+                let most = if ch == 'e' { 0.35 } else { 0.1 };
+                assert!(filled < most, "{ch}: {filled}");
+            }
+            // Each magnified to two screen pixels to a font pixel, one above another.
+            let magnified: Vec<image::RgbaImage> = scales
+                .iter()
+                .zip(&seen)
+                .map(|(scale, (_, drawn))| {
+                    let (width, height) = (
+                        (drawn.width as f32 * 2.0 / scale) as u32,
+                        (drawn.height as f32 * 2.0 / scale) as u32,
+                    );
+                    image::imageops::resize(
+                        &drawn.image(),
+                        width,
+                        height,
+                        image::imageops::FilterType::Nearest,
+                    )
+                })
+                .collect();
+            let width = magnified.iter().map(image::RgbaImage::width).max().unwrap();
+            let height: u32 = magnified.iter().map(image::RgbaImage::height).sum();
+            let mut sheet = image::RgbaImage::new(width, height);
+            let mut top = 0;
+            for image in &magnified {
+                image::imageops::replace(&mut sheet, image, 0, top.into());
+                top += image.height();
+            }
+            crate::test_support::preview("TOMORI_SMALL_TEXT_PREVIEW", &sheet);
+        });
     }
 
     #[test]
