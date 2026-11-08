@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tomori_backend::{Event, Snapshot, ToolServer, Worker, WorkerState};
-use tomori_protocol::{ClientMessage, SpeechSetting};
+use tomori_protocol::{ClientMessage, QueueState, SpeechSetting};
 use tomori_server::Server;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
 use tomori_server::kept::SpaceStore;
@@ -612,6 +612,41 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
             "{tool}"
         );
     }
+}
+
+#[test]
+fn the_space_tool_counts_only_input_not_yet_sent_to_the_agent() {
+    let backend = FakeBackend::manual();
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    create(&mut ada, "Queue");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let session = backend.started().remove(0);
+    let one = id(&session);
+    let queued = || {
+        call(&server, &token, Some(&one), "space", json!({}))["structuredContent"]["queued"].clone()
+    };
+    let has = |state: &tomori_protocol::SpaceState, text: &str, wanted: QueueState| {
+        state
+            .queue
+            .iter()
+            .any(|entry| entry.text == text && entry.state == wanted)
+    };
+    assert_eq!(queued(), 0);
+
+    // Input delivered to the agent, whose turn is still running, is no longer queued, though the space still shows it.
+    ada.say("u1", "first");
+    ada.space(|state| has(state, "first", QueueState::Delivered));
+    assert_eq!(queued(), 0);
+
+    // Input spoken while the turn runs waits for it, and is counted until it is sent.
+    ada.say("u2", "second");
+    ada.space(|state| has(state, "second", QueueState::Queued));
+    assert_eq!(queued(), 1);
+    session.reply("Done.");
+    let state = ada.space(|state| has(state, "second", QueueState::Delivered));
+    assert_eq!(state.queue.len(), 2);
+    assert_eq!(queued(), 0);
 }
 
 /// Creating and attaching sessions held, until this is dropped.

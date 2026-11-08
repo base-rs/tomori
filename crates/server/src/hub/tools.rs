@@ -223,7 +223,8 @@ impl Hub {
             "modes": shown.modes.iter().map(|mode| &mode.id).collect::<Vec<_>>(),
             "participants": participants,
             "visitors": record.model.visitors.len(),
-            "queued": shown.queue.len(),
+            // Only input not yet sent to the agent: the queue the space shows also keeps recently delivered and failed entries.
+            "queued": record.model.waiting(),
         }))
     }
 
