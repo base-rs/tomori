@@ -3359,7 +3359,12 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
-            ClientMessage::PlacePanel { panel, wall, pose } => {
+            ClientMessage::PlacePanel {
+                panel,
+                wall,
+                slot,
+                pose,
+            } => {
                 let checked =
                     limits::check(&panel, limits::IDENTIFIER_BYTES, "panel").and_then(|()| {
                         wall.as_deref().map_or(Ok(()), |wall| {
@@ -3370,10 +3375,11 @@ impl Hub {
                     state.error(participant, error);
                     return;
                 }
-                let target = match (wall, pose) {
-                    (Some(wall), _) => crate::stage::Target::Wall(wall),
-                    (None, Some(pose)) => crate::stage::Target::Free(pose),
-                    (None, None) => {
+                let target = match (wall, slot, pose) {
+                    (Some(wall), Some(slot), _) => crate::stage::Target::Slot(wall, slot),
+                    (Some(wall), None, _) => crate::stage::Target::Wall(wall),
+                    (None, _, Some(pose)) => crate::stage::Target::Free(pose),
+                    (None, _, None) => {
                         state.error(participant, "Say where to put the panel.");
                         return;
                     }

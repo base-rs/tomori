@@ -240,6 +240,7 @@ mod tests {
             ClientMessage::PlacePanel {
                 panel: "panel-1".into(),
                 wall: None,
+                slot: None,
                 pose: Some(Pose::default()),
             },
             ClientMessage::DismissPanel {

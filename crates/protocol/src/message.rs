@@ -403,13 +403,16 @@ pub enum ClientMessage {
     RemoveWall {
         wall: String,
     },
-    /// Put the panel `panel` onto the wall `wall`, which takes it into its layout, or, without a wall, leave it floating
-    /// at `pose`, in the space's coordinates, for everyone in the space. Participants only, and only to a server whose
-    /// [`crate::SpaceState::projection`] is set.
+    /// Put the panel `panel` onto the wall `wall`, which takes it into its layout, in `slot` where it says, or, without a
+    /// wall, leave it floating at `pose`, in the space's coordinates, for everyone in the space. Participants only, and
+    /// only to a server whose [`crate::SpaceState::projection`] is set. An older server, which knows no `slot`, puts it in
+    /// the wall's most prominent free slot.
     PlacePanel {
         panel: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wall: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pose: Option<Pose>,
     },

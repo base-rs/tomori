@@ -486,9 +486,10 @@ mod tests {
         });
     }
 
-    /// Set `TOMORI_PROJECTION_PREVIEW` to a PNG path to save what this renders: the Tomori wall with four text panels and
-    /// two code panels, from home, then with one pointed at and named on the ray, one pulled off and carried, and the
-    /// code panels close up, highlighted.
+    /// Set `TOMORI_PROJECTION_PREVIEW` to a PNG path to save what this renders: the Tomori wall where the server stands it
+    /// by default, curving below the swarm, with four text panels and two code panels, from home, then with one pointed
+    /// at and named on the ray, and one pulled off and carried, fitting its text, towards a slot whose outline shows
+    /// where it would go, and the Rust code panel close up, highlighted.
     #[test]
     fn a_projection_wall_and_its_panels_render_over_the_scene() {
         const WIDTH: u32 = 960;
@@ -608,13 +609,16 @@ mod tests {
             let mut conversation = joined();
             show_projection(&mut conversation, Vec::new(), shown);
             let head = Mat4::from_translation(arrival::HOME);
-            let wall = tomori_protocol::Pose::upright_facing([1.9, 1.5, -2.1], [0.0, 1.5, 0.0]);
-            let wall_at = Vec3::from_array(wall.position);
-            let wall_frame =
-                Mat4::from_rotation_translation(glam::Quat::from_array(wall.orientation), wall_at);
-            let slot = |index: u32| {
-                wall_frame.transform_point3(tomori_scene::projection::slot_offset(index))
-            };
+            let wall = tomori_wall();
+            let wall_at = Vec3::from_array(wall.pose.position);
+            let wall_frame = Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                wall_at,
+            );
+            let slots = tomori_scene::projection::slot_frames(&wall, wall_frame);
+            let slot = |index: u32| slots[index as usize].w_axis.truncate();
+            // Looking ahead at the swarm, with the wall below it.
+            let looking = Vec3::new(0.0, 1.0, -2.3);
             let senses = Senses {
                 focused: true,
                 head: Some(head),
@@ -629,12 +633,11 @@ mod tests {
             let mut step = Step::default();
             let now = Instant::now();
             // About the field of view the headset gives the wall, to judge its text at the headset's resolution.
-            let lens = Mat4::perspective_rh(0.9, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
-            let from_home = lens * Mat4::look_at_rh(arrival::HOME, wall_at, Vec3::Y);
-            // Close up: the code panels, from 1.4 m in front of the slots between them.
-            let between = (slot(2) + slot(5)) / 2.0 + wall_frame.transform_vector3(Vec3::X * 0.3);
-            let facing = wall_frame.transform_vector3(Vec3::Z);
-            let close = lens * Mat4::look_at_rh(between + facing * 1.3, between, Vec3::Y);
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, looking, Vec3::Y);
+            // Close up: the Rust code panel, in the third slot of the curved wall, from 0.8 m in front of it.
+            let facing = slots[2].transform_vector3(Vec3::Z).normalize();
+            let close = lens * Mat4::look_at_rh(slot(2) + facing * 0.8, slot(2), Vec3::Y);
             let capture_from = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
                 renderer.render(
                     &device,
@@ -685,7 +688,12 @@ mod tests {
                 ..senses
             };
             let frame = step.update(&away, &mut conversation, &mut felt(), now, 0.01);
-            assert_eq!(frame.projection.len(), 1 + 6, "the wall and its panels");
+            let wall_sheets = tomori_protocol::WALL_SLOTS as usize + 1;
+            assert_eq!(
+                frame.projection.len(),
+                wall_sheets + 6,
+                "the wall's slots, its label and its panels"
+            );
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let wall_drawn = capture(&renderer, &panels);
             assert_ne!(wall_drawn, bare, "the wall must draw over the bare scene");
@@ -711,21 +719,22 @@ mod tests {
             assert!(violet(&highlighted) > 20 + violet(&unhighlighted));
             // Pointing at the first panel names it on the ray.
             let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
-            assert_eq!(frame.projection.len(), 1 + 6 + 1, "with the label");
+            assert_eq!(
+                frame.projection.len(),
+                wall_sheets + 6 + 1,
+                "with the label"
+            );
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let pointed = capture(&renderer, &panels);
             assert_ne!(pointed, wall_drawn);
-            // Pulled off and carried towards home.
+            // Pulled off and carried towards the last slot, whose outline shows where it would go, over the code panel there.
             let squeezed = Senses {
                 grip: Some(1.0),
                 ..senses
             };
             step.update(&squeezed, &mut conversation, &mut felt(), now, 0.01);
             let carried = Senses {
-                ray: tomori_scene::pointing::Ray::new(
-                    arrival::HOME,
-                    wall_at + Vec3::new(-1.2, -0.2, 0.6) - arrival::HOME,
-                ),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, slot(5) - arrival::HOME),
                 ..squeezed
             };
             let frame = step.update(&carried, &mut conversation, &mut felt(), now, 0.01);

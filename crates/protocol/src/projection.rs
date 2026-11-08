@@ -85,6 +85,28 @@ pub enum WallKind {
     Unknown,
 }
 
+/// How a wall's [`WALL_SLOTS`] slots are laid out about its pose. `Unknown` stands for a shape a newer server sends,
+/// which a client draws as a [`WallShape::Grid`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WallShape {
+    /// A flat board, three columns of two rows, its middle at the pose.
+    #[default]
+    Grid,
+    /// One row, curved along an arc about a point `radius` metres ahead of the wall, along its pose's +Z, so that each
+    /// slot faces that point: the pose is the middle of the row, between its third and fourth slots.
+    Arc { radius: f32 },
+    #[serde(other)]
+    Unknown,
+}
+
+impl WallShape {
+    fn is_grid(&self) -> bool {
+        *self == Self::Grid
+    }
+}
+
 /// A wall panels are projected onto, upright, facing along its pose's +Z, in the space's coordinates.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -95,16 +117,26 @@ pub struct Wall {
     pub kind: WallKind,
     /// Where its middle is, and which way it faces.
     pub pose: Pose,
+    /// How its slots are laid out: a flat grid, unless it says otherwise, as an older server's walls do not.
+    #[serde(default, skip_serializing_if = "WallShape::is_grid")]
+    pub shape: WallShape,
 }
 
 impl Wall {
-    /// The wall `id` of `kind` at `pose`.
+    /// The flat wall `id` of `kind` at `pose`.
     pub fn new(id: impl Into<String>, kind: WallKind, pose: Pose) -> Self {
         Self {
             id: id.into(),
             kind,
             pose,
+            shape: WallShape::Grid,
         }
+    }
+
+    /// The wall, its slots laid out as `shape` says.
+    pub fn with_shape(mut self, shape: WallShape) -> Self {
+        self.shape = shape;
+        self
     }
 }
 
@@ -400,6 +432,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(newer.walls[0].kind, WallKind::Unknown);
+        assert_eq!(newer.walls[0].shape, WallShape::Grid);
+        // A curved wall says so, and a newer shape is read as unknown.
+        let curved = Wall::new(TOMORI_WALL, WallKind::Tomori, pose)
+            .with_shape(WallShape::Arc { radius: 2.5 });
+        let json = serde_json::json!({"id": "tomori", "kind": "tomori",
+            "pose": {"position": [1.0, 1.5, -2.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+            "shape": {"kind": "arc", "radius": 2.5}});
+        assert_eq!(serde_json::to_value(&curved).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Wall>(json).unwrap(), curved);
+        let newest: Wall = serde_json::from_value(serde_json::json!({"id": "w", "kind": "added",
+            "pose": {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]},
+            "shape": {"kind": "dome", "rings": 3}}))
+        .unwrap();
+        assert_eq!(newest.shape, WallShape::Unknown);
         assert_eq!(newer.panels[0].place, Place::Unknown);
         assert_eq!((newer.panels[0].age, newer.panels[0].meta.len()), (0, 0));
     }
@@ -507,6 +553,7 @@ mod tests {
                 ClientMessage::PlacePanel {
                     panel: "panel-1".into(),
                     wall: Some(TOMORI_WALL.into()),
+                    slot: None,
                     pose: None,
                 },
                 serde_json::json!({"type": "place_panel", "panel": "panel-1", "wall": "tomori"}),
@@ -514,7 +561,17 @@ mod tests {
             (
                 ClientMessage::PlacePanel {
                     panel: "panel-1".into(),
+                    wall: Some(TOMORI_WALL.into()),
+                    slot: Some(4),
+                    pose: None,
+                },
+                serde_json::json!({"type": "place_panel", "panel": "panel-1", "wall": "tomori", "slot": 4}),
+            ),
+            (
+                ClientMessage::PlacePanel {
+                    panel: "panel-1".into(),
                     wall: None,
+                    slot: None,
                     pose: Some(pose),
                 },
                 serde_json::json!({"type": "place_panel", "panel": "panel-1", "pose": pose_json}),

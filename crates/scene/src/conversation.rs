@@ -2897,11 +2897,16 @@ impl Conversation {
         if self.projection().is_none() {
             return;
         }
-        let (wall, pose) = match target {
-            crate::projection::Target::Wall(wall) => (Some(wall), None),
-            crate::projection::Target::Free(pose) => (None, Some(pose)),
+        let (wall, slot, pose) = match target {
+            crate::projection::Target::Wall(wall, slot) => (Some(wall), Some(slot), None),
+            crate::projection::Target::Free(pose) => (None, None, Some(pose)),
         };
-        self.send(ClientMessage::PlacePanel { panel, wall, pose });
+        self.send(ClientMessage::PlacePanel {
+            panel,
+            wall,
+            slot,
+            pose,
+        });
     }
 
     /// Dismiss the panel `panel`, which the joined space shows, for everyone in it. Says whether it asked, as only a
@@ -10693,7 +10698,7 @@ mod tests {
         assert!(conversation.projection().is_none());
         conversation.place_panel(
             "panel-1".into(),
-            crate::projection::Target::Wall(tomori_protocol::TOMORI_WALL.into()),
+            crate::projection::Target::Wall(tomori_protocol::TOMORI_WALL.into(), 0),
         );
         assert!(!conversation.dismiss_panel("panel-1"));
         assert!(sent(&mut conversation).is_empty());
@@ -10706,7 +10711,7 @@ mod tests {
         conversation.place_panel("panel-1".into(), crate::projection::Target::Free(pose));
         conversation.place_panel(
             "panel-1".into(),
-            crate::projection::Target::Wall("wall-1".into()),
+            crate::projection::Target::Wall("wall-1".into(), 3),
         );
         assert!(conversation.dismiss_panel("panel-2"));
         // One the space does not show is not dismissed.
@@ -10717,11 +10722,13 @@ mod tests {
                 ClientMessage::PlacePanel {
                     panel: "panel-1".into(),
                     wall: None,
+                    slot: None,
                     pose: Some(pose),
                 },
                 ClientMessage::PlacePanel {
                     panel: "panel-1".into(),
                     wall: Some("wall-1".into()),
+                    slot: Some(3),
                     pose: None,
                 },
                 ClientMessage::DismissPanel {

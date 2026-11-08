@@ -13,9 +13,12 @@
 //! something only in that environment's geometry: they are hidden while the space is in another environment, and shown
 //! again, where they were, when it comes back.
 //!
-//! **Layout.** A wall has [`WALL_SLOTS`] slots, the most prominent first. A panel put on a wall takes its most
-//! prominent free slot; when none is free, the panel that has been on the wall longest leaves it, and the newcomer takes
-//! its slot. Nothing else ever moves, so that nobody's reading is disturbed.
+//! **Layout.** A wall has [`WALL_SLOTS`] slots, the most prominent first. A panel the agent projects takes its wall's
+//! most prominent free slot. A participant puts a panel in the slot they choose, and it is then arranged: when that slot
+//! holds another panel, the two change places, the other going where the one put there came from, or into a free slot
+//! on the same wall when it came from elsewhere and one is free. When a wall is full, the panel that has been on it
+//! longest of those not arranged leaves it for a newcomer, or, when every one is arranged, the one there longest. Nothing
+//! else ever moves, so that nobody's reading is disturbed.
 mod blocks;
 mod code;
 
@@ -25,7 +28,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tomori_protocol::{
-    CODE_LINES, Code, Meta, Panel, Place, Pose, Projection, TOMORI_WALL, WALL_SLOTS, Wall, WallKind,
+    CODE_LINES, Code, Meta, Panel, Place, Pose, Projection, TOMORI_WALL, WALL_SLOTS, Wall,
+    WallKind, WallShape,
 };
 
 /// The most walls owners may add in one environment of a space.
@@ -54,10 +58,15 @@ pub const REACH: f32 = 20.0;
 /// The version of the kept format, written with each space's stage.
 pub const SCHEMA: u32 = 1;
 
-/// Where the Tomori wall stands in an environment that declares no `stage` anchor: front right of home, beside the
-/// swarm, clear of Sky's shrine and inside the farmyard's fence, upright and facing home.
+/// How far ahead of the Tomori wall the point is that its row of slots curves about, in metres: from where it stands by
+/// default, home, so that every slot faces a participant standing there.
+pub const ARC_RADIUS: f32 = 2.3;
+
+/// Where the Tomori wall stands in an environment that declares no `stage` anchor: below the swarm, the middle of its
+/// curved row of slots straight ahead of home, beneath the swarm's middle, low enough that the swarm and every worker
+/// station are seen over it, upright and facing home.
 pub fn default_stage() -> Pose {
-    Pose::upright_facing([1.9, 1.5, -2.1], [0.0, 1.5, 0.0])
+    Pose::upright_facing([0.0, 0.52, -ARC_RADIUS], [0.0, 0.52, 0.0])
 }
 
 /// What a panel shows: its title, on one line and possibly empty, its body, and its metadata, in order; and, for a
@@ -85,8 +94,10 @@ pub struct Walls<'a> {
 /// Where a participant puts a panel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
-    /// Into the layout of the wall with this identity.
+    /// Into the layout of the wall with this identity, in its most prominent free slot, as an older client asks.
     Wall(String),
+    /// Into this slot of the wall with this identity, which the participant chose.
+    Slot(String, u32),
     /// Floating free at this pose.
     Free(Pose),
 }
@@ -113,6 +124,9 @@ struct Kept {
     /// Whether a participant has put it where it is, so that the agent's next code panels do not replace it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pinned: bool,
+    /// A participant put it on its wall, so that it leaves a full wall only after those the agent put there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    arranged: bool,
 }
 
 impl Kept {
@@ -273,7 +287,10 @@ impl Stage {
     /// The walls panels can be put on in `walls`' environment: the Tomori wall, then the environment's own, then those
     /// its owners added.
     fn walls(&self, walls: &Walls<'_>) -> Vec<Wall> {
-        let mut shown = vec![Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori)];
+        let mut shown = vec![
+            Wall::new(TOMORI_WALL, WallKind::Tomori, walls.tomori)
+                .with_shape(WallShape::Arc { radius: ARC_RADIUS }),
+        ];
         shown.extend(walls.declared.iter().take(DECLARED_WALLS).enumerate().map(
             |(index, pose)| Wall::new(format!("environment-{index}"), WallKind::Environment, *pose),
         ));
@@ -364,25 +381,34 @@ impl Stage {
         Some(room.panels.remove(index))
     }
 
-    /// Put `kept` on the wall `wall` in `environment`, in its most prominent free slot, or else in the slot of the
-    /// panel that has been on it longest, which leaves.
-    fn put_on(&mut self, environment: &str, mut kept: Kept, wall: &str) {
-        kept.placed = self.tick();
-        let list = self.list(environment, Some(wall));
+    /// The most prominent slot of the wall `wall` that none of `list` is in.
+    fn free_slot(list: &[Kept], wall: &str) -> Option<u32> {
         let taken: Vec<u32> = list
             .iter()
             .filter_map(|other| other.slot_on(wall))
             .collect();
-        let slot = match (0..WALL_SLOTS).find(|slot| !taken.contains(slot)) {
+        (0..WALL_SLOTS).find(|slot| !taken.contains(slot))
+    }
+
+    /// Put `kept` on the wall `wall` in `environment`, `arranged` by a participant or not, in its most prominent free
+    /// slot, or else in the slot of the panel that has been on it longest of those not arranged, or, when all are, of
+    /// them all, which leaves.
+    fn put_on(&mut self, environment: &str, mut kept: Kept, wall: &str, arranged: bool) {
+        kept.placed = self.tick();
+        kept.arranged = arranged;
+        let list = self.list(environment, Some(wall));
+        let slot = match Self::free_slot(list, wall) {
             Some(slot) => slot,
             None => {
                 let (index, slot) = list
                     .iter()
                     .enumerate()
                     .filter_map(|(index, other)| {
-                        other.slot_on(wall).map(|slot| (index, other.placed, slot))
+                        other
+                            .slot_on(wall)
+                            .map(|slot| (index, (other.arranged, other.placed), slot))
                     })
-                    .min_by_key(|(_, placed, _)| *placed)
+                    .min_by_key(|(_, order, _)| *order)
                     .map(|(index, _, slot)| (index, slot))
                     .expect("a full wall holds panels");
                 list.remove(index);
@@ -394,6 +420,46 @@ impl Stage {
             slot,
         };
         list.push(kept);
+    }
+
+    /// Put `kept`, which came from `from`, in the slot `slot` of the wall `wall` in `environment`, arranged. A panel
+    /// already there changes places with it: into the slot it came from on the same wall, or else into the wall's most
+    /// prominent free slot, or else where it came from, on another wall or floating.
+    fn put_in(&mut self, environment: &str, mut kept: Kept, from: Placed, wall: &str, slot: u32) {
+        kept.placed = self.tick();
+        kept.arranged = true;
+        kept.place = Placed::Wall {
+            wall: wall.to_owned(),
+            slot,
+        };
+        let placed = self.tick();
+        let list = self.list(environment, Some(wall));
+        let occupant = list
+            .iter()
+            .position(|other| other.slot_on(wall) == Some(slot))
+            .map(|index| list.remove(index));
+        list.push(kept);
+        let free = Self::free_slot(list, wall);
+        let Some(mut occupant) = occupant else {
+            return;
+        };
+        occupant.placed = placed;
+        occupant.place = match (&from, free) {
+            (Placed::Wall { wall: was, slot }, _) if was == wall => Placed::Wall {
+                wall: wall.to_owned(),
+                slot: *slot,
+            },
+            (_, Some(free)) => Placed::Wall {
+                wall: wall.to_owned(),
+                slot: free,
+            },
+            (from, None) => from.clone(),
+        };
+        let to = match &occupant.place {
+            Placed::Wall { wall, .. } => Some(wall.clone()),
+            Placed::Free { .. } => None,
+        };
+        self.list(environment, to.as_deref()).push(occupant);
     }
 
     /// What participants see of the space `space` in `walls`' environment at `now`, in seconds since the epoch: every
@@ -454,8 +520,9 @@ impl Stage {
                 pose: Pose::default(),
             },
             pinned: false,
+            arranged: false,
         };
-        self.put_on(walls.environment, kept, &wall);
+        self.put_on(walls.environment, kept, &wall, false);
         self.bound(walls.environment);
         id
     }
@@ -534,11 +601,14 @@ impl Stage {
         panel: &str,
         target: Target,
     ) -> Result<bool, &'static str> {
+        let shown = |wall: &str| self.walls(walls).iter().any(|shown| shown.id == wall);
         let target = match target {
-            Target::Wall(wall) if self.walls(walls).iter().any(|shown| shown.id == wall) => {
-                Target::Wall(wall)
+            Target::Wall(wall) if shown(&wall) => Target::Wall(wall),
+            Target::Slot(wall, slot) if shown(&wall) && slot < WALL_SLOTS => {
+                Target::Slot(wall, slot)
             }
-            Target::Wall(_) => return Err("That wall is not here."),
+            Target::Slot(wall, _) if shown(&wall) => return Err("That wall has no such slot."),
+            Target::Wall(_) | Target::Slot(..) => return Err("That wall is not here."),
             Target::Free(pose) => Target::Free(
                 valid(&pose).ok_or("A panel must float within 20 m of the space's middle.")?,
             ),
@@ -550,18 +620,30 @@ impl Stage {
         let pinned = !kept.pinned;
         kept.pinned = true;
         match target {
-            // Put back on the wall it is on, it keeps its slot.
+            // Put back on the wall it is on, or in the slot it is in, it keeps its slot, now arranged.
             Target::Wall(wall) if kept.slot_on(&wall).is_some() => {
+                let changed = !std::mem::replace(&mut kept.arranged, true);
                 self.list(walls.environment, Some(&wall)).push(kept);
-                Ok(pinned)
+                Ok(pinned || changed)
+            }
+            Target::Slot(wall, slot) if kept.slot_on(&wall) == Some(slot) => {
+                let changed = !std::mem::replace(&mut kept.arranged, true);
+                self.list(walls.environment, Some(&wall)).push(kept);
+                Ok(pinned || changed)
             }
             Target::Wall(wall) => {
-                self.put_on(walls.environment, kept, &wall);
+                self.put_on(walls.environment, kept, &wall, true);
+                Ok(true)
+            }
+            Target::Slot(wall, slot) => {
+                let from = kept.place.clone();
+                self.put_in(walls.environment, kept, from, &wall, slot);
                 Ok(true)
             }
             Target::Free(pose) => {
                 let changed = pinned || kept.place != Placed::Free { pose };
                 kept.place = Placed::Free { pose };
+                kept.arranged = false;
                 kept.placed = self.tick();
                 let list = self.list(walls.environment, None);
                 list.push(kept);
@@ -695,16 +777,25 @@ mod tests {
     };
 
     #[test]
-    fn the_default_stage_stands_beside_the_swarm_facing_home() {
+    fn the_default_stage_stands_below_the_swarm_facing_home_curving_about_it() {
         let stage = default_stage();
-        assert_eq!(stage.position, [1.9, 1.5, -2.1]);
-        // Its +Z, the way it faces, points from it towards home.
-        let [_, y, _, w] = stage.orientation;
-        let facing = [2.0 * y * w, 0.0, 1.0 - 2.0 * y * y];
-        let towards = [-1.9_f32, 0.0, 2.1];
-        let length = (towards[0] * towards[0] + towards[2] * towards[2]).sqrt();
-        assert!((facing[0] - towards[0] / length).abs() < 1e-5);
-        assert!((facing[2] - towards[2] / length).abs() < 1e-5);
+        // Straight ahead of home, beneath the swarm's middle, and low, its arc's radius the distance to home.
+        assert_eq!(stage.position, [0.0, 0.52, -ARC_RADIUS]);
+        // Its +Z, the way it faces, points towards home.
+        assert_eq!(stage.orientation, [0.0, 0.0, 0.0, 1.0]);
+        let mut stage = Stage::default();
+        let wall = stage.walls(&SKY).remove(0);
+        assert_eq!(wall.shape, WallShape::Arc { radius: ARC_RADIUS });
+        // A space kept before keeps no pose for the Tomori wall, so it stands at the new default, with its panels.
+        let id = stage.project(&SKY, content("kept"), None, 0);
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        let walls = Walls {
+            tomori: default_stage(),
+            ..SKY
+        };
+        let view = kept.view("s", &walls, 0);
+        assert_eq!(view.walls[0].pose, default_stage());
+        assert_eq!(view.panel(&id).unwrap().place, on(TOMORI_WALL, 0));
     }
 
     #[test]
@@ -786,6 +877,183 @@ mod tests {
         assert!(stage.view("s", &SKY, 0).panel(&ids[1]).is_some());
     }
 
+    /// Where each panel shown in `walls`' environment is, by title, in order of title.
+    fn places(stage: &Stage, walls: &Walls<'_>) -> Vec<(String, Place)> {
+        let mut places = shown(stage, walls);
+        places.sort_by(|a, b| a.0.cmp(&b.0));
+        places
+    }
+
+    #[test]
+    fn a_panel_put_in_a_slot_takes_it_and_changes_places_with_the_one_there() {
+        let mut stage = Stage::default();
+        let added = stage.add_wall("sky", &pose(-2.0, -2.0)).unwrap();
+        let ids: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|title| stage.project(&SKY, content(title), None, 0))
+            .collect();
+        // Into an empty slot of its own wall: it takes it, and nothing else moves.
+        assert_eq!(
+            stage.place(&SKY, &ids[0], Target::Slot(TOMORI_WALL.into(), 5)),
+            Ok(true)
+        );
+        assert_eq!(
+            places(&stage, &SKY),
+            [
+                ("a".into(), on(TOMORI_WALL, 5)),
+                ("b".into(), on(TOMORI_WALL, 1)),
+                ("c".into(), on(TOMORI_WALL, 2)),
+            ]
+        );
+        // Into its own slot again, nothing changes.
+        assert_eq!(
+            stage.place(&SKY, &ids[0], Target::Slot(TOMORI_WALL.into(), 5)),
+            Ok(false)
+        );
+        // Onto another panel on the same wall: the two change places.
+        stage
+            .place(&SKY, &ids[1], Target::Slot(TOMORI_WALL.into(), 2))
+            .unwrap();
+        assert_eq!(
+            places(&stage, &SKY)[1..],
+            [
+                ("b".into(), on(TOMORI_WALL, 2)),
+                ("c".into(), on(TOMORI_WALL, 1)),
+            ]
+        );
+        // From another wall onto a panel on a wall with a free slot: the one there moves to that wall's most prominent
+        // free slot.
+        let d = stage.project(&SKY, content("d"), None, 0);
+        stage
+            .place(&SKY, &d, Target::Slot(added.clone(), 0))
+            .unwrap();
+        stage
+            .place(&SKY, &ids[2], Target::Slot(added.clone(), 0))
+            .unwrap();
+        assert_eq!(
+            places(&stage, &SKY)[2..],
+            [("c".into(), on(&added, 0)), ("d".into(), on(&added, 1)),]
+        );
+        // From floating onto a panel on a full wall: the one there floats where it floated.
+        for title in ["e", "f", "g", "h"] {
+            let id = stage.project(&SKY, content(title), None, 0);
+            stage.place(&SKY, &id, Target::Wall(added.clone())).unwrap();
+        }
+        let floating = pose(1.0, -1.0);
+        stage.place(&SKY, &ids[0], Target::Free(floating)).unwrap();
+        stage
+            .place(&SKY, &ids[0], Target::Slot(added.clone(), 1))
+            .unwrap();
+        let view = places(&stage, &SKY);
+        assert_eq!(view[0], ("a".into(), on(&added, 1)));
+        assert_eq!(
+            view[3],
+            (
+                "d".into(),
+                Place::Free {
+                    pose: valid(&floating).unwrap()
+                }
+            )
+        );
+        // From another full wall onto a panel on a full wall: they change walls and slots.
+        for title in ["i", "j", "k", "l"] {
+            stage.project(&SKY, content(title), None, 0);
+        }
+        let b = ids[1].clone();
+        let tomori_slot = match stage.view("s", &SKY, 0).panel(&b).unwrap().place {
+            Place::Wall { slot, .. } => slot,
+            _ => unreachable!("on the Tomori wall"),
+        };
+        stage
+            .place(&SKY, &b, Target::Slot(added.clone(), 3))
+            .unwrap();
+        let view = stage.view("s", &SKY, 0);
+        assert_eq!(view.panel(&b).unwrap().place, on(&added, 3));
+        let moved = view
+            .panels
+            .iter()
+            .find(|panel| panel.place == on(TOMORI_WALL, tomori_slot))
+            .unwrap();
+        assert_eq!(moved.title, "f");
+        // Refused: a slot past the last, or a wall not here.
+        assert_eq!(
+            stage.place(&SKY, &b, Target::Slot(added.clone(), WALL_SLOTS)),
+            Err("That wall has no such slot.")
+        );
+        assert_eq!(
+            stage.place(&SKY, &b, Target::Slot("wall-99".into(), 0)),
+            Err("That wall is not here.")
+        );
+        // And kept so across a restart.
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept, stage);
+    }
+
+    #[test]
+    fn a_full_wall_drops_the_oldest_panel_not_arranged_first_and_arranged_ones_keep_their_slots() {
+        let mut stage = Stage::default();
+        let ids: Vec<String> = (0..WALL_SLOTS)
+            .map(|index| stage.project(&SKY, content(&index.to_string()), None, 0))
+            .collect();
+        // The two oldest are arranged: put in their own slots by hand.
+        for id in &ids[..2] {
+            stage
+                .place(&SKY, id, Target::Wall(TOMORI_WALL.into()))
+                .unwrap();
+        }
+        // New panels take the slots of the oldest not arranged, one after another, and never the arranged ones.
+        for (title, slot) in [("new", 2), ("newer", 3), ("newest", 4)] {
+            stage.project(&SKY, content(title), None, 0);
+            let view = stage.view("s", &SKY, 0);
+            let there = view
+                .panels
+                .iter()
+                .find(|panel| panel.place == on(TOMORI_WALL, slot))
+                .unwrap();
+            assert_eq!(there.title, title);
+            for (index, id) in ids[..2].iter().enumerate() {
+                assert_eq!(view.panel(id).unwrap().place, on(TOMORI_WALL, index as u32));
+            }
+        }
+        // With every panel arranged, the one there longest goes: arranged before the rest were, the first.
+        for slot in 0..WALL_SLOTS {
+            let id = stage
+                .view("s", &SKY, 0)
+                .panels
+                .into_iter()
+                .find(|panel| panel.place == on(TOMORI_WALL, slot))
+                .unwrap()
+                .id;
+            stage
+                .place(&SKY, &id, Target::Slot(TOMORI_WALL.into(), slot))
+                .unwrap();
+        }
+        stage.project(&SKY, content("last"), None, 0);
+        let view = stage.view("s", &SKY, 0);
+        assert!(view.panel(&ids[0]).is_none());
+        assert_eq!(view.panels.len(), WALL_SLOTS as usize);
+        // A panel a participant puts on a full wall, without a slot, leaves the oldest not arranged too: of the agent's
+        // two, the earlier.
+        let floating = stage
+            .view("s", &SKY, 0)
+            .panels
+            .into_iter()
+            .find(|panel| panel.title == "newest")
+            .unwrap()
+            .id;
+        stage
+            .place(&SKY, &floating, Target::Free(pose(0.0, -1.0)))
+            .unwrap();
+        stage.project(&SKY, content("fill"), None, 0);
+        stage
+            .place(&SKY, &floating, Target::Wall(TOMORI_WALL.into()))
+            .unwrap();
+        let view = stage.view("s", &SKY, 0);
+        assert!(view.panels.iter().all(|panel| panel.title != "last"));
+        assert!(view.panels.iter().any(|panel| panel.title == "fill"));
+        assert!(view.panel(&floating).is_some());
+    }
+
     #[test]
     fn panels_are_pulled_off_snapped_back_and_dismissed() {
         let mut stage = Stage::default();
@@ -814,7 +1082,7 @@ mod tests {
             stage.view("s", &SKY, 0).panel(&one).unwrap().place,
             on(&added, 0)
         );
-        // Put back where it is, it is pinned there, which changes it once.
+        // Put back where it is, it is pinned there and arranged, which changes it once, and again, nothing at all.
         assert_eq!(
             stage.place(&SKY, &two, Target::Wall(TOMORI_WALL.into())),
             Ok(true)
@@ -1015,6 +1283,7 @@ mod tests {
                 pose: pose(0.0, 0.0),
             },
             pinned: false,
+            arranged: false,
         };
         // More hidden in other environments than the limit allows, the earliest placed in the second.
         for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {

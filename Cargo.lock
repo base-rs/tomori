@@ -3644,6 +3644,7 @@ dependencies = [
  "ash",
  "env_logger",
  "glam",
+ "image",
  "jni 0.21.1",
  "log",
  "ndk",
