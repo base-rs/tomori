@@ -2477,6 +2477,24 @@ fn agent_speech_muted_while_connected_is_not_heard() {
 }
 
 #[test]
+fn agent_speech_skipped_while_connected_is_not_heard_until_no_longer_skipped() {
+    let peer = Peer::start();
+    let held = Held::default();
+    let mut session = Script::default();
+    let mut connection = with_peer(&peer, &mut session, Scripted::default(), held.clone());
+    until(&mut connection, &mut session, |_, _| held.opened());
+    let heard = |held: &Held| (0..10).any(|_| held.heard());
+    session.push(Action::SetAgentSkipped(true));
+    connection.poll(true, &mut session);
+    peer.speak(&mut connection, &mut session);
+    assert!(!heard(&held));
+    session.push(Action::SetAgentSkipped(false));
+    connection.poll(true, &mut session);
+    peer.speak(&mut connection, &mut session);
+    assert!(heard(&held));
+}
+
+#[test]
 fn a_speaker_that_fails_once_open_is_reported_once_and_tried_again_later() {
     let peer = Peer::start();
     let mut session = Script::default();

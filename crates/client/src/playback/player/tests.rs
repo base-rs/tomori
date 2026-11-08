@@ -217,6 +217,42 @@ fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
 }
 
 #[test]
+fn skipped_agent_speech_is_silent_but_still_plays_and_the_mute_is_kept_apart() {
+    let (sender, mut player, control) = player();
+    control.set_agent_skipped(true);
+    sender.send(frame(1, 0, 100)).unwrap();
+    sender.send(frame(AGENT_SOURCE, 0, 20)).unwrap();
+    sender.send(frame(REPLAY_SOURCE, 0, 7)).unwrap();
+    // Other participants still play; the agent is silent here, live or played again, but still plays, with its level.
+    assert_eq!(render(&mut player, FRAME), [100; FRAME]);
+    let (playing, level) = control.agent_speech();
+    assert!(playing);
+    assert!(level > 0.0);
+    // Muting and then no longer skipping keeps it silent, as it is still muted.
+    control.set_agent_muted(true);
+    control.set_agent_skipped(false);
+    sender.send(frame(AGENT_SOURCE, 1, 20)).unwrap();
+    assert_eq!(render(&mut player, FRAME), [0; FRAME]);
+    // Unmuting then lets it be heard again.
+    control.set_agent_muted(false);
+    sender.send(frame(AGENT_SOURCE, 2, 20)).unwrap();
+    assert_eq!(render(&mut player, FRAME), [20; FRAME]);
+    // Skipping, and then unmuting, keeps it skipped; the skip survives the mixer being made again for a new rate.
+    control.set_agent_skipped(true);
+    control.set_agent_muted(false);
+    render(&mut player, FRAME);
+    let mut output = vec![1; FRAME * 2];
+    sender
+        .send(AudioFrame {
+            sample_rate: RATE * 2,
+            ..frame(AGENT_SOURCE, 3, 20)
+        })
+        .unwrap();
+    player.render(RATE * 2, Layout::Mono, &mut output);
+    assert!(output.iter().all(|&sample| sample == 0));
+}
+
+#[test]
 fn never_plays_the_local_participant() {
     let (sender, mut player, control) = player();
     control.set_local_source(Some(5));

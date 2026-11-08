@@ -18,6 +18,7 @@ enum Command {
     LocalSource(Option<u32>),
     Clear,
     AgentMuted(bool),
+    AgentSkipped(bool),
     Play(Earcon, Direction),
     Ambient(Sound, Position),
     Probe,
@@ -58,6 +59,8 @@ pub struct Player {
     mixer: Option<Mixer>,
     local_source: Option<u32>,
     agent_muted: bool,
+    /// Whether the participant spoke over the agent, so that the rest of what it was saying is skipped here, as muted speech is.
+    agent_skipped: bool,
     /// Whether mixers load the echo probe.
     probe: bool,
 }
@@ -82,6 +85,7 @@ impl Player {
             mixer: None,
             local_source: None,
             agent_muted: false,
+            agent_skipped: false,
             probe: false,
         };
         (player, PlayerControl { commands, shared })
@@ -105,7 +109,7 @@ impl Player {
             ..self.options
         });
         mixer.set_local_source(self.local_source);
-        mixer.set_agent_muted(self.agent_muted);
+        mixer.set_agent_muted(self.agent_muted || self.agent_skipped);
         if self.probe {
             mixer.load_probe();
         }
@@ -132,7 +136,11 @@ impl Player {
                 }
                 Command::AgentMuted(muted) => {
                     self.agent_muted = muted;
-                    mixer.set_agent_muted(muted);
+                    mixer.set_agent_muted(self.agent_muted || self.agent_skipped);
+                }
+                Command::AgentSkipped(skipped) => {
+                    self.agent_skipped = skipped;
+                    mixer.set_agent_muted(self.agent_muted || self.agent_skipped);
                 }
                 Command::Play(earcon, direction) => mixer.play(earcon, direction),
                 Command::Ambient(sound, position) => mixer.ambient(sound, position),
@@ -203,6 +211,11 @@ impl PlayerControl {
     /// Mute or unmute agent speech locally, live or played again, while other participants still play. Muted speech is still consumed in real time, so unmuting resumes it live. See `design/speech.md`.
     pub fn set_agent_muted(&self, muted: bool) {
         let _ = self.commands.send(Command::AgentMuted(muted));
+    }
+
+    /// Skip the rest of what the agent is saying here, live or played again, or stop skipping it: the participant spoke over it. Skipped speech is silent, as muted speech is, and still consumed in real time and measured, so it still plays; the mute and the skip are kept apart, so that ending one leaves the other. See `design/speech.md`.
+    pub fn set_agent_skipped(&self, skipped: bool) {
+        let _ = self.commands.send(Command::AgentSkipped(skipped));
     }
 
     /// Whether agent speech played again for this participant, a replay or catch-up, was playing at the last render, including the breaths between its segments.

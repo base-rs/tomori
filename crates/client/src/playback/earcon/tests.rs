@@ -76,6 +76,19 @@ fn rising_and_falling_cues_differ_by_pitch_direction() {
     assert!(!rises(Earcon::Off));
     assert!(!rises(Earcon::Failed));
     assert!(!rises(Earcon::CatchingUp));
+    assert!(!rises(Earcon::YourTurn));
+}
+
+#[test]
+fn the_turn_cue_is_the_softest_single_note() {
+    let turn = Earcon::YourTurn.spec();
+    assert_eq!(turn.notes.len(), 1);
+    assert!(
+        Earcon::ALL
+            .into_iter()
+            .filter(|earcon| *earcon != Earcon::YourTurn)
+            .all(|earcon| earcon.spec().level > turn.level)
+    );
 }
 
 #[test]

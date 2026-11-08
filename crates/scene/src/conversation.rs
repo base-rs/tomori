@@ -335,6 +335,8 @@ pub struct Conversation {
     replaying: bool,
     /// Agent speech playing on this device at the last frame, live or played again, which the swarm speaks with.
     speech: SpeechActivity,
+    /// Whether the agent is still speaking here, whether it is the participant's turn, and what they spoke over. See `design/speech.md`.
+    turn: crate::turn::Turn,
     /// This device's Feedback setting, which the hand menu and console change.
     feedback: feedback::Settings,
     /// Whether the last [`Self::accept`] refused, saying why, rather than acting or having nothing to do.
@@ -464,6 +466,7 @@ impl Conversation {
             muted: false,
             replaying: false,
             speech: SpeechActivity::default(),
+            turn: crate::turn::Turn::default(),
             feedback: feedback::Settings::default(),
             refused: false,
             problem_seen: None,
@@ -683,6 +686,7 @@ impl Conversation {
         if !matches!(state, ConnectionState::Connected { .. }) {
             // A pairing belongs to its connection; the server withdraws it.
             self.pairing = None;
+            self.forget_turn();
             self.stop_live();
             let naming = self.talk.as_ref().and_then(Talk::naming);
             match &self.talk {
@@ -1005,8 +1009,17 @@ impl Conversation {
                 }
             }
             // Agent speech is heard rather than shown: its audio plays through the speaker.
-            ServerMessage::Speech { segment, text, .. } => {
+            ServerMessage::Speech {
+                segment,
+                text,
+                message,
+                ..
+            } => {
                 log::info!("Agent speech {segment}: {text}");
+                // Something other than what the participant spoke over is heard again.
+                if self.turn.announced(&message) {
+                    self.actions.push(Action::SetAgentSkipped(false));
+                }
             }
             // Presence comes with the presence work.
             ServerMessage::Welcome { .. }
@@ -1187,6 +1200,10 @@ impl Conversation {
         if self.muted {
             self.toggle_mute();
         }
+        // Asking to hear it again hears what was skipped, too.
+        if self.turn.resume() {
+            self.actions.push(Action::SetAgentSkipped(false));
+        }
         self.notice = None;
         self.send(ClientMessage::Replay { message: None });
     }
@@ -1237,6 +1254,56 @@ impl Conversation {
     /// Agent speech playing on this device, from the player, once per frame: live or played again, and even while muted here, since the others still hear it. The swarm speaks while it plays; see `design/speech.md`.
     pub fn speech(&self) -> SpeechActivity {
         self.speech
+    }
+
+    /// Agent speech played this frame, `playing` or not: heard if it is neither muted, skipped nor silenced while the participant records; and once it has ended, with the agent free, it is the participant's turn.
+    fn hear(&mut self, playing: bool) {
+        let recording = matches!(self.talk, Some(Talk::Recording { .. }));
+        let audible = !self.muted && !self.turn.is_skipped() && !recording;
+        self.turn.played(playing, audible);
+        let free = self.turn_free();
+        self.turn.settle(self.turn_clock(), free);
+    }
+
+    /// The frame's time, as the connection's tick last gave it before the frame's speech, or the clock's without one.
+    fn turn_clock(&self) -> Instant {
+        self.turn.now().unwrap_or_else(Instant::now)
+    }
+
+    /// Whether the agent is free for the participant to speak to: one who takes part, in a space, idle, with no request waiting, nothing queued, and none of their own words being recorded or on their way.
+    fn turn_free(&self) -> bool {
+        self.talk.is_none()
+            && self.role.participates()
+            && self
+                .space
+                .as_ref()
+                .filter(|_| self.mode == Mode::Space)
+                .is_some_and(|space| {
+                    space.activity == tomori_protocol::Activity::Idle
+                        && space.approval.is_none()
+                        && space.question.is_none()
+                        && space.queue.is_empty()
+                })
+    }
+
+    /// The participant starts speaking: if the agent is speaking here, the rest of what it is saying is skipped, faded out as push-to-talk silences playback and left silent after, and a replay or catch-up is stopped, so that they take the turn rather than talk over it. Its words stay in the transcript, and the right stick plays them again. See `design/speech.md`.
+    fn speak_over(&mut self) {
+        if !self.turn.speak(self.turn_clock()) {
+            return;
+        }
+        log::info!("Spoke over the agent: skipping the rest of what it is saying");
+        self.actions.push(Action::SetAgentSkipped(true));
+        if self.replaying {
+            self.send(ClientMessage::StopReplay);
+        }
+    }
+
+    /// Forget what the agent was saying and what was heard of it, as on leaving a space or losing the connection; nothing skipped stays skipped.
+    fn forget_turn(&mut self) {
+        if self.turn.is_skipped() {
+            self.actions.push(Action::SetAgentSkipped(false));
+        }
+        self.turn.reset();
     }
 
     /// Finish a jump with the first listing: join the space that most needs attention, even one the server already put this participant in, since joining is what says it has been seen. If someone dealt with it meanwhile, stay in the lobby and say so.
@@ -1290,6 +1357,7 @@ impl Conversation {
         // Knocks belong to the space.
         self.knocks.clear();
         self.knock = None;
+        self.forget_turn();
         self.space = None;
         self.cards = None;
         self.projection = None;
@@ -2815,6 +2883,8 @@ impl Conversation {
         };
         Some(Status {
             activity: space.activity,
+            speaking: self.turn.speaking_as(now, self.muted),
+            pulse: (self.turn.pulse(now) * 255.0).round() as u8,
             mode: space
                 .current_mode()
                 .map(|mode| mode.name.clone())
@@ -3013,6 +3083,7 @@ impl Conversation {
             .filter(|target| naming.is_none() && self.knows(target));
         let attention = pointed.iter().filter(|_| !answering).cloned().collect();
         let begun = Utterance::new(utterance.clone(), self.capture_generation);
+        self.speak_over();
         self.actions.push(Action::BeginUtterance(match naming {
             Some(Naming::Name) => begun.naming(),
             Some(Naming::Title) => begun.titling(),
@@ -4779,12 +4850,16 @@ impl Session for Conversation {
         if let Report::Replaying(replaying) = report {
             self.set_replaying(replaying);
         }
+        if let Report::Tick { now, .. } = report {
+            self.turn.tick(now);
+        }
         if let Report::AgentSpeech { playing, level } = report {
             self.speech = SpeechActivity {
                 playing,
                 level,
                 ..SpeechActivity::default()
             };
+            self.hear(playing);
         }
         match report {
             Report::Connecting(choice) => self.connect(choice),
@@ -4817,6 +4892,7 @@ impl Session for Conversation {
     /// The approval and question waiting in the joined space, the knocks on it, and the recording, nearing the server's limit. Visitors cannot decide requests or let anyone in, so nothing waits for them.
     fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
         feedback.observe_recording(self.recording(), self.utterance_limit(), now);
+        feedback.observe_turn(self.turn.turn(), now);
         let space = self
             .joined_space()
             .map(|(space, _)| space)
@@ -9352,6 +9428,277 @@ mod tests {
         assert!(!conversation.menu_model().pill);
         conversation.choose_menu(crate::hand_menu::Choice::Pill);
         assert!(conversation.pill_status(now).is_some());
+    }
+
+    /// A frame at `at`, with agent speech `playing` on this device, as the connection reports it.
+    fn speech_frame(conversation: &mut Conversation, at: Instant, playing: bool) {
+        Session::report(
+            conversation,
+            Report::Tick {
+                now: at,
+                browsing: false,
+            },
+        );
+        Session::report(
+            conversation,
+            Report::AgentSpeech {
+                playing,
+                level: if playing { 0.3 } else { 0.0 },
+            },
+        );
+    }
+
+    /// Agent speech of `message` announced, live.
+    fn announce(conversation: &mut Conversation, message: &str) {
+        conversation.apply(Event::Message(ServerMessage::Speech {
+            segment: 1,
+            message: message.into(),
+            text: "Done.".into(),
+            sample_rate: 24_000,
+            replay: false,
+        }));
+    }
+
+    /// The turn cues `conversation` makes the feedback play, as the connection observes it each frame.
+    fn turn_cues(
+        conversation: &Conversation,
+        feedback: &mut feedback::Feedback,
+        at: Instant,
+    ) -> usize {
+        Session::observe(conversation, feedback, at);
+        feedback
+            .take_earcons()
+            .filter(|(earcon, _)| *earcon == tomori_client::playback::Earcon::YourTurn)
+            .count()
+    }
+
+    #[test]
+    fn the_pill_says_speaking_while_speech_plays_then_settles_to_idle_with_your_turn_once() {
+        use crate::pill::Speaking;
+        let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
+        let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        speech_frame(&mut conversation, start, false);
+        assert_eq!(conversation.pill_status(start).unwrap().speaking, None);
+        // The agent is idle on the server, but its reply still plays here.
+        announce(&mut conversation, "m1");
+        speech_frame(&mut conversation, start + ms(20), true);
+        let status = conversation.pill_status(start + ms(20)).unwrap();
+        assert_eq!(status.activity, Activity::Idle);
+        assert_eq!(status.speaking, Some(Speaking::Heard));
+        assert!(
+            crate::pill::rows(&status)[0]
+                .plain()
+                .starts_with("◉ speaking")
+        );
+        assert_eq!(turn_cues(&conversation, &mut feedback, start + ms(20)), 0);
+        // A breath between segments is still speaking, and no turn.
+        speech_frame(&mut conversation, start + ms(400), false);
+        assert_eq!(
+            conversation.pill_status(start + ms(400)).unwrap().speaking,
+            Some(Speaking::Heard)
+        );
+        assert_eq!(turn_cues(&conversation, &mut feedback, start + ms(400)), 0);
+        // Once it has stopped for longer than the swarm's hold, the pill settles to idle, its dot pulsing once, and the turn is cued once.
+        let ended = start + ms(20) + crate::turn::HOLD;
+        speech_frame(&mut conversation, ended, false);
+        let status = conversation.pill_status(ended).unwrap();
+        assert_eq!(status.speaking, None);
+        assert_eq!(
+            crate::pill::rows(&status)[0].plain().split("  ").next(),
+            Some("● idle")
+        );
+        assert!(
+            conversation
+                .pill_status(ended + crate::turn::PULSE / 2)
+                .unwrap()
+                .pulse
+                > 250
+        );
+        assert_eq!(
+            conversation
+                .pill_status(ended + crate::turn::PULSE)
+                .unwrap()
+                .pulse,
+            0
+        );
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended), 1);
+        speech_frame(&mut conversation, ended + ms(20), false);
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended + ms(20)), 0);
+        // A reply with no speech is no turn.
+        conversation.apply(space(|space| space.activity = Activity::Running));
+        speech_frame(&mut conversation, ended + ms(1_000), false);
+        conversation.apply(space(|space| space.activity = Activity::Idle));
+        speech_frame(&mut conversation, ended + ms(2_000), false);
+        assert_eq!(
+            turn_cues(&conversation, &mut feedback, ended + ms(2_000)),
+            0
+        );
+        assert_eq!(
+            conversation.pill_status(ended + ms(2_300)).unwrap().pulse,
+            0
+        );
+    }
+
+    #[test]
+    fn speech_shows_over_running_and_the_turn_waits_for_the_agent_to_be_free() {
+        use crate::pill::Speaking;
+        let mut conversation = on_wrist(|space| space.activity = Activity::Running);
+        let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        speech_frame(&mut conversation, start, true);
+        let status = conversation.pill_status(start).unwrap();
+        assert_eq!(status.speaking, Some(Speaking::Heard));
+        assert_eq!(status.activity, Activity::Running);
+        // Speech ended, the agent still working: running again, and not yet the participant's turn.
+        let ended = start + ms(1_000);
+        speech_frame(&mut conversation, ended, false);
+        assert_eq!(conversation.pill_status(ended).unwrap().speaking, None);
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended), 0);
+        // Nor while an approval waits.
+        conversation.apply(space(|space| {
+            space.activity = Activity::Idle;
+            space.approval = Some(approval(&[]));
+        }));
+        speech_frame(&mut conversation, ended + ms(100), false);
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended + ms(100)), 0);
+        // Once it is idle with nothing waiting, it is, having spoken.
+        conversation.apply(space(|space| {
+            space.activity = Activity::Idle;
+            space.approval = None;
+        }));
+        speech_frame(&mut conversation, ended + ms(200), false);
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended + ms(200)), 1);
+    }
+
+    #[test]
+    fn muted_speech_shows_as_speaking_muted_and_is_no_turn() {
+        use crate::pill::Speaking;
+        let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
+        let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+        conversation.toggle_mute();
+        let start = Instant::now();
+        speech_frame(&mut conversation, start, true);
+        let status = conversation.pill_status(start).unwrap();
+        assert_eq!(status.speaking, Some(Speaking::Muted));
+        assert!(
+            crate::pill::rows(&status)[0]
+                .plain()
+                .starts_with("◉ speaking, muted")
+        );
+        let ended = start + Duration::from_secs(1);
+        speech_frame(&mut conversation, ended, false);
+        assert_eq!(conversation.pill_status(ended).unwrap().speaking, None);
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended), 0);
+        assert_eq!(conversation.pill_status(ended).unwrap().pulse, 0);
+    }
+
+    #[test]
+    fn speaking_over_the_agent_skips_the_rest_of_what_it_says_until_it_says_something_else() {
+        use crate::pill::Speaking;
+        let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
+        let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        announce(&mut conversation, "m1");
+        speech_frame(&mut conversation, start, true);
+        conversation.take_actions();
+        // X while it speaks skips the rest, before the microphone opens.
+        conversation.talk(true);
+        let actions = conversation.take_actions();
+        assert!(matches!(
+            &actions[..],
+            [Action::SetAgentSkipped(true), Action::BeginUtterance(_)]
+        ));
+        speech_frame(&mut conversation, start + ms(20), true);
+        conversation.talk(false);
+        conversation.take_actions();
+        // Still playing for the others, so still speaking, but skipped here.
+        speech_frame(&mut conversation, start + ms(40), true);
+        let status = conversation.pill_status(start + ms(40)).unwrap();
+        assert_eq!(status.speaking, Some(Speaking::Skipped));
+        assert!(
+            crate::pill::rows(&status)[0]
+                .plain()
+                .starts_with("◉ speaking, skipped")
+        );
+        // More of the same message stays skipped.
+        announce(&mut conversation, "m1");
+        assert!(conversation.take_actions().is_empty());
+        // What was skipped, ending, is no turn: the participant has spoken.
+        let ended = start + ms(2_000);
+        speech_frame(&mut conversation, ended, false);
+        conversation.talk = None;
+        speech_frame(&mut conversation, ended + ms(20), false);
+        assert_eq!(turn_cues(&conversation, &mut feedback, ended + ms(20)), 0);
+        // The agent's next message is heard.
+        announce(&mut conversation, "m2");
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::SetAgentSkipped(false)]
+        );
+        speech_frame(&mut conversation, ended + ms(40), true);
+        assert_eq!(
+            conversation.pill_status(ended + ms(40)).unwrap().speaking,
+            Some(Speaking::Heard)
+        );
+        // X long after speech ended skips nothing.
+        let later = ended + ms(5_000);
+        speech_frame(&mut conversation, later, false);
+        conversation.take_actions();
+        conversation.talk(true);
+        assert!(matches!(
+            &conversation.take_actions()[..],
+            [Action::BeginUtterance(_)]
+        ));
+    }
+
+    #[test]
+    fn speaking_over_a_replay_stops_it_and_asking_again_hears_what_was_skipped() {
+        let mut conversation = on_wrist(|space| {
+            space.activity = Activity::Idle;
+            space.speech = SpeechSetting::Full;
+        });
+        let start = Instant::now();
+        Session::report(&mut conversation, Report::Replaying(true));
+        speech_frame(&mut conversation, start, true);
+        conversation.take_actions();
+        conversation.talk(true);
+        let actions = conversation.take_actions();
+        assert!(matches!(
+            &actions[..],
+            [
+                Action::SetAgentSkipped(true),
+                Action::Send(ClientMessage::StopReplay),
+                Action::BeginUtterance(_)
+            ]
+        ));
+        conversation.talk(false);
+        Session::report(&mut conversation, Report::Replaying(false));
+        conversation.take_actions();
+        // The right stick plays it again, heard.
+        conversation.replay();
+        assert_eq!(
+            conversation.take_actions(),
+            [
+                Action::SetAgentSkipped(false),
+                Action::Send(ClientMessage::Replay { message: None })
+            ]
+        );
+        // Leaving the space forgets a skip.
+        announce(&mut conversation, "m1");
+        speech_frame(&mut conversation, start + Duration::from_millis(20), true);
+        conversation.talk(true);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::Left { deleted: None }));
+        assert!(
+            conversation
+                .take_actions()
+                .contains(&Action::SetAgentSkipped(false))
+        );
     }
 
     #[test]
