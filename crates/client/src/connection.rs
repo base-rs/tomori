@@ -1518,10 +1518,12 @@ impl Connection {
                     self.voice.stop_live();
                 }
                 Action::SetAgentMuted(muted) => self.speaker.set_muted(muted),
+                // Without a player, nothing plays to skip; the next one starts with nothing skipped.
                 Action::SetAgentSkipped(skipped) => {
-                    if let Some(control) = self.speaker.control() {
-                        control.set_agent_skipped(skipped);
-                    }
+                    let _ = self
+                        .speaker
+                        .control()
+                        .inspect(|control| control.set_agent_skipped(skipped));
                 }
                 Action::SetFeedback(settings) => {
                     self.feedback.set_settings(settings);
