@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! What is projected in a space: its walls and the text panels on them or floating, as the server sends them; where
+//! What is projected in a space: its walls and the text and code panels on them or floating, as the server sends them; where
 //! each stands; which panel the ray points at, and the label that names it; and pulling a panel off with the grip,
 //! carrying it along the ray and letting it go, where it floats, or, near a wall, snaps back into that wall's layout.
 //! See `design/projection.md`.
@@ -12,7 +12,9 @@
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3};
-use tomori_protocol::{Panel, Place, Pose, Projection, WALL_SLOTS, Wall, WallKind};
+use tomori_protocol::{
+    CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, WALL_SLOTS, Wall, WallKind,
+};
 
 use crate::{
     arrival::HOME,
@@ -32,6 +34,18 @@ const ROWS: usize = BODY_ROWS + 3;
 /// The size of a font pixel on a wall, in metres: a panel is about 60 by 36 cm, its text legible from about 3 m.
 pub const PIXEL: f32 = 0.0019;
 const PADDING: (usize, usize) = (6, 5);
+
+/// A code panel's face, in cells: a title, a row of its language, length and age, a rule, its lines, each after its
+/// number, and a row saying how many more lines there are.
+pub const CODE_COLUMNS: usize = 48;
+const CODE_ROWS: usize = 3 + CODE_LINES + 1;
+const CODE_PADDING: (usize, usize) = (6, 12);
+/// The cells of a code panel's line number, and the space after it.
+const GUTTER: usize = 3;
+/// The size of a font pixel on a code panel, in metres, smaller than a text panel's so that the same panel holds its
+/// [`CODE_COLUMNS`] and [`CODE_LINES`], legible from about 2 m.
+pub const CODE_PIXEL: f32 = PIXEL * (COLUMNS * CELL_WIDTH + 2 * PADDING.0) as f32
+    / (CODE_COLUMNS * CELL_WIDTH + 2 * CODE_PADDING.0) as f32;
 
 /// A wall's slots: [`WALL_SLOTS`] in columns of this many, the first at the top left as seen from in front.
 const SLOT_COLUMNS: u32 = 3;
@@ -136,31 +150,73 @@ pub fn name(panel: &Panel) -> String {
     crate::ui_text::clip(start.trim().trim_start_matches('#').trim(), 60)
 }
 
-/// How long ago, briefly, with what a panel's metadata says, such as `source: CI · 5m`.
+/// How many lines a code panel's block has, such as `40 lines`.
+fn length(code: &Code) -> String {
+    match code.lines {
+        1 => "1 line".to_owned(),
+        lines => format!("{lines} lines"),
+    }
+}
+
+/// How long ago, briefly, with what a panel's metadata says, such as `source: CI · 5m`, or, for a code panel, its
+/// language and length, such as `rust · 40 lines · 5m`, and whether it is pinned.
 fn about(panel: &Panel) -> String {
     let mut parts: Vec<String> = panel
         .meta
         .iter()
         .map(|meta| format!("{}: {}", meta.key, meta.value))
         .collect();
+    if let Some(code) = &panel.code {
+        parts.extend((!code.language.is_empty()).then(|| code.language.clone()));
+        parts.push(length(code));
+    }
     parts.push(crate::board::age(panel.age));
+    if panel.code.is_some() && panel.pinned {
+        parts.push("pinned".to_owned());
+    }
     parts.join(" · ")
+}
+
+/// The colour each kind of code is drawn in, one calm palette on a panel's dark face for every client, whichever
+/// highlighter classified it on the server.
+pub fn palette(kind: TokenKind) -> crate::ui_text::Rgba {
+    match kind {
+        TokenKind::Keyword => [0.78, 0.62, 0.96, 1.0],
+        TokenKind::String => [0.66, 0.86, 0.58, 1.0],
+        TokenKind::Comment => [0.5, 0.56, 0.64, 1.0],
+        TokenKind::Number => [0.96, 0.7, 0.48, 1.0],
+        TokenKind::Function => [0.5, 0.74, 0.98, 1.0],
+        TokenKind::Type => [0.95, 0.84, 0.52, 1.0],
+        TokenKind::Variable => [0.84, 0.88, 0.94, 1.0],
+        TokenKind::Operator => [0.56, 0.86, 0.9, 1.0],
+        TokenKind::Punctuation => [0.64, 0.68, 0.75, 1.0],
+        TokenKind::Constant => [0.96, 0.62, 0.56, 1.0],
+        TokenKind::Attribute => [0.9, 0.64, 0.82, 1.0],
+        // Plain, and a kind this client does not know.
+        _ => TEXT,
+    }
 }
 
 /// What a panel's face shows: its title, bold, its metadata and age, a rule, and its body as Markdown-lite, styled as
 /// the transcript styles a message, on [`BODY_ROWS`] rows, ending with "…" where it is longer. A `highlighted` panel,
 /// pointed at or carried, is framed brightly, and the `newest` on its wall in blue.
 pub fn face(panel: &Panel, highlighted: bool, newest: bool) -> Canvas {
-    let mut canvas = Canvas::new(COLUMNS, PIXEL);
-    canvas.padding = PADDING;
-    canvas.background = [0.02, 0.035, 0.06, 0.94];
-    canvas.border = Some(if highlighted {
+    let border = Some(if highlighted {
         HIGHLIGHT
     } else if newest {
         NEWEST
     } else {
         FRAME
     });
+    if let Some(code) = &panel.code {
+        let mut canvas = code_face(panel, code);
+        canvas.border = border;
+        return canvas;
+    }
+    let mut canvas = Canvas::new(COLUMNS, PIXEL);
+    canvas.padding = PADDING;
+    canvas.background = [0.02, 0.035, 0.06, 0.94];
+    canvas.border = border;
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), COLUMNS),
         Row::text(&about(panel), Style::plain(DIM), COLUMNS),
@@ -175,6 +231,66 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool) -> Canvas {
     }
     body.resize(BODY_ROWS, Vec::new());
     rows.extend(body.into_iter().map(Row::new));
+    canvas.rows = rows;
+    canvas
+}
+
+/// A code panel's face: its title, bold, its language, length and age, a rule, and its lines in monospace, each after
+/// its number, coloured by kind as [`palette`] colours them, a line longer than the panel ending with "…", then how many
+/// more lines its block has. Spans that are not valid for its body, as `valid_spans` checks them, are ignored, and the
+/// code drawn plain.
+fn code_face(panel: &Panel, code: &Code) -> Canvas {
+    let mut canvas = Canvas::new(CODE_COLUMNS, CODE_PIXEL);
+    canvas.padding = CODE_PADDING;
+    canvas.background = [0.015, 0.025, 0.045, 0.95];
+    let mut rows = vec![
+        Row::text(&panel.title, Style::bold(BRIGHT), CODE_COLUMNS),
+        Row::text(&about(panel), Style::plain(DIM), CODE_COLUMNS),
+        Row::text(&"─".repeat(CODE_COLUMNS), Style::plain(DIM), CODE_COLUMNS),
+    ];
+    // The kind of each character of the body, in order.
+    let mut kinds = vec![TokenKind::Plain; panel.body.chars().count()];
+    if tomori_protocol::valid_spans(&panel.body, &code.spans) {
+        for span in &code.spans {
+            kinds[span.start as usize..span.end() as usize].fill(span.kind);
+        }
+    }
+    let mut at = 0;
+    let lines: Vec<&str> = panel.body.split('\n').collect();
+    for (number, line) in lines.iter().enumerate().take(CODE_LINES) {
+        let mut spans = vec![crate::ui_text::Span::new(
+            format!("{:>width$} ", number + 1, width = GUTTER - 1),
+            Style::plain(DIM),
+        )];
+        for (index, c) in line.chars().enumerate() {
+            let style = Style::plain(palette(kinds[at + index]));
+            // Joined to the run before, of the same kind, but never to the line's number.
+            if spans.len() > 1 && spans[spans.len() - 1].style == style {
+                spans.last_mut().expect("a run before").text.push(c);
+            } else {
+                spans.push(crate::ui_text::Span::new(c.to_string(), style));
+            }
+        }
+        at += line.chars().count() + 1;
+        let mut cells = cut(&spans, CODE_COLUMNS);
+        // A line cut, here or by the server, ends with a dim "…".
+        if let Some(last) = cells.last_mut().filter(|(c, _)| *c == '…') {
+            last.1 = Style::plain(DIM);
+        }
+        rows.push(Row::new(cells));
+    }
+    let shown = lines.len().min(CODE_LINES);
+    rows.resize(CODE_ROWS - 1, Row::default());
+    let more = (code.lines as usize).saturating_sub(shown);
+    rows.push(match more {
+        0 => Row::default(),
+        1 => Row::text("…1 more line", Style::plain(DIM), CODE_COLUMNS),
+        more => Row::text(
+            &format!("…{more} more lines"),
+            Style::plain(DIM),
+            CODE_COLUMNS,
+        ),
+    });
     canvas.rows = rows;
     canvas
 }
@@ -231,6 +347,24 @@ pub fn label(panel: &Panel, at: Vec3, viewer: Vec3) -> Sheet {
             LABEL_COLUMNS,
         ))
     }));
+    if let Some(code) = &panel.code {
+        let mut about = vec![if code.lines as usize > CODE_LINES {
+            format!("lines 1–{CODE_LINES} of {}", code.lines)
+        } else {
+            length(code)
+        }];
+        if !code.language.is_empty() {
+            about.insert(0, code.language.clone());
+        }
+        if panel.pinned {
+            about.push("pinned".to_owned());
+        }
+        canvas.rows.push(Row::text(
+            &about.join(" · "),
+            Style::plain(TEXT),
+            LABEL_COLUMNS,
+        ));
+    }
     let place = match &panel.place {
         Place::Wall { wall, .. } if wall == tomori_protocol::TOMORI_WALL => "on the Tomori wall",
         Place::Wall { .. } => "on a wall",

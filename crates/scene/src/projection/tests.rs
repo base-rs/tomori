@@ -149,6 +149,165 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
     assert_eq!(name(&Panel::new("4", "", "", Place::Unknown)), "");
 }
 
+/// A code panel of Rust, its block `lines` long, with a keyword and a function highlighted on its first line.
+fn code_panel(id: &str, lines: u32) -> Panel {
+    use tomori_protocol::Span;
+    Panel::new(
+        id,
+        "rust",
+        "fn main() {\n    let x = \"日本\";\n}",
+        on(TOMORI_WALL, 1),
+    )
+    .with_code(Code::new("rust", lines).with_spans(vec![
+        Span::new(0, 2, TokenKind::Keyword),
+        Span::new(3, 4, TokenKind::Function),
+        Span::new(24, 4, TokenKind::String),
+    ]))
+    .with_age(300)
+}
+
+/// The colours of the cells of `row` that hold `text`, where it first is.
+fn colours(row: &crate::ui_text::Row, text: &str) -> Vec<crate::ui_text::Rgba> {
+    let plain: String = row.cells.iter().map(|(c, _)| *c).collect();
+    let start = plain.find(text).expect("the row holds the text");
+    let start = plain[..start].chars().count();
+    row.cells[start..start + text.chars().count()]
+        .iter()
+        .map(|(_, style)| style.color)
+        .collect()
+}
+
+#[test]
+fn a_code_panel_shows_its_lines_numbered_and_coloured_by_kind() {
+    let canvas = face(&code_panel("c", 3), false, false);
+    // The same size as a text panel, at a finer pixel, so that it fits its slot.
+    let (width, height) = canvas.size();
+    let (panel_width, panel_height) = panel_size();
+    assert!((width - panel_width).abs() < 1e-4, "{width}");
+    assert!((height - panel_height).abs() < 0.002, "{height}");
+    assert_eq!(canvas.pixel, CODE_PIXEL);
+    let text = canvas.plain();
+    let lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(lines.len(), CODE_ROWS);
+    assert_eq!(lines[0].trim_end(), "rust");
+    assert_eq!(lines[1].trim_end(), "rust · 3 lines · 5m");
+    assert!(lines[2].starts_with('─'));
+    assert_eq!(lines[3].trim_end(), " 1 fn main() {");
+    assert_eq!(lines[4].trim_end(), " 2     let x = \"日本\";");
+    assert_eq!(lines[5].trim_end(), " 3 }");
+    // Nothing more to say past the block's end.
+    assert!(lines[CODE_ROWS - 1].trim().is_empty());
+    // The line numbers dim, and each span in its kind's colour, the rest plain.
+    let rows = &canvas.rows;
+    assert_eq!(colours(&rows[3], " 1"), [DIM; 2]);
+    assert_eq!(colours(&rows[3], "fn"), [palette(TokenKind::Keyword); 2]);
+    assert_eq!(colours(&rows[3], "main"), [palette(TokenKind::Function); 4]);
+    assert_eq!(colours(&rows[3], "()"), [TEXT; 2]);
+    // A wide character takes two cells, both its kind's colour.
+    let wide = format!("\"日{}", crate::ui_text::WIDE);
+    assert_eq!(colours(&rows[4], &wide), [palette(TokenKind::String); 3]);
+    assert!(crate::ui_text::whole(&rows[4].cells));
+    // Highlighted or newest, it is framed as a text panel is.
+    assert_eq!(
+        face(&code_panel("c", 3), true, false).border,
+        Some(HIGHLIGHT)
+    );
+    assert_eq!(face(&code_panel("c", 3), false, true).border, Some(NEWEST));
+}
+
+#[test]
+fn a_long_code_panel_says_how_many_more_lines_it_has_and_cuts_long_lines() {
+    let long = "x".repeat(tomori_protocol::CODE_LINE_CHARS);
+    let body = std::iter::once(format!("{long}…"))
+        .chain((2..=CODE_LINES).map(|line| format!("line {line}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut panel = Panel::new("c", "text", body, Place::Unknown)
+        .with_code(Code::new("", 40))
+        .with_pinned(true);
+    let canvas = face(&panel, false, false);
+    let text = canvas.plain();
+    let lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(lines[1].trim_end(), "40 lines · 0m · pinned");
+    // Cut to the panel, with a dim "…".
+    assert_eq!(lines[3].chars().count(), CODE_COLUMNS);
+    assert!(lines[3].ends_with('…'));
+    assert_eq!(canvas.rows[3].cells.last().unwrap().1.color, DIM);
+    assert_eq!(lines[3 + CODE_LINES - 1].trim_end(), "16 line 16");
+    assert_eq!(lines[CODE_ROWS - 1].trim_end(), "…24 more lines");
+    // One more line is said as one.
+    panel.code = Some(Code::new("", CODE_LINES as u32 + 1));
+    assert!(face(&panel, false, false).plain().ends_with("…1 more line"));
+    // A code panel of one line says so; a server's lines beyond what a panel holds are not drawn.
+    let one = Panel::new("c", "sh", "ls", Place::Unknown).with_code(Code::new("sh", 1));
+    assert!(
+        face(&one, false, false)
+            .plain()
+            .contains("sh · 1 line · 0m")
+    );
+    let many = Panel::new("c", "sh", vec!["x"; 40].join("\n"), Place::Unknown)
+        .with_code(Code::new("sh", 40));
+    let text = face(&many, false, false).plain();
+    assert_eq!(text.split('\n').count(), CODE_ROWS);
+    assert!(text.ends_with("…24 more lines"));
+}
+
+#[test]
+fn a_code_panel_whose_spans_are_not_valid_is_drawn_plain() {
+    use tomori_protocol::Span;
+    for spans in [
+        vec![Span::new(0, 99, TokenKind::Keyword)],
+        vec![
+            Span::new(3, 4, TokenKind::Function),
+            Span::new(0, 2, TokenKind::Keyword),
+        ],
+        vec![Span::new(0, 0, TokenKind::Keyword)],
+    ] {
+        let mut panel = code_panel("c", 3);
+        panel.code = Some(Code::new("rust", 3).with_spans(spans));
+        let canvas = face(&panel, false, false);
+        assert_eq!(colours(&canvas.rows[3], "fn main"), [TEXT; 7]);
+    }
+    // Every kind has its colour, distinct from the others, and plain, as a kind this client does not know, is text.
+    let colours: Vec<_> = TokenKind::ALL.iter().map(|kind| palette(*kind)).collect();
+    for (index, colour) in colours.iter().enumerate() {
+        assert!(!colours[index + 1..].contains(colour), "{index}");
+    }
+    assert_eq!(palette(TokenKind::Plain), TEXT);
+}
+
+#[test]
+fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
+    let lines = |panel: &Panel| -> Vec<String> {
+        label(panel, Vec3::new(0.0, 1.5, -3.0), HOME)
+            .canvas
+            .unwrap()
+            .plain()
+            .lines()
+            .map(|line| line.trim_end().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        lines(&code_panel("c", 3)),
+        ["rust", "rust · 3 lines", "5m ago, on the Tomori wall"]
+    );
+    assert_eq!(
+        lines(&code_panel("c", 40).with_pinned(true)),
+        [
+            "rust",
+            "rust · lines 1–16 of 40 · pinned",
+            "5m ago, on the Tomori wall"
+        ]
+    );
+    let mut plain = code_panel("c", 2);
+    plain.code = Some(Code::new("", 2));
+    assert_eq!(lines(&plain)[1], "2 lines");
+    // A text panel pinned by being put back says nothing of it, as only code panels are replaced.
+    let text = panel("1", on(TOMORI_WALL, 0)).with_pinned(true);
+    assert!(!lines(&text).concat().contains("pinned"));
+    assert!(!face(&text, false, false).plain().contains("pinned"));
+}
+
 #[test]
 fn the_ray_s_label_names_a_panel_with_its_metadata_and_where_it_is() {
     let point = Vec3::new(0.0, 1.5, -3.0);
