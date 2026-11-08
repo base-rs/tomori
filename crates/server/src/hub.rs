@@ -324,11 +324,13 @@ pub struct CreateRequest {
 #[derive(Debug)]
 pub enum Job {
     Create(CreateRequest),
-    /// List the existing sessions of `backend` in `directory` for `participant`.
+    /// List the existing sessions of `backend` in `directory` for `participant`, and those already bound to a space if
+    /// `bound`.
     ListSessions {
         participant: String,
         backend: String,
         directory: String,
+        bound: bool,
     },
     /// Remove Tomori's instruction entries from `session` of `backend`, whose space was forgotten.
     ForgetInstructions {
@@ -788,6 +790,38 @@ struct Rename {
     name: String,
     /// The participant who asked, by hub key, and the utterance that said the name, if they spoke it, to answer once it is kept. A name kept on their behalf, as when their token had none, answers nobody.
     asked: Option<(String, Option<String>)>,
+}
+
+/// `sessions` as listed to a client at `now`: each with how long ago it was last active, and, when `spaces`, by session,
+/// has it bound to a space, that space, or, unless `bound` asks for those, left out.
+fn listed_sessions(
+    sessions: Vec<tomori_backend::SessionSummary>,
+    spaces: &HashMap<&str, &str>,
+    bound: bool,
+    now: std::time::SystemTime,
+) -> Vec<tomori_protocol::SessionSummary> {
+    let now = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    sessions
+        .into_iter()
+        .filter_map(|session| {
+            let space = spaces
+                .get(session.id.as_str())
+                .map(|space| (*space).to_owned());
+            (bound || space.is_none()).then(|| tomori_protocol::SessionSummary {
+                // A time ahead of the server's clock was a moment ago.
+                age: session
+                    .updated
+                    .map(|updated| (now.saturating_sub(u128::from(updated)) / 1000) as u64),
+                id: session.id,
+                title: session.title,
+                directory: session.directory,
+                busy: session.busy,
+                space,
+            })
+        })
+        .collect()
 }
 
 /// A name said aloud, as recognition writes it, without the full stop or other mark it may end with: "Ada." is Ada.
@@ -2887,7 +2921,11 @@ impl Hub {
                     state.error(participant, "The server is shutting down.");
                 }
             }
-            ClientMessage::ListSessions { backend, directory } => {
+            ClientMessage::ListSessions {
+                backend,
+                directory,
+                bound,
+            } => {
                 let checked = limits::check(&backend, limits::NAME_BYTES, "backend")
                     .and_then(|()| limits::check(&directory, limits::DIRECTORY_BYTES, "directory"));
                 if let Err(error) = checked {
@@ -2915,6 +2953,7 @@ impl Hub {
                         participant: participant.to_owned(),
                         backend,
                         directory,
+                        bound,
                     })
                     .is_err()
                 {
@@ -4621,36 +4660,32 @@ impl Hub {
     }
 
     /// Report `backend`'s session list to `participant`, its failures as an error. A session already bound to a space
-    /// that has not closed is left out, since binding it again would be refused, as is one whose identifier or
-    /// directory is too long to be sent back to bind it; the list is then fitted to [`limits::SNAPSHOT_BUDGET`]. See
-    /// `design/arrival.md`.
+    /// that has not closed is left out, since binding it again would be refused, unless `bound` asks for it, when it
+    /// names its space; one whose identifier or directory is too long to be sent back to bind it is left out; the list is
+    /// then fitted to [`limits::SNAPSHOT_BUDGET`]. See `design/arrival.md`.
     pub(crate) fn sessions(
         &self,
         participant: &str,
         backend: &str,
+        bound: bool,
         result: Result<Vec<tomori_backend::SessionSummary>, String>,
     ) {
         let state = self.lock();
         let message = match result {
             Ok(sessions) => {
-                let bound: HashSet<&str> = state
+                let spaces: HashMap<&str, &str> = state
                     .spaces
                     .iter()
                     .filter(|space| space.model.backend == backend && !space.model.is_closed())
-                    .map(|space| space.model.session.as_str())
-                    .collect();
-                let sessions = sessions
-                    .into_iter()
-                    .filter(|session| !bound.contains(session.id.as_str()))
-                    .map(|session| tomori_protocol::SessionSummary {
-                        id: session.id,
-                        title: session.title,
-                        directory: session.directory,
-                        busy: session.busy,
-                    })
+                    .map(|space| (space.model.session.as_str(), space.model.id.as_str()))
                     .collect();
                 ServerMessage::Sessions {
-                    sessions: limits::sessions(sessions),
+                    sessions: limits::sessions(listed_sessions(
+                        sessions,
+                        &spaces,
+                        bound,
+                        std::time::SystemTime::now(),
+                    )),
                 }
             }
             Err(error) => ServerMessage::Error {
@@ -5309,6 +5344,55 @@ mod tests {
             Vec::new(),
             SpaceSlots::new(crate::workspace::DEFAULT_MAX_SPACES),
         )
+    }
+
+    /// Sessions are listed with how long ago they were last active, a time ahead of the clock as just now and an unknown
+    /// one as unknown, and a session bound to a space is left out unless asked for, when it names its space.
+    #[test]
+    fn listed_sessions_say_their_age_and_their_space_when_asked() {
+        let session = |id: &str, updated: Option<u64>| tomori_backend::SessionSummary {
+            id: id.into(),
+            title: id.into(),
+            directory: "/work".into(),
+            busy: false,
+            updated,
+        };
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10_000);
+        let sessions = || {
+            vec![
+                session("old", Some(1_000_000)),
+                session("ahead", Some(20_000_000)),
+                session("timeless", None),
+                session("bound", Some(9_999_500)),
+            ]
+        };
+        let spaces = HashMap::from([("bound", "space-1")]);
+        let listed = |bound: bool| {
+            listed_sessions(sessions(), &spaces, bound, now)
+                .into_iter()
+                .map(|session| (session.id, session.age, session.space))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed(false),
+            [
+                ("old".to_owned(), Some(9_000), None),
+                ("ahead".to_owned(), Some(0), None),
+                ("timeless".to_owned(), None, None),
+            ]
+        );
+        assert_eq!(
+            listed(true)[3],
+            ("bound".to_owned(), Some(0), Some("space-1".to_owned()))
+        );
+        // A clock before the epoch takes every time as ahead of it.
+        let before = listed_sessions(
+            sessions(),
+            &spaces,
+            false,
+            std::time::UNIX_EPOCH - std::time::Duration::from_secs(1),
+        );
+        assert_eq!(before[0].age, Some(0));
     }
 
     #[test]

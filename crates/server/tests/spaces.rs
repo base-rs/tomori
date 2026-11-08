@@ -190,9 +190,19 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
 
 /// The sessions `client` is told `backend` has in `directory` or beneath it.
 fn sessions_in(client: &mut TestClient, directory: &str) -> Vec<tomori_protocol::SessionSummary> {
+    listed_in(client, directory, false)
+}
+
+/// The sessions `client` is told `backend` has in `directory` or beneath it, with those bound to a space if `bound`.
+fn listed_in(
+    client: &mut TestClient,
+    directory: &str,
+    bound: bool,
+) -> Vec<tomori_protocol::SessionSummary> {
     client.send(&ClientMessage::ListSessions {
         backend: "fake".into(),
         directory: directory.into(),
+        bound,
     });
     client.wait_for(|message| match message {
         ServerMessage::Sessions { sessions } => Some(sessions.clone()),
@@ -224,10 +234,23 @@ fn listing_the_backend_sessions_returns_those_beneath_the_directory_not_in_a_spa
         environment: None,
         instructions: None,
     });
-    ada.space(|state| state.title == "Nested");
+    let nested_space = ada.space(|state| state.title == "Nested").id;
 
-    // A session bound to an open space is not offered, since binding it again would be refused.
+    // A session bound to an open space is not offered, since binding it again would be refused, unless the client asks
+    // for those, when each names its space, so that the client can offer to join it instead.
     assert!(sessions_in(&mut ada, "/tmp").is_empty());
+    let bound = listed_in(&mut ada, "/tmp", true);
+    let spaces: Vec<(&str, bool)> = bound
+        .iter()
+        .map(|session| (session.title.as_str(), session.space.is_some()))
+        .collect();
+    assert_eq!(
+        spaces,
+        [("Nested", true), ("Second", true), ("First", true)]
+    );
+    assert_eq!(bound[0].space.as_deref(), Some(nested_space.as_str()));
+    // The fake backend cannot say when its sessions were last active, so none says.
+    assert!(bound.iter().all(|session| session.age.is_none()));
 
     // Once their spaces have closed, every session beneath the directory is listed, the most recent first, a busy one
     // marked so, each in its own directory.
@@ -276,6 +299,7 @@ fn listing_sessions_refuses_unknown_and_non_attaching_backends() {
     ada.send(&ClientMessage::ListSessions {
         backend: "missing".into(),
         directory: "/tmp".into(),
+        bound: false,
     });
     assert_eq!(ada.error(), "Unknown backend; available: fake.");
 }
