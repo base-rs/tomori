@@ -3660,6 +3660,12 @@ impl Hub {
         );
         // Its environment's server side stops, and what it kept goes with the record, as do its walls, panels and speech.
         self.reconcile_server_sides(state);
+        // Nor needs Tomori's tools, unless another space in its directory does. See `design/mcp.md`.
+        self.tools_due(
+            state.shutting_down,
+            &record.model.backend,
+            &record.model.directory,
+        );
         state.unkept = true;
         // Everyone in the lobby, those it was deleted under among them, is sent the listing without it.
         state.touch_lobby();
