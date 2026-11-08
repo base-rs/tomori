@@ -490,6 +490,7 @@ fn prompt(event: &crate::PairingEvent) -> String {
             "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
         ),
         crate::PairingEvent::Paused => "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again.".to_owned(),
+        crate::PairingEvent::Agent { notice } => notice.clone(),
     }
 }
 
@@ -1571,6 +1572,13 @@ mod tests {
         };
         assert!(prompt(&waiting).starts_with("Pairing request from \"Quest\": code 123 456."));
         assert!(prompt(&crate::PairingEvent::Paused).starts_with("Pairing is paused"));
+        let agent = crate::PairingEvent::Agent {
+            notice: "The agent of space space-1 declined pairing.".to_owned(),
+        };
+        assert_eq!(
+            prompt(&agent),
+            "The agent of space space-1 declined pairing."
+        );
         tell(&crate::PairingEvent::Paused);
     }
 
