@@ -611,7 +611,15 @@ struct SpaceRecord {
     channel: Option<crate::channel::Channel>,
     /// The space's projection walls and the panels on them. See `design/projection.md`.
     stage: crate::stage::Stage,
+    /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
+    /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
+    /// `design/arrival.md`.
+    active: Option<u64>,
 }
+
+/// How finely when a space was last active is kept, in seconds, so that a busy space's record of spaces is written at
+/// most once a minute for it.
+const ACTIVE_RESOLUTION: u64 = 60;
 
 /// How many spoken answers each space remembers, to acknowledge a repeated finalization. A client repeats only its latest utterance, after reconnecting.
 const ANSWERED: usize = 16;
@@ -654,8 +662,28 @@ impl SpaceRecord {
     }
 
     /// The space as listed in the lobby at `now`, with how long it has needed its attention.
-    fn summary(&self, now: Instant) -> tomori_protocol::SpaceSummary {
+    /// The space was active at `unix`, in seconds since the Unix epoch. Returns whether that changed when it is kept as
+    /// last active, and so the record of spaces is to be written again.
+    fn stamp_active(&mut self, unix: u64) -> bool {
+        let active = Some(unix - unix % ACTIVE_RESOLUTION);
+        let changed = self.active != active;
+        self.active = active;
+        changed
+    }
+
+    /// The space as the lobby lists it at `now`, which is `unix` in seconds since the Unix epoch, with its folder
+    /// beneath one of `roots`.
+    fn summary(
+        &self,
+        now: Instant,
+        unix: u64,
+        roots: &[WorkspaceRoot],
+    ) -> tomori_protocol::SpaceSummary {
         let mut summary = self.model.summary();
+        summary.folder = Some(crate::workspace::folder(roots, &self.model.directory));
+        summary.active_age = self
+            .active
+            .map(|active| u32::try_from(unix.saturating_sub(active)).unwrap_or(u32::MAX));
         summary.attention_age = summary.attention.map(|level| match self.attention.get() {
             Some((stamped, since)) if stamped == level => {
                 u32::try_from(now.saturating_duration_since(since).as_secs()).unwrap_or(u32::MAX)
@@ -1055,6 +1083,7 @@ impl HubState {
                     closed_order: space.closed.filter(|_| !space.kept_open),
                     placements: space.placements.clone(),
                     stage: space.stage.clone(),
+                    active: space.active,
                 }
             })
             .collect()
@@ -4286,6 +4315,8 @@ impl Hub {
         if let Some(origin) = record.origin {
             space.model.originate(&key, origin);
         }
+        // Input queued in it makes the space active.
+        let active = space.stamp_active(crate::cards::unix_now());
         state.send(
             &record.participant,
             ServerMessage::Transcript {
@@ -4296,6 +4327,10 @@ impl Hub {
         );
         state.pump(&record.space);
         state.touch_space(&record.space);
+        if active {
+            drop(state);
+            self.keep();
+        }
     }
 
     pub(crate) fn transcript_failed(&self, utterance: UtteranceId, error: &str) {
@@ -4374,7 +4409,14 @@ impl Hub {
             restoring: false,
             channel: None,
             stage: crate::stage::Stage::default(),
+            active: None,
         });
+        // Created now, it is active from now.
+        state
+            .spaces
+            .last_mut()
+            .expect("pushed above")
+            .stamp_active(crate::cards::unix_now());
         // Tomori's tools are registered for its directory, if they are not already.
         self.tools_due(state.shutting_down, &request.backend, &request.directory);
         // Given before any input, so that the agent has them for its first turn.
@@ -4495,6 +4537,7 @@ impl Hub {
                     restoring: true,
                     channel: None,
                     stage: kept.stage,
+                    active: kept.active,
                 });
             }
             // Listed in the order they were created, as before the restart.
@@ -4633,6 +4676,9 @@ impl Hub {
         let resynchronized = matches!(event, Event::Resynchronized { .. });
         let was_open = !record.model.is_closed();
         let title = record.model.title.clone();
+        // The agent working in the space keeps when it was last active, written again at most once a minute.
+        let active =
+            crate::space::is_activity(&event) && record.stamp_active(crate::cards::unix_now());
         record.model.apply(event);
         // Following its session, the space took its new title: everyone sees it, and it is kept across a restart.
         let retitled = record.model.title != title;
@@ -4671,7 +4717,7 @@ impl Hub {
         }
         // The space's attention may have changed.
         self.recount(&mut state);
-        if retitled {
+        if retitled || active {
             drop(state);
             self.keep();
         }
@@ -5201,10 +5247,15 @@ impl Hub {
             Outgoing::Spaces => {
                 let state = self.lock();
                 let now = Instant::now();
+                let unix = crate::cards::unix_now();
+                let roots = self
+                    .roots
+                    .read()
+                    .expect("workspace roots are never left poisoned");
                 let mut spaces: Vec<_> = state
                     .spaces
                     .iter()
-                    .map(|space| space.summary(now))
+                    .map(|space| space.summary(now, unix, &roots))
                     .collect();
                 limits::fit_spaces(&mut spaces);
                 Some(ServerMessage::Spaces { spaces })
@@ -5602,7 +5653,7 @@ mod tests {
                 state
                     .space(&space)
                     .unwrap()
-                    .summary(since.1 + Duration::from_secs(90)),
+                    .summary(since.1 + Duration::from_secs(90), 0, &[]),
             )
         };
         let (level, later) = record(&hub);

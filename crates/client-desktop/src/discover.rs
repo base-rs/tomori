@@ -333,6 +333,9 @@ mod tests {
             participants: 0,
             attention: None,
             attention_age: None,
+            folder: None,
+            active_age: None,
+            latest: None,
         };
         assert_eq!(
             hint(&some, Some(std::slice::from_ref(&space))),

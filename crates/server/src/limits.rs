@@ -237,13 +237,22 @@ pub fn fit_state(state: &mut SpaceState) {
 /// Longest directory shown in the lobby listing once the listing is over budget, in bytes.
 const LISTED_DIRECTORY_BYTES: usize = 120;
 
-/// Trim the lobby listing to [`SNAPSHOT_BUDGET`]: shorten directories to their final components, then leave out closed spaces, then the oldest spaces, keeping those that need attention longest, the most urgent last of all.
+/// Trim the lobby listing to [`SNAPSHOT_BUDGET`]: leave out the start of each space's newest reply, oldest spaces first, then shorten directories to their final components, then leave out closed spaces, then the oldest spaces, keeping those that need attention longest, the most urgent last of all.
 ///
 /// The spaces needing attention are left out least urgent first, so the space a client would jump to is kept while any is.
 pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
     let mut size = json_len(spaces);
     if size <= SNAPSHOT_BUDGET {
         return;
+    }
+    for space in spaces.iter_mut() {
+        if size <= SNAPSHOT_BUDGET {
+            break;
+        }
+        if let Some(latest) = space.latest.take() {
+            // The field, its quotes, colon and comma.
+            size -= json_len(&latest) + r#","latest":"#.len();
+        }
     }
     for space in spaces.iter_mut() {
         if size <= SNAPSHOT_BUDGET {
@@ -431,8 +440,51 @@ mod tests {
                 participants: 0,
                 attention: None,
                 attention_age: None,
+                folder: None,
+                active_age: None,
+                latest: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_newest_replies_are_left_out_of_the_listing_first_and_oldest_first() {
+        let space = |index: usize| SpaceSummary {
+            directory: "/work".into(),
+            title: format!("Space {index}"),
+            folder: Some("ioquatix/tomori".into()),
+            active_age: Some(60),
+            latest: Some("w".repeat(crate::space::LATEST_CHARS)),
+            ..listing(1).remove(0)
+        };
+        // As many spaces as fit without their replies, but not with them.
+        let without = |count: usize| {
+            json_len(
+                &(0..count)
+                    .map(|index| SpaceSummary {
+                        latest: None,
+                        ..space(index)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let count = (1..)
+            .find(|count| without(*count + 1) > SNAPSHOT_BUDGET)
+            .unwrap();
+        let mut spaces: Vec<_> = (0..count).map(space).collect();
+        assert!(json_len(&spaces) > SNAPSHOT_BUDGET);
+        fit_spaces(&mut spaces);
+        assert!(json_len(&spaces) <= SNAPSHOT_BUDGET);
+        // Every space and directory is kept: only replies are left out, the oldest spaces' first.
+        assert_eq!(spaces.len(), count);
+        assert!(spaces.iter().all(|space| space.directory == "/work"));
+        assert!(spaces[0].latest.is_none());
+        assert!(spaces.last().unwrap().latest.is_some());
+        let kept = spaces
+            .iter()
+            .position(|space| space.latest.is_some())
+            .unwrap();
+        assert!(spaces[kept..].iter().all(|space| space.latest.is_some()));
     }
 
     #[test]

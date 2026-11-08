@@ -1492,6 +1492,39 @@ impl Conversation {
     }
 
     /// The name the server gives the environment `id`, or the identifier itself when it offers none by that name.
+    /// What the lobby says of `space` beneath its title, a line each: its project folder and environment; what it
+    /// needs, or else what its agent is doing, how many are here and how long ago it was last active; and the start of
+    /// its newest reply, quoted. What an older server does not list is left out, its folder then being the directory's
+    /// last part. See `design/arrival.md`.
+    fn space_detail(&self, space: &SpaceSummary) -> String {
+        let folder = space.folder.clone().unwrap_or_else(|| {
+            space
+                .directory
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        });
+        let place = [folder, self.environment_name(&space.environment)]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let status = space
+            .attention
+            .map_or(activity_label(space.activity), arrival::attention_label);
+        let mut now = vec![status.to_owned()];
+        if space.participants > 0 {
+            now.push(format!("{} here", space.participants));
+        }
+        now.extend(space.active_age.map(ago));
+        let mut lines = vec![place, now.join(" · ")];
+        lines.extend(space.latest.as_ref().map(|latest| format!("“{latest}”")));
+        lines.retain(|line| !line.is_empty());
+        lines.join("\n")
+    }
+
     fn environment_name(&self, id: &str) -> String {
         self.environments
             .iter()
@@ -3739,7 +3772,7 @@ impl Conversation {
             .iter()
             .map(|space| {
                 format!(
-                    "{} [{}{}]",
+                    "{} [{}{}{}]{}",
                     space.title,
                     space
                         .attention
@@ -3747,7 +3780,16 @@ impl Conversation {
                     match space.participants {
                         0 => String::new(),
                         count => format!(", {count} here"),
-                    }
+                    },
+                    space
+                        .active_age
+                        .map(|age| format!(", {}", ago(age)))
+                        .unwrap_or_default(),
+                    space
+                        .folder
+                        .as_ref()
+                        .map(|folder| format!(" {folder}"))
+                        .unwrap_or_default(),
                 )
             })
             .chain(self.creates().then(|| "+ New space".to_owned()));
@@ -3982,12 +4024,7 @@ impl Conversation {
                             attention: space.attention,
                         },
                         label: space.title.clone(),
-                        detail: Some(
-                            space
-                                .attention
-                                .map_or(activity_label(space.activity), arrival::attention_label)
-                                .into(),
-                        ),
+                        detail: Some(self.space_detail(space)),
                         selected: spaces && index == self.selected,
                     })
                     .chain(self.creates().then(|| arrival::Item {
@@ -4565,6 +4602,17 @@ fn renamer(renamer: &tomori_protocol::Renamer) -> String {
     }
 }
 
+/// How long ago something happened, `seconds` since, as the lobby says it: "just now" within a minute, and then in
+/// minutes, hours or days.
+fn ago(seconds: u32) -> String {
+    match seconds {
+        0..60 => "just now".into(),
+        60..3600 => format!("{}m ago", seconds / 60),
+        3600..86_400 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
 /// How long ago something happened, briefly.
 fn age(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
@@ -5001,6 +5049,9 @@ mod tests {
                 participants: 2,
                 attention: None,
                 attention_age: None,
+                folder: None,
+                active_age: None,
+                latest: None,
             }],
         }));
         assert!(conversation.text().contains("> Tomori [running, 2 here]"));
@@ -5030,6 +5081,9 @@ mod tests {
             participants: 1,
             attention: None,
             attention_age: None,
+            folder: None,
+            active_age: None,
+            latest: None,
             environment: "sky".into(),
         }
     }
@@ -5360,7 +5414,12 @@ mod tests {
             .items
             .iter()
             .take(5)
-            .map(|item| item.detail.clone().unwrap())
+            .map(|item| {
+                // Beneath the folder and environment, what the space needs, or else what its agent is doing.
+                let detail = item.detail.clone().unwrap();
+                let status = detail.lines().nth(1).unwrap();
+                status.split(" · ").next().unwrap().to_owned()
+            })
             .collect();
         assert_eq!(
             details,
@@ -7217,6 +7276,52 @@ mod tests {
     }
 
     #[test]
+    fn the_lobby_says_where_each_space_is_what_it_is_doing_and_its_newest_reply() {
+        let mut conversation = crate::test_support::conversation("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(connected());
+        let described = SpaceSummary {
+            folder: Some("ioquatix/tomori".into()),
+            active_age: Some(300),
+            latest: Some("All 42 tests pass.".into()),
+            participants: 2,
+            ..summary("space-1", "Tomori")
+        };
+        let older = SpaceSummary {
+            directory: "/work/base-rs/".into(),
+            environment: String::new(),
+            participants: 0,
+            ..summary("space-2", "Base")
+        };
+        listed(&mut conversation, vec![described, older]);
+        let view = conversation.arrival().unwrap();
+        assert_eq!(
+            view.items[0].detail.as_deref(),
+            Some("ioquatix/tomori · Sky\nidle · 2 here · 5m ago\n“All 42 tests pass.”")
+        );
+        // From an older server, the folder is the directory's last part, and nothing is made up.
+        assert_eq!(view.items[1].detail.as_deref(), Some("base-rs\nidle"));
+        let text = conversation.text();
+        // Its folder last, cut to the console's width.
+        assert!(
+            text.contains("> Tomori [idle, 2 here, 5m ago] ioquati"),
+            "{text}"
+        );
+        assert!(text.contains("Base [idle]"), "{text}");
+        for (seconds, said) in [
+            (0, "just now"),
+            (59, "just now"),
+            (60, "1m ago"),
+            (3599, "59m ago"),
+            (3600, "1h ago"),
+            (86_399, "23h ago"),
+            (86_400, "1d ago"),
+        ] {
+            assert_eq!(ago(seconds), said);
+        }
+    }
+
+    #[test]
     fn an_owner_says_the_space_s_new_title_and_x_says_it_again_until_b_cancels() {
         use crate::hand_menu::Choice as MenuChoice;
         use crate::recording::Phase;
@@ -7883,6 +7988,9 @@ mod tests {
                 participants: 0,
                 attention: None,
                 attention_age: None,
+                folder: None,
+                active_age: None,
+                latest: None,
             }],
         }));
         conversation.take_actions();
@@ -8187,6 +8295,9 @@ mod tests {
                     participants: 0,
                     attention: None,
                     attention_age: None,
+                    folder: None,
+                    active_age: None,
+                    latest: None,
                 })
                 .collect(),
         }));
@@ -10638,6 +10749,9 @@ mod tests {
                     participants: 0,
                     attention: None,
                     attention_age: None,
+                    folder: None,
+                    active_age: None,
+                    latest: None,
                 }],
             }));
             assert!(conversation.spaces.is_empty());
@@ -10673,6 +10787,9 @@ mod tests {
                 participants: 0,
                 attention,
                 attention_age: None,
+                folder: None,
+                active_age: None,
+                latest: None,
             }
         }
 

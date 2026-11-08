@@ -23,6 +23,19 @@ pub struct SpaceSummary {
     /// waiting comes first. Absent without attention, and from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_age: Option<u32>,
+    /// The space's project folder, its directory relative to the workspace root it is in, such as `ioquatix/tomori`,
+    /// or the root's name when it is the root itself, so that spaces in different projects are told apart. Absent
+    /// from older servers. See `design/arrival.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// How long ago, in whole seconds, the space was last active: when its agent last worked in it or input was
+    /// queued in it. Absent when not known, and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_age: Option<u32>,
+    /// The first words of the agent's newest reply in the space, on one line, cut short with "…". Absent when it has
+    /// none, and from older servers. A visitor sees no more than joining the space shows them. See `design/arrival.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
 }
 
 /// What about a space needs a participant, worked out by the server for anyone, not for one participant. When several
@@ -730,6 +743,29 @@ mod tests {
         assert_eq!((summary.attention, summary.attention_age), (None, None));
         // Without attention, nothing is added to the wire, so an older client reads exactly what it did before.
         assert_eq!(serde_json::to_value(&summary).unwrap(), older);
+        assert_eq!(
+            (
+                summary.folder.as_deref(),
+                summary.active_age,
+                summary.latest.as_deref()
+            ),
+            (None, None, None)
+        );
+        // What a newer server says of each space is read back, and an older client skips it as unknown fields.
+        let described = SpaceSummary {
+            folder: Some("ioquatix/tomori".into()),
+            active_age: Some(300),
+            latest: Some("All 42 tests pass…".into()),
+            ..summary.clone()
+        };
+        let json = serde_json::to_value(&described).unwrap();
+        assert_eq!(json["folder"], "ioquatix/tomori");
+        assert_eq!(json["active_age"], 300);
+        assert_eq!(json["latest"], "All 42 tests pass…");
+        assert_eq!(
+            serde_json::from_value::<SpaceSummary>(json).unwrap(),
+            described
+        );
 
         let waiting = SpaceSummary {
             attention: Some(Attention::Input),
