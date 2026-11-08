@@ -372,9 +372,7 @@ impl Mixer {
     pub fn is_source_recent(&self, source: u32, within: Duration) -> bool {
         let within = (within.as_secs_f64() * f64::from(self.options.sample_rate)) as u64;
         self.sources.get(&source).is_some_and(|source| {
-            source.buffer.is_playing()
-                || source.buffer.buffered_samples() > 0
-                || source.buffer.idle_samples() < within
+            source.buffer.has_audio() || source.buffer.idle_samples() < within
         })
     }
 
@@ -490,9 +488,7 @@ impl Mixer {
         }
         let idle_limit = (IDLE_LIMIT.as_secs_f64() * f64::from(rate)) as u64;
         self.sources.retain(|_, source| {
-            source.buffer.is_playing()
-                || source.buffer.buffered_samples() > 0
-                || source.buffer.idle_samples() < idle_limit
+            source.buffer.has_audio() || source.buffer.idle_samples() < idle_limit
         });
         self.bypass.clear();
         self.bypass.resize(output.len(), 0.0);

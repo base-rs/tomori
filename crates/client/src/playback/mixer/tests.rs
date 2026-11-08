@@ -260,6 +260,23 @@ fn a_source_stays_recent_through_a_short_silence() {
 }
 
 #[test]
+fn a_source_resampled_to_the_device_rate_ends_once_it_runs_dry() {
+    let mut mixer = mixer();
+    // Speech at half the device rate ends part way between two of its samples.
+    mixer.push(AudioFrame {
+        sample_rate: RATE / 2,
+        ..frame(REPLAY_SOURCE, 0, 1_000)
+    });
+    mix(&mut mixer, 8);
+    assert!(mixer.is_source_recent(REPLAY_SOURCE, Duration::from_millis(100)));
+    mix(&mut mixer, 200);
+    assert!(!mixer.is_source_recent(REPLAY_SOURCE, Duration::from_millis(100)));
+    // And, idle long enough, it is forgotten.
+    mix(&mut mixer, 2 * IDLE_LIMIT.as_millis() as usize);
+    assert_eq!(mixer.sources().count(), 0);
+}
+
+#[test]
 fn clearing_forgets_levels() {
     let mut mixer = mixer();
     mixer.push(frame(1, 0, 1_000));

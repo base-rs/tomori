@@ -49,6 +49,23 @@ fn buffers_to_the_target_before_playing() {
 }
 
 #[test]
+fn a_resampled_stream_that_runs_dry_has_no_audio_left() {
+    let mut statistics = PlaybackStatistics::default();
+    let mut buffer = JitterBuffer::new(RATE, options());
+    assert!(!buffer.has_audio());
+    buffer.push(frame(0, 1), &mut statistics);
+    // Frames waiting to start are audio to play.
+    assert!(buffer.has_audio());
+    buffer.push(frame(1, 1), &mut statistics);
+    // At twice the rate, it runs dry half way past its last sample, which it keeps to interpolate into a next frame.
+    let mut output = vec![0.0; 32];
+    buffer.mix_into(&mut output, RATE * 2, 1.0, &mut statistics);
+    assert!(!buffer.is_playing());
+    assert_eq!(buffer.buffered_samples(), 1);
+    assert!(!buffer.has_audio());
+}
+
+#[test]
 fn reorders_frames_by_sequence() {
     let mut statistics = PlaybackStatistics::default();
     let mut buffer = JitterBuffer::new(RATE, options());

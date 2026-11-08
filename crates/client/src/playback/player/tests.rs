@@ -68,6 +68,103 @@ fn a_replay_stops_being_reported_once_it_has_been_quiet_for_a_pause() {
     assert!(!control.is_replaying());
 }
 
+/// Render `samples` at twice the speech's rate, as 24 kHz speech plays on a 48 kHz headset, so that a stream that runs dry ends part way between two of its samples.
+fn render_resampled(player: &mut Player, samples: usize) {
+    let mut output = vec![0; samples];
+    player.render(RATE * 2, Layout::Mono, &mut output);
+}
+
+/// More than [`REPLAY_PAUSE`] at the resampled rate.
+const PAST_THE_PAUSE: usize = 2 * 800;
+
+#[test]
+fn a_live_reply_heard_for_the_first_time_is_not_replaying() {
+    let (sender, mut player, control) = player();
+    sender.send(frame(AGENT_SOURCE, 0, 7)).unwrap();
+    for sequence in 1..5 {
+        sender.send(frame(AGENT_SOURCE, sequence, 7)).unwrap();
+        render_resampled(&mut player, FRAME * 2);
+        assert!(!control.is_replaying());
+        assert!(control.agent_speech().0);
+    }
+    render_resampled(&mut player, PAST_THE_PAUSE);
+    assert!(!control.is_replaying());
+}
+
+#[test]
+fn a_catch_up_is_replaying_until_it_ends_and_the_live_reply_after_it_is_not() {
+    let (sender, mut player, control) = player();
+    // Joining or returning, the latest reply is played again from its start; the pill says so throughout, breaths included.
+    for sequence in 0..4 {
+        sender.send(frame(REPLAY_SOURCE, sequence, 7)).unwrap();
+        render_resampled(&mut player, FRAME * 2);
+        assert!(control.is_replaying());
+    }
+    render_resampled(&mut player, 400);
+    assert!(control.is_replaying());
+    // Caught up, the next reply is heard live, for the first time.
+    render_resampled(&mut player, PAST_THE_PAUSE);
+    assert!(!control.is_replaying());
+    for sequence in 0..4 {
+        sender.send(frame(AGENT_SOURCE, sequence, 7)).unwrap();
+        render_resampled(&mut player, FRAME * 2);
+        assert!(!control.is_replaying());
+    }
+}
+
+#[test]
+fn a_replay_followed_by_a_live_reply_stops_replaying_once_it_has_played_out() {
+    let (sender, mut player, control) = player();
+    for sequence in 0..4 {
+        sender.send(frame(REPLAY_SOURCE, sequence, 7)).unwrap();
+    }
+    render_resampled(&mut player, FRAME * 2);
+    assert!(control.is_replaying());
+    // A later reply starts live, which stops the replay at the server: what was sent of it plays out, and then it has ended.
+    for sequence in 0..200 {
+        sender.send(frame(AGENT_SOURCE, sequence, 20)).unwrap();
+        render_resampled(&mut player, FRAME * 2);
+    }
+    assert!(control.agent_speech().0);
+    assert!(!control.is_replaying());
+}
+
+#[test]
+fn stopping_a_replay_stops_replaying_once_what_was_sent_has_played() {
+    let (sender, mut player, control) = player();
+    for sequence in 0..2 {
+        sender.send(frame(REPLAY_SOURCE, sequence, 7)).unwrap();
+    }
+    render_resampled(&mut player, FRAME * 2);
+    assert!(control.is_replaying());
+    // Stopped, the server sends no more of it, and the participant follows live speech, or silence.
+    render_resampled(&mut player, PAST_THE_PAUSE);
+    assert!(!control.is_replaying());
+    // So the right stick asks for a replay again, and the next one is reported in turn.
+    sender.send(frame(REPLAY_SOURCE, 2, 7)).unwrap();
+    render_resampled(&mut player, FRAME * 2);
+    assert!(control.is_replaying());
+}
+
+#[test]
+fn reconnecting_during_a_replay_stops_replaying_at_once() {
+    let (sender, mut player, control) = player();
+    for sequence in 0..4 {
+        sender.send(frame(REPLAY_SOURCE, sequence, 7)).unwrap();
+    }
+    render_resampled(&mut player, FRAME * 2);
+    assert!(control.is_replaying());
+    // A new connection clears what was buffered; the reply it resumes is live, on the agent's own source.
+    control.clear();
+    render_resampled(&mut player, FRAME * 2);
+    assert!(!control.is_replaying());
+    sender.send(frame(AGENT_SOURCE, 0, 7)).unwrap();
+    sender.send(frame(AGENT_SOURCE, 1, 7)).unwrap();
+    render_resampled(&mut player, FRAME * 2);
+    assert!(!control.is_replaying());
+    assert!(control.agent_speech().0);
+}
+
 #[test]
 fn agent_speech_is_reported_while_it_plays_live_or_again_even_muted() {
     let (sender, mut player, control) = player();
