@@ -360,7 +360,7 @@ fn tools() -> Value {
         },
         {
             "name": "pairing",
-            "description": "The device pairing waiting on this Tomori server, if any: the device's name, how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. It never gives the code: only the device shows it.",
+            "description": "The device pairing waiting on this Tomori server, if any: how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. It never gives the code, since only the device shows it, nor the device's name, which the device chose itself.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read,
         },
@@ -506,12 +506,11 @@ fn confirm_pairing(hub: &Hub, session: &str, arguments: &Value) -> Result<Value,
 fn decide_pairing(hub: &Hub, session: &str, decision: Decision<'_>) -> Result<Value, String> {
     let decided = hub.agent_decide_pairing(session, decision)?;
     let did = if decided.confirmed {
-        format!("{:?} is paired, as an owner", decided.device)
+        "the device is paired, as an owner"
     } else {
-        format!("you declined pairing for {:?}", decided.device)
+        "you declined the pairing"
     };
     Ok(structured(json!({
-        "device": decided.device,
         "confirmed": decided.confirmed,
         "next": format!("Tell everyone in the space that {did}."),
     })))

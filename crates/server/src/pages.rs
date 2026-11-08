@@ -182,17 +182,17 @@ pub fn status(
                 Some(code) => {
                     let _ = writeln!(
                         body,
-                        "<p>{} asks to pair with code <strong>{}</strong>. Confirm only if the device shows the same code.</p>\n\
+                        "<p>Pairing request from {}, with code <strong>{}</strong>. Confirm only if the device you are pairing shows the same code.</p>\n\
 <form class=\"inline\" method=\"post\" action=\"{CONFIRM_PAIRING_PATH}\">{target}<button>Confirm</button></form> {decline}",
-                        escape(&pairing.name),
+                        escape(&pairing.device.to_string()),
                         escape(code)
                     );
                 }
                 None => {
                     let _ = writeln!(
                         body,
-                        "<p>{} is pairing; its code is not shown yet.</p>\n{decline}",
-                        escape(&pairing.name)
+                        "<p>Pairing request from {}; its code is not shown yet.</p>\n{decline}",
+                        escape(&pairing.device.to_string())
                     );
                 }
             }
@@ -313,17 +313,23 @@ mod tests {
         assert!(empty.contains("No pairing is pending"));
         let mut view = PairingView {
             serial: 7,
-            name: "<Quest>".into(),
+            device: tomori_security::pairing::ChosenName::new("<Ada's & Quest> 4 eight"),
             code: Some("042 917".into()),
         };
         let pairing = super::status(&Status::default(), Some(&view), false, None, false);
-        assert!(pairing.contains("&lt;Quest&gt; asks to pair with code <strong>042 917</strong>"));
+        assert!(pairing.contains(
+            "Pairing request from a device calling itself &quot;Ada&#39;s &amp; Quest&quot;, with code <strong>042 917</strong>. Confirm only if the device you are pairing shows the same code."
+        ));
         assert!(pairing.contains("action=\"/pairing/confirm\""));
         assert!(pairing.contains("action=\"/pairing/decline\""));
         assert!(pairing.contains("name=\"pairing\" value=\"7\""));
         view.code = None;
         let unrevealed = super::status(&Status::default(), Some(&view), false, None, false);
-        assert!(unrevealed.contains("is pairing; its code is not shown yet"));
+        assert!(unrevealed.contains("&amp; Quest&quot;; its code is not shown yet"));
+        // A device whose name is left with nothing is shown as a device.
+        view.device = tomori_security::pairing::ChosenName::new("482 913");
+        let nameless = super::status(&Status::default(), Some(&view), false, None, false);
+        assert!(nameless.contains("Pairing request from a device; its code is not shown yet"));
         assert!(!unrevealed.contains("/pairing/confirm"));
         assert!(unrevealed.contains("/pairing/decline"));
         assert!(empty.contains("No spaces."));

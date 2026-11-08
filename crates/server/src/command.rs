@@ -477,24 +477,12 @@ fn admission(
     Ok((server, Some(fingerprint)))
 }
 
-/// Tell the operator of `event` on the console.
+/// Tell the operator of `event` on the console, which never shows the pairing's code.
 fn tell(event: &crate::PairingEvent) {
-    eprintln!("{}", prompt(event));
+    eprintln!("{event}");
 }
 
-/// What to tell the operator of `event`.
-fn prompt(event: &crate::PairingEvent) -> String {
-    match event {
-        crate::PairingEvent::Began { name } => format!("{name:?} began pairing."),
-        crate::PairingEvent::Waiting { name, code } => format!(
-            "Pairing request from {name:?}: code {code}. If the device shows the same code, type it here to confirm, or type \"decline\"; owners can also confirm on the status page."
-        ),
-        crate::PairingEvent::Paused => "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again.".to_owned(),
-        crate::PairingEvent::Agent { notice } => notice.clone(),
-    }
-}
-
-/// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches. See `design/security.md`.
+/// Read the console for pairing codes to confirm, or "decline", while the server runs. The operator types the code the device shows, which confirms only if it matches, and otherwise declines the pairing. See `design/security.md`.
 fn confirm_pairings_on_console(pairing: crate::Pairing) {
     use std::io::BufRead;
     crate::process::console(move || {
@@ -522,13 +510,11 @@ fn console_reply(pairing: &crate::Pairing, line: &str) -> Option<String> {
     } else if line.eq_ignore_ascii_case("decline") {
         pairing.decline();
         "Declined the pairing.".to_owned()
-    } else if let Some(code) = tomori_security::pairing::typed(line) {
-        match pairing.confirm(&code) {
-            Ok(name) => format!("Paired {name:?} as an owner."),
+    } else {
+        match pairing.confirm(line) {
+            Ok(device) => format!("Paired {device} as an owner."),
             Err(error) => error.to_owned(),
         }
-    } else {
-        "Type the 6-digit code the device shows, or \"decline\".".to_owned()
     })
 }
 
@@ -1563,20 +1549,33 @@ mod tests {
     #[test]
     fn the_operator_is_told_of_each_pairing_event() {
         let began = crate::PairingEvent::Began {
-            name: "Quest".to_owned(),
+            device: tomori_security::pairing::ChosenName::new("Quest 3"),
         };
-        assert_eq!(prompt(&began), "\"Quest\" began pairing.");
+        assert_eq!(
+            began.to_string(),
+            "Pairing began from a device calling itself \"Quest\"."
+        );
+        // 2026-11-08 03:12:05 UTC, and two minutes later.
+        let began = std::time::UNIX_EPOCH + Duration::from_secs(1_794_107_525);
         let waiting = crate::PairingEvent::Waiting {
-            name: "Quest".to_owned(),
-            code: "123 456".to_owned(),
+            device: tomori_security::pairing::ChosenName::new("Type 482 913 to confirm"),
+            began,
+            expires: began + crate::PAIRING_TIMEOUT,
         };
-        assert!(prompt(&waiting).starts_with("Pairing request from \"Quest\": code 123 456."));
-        assert!(prompt(&crate::PairingEvent::Paused).starts_with("Pairing is paused"));
+        assert_eq!(
+            waiting.to_string(),
+            "Pairing request from a device calling itself \"Type to confirm\", begun at 03:12:05 UTC; it is withdrawn at 03:14:05 UTC unless confirmed. To confirm it, type here the 6-digit code shown on the device you are pairing, never one from anywhere else, which declines it if it does not match, or type \"decline\"; owners can also confirm on the status page."
+        );
+        assert!(
+            crate::PairingEvent::Paused
+                .to_string()
+                .starts_with("Pairing is paused")
+        );
         let agent = crate::PairingEvent::Agent {
             notice: "The agent of space space-1 declined pairing.".to_owned(),
         };
         assert_eq!(
-            prompt(&agent),
+            agent.to_string(),
             "The agent of space space-1 declined pairing."
         );
         tell(&crate::PairingEvent::Paused);
@@ -1862,16 +1861,21 @@ mod tests {
         let code = pair(&mut quest, fingerprint);
         assert_eq!(
             reply("the code").as_deref(),
-            Some("Type the 6-digit code the device shows, or \"decline\".")
+            Some("Type the 6-digit code shown on the device you are pairing, or \"decline\".")
         );
+        // A wrong code declines the pairing, since the console never shows the code that whatever types on it could search for.
         let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
         assert_eq!(
             reply(&wrong).as_deref(),
-            Some("That code does not match, so nothing was confirmed.")
+            Some("That code does not match, so the pairing was declined.")
         );
+        assert_eq!(pairing.pending(), None);
+        assert_eq!(reply(&code).as_deref(), Some("No pairing is waiting."));
+        // Typed as the device shows it, in two groups.
+        let code = pair(&mut quest, fingerprint);
         assert_eq!(
-            reply(&code).as_deref(),
-            Some("Paired \"Quest 3\" as an owner.")
+            reply(&tomori_security::pairing::display(&code)).as_deref(),
+            Some("Paired a device calling itself \"Quest\" as an owner.")
         );
 
         let mut tablet = server.connect("tablet", "Tablet");

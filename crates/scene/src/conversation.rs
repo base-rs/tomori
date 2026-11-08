@@ -65,12 +65,22 @@ const LOST: &str = "Connection lost; your words were not sent.";
 pub const AUTOMATIC_SETTLE: Duration = Duration::from_millis(1500);
 
 /// Pairing this device as an owner, from choosing the pairing object until the server confirms or refuses it. See `design/security.md`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Pairing {
     /// Committed to this value, waiting for the server's.
     Committed(tomori_security::pairing::Nonce, Instant),
     /// Both sides have the code, written for reading, which waits to be confirmed on the server.
     Waiting(String, Instant),
+}
+
+/// Written without the code, which the device shows only on its pairing object, and without the value, which is a secret until revealed.
+impl std::fmt::Debug for Pairing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Committed(_, began) => write!(formatter, "Committed([redacted], {began:?})"),
+            Self::Waiting(_, began) => write!(formatter, "Waiting([redacted], {began:?})"),
+        }
+    }
 }
 
 /// The problem shown when words that said a new name did not change it, for `reason`.
@@ -5424,6 +5434,12 @@ mod tests {
         };
         let commitment = commitment.clone();
         assert_eq!(pairing_label(&conversation).as_deref(), Some("Pairing..."));
+        // Debugged, the pairing holds neither its value nor, later, its code.
+        let debugged = format!("{:?}", conversation.pairing);
+        assert!(
+            debugged.starts_with("Some(Committed([redacted], "),
+            "{debugged}"
+        );
 
         let server = Nonce::generate();
         conversation.apply(Event::Message(ServerMessage::PairNonce {
@@ -5439,6 +5455,11 @@ mod tests {
         assert_eq!(pairing_label(&conversation), Some(expected.clone()));
         assert!(conversation.status().unwrap().contains(&expected));
         assert_eq!(conversation.menu_model().pairing, Some(expected.clone()));
+        let debugged = format!("{:?}", conversation.pairing);
+        assert!(
+            debugged.starts_with("Some(Waiting([redacted], ") && !debugged.contains(&expected),
+            "{debugged}"
+        );
         // The server waits for the operator to confirm it: the code stays shown, and the device waits too.
         conversation.apply(Event::Message(ServerMessage::PairWaiting));
         conversation.expire_pairing(Instant::now());

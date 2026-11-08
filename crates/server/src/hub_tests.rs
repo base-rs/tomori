@@ -818,7 +818,7 @@ fn an_agent_s_confirmation_whose_token_cannot_be_issued_says_so() {
     assert_eq!(
         hub.status().pairing_decisions,
         [format!(
-            "The agent of space {space} (\"Space\"), session session, confirmed pairing for \"quest\" with nobody in the space, but the token could not be issued."
+            "The agent of space {space} (\"Space\"), session session, confirmed the pairing waiting with nobody in the space, but the token could not be issued."
         )]
     );
 }
@@ -1454,11 +1454,41 @@ fn the_console_is_prompted_as_a_pairing_begins() {
     hub.set_pairing_prompt(Box::new(move |event: &PairingEvent| {
         seen.lock().unwrap().push(event.clone())
     }));
+    let before = std::time::SystemTime::now();
     pair(&device);
-    assert!(matches!(
-        &events.lock().unwrap()[..],
-        [PairingEvent::Began { .. }, PairingEvent::Waiting { .. }]
-    ));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(matches!(events[0], PairingEvent::Began { .. }));
+    let waiting: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            PairingEvent::Waiting { began, expires, .. } => Some((*began, *expires)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(waiting.len(), 1);
+    let (began, expires) = waiting[0];
+    // Begun as it was asked for, before it was revealed, and withdrawn after the timeout.
+    assert!(began >= before - Duration::from_secs(1) && began <= std::time::SystemTime::now());
+    assert_eq!(expires.duration_since(began).unwrap(), PAIRING_TIMEOUT);
+}
+
+#[test]
+fn what_confirms_a_pairing_is_debugged_without_its_code() {
+    assert_eq!(
+        format!("{:?}", Confirmation::Typed("042917")),
+        "Typed([redacted])"
+    );
+    assert_eq!(
+        format!("{:?}", Confirmation::Agent("042917")),
+        "Agent([redacted])"
+    );
+    assert_eq!(format!("{:?}", Confirmation::Shown(3)), "Shown(3)");
+    assert_eq!(
+        format!("{:?}", crate::hub::Decision::Confirm("042 917")),
+        "Confirm([redacted])"
+    );
+    assert_eq!(format!("{:?}", crate::hub::Decision::Decline), "Decline");
 }
 
 #[test]

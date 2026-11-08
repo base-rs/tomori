@@ -35,6 +35,10 @@ name = "pairing"
 required-features = ["fake"]
 
 [[test]]
+name = "pairing_output"
+required-features = ["fake"]
+
+[[test]]
 name = "knocking"
 required-features = ["fake"]
 

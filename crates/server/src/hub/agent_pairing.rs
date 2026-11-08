@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! What a space's agent may do with a device pairing through Tomori's tools: list the pairing waiting without its code, confirm it with the code a participant read aloud from the device, or decline it, always where everyone can see. See `design/security.md` and `design/mcp.md`.
+//! What a space's agent may do with a device pairing through Tomori's tools: list the pairing waiting without its code or the device's name, confirm it with the code a participant read aloud from the device, or decline it, always where everyone can see. See `design/security.md` and `design/mcp.md`.
 use std::time::Instant;
 
 use super::{Confirmation, Hub, HubState, PAIRING_DECISIONS, PairingEvent, REVEAL_TIMEOUT};
@@ -11,11 +11,21 @@ use serde_json::{Value, json};
 pub(crate) const NO_PAIRING: &str = "This server does not pair devices: in --auth open mode everyone who connects is already an owner, so there is no pairing to list, confirm or decline.";
 
 /// What the agent asked to do with the pairing waiting.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) enum Decision<'a> {
     /// Confirm it, if this is its code, as a participant read it aloud from the device.
     Confirm(&'a str),
     Decline,
+}
+
+/// Written without the code given, which may be the device's.
+impl std::fmt::Debug for Decision<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Confirm(_) => "Confirm([redacted])",
+            Self::Decline => "Decline",
+        })
+    }
 }
 
 impl Decision<'_> {
@@ -28,11 +38,9 @@ impl Decision<'_> {
     }
 }
 
-/// What the agent did with a pairing, for the tool's result.
+/// What the agent did with a pairing, for the tool's result. It never names the device, whose name the device chose and could carry an attacker's instructions or code; see `design/security.md`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Decided {
-    /// The device whose pairing was decided, by the name it gave.
-    pub device: String,
     pub confirmed: bool,
 }
 
@@ -72,7 +80,7 @@ impl Hub {
         self.pairing.read().expect("never left poisoned").is_some()
     }
 
-    /// The pairing waiting, as the `pairing` tool lists it to the agent of the space bound to `session`: the device's name, how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. Never the code, nor the values it is derived from. See `design/security.md`.
+    /// The pairing waiting, as the `pairing` tool lists it to the agent of the space bound to `session`: only what the server knows itself, how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. Never the code, nor the values it is derived from, nor the device's name, which the device chose and could carry an attacker's code or instructions. The server knows nothing else of the device, such as its kind or platform. See `design/security.md`.
     pub(crate) fn tool_pairing(&self, session: &str) -> Result<Value, String> {
         let timeout = *self.pairing_timeout.read().expect("never left poisoned");
         let state = self.lock();
@@ -90,7 +98,6 @@ impl Hub {
                 timeout
             };
             json!({
-                "device": pairing.name,
                 "began_seconds_ago": waited.as_secs(),
                 "expires_in_seconds": limit.saturating_sub(waited).as_secs(),
                 "code_shown": pairing.code.is_some(),
@@ -137,9 +144,9 @@ impl Hub {
         if !self.pairs() {
             return refuse(state, NO_PAIRING);
         }
-        let Some(device) = state.pairing.as_ref().map(|pairing| pairing.name.clone()) else {
+        if state.pairing.is_none() {
             return refuse(state, "No pairing is waiting.");
-        };
+        }
         let present = state.present_in(&space);
         let code = match decision {
             Decision::Decline => {
@@ -148,12 +155,9 @@ impl Hub {
                 self.announce_pairing(
                     &space,
                     session,
-                    &format!("declined pairing for {device:?} {present}"),
+                    &format!("declined the pairing waiting {present}"),
                 );
-                return Ok(Decided {
-                    device,
-                    confirmed: false,
-                });
+                return Ok(Decided { confirmed: false });
             }
             Decision::Confirm(code) => code,
         };
@@ -175,9 +179,7 @@ impl Hub {
                 self.announce_pairing(
                     &space,
                     session,
-                    &format!(
-                        "gave a code that did not match the one {device:?} shows, so its pairing was declined"
-                    ),
+                    "gave a code that did not match the one the device shows, so its pairing was declined",
                 );
                 return Err(announced(error));
             }
@@ -185,23 +187,20 @@ impl Hub {
         };
         drop(state);
         match self.issue_pairing(pairing) {
-            Ok(device) => {
+            Ok(_) => {
                 self.announce_pairing(
                     &space,
                     session,
-                    &format!("confirmed pairing for {device:?} {present}; it is now an owner"),
+                    &format!("confirmed the pairing waiting {present}; the device is now an owner"),
                 );
-                Ok(Decided {
-                    device,
-                    confirmed: true,
-                })
+                Ok(Decided { confirmed: true })
             }
             Err(error) => {
                 self.announce_pairing(
                     &space,
                     session,
                     &format!(
-                        "confirmed pairing for {device:?} {present}, but {}",
+                        "confirmed the pairing waiting {present}, but {}",
                         error.trim_end_matches('.').to_lowercase()
                     ),
                 );
