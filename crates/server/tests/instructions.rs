@@ -327,7 +327,8 @@ fn a_forgotten_space_s_entries_are_removed_unless_another_space_is_bound_to_its_
         environment: None,
         instructions: Some("Mind the tests.".to_owned()),
     });
-    ada.space(|state| state.title == "Third");
+    // Bound to the second space's session, it takes that session's own title.
+    ada.space(|state| state.title == "Second" && state.id != second);
     until(
         &second_session,
         "the third space's layers were never given",

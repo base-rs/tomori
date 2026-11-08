@@ -256,7 +256,7 @@ impl FakeBackend {
             handle: handle.clone(),
             inner: Arc::new(FakeSessionInner {
                 id: Mutex::new(format!("fake-{number}")),
-                title: title.to_owned(),
+                title: Mutex::new(title.to_owned()),
                 directory: directory.to_owned(),
                 manual: self.shared.manual.load(Ordering::SeqCst),
                 snapshot_failure: self.shared.snapshot_failure.clone(),
@@ -466,7 +466,7 @@ impl Backend for FakeBackend {
             .filter(|session| std::path::Path::new(&session.inner.directory).starts_with(directory))
             .map(|session| SessionSummary {
                 id: session.id(),
-                title: session.inner.title.clone(),
+                title: session.inner.title.lock().unwrap().clone(),
                 directory: session.inner.directory.clone(),
                 busy: session.is_busy(),
             })
@@ -546,7 +546,8 @@ struct FakeSessionInner {
     /// The agent may name its session anew; see [`FakeSession::rename`].
     id: Mutex<String>,
     closing_failure: Arc<AtomicBool>,
-    title: String,
+    /// The session's own title, which [`Event::TitleChanged`] changes as the agent's would.
+    title: Mutex<String>,
     directory: String,
     manual: bool,
     snapshot_failure: Arc<AtomicBool>,
@@ -630,6 +631,9 @@ impl FakeSession {
             Event::WorkersChanged { workers } | Event::WorkersPartial { workers, .. } => {
                 self.inner.family.lock().unwrap().clone_from(workers);
             }
+            Event::TitleChanged { title } => {
+                title.clone_into(&mut self.inner.title.lock().unwrap())
+            }
             _ => {}
         }
         let mut outbound = self.inner.outbound.lock().unwrap();
@@ -696,6 +700,13 @@ impl FakeSession {
         *self.inner.family.lock().unwrap() = workers;
     }
 
+    /// Title the session anew, as its user may in the agent's own interface, reporting it as the agent would.
+    pub fn retitle(&self, title: &str) {
+        self.emit(Event::TitleChanged {
+            title: title.to_owned(),
+        });
+    }
+
     /// Name the session anew, as an agent may once it starts.
     pub fn rename(&self, id: &str) {
         *self.inner.id.lock().unwrap() = id.to_owned();
@@ -747,6 +758,7 @@ impl Session for FakeSession {
             permissions: self.inner.permissions.lock().unwrap().clone(),
             questions: self.inner.questions.lock().unwrap().clone(),
             modes: self.inner.modes.lock().unwrap().clone(),
+            title: Some(self.inner.title.lock().unwrap().clone()),
             ..Snapshot::default()
         })
     }

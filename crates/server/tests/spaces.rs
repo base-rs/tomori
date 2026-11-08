@@ -447,8 +447,9 @@ fn a_failed_snapshot_of_an_attached_session_can_be_retried() {
     assert!(ada.error().contains("initial session state"));
     backend.fail_snapshots(false);
     ada.send(&request("Retried"));
+    // Bound to the session, the space takes its title.
     assert_eq!(
-        ada.space(|state| state.title == "Retried").activity,
+        ada.space(|state| state.title == "Existing").activity,
         Activity::Idle
     );
 }
@@ -748,6 +749,7 @@ fn attention_is_captured_as_the_utterance_begins_and_never_from_a_description_a_
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: vec![worker("ses_c")],
     });
     // Messages on a connection are handled in order, so once the listing asked for after it arrives, the utterance
@@ -1625,6 +1627,7 @@ fn say_answer(
         }),
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     client.send_audio(tomori_protocol::Gate::Agent, speech(text));
@@ -1873,6 +1876,7 @@ fn skipped_live_frames_within_an_utterance_do_not_fail_it() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     ada.send_audio(Gate::Agent, speech("he"));
@@ -1908,6 +1912,7 @@ fn a_lost_frame_fails_the_utterance() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     ada.send_audio(Gate::Agent, speech("ab"));

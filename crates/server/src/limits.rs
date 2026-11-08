@@ -73,6 +73,38 @@ pub fn check(value: &str, limit: usize, what: &str) -> Result<(), String> {
     }
 }
 
+/// A space's title as an owner or the space's agent gives it, cleaned, or why it is refused. It is cleaned as a display
+/// name is ([`tomori_protocol::text::clean_name`]): on one line, composed, without control or format characters, with
+/// each run of spaces made one and none at either end. Cleaned, it must be at most [`TITLE_BYTES`] bytes. An empty
+/// title is allowed: it lets the space follow its agent session's title again. See `design/spaces.md`.
+pub fn title(title: &str) -> Result<String, String> {
+    let cleaned = tomori_protocol::text::clean_name(title);
+    if cleaned.len() > TITLE_BYTES {
+        Err(format!(
+            "That title is too long; the limit is {TITLE_BYTES} bytes."
+        ))
+    } else {
+        Ok(cleaned)
+    }
+}
+
+/// A title the agent reports for a space's session, cleaned as [`title`] cleans one and cut to [`TITLE_BYTES`], or
+/// `None` when nothing is left of it, which a space never takes.
+pub fn session_title(title: &str) -> Option<String> {
+    let cleaned = tomori_protocol::text::clean_name(title);
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.len() <= TITLE_BYTES {
+        return Some(cleaned);
+    }
+    let mut end = TITLE_BYTES - '…'.len_utf8();
+    while !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}…", cleaned[..end].trim_end()))
+}
+
 /// A display name as the server keeps it, cleaned, or why it is refused, by the rules of [`tomori_protocol::text::display_name`]: on one line, composed, without format characters, not empty, not starting with `/`, without `:`, `[` or `]`, and at most [`tomori_protocol::text::NAME_CHARS`] characters and [`NAME_BYTES`] bytes. They apply to a rename and to a token's name. See `design/security.md`.
 pub fn name(name: &str) -> Result<String, String> {
     tomori_protocol::text::display_name(name).map_err(|error| error.to_string())
@@ -297,6 +329,27 @@ mod tests {
             text,
             completed: true,
         }
+    }
+
+    #[test]
+    fn a_title_is_cleaned_onto_one_line_and_bounded() {
+        assert_eq!(
+            title("  Release\r\nplanning\u{200b}  ").unwrap(),
+            "Release planning"
+        );
+        // Empty, it lets the space follow its session again.
+        assert_eq!(title(" \t ").unwrap(), "");
+        assert_eq!(title(&"é".repeat(100)).unwrap(), "é".repeat(100));
+        assert_eq!(
+            title(&format!(" {} ", "t".repeat(TITLE_BYTES + 1))).unwrap_err(),
+            "That title is too long; the limit is 200 bytes."
+        );
+        // A session's title is cut rather than refused, on a character's boundary, and one with nothing in it is none.
+        assert_eq!(session_title(" Studio\n").as_deref(), Some("Studio"));
+        assert_eq!(session_title("\u{200b} \n"), None);
+        let cut = session_title(&"é".repeat(150)).unwrap();
+        assert!(cut.len() <= TITLE_BYTES && cut.ends_with('…'), "{cut}");
+        assert!(cut.starts_with("éé"));
     }
 
     #[test]

@@ -275,6 +275,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run", "the"]);
@@ -491,6 +492,7 @@ fn a_recognizer_failure_fails_the_utterance() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["please", "fail"]);
@@ -529,6 +531,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["please", "fail", "please", "please"]);
@@ -548,6 +551,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run", "the", "tests"]);
@@ -580,6 +584,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["crash"]);
@@ -605,6 +610,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run"]);
@@ -629,6 +635,7 @@ fn an_utterance_that_cannot_start_fails_visibly() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run", "the", "tests"]);
@@ -651,6 +658,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     bob.send(&ClientMessage::UtteranceBegin {
@@ -658,6 +666,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut bob, &["run", "the"]);
@@ -686,6 +695,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["please", "please"]);
@@ -707,6 +717,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run", "the", "tests"]);
@@ -744,6 +755,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run"]);
@@ -761,6 +773,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak(&mut ada, &["run", "the", "tests"]);
@@ -856,6 +869,7 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     ada.send_audio(Gate::Agent, vec![0; 320]);
@@ -1121,6 +1135,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     speak_steadily(&mut ada, 65);
@@ -1289,6 +1304,7 @@ fn begin(client: &mut TestClient, id: &str, progress: bool) {
         answer: None,
         progress,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
 }
@@ -1527,6 +1543,7 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     // One second more than the limit; the failure arrives before the utterance ends.
@@ -1969,6 +1986,7 @@ fn without_recognition_an_ended_utterance_fails_and_a_cancelled_one_is_silent() 
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention: Vec::new(),
         });
         speak(&mut ada, &["run", "the", "tests"]);

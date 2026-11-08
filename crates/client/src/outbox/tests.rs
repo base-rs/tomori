@@ -124,6 +124,7 @@ fn opted_in_microphone_cannot_resume_after_reconnect_without_a_new_activation() 
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention: Vec::new(),
         })
         .unwrap();
@@ -490,6 +491,7 @@ fn begin(utterance: &str) -> ClientMessage {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     }
 }

@@ -35,7 +35,7 @@ pub use projection::{
 pub use space::{
     Activity, AgentInstructions, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,
     Engagement, EnvironmentInfo, EnvironmentVersion, KnockRequest, KnockState, Message, Mode,
-    Participant, Presentation, PresentationKind, Question, QueueEntry, QueueState, Role,
+    Participant, Presentation, PresentationKind, Question, QueueEntry, QueueState, Renamer, Role,
     SessionSummary, SpaceState, SpaceSummary, SpeechSetting, Worker, WorkerState, WorkspaceRoot,
 };
 

@@ -584,6 +584,7 @@ impl TestClient {
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention,
         });
         self.send_audio(Gate::Agent, speech(text));

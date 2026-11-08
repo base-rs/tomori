@@ -75,6 +75,9 @@ pub struct Utterance {
     pub answer: Option<tomori_protocol::AnswerTarget>,
     /// Whether the words say the participant's new display name, which the server takes as a rename rather than queueing for the agent; see `design/security.md`.
     pub naming: bool,
+    /// Whether the words say the space's new title, which the server takes as renaming the space rather than queueing
+    /// for the agent; see `design/hand-menu.md`.
+    pub titling: bool,
     /// What the participant attends to as they begin speaking, such as the worker they point at, by identity only,
     /// which the server describes to the agent with the words. See `design/spaces.md`.
     pub attention: Vec<tomori_protocol::Resource>,
@@ -88,6 +91,7 @@ impl Utterance {
             generation,
             answer: None,
             naming: false,
+            titling: false,
             attention: Vec::new(),
         }
     }
@@ -101,6 +105,13 @@ impl Utterance {
     /// The utterance as the participant's new display name, which the server takes as a rename.
     pub fn naming(mut self) -> Self {
         self.naming = true;
+        self
+    }
+
+    /// The utterance as the space's new title, which the server takes as renaming the space. Only for an owner, on a
+    /// server whose space state says it renames spaces.
+    pub fn titling(mut self) -> Self {
+        self.titling = true;
         self
     }
 
@@ -648,15 +659,15 @@ impl Voice {
             .is_some_and(|microphone| microphone.utterance().is_some())
     }
 
-    fn begin(
-        &mut self,
-        client: &Client,
-        utterance: String,
-        generation: u64,
-        answer: Option<tomori_protocol::AnswerTarget>,
-        naming: bool,
-        attention: Vec<tomori_protocol::Resource>,
-    ) -> Result<(), String> {
+    fn begin(&mut self, client: &Client, utterance: Utterance) -> Result<(), String> {
+        let Utterance {
+            id: utterance,
+            generation,
+            answer,
+            naming,
+            titling,
+            attention,
+        } = utterance;
         let resume_live = self.live && self.recording.is_some();
         if resume_live {
             if self.generation != Some(generation) || !client.sender().arm_microphone(generation) {
@@ -673,7 +684,7 @@ impl Voice {
         }
         let mut voice = self.lock();
         let microphone = voice.microphone.as_mut().unwrap();
-        let result = microphone.start(utterance, answer, naming, attention);
+        let result = microphone.start(utterance, answer, (naming, titling), attention);
         drop(voice);
         if let Err(error) = result {
             self.recording = None;
@@ -1414,13 +1425,8 @@ impl Connection {
                         session.report(Report::Failed("Not connected.".into()));
                     }
                 }
-                Action::BeginUtterance(Utterance {
-                    id: utterance,
-                    generation,
-                    answer,
-                    naming,
-                    attention,
-                }) => {
+                Action::BeginUtterance(begun) => {
+                    let utterance = begun.id.clone();
                     // The opening tick plays through the silencing, as X is pressed and before the microphone has opened; see `design/live-audio.md`. A live microphone is already open and would hear it, so then it is only felt.
                     self.feedback.emit_heard(
                         Feedback::RecordingStarts,
@@ -1436,9 +1442,7 @@ impl Connection {
                     self.utterances.push(utterance.clone());
                     self.recording = Some(utterance.clone());
                     let begun = match &self.client {
-                        Some(client) => self
-                            .voice
-                            .begin(client, utterance, generation, answer, naming, attention),
+                        Some(client) => self.voice.begin(client, begun),
                         None => Err("Not connected.".into()),
                     };
                     if let Err(error) = begun {

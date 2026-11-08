@@ -700,6 +700,8 @@ struct UtteranceRecord {
     answer: Option<tomori_protocol::AnswerTarget>,
     /// Whether the transcript is the participant's new display name, rather than being queued or answering.
     naming: bool,
+    /// Whether the transcript is the space's new title, rather than being queued or answering. See `design/hand-menu.md`.
+    titling: bool,
     /// What the participant attended to as the utterance began, as the space knew it then. Their client names only
     /// identities. See `design/spaces.md`.
     attention: Vec<crate::space::Attended>,
@@ -953,6 +955,38 @@ impl HubState {
         }
     }
 
+    /// Give the space `space`, which is listed, the title `title`, cleaned by [`limits::title`], as `by` asked, in place
+    /// of its session's, or let it follow its session's title again when `title` is empty, telling everyone in it and
+    /// the lobby. Returns whether the title shown changed. The caller keeps the change. See `design/spaces.md`.
+    fn rename_space(&mut self, space: &str, title: String, by: tomori_protocol::Renamer) -> bool {
+        let Some(record) = self.space_mut(space) else {
+            unreachable!("only a listed space is renamed");
+        };
+        let before = record.model.renamed_by().cloned();
+        let changed = record.model.rename(title, by.clone());
+        let following = record.model.renamed_by().is_none();
+        if changed || before.as_ref() != record.model.renamed_by() {
+            let who = match &by {
+                tomori_protocol::Renamer::Agent => "its agent".to_owned(),
+                tomori_protocol::Renamer::Participant { .. }
+                | tomori_protocol::Renamer::Unknown => "an owner".to_owned(),
+            };
+            if following {
+                log::info!(
+                    "Space {space} follows its session's title again, as {who} asked: {:?}.",
+                    record.model.title
+                );
+            } else {
+                log::info!(
+                    "Space {space} is now titled {:?}, as {who} asked.",
+                    record.model.title
+                );
+            }
+            self.touch_space(space);
+        }
+        changed
+    }
+
     /// Tell everyone in the space, and the lobby, that the space changed.
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
@@ -1006,6 +1040,7 @@ impl HubState {
                 crate::kept::KeptSpace {
                     id: model.id.clone(),
                     title: model.title.clone(),
+                    renamed_by: model.renamed_by().cloned(),
                     backend: model.backend.clone(),
                     directory: model.directory.clone(),
                     session: model.session.clone(),
@@ -2907,8 +2942,16 @@ impl Hub {
                 answer,
                 progress,
                 naming,
+                titling,
                 attention,
             } => {
+                if naming && titling {
+                    state.error(
+                        participant,
+                        "Words cannot say both your name and the space's title.",
+                    );
+                    return;
+                }
                 let checked =
                     limits::check(&utterance, limits::UTTERANCE_BYTES, "utterance identifier")
                         .and_then(|()| match &answer {
@@ -2946,7 +2989,7 @@ impl Hub {
                 // space that shows them. An answer goes to the question presented, and a name to the participant, so
                 // either is about nothing attended to.
                 let attention = match state.space(&space) {
-                    Some(record) if answer.is_none() && !naming => {
+                    Some(record) if answer.is_none() && !naming && !titling => {
                         let environments = self.environments();
                         let walls = environments.walls(&record.model.environment);
                         let now = crate::cards::unix_now();
@@ -2975,6 +3018,7 @@ impl Hub {
                         // Words that name the participant answer nothing, since they are never queued.
                         answer,
                         naming,
+                        titling,
                         attention,
                         origin,
                         progress: progress.then_some(connection),
@@ -3030,7 +3074,10 @@ impl Hub {
                         .utterances
                         .get(&open.id)
                         .filter(|record| {
-                            record.attention.is_empty() && record.answer.is_none() && !record.naming
+                            record.attention.is_empty()
+                                && record.answer.is_none()
+                                && !record.naming
+                                && !record.titling
                         })
                         .and_then(|record| {
                             state.space(&record.space).map(|space| {
@@ -3756,6 +3803,25 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+            ClientMessage::RenameSpace { title } => {
+                let title = match limits::title(&title) {
+                    Ok(title) => title,
+                    Err(error) => {
+                        state.error(participant, format!("Title not changed: {error}"));
+                        return;
+                    }
+                };
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let by = state.participants[participant].name.clone();
+                state.rename_space(
+                    &space,
+                    title,
+                    tomori_protocol::Renamer::Participant { name: by },
+                );
+                deferred.push(Deferred::Keep);
+            }
             ClientMessage::SetSpeech { speech } => {
                 let Some(space) = in_space(state) else {
                     return;
@@ -4056,6 +4122,55 @@ impl Hub {
             }
             return;
         }
+        // Words that say the space's new title rename the space they were said in, if it is still listed, and are
+        // never queued, even in a space whose session has closed. Saying the title it has already changes nothing.
+        if record.titling && !text.is_empty() {
+            let title = limits::title(spoken_name(text)).and_then(|title| {
+                if title.is_empty() {
+                    Err("No title was heard.".to_owned())
+                } else {
+                    Ok(title)
+                }
+            });
+            // The space may have been forgotten while the words were transcribed.
+            let renamed = title.and_then(|title| {
+                if state.space(&record.space).is_none() {
+                    return Err("That space is no longer listed.".to_owned());
+                }
+                let by = state
+                    .participants
+                    .get(&record.participant)
+                    .map_or_else(String::new, |participant| participant.name.clone());
+                state.rename_space(
+                    &record.space,
+                    title.clone(),
+                    tomori_protocol::Renamer::Participant { name: by },
+                );
+                Ok(title)
+            });
+            match renamed {
+                Ok(title) => {
+                    state.send(
+                        &record.participant,
+                        ServerMessage::Transcript {
+                            utterance: record.client,
+                            text: title,
+                            finished: true,
+                        },
+                    );
+                    drop(state);
+                    self.keep();
+                }
+                Err(error) => state.send(
+                    &record.participant,
+                    ServerMessage::TranscriptFailed {
+                        utterance: record.client,
+                        error,
+                    },
+                ),
+            }
+            return;
+        }
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
         // A repeated finalization of an answer already applied is acknowledged in the same way.
@@ -4329,6 +4444,8 @@ impl Hub {
                     kept.session.clone(),
                     Snapshot::default(),
                 );
+                // Renamed, it keeps its title over its session's once bound again.
+                model.keep_title(kept.renamed_by);
                 model.set_attribution(kept.attribution);
                 if kept.brief {
                     model
@@ -4515,7 +4632,16 @@ impl Hub {
         let record = state.space_mut(space)?;
         let resynchronized = matches!(event, Event::Resynchronized { .. });
         let was_open = !record.model.is_closed();
+        let title = record.model.title.clone();
         record.model.apply(event);
+        // Following its session, the space took its new title: everyone sees it, and it is kept across a restart.
+        let retitled = record.model.title != title;
+        if retitled {
+            log::info!(
+                "Space {space} follows its session's title, now {:?}.",
+                record.model.title
+            );
+        }
         let replies = record.model.take_projected();
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
@@ -4545,6 +4671,10 @@ impl Hub {
         }
         // The space's attention may have changed.
         self.recount(&mut state);
+        if retitled {
+            drop(state);
+            self.keep();
+        }
         (!replies.is_empty()).then(|| crate::stage::Projecting::new(replies))
     }
 

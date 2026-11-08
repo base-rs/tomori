@@ -225,6 +225,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");

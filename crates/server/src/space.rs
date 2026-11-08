@@ -25,7 +25,13 @@ const MESSAGE_TEXT_LIMIT: usize = 20_000;
 #[derive(Debug)]
 pub struct SpaceModel {
     pub id: String,
+    /// The title shown: its session's, unless someone renamed the space; see [`Self::rename`].
     pub title: String,
+    /// Who gave the space its title in place of its session's, if anyone has since it last followed the session. See
+    /// `design/spaces.md`.
+    renamed_by: Option<tomori_protocol::Renamer>,
+    /// The session's own title, as the backend last reported it, cleaned, if it has.
+    session_title: Option<String>,
     pub backend: String,
     pub directory: String,
     /// The environment the space is bound to, the same for every participant, which an owner may change.
@@ -397,9 +403,13 @@ impl SpaceModel {
             .into_iter()
             .map(|entry| worker(entry, &session))
             .collect();
+        let session_title = snapshot.title.as_deref().and_then(limits::session_title);
         let mut model = Self {
             id,
-            title,
+            // The session's own title, where the backend reports it, which the space follows from the start.
+            title: session_title.clone().unwrap_or(title),
+            renamed_by: None,
+            session_title,
             backend,
             directory,
             environment,
@@ -473,7 +483,12 @@ impl SpaceModel {
             workers: _,
             workers_incomplete: _,
             modes,
+            title,
         } = snapshot;
+        // The session may have been renamed while the space could not hear of it.
+        if let Some(title) = title {
+            self.follow(&title);
+        }
         // The agent keeps a message's text in its records only once the message ends, so a message read again while
         // it is still being written may list less text than the space already shows. Keep what the space has; the
         // text it missed while disconnected is restored when the message ends.
@@ -799,6 +814,44 @@ impl SpaceModel {
         }
     }
 
+    /// Take `title`, which the backend reports as the session's own, as the space's title too, unless someone renamed
+    /// the space. A title with nothing left of it once cleaned is ignored. See `design/spaces.md`.
+    fn follow(&mut self, title: &str) {
+        let Some(title) = limits::session_title(title) else {
+            return;
+        };
+        if self.renamed_by.is_none() {
+            self.title.clone_from(&title);
+        }
+        self.session_title = Some(title);
+    }
+
+    /// Give the space `title`, already cleaned by [`limits::title`], as `by` asked, in place of its session's, which it
+    /// no longer follows; or, when `title` is empty, let it follow its session's title again, taking it now if the
+    /// backend has reported it, and keeping the title it has otherwise. Returns whether the title shown changed. See
+    /// `design/spaces.md`.
+    pub fn rename(&mut self, title: String, by: tomori_protocol::Renamer) -> bool {
+        let before = std::mem::take(&mut self.title);
+        if title.is_empty() {
+            self.renamed_by = None;
+            self.title = self.session_title.clone().unwrap_or_else(|| before.clone());
+        } else {
+            self.renamed_by = Some(by);
+            self.title = title;
+        }
+        self.title != before
+    }
+
+    /// Who gave the space its title in place of its session's, if anyone did.
+    pub fn renamed_by(&self) -> Option<&tomori_protocol::Renamer> {
+        self.renamed_by.as_ref()
+    }
+
+    /// Restore that `by` gave the space its title, as kept across a restart, so that it does not follow its session.
+    pub fn keep_title(&mut self, by: Option<tomori_protocol::Renamer>) {
+        self.renamed_by = by;
+    }
+
     /// How much of each reply is spoken. Full unless a participant chose brief.
     pub fn speech(&self) -> SpeechSetting {
         self.speech
@@ -1078,6 +1131,11 @@ impl SpaceModel {
             Event::Resynchronized { snapshot } => {
                 if !self.closed {
                     self.resynchronize(snapshot);
+                }
+            }
+            Event::TitleChanged { title } => {
+                if !self.closed {
+                    self.follow(&title);
                 }
             }
             Event::Closed { reason } => {
@@ -1550,6 +1608,8 @@ impl SpaceModel {
             // Set by the hub, which knows the backends.
             deletes: false,
             deletes_session: false,
+            renamed_by: self.renamed_by.clone(),
+            renames: true,
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]
@@ -1669,6 +1729,79 @@ mod tests {
         );
         assert_eq!(space.worker_finished_at("c"), None);
         assert_eq!(space.workers_complete(), (true, None));
+    }
+
+    #[test]
+    fn a_space_follows_its_session_s_title_unless_renamed() {
+        use tomori_protocol::Renamer;
+        // Without a title from its backend, a space has the one it was created with.
+        let mut space = model();
+        assert_eq!(space.title, "Title");
+        // With one, it takes the session's own from the start.
+        let titled = SpaceModel::new(
+            "s2".into(),
+            "Asked for".into(),
+            "fake".into(),
+            "/tmp".into(),
+            "sky".into(),
+            "fake-2".into(),
+            Snapshot {
+                title: Some("The session's".into()),
+                ..Snapshot::default()
+            },
+        );
+        assert_eq!(titled.title, "The session's");
+
+        space.apply(Event::TitleChanged {
+            title: "Renamed\nin OpenCode".into(),
+        });
+        assert_eq!(space.title, "Renamed in OpenCode");
+        // Renaming to the title it has already changes nothing shown, though it stops following its session.
+        let ada = Renamer::Participant { name: "Ada".into() };
+        assert!(!space.rename("Renamed in OpenCode".into(), ada.clone()));
+        assert_eq!(space.renamed_by(), Some(&ada));
+        assert!(space.rename("Release planning".into(), Renamer::Agent));
+        assert_eq!(space.state(Vec::new(), "").renamed_by, Some(Renamer::Agent));
+        // Renamed, it keeps its title through the session's renames and a resynchronization.
+        space.apply(Event::TitleChanged {
+            title: "Again".into(),
+        });
+        space.apply(Event::Resynchronized {
+            snapshot: Snapshot {
+                title: Some("Read again".into()),
+                ..Snapshot::default()
+            },
+        });
+        assert_eq!(space.title, "Release planning");
+        // Cleared, it follows its session again, taking the title last reported.
+        assert!(space.rename(String::new(), ada.clone()));
+        assert_eq!(
+            (space.title.as_str(), space.renamed_by()),
+            ("Read again", None)
+        );
+        // Clearing a space that follows changes nothing.
+        assert!(!space.rename(String::new(), ada.clone()));
+
+        // A space whose session never reported a title keeps its own when cleared.
+        let mut space = model();
+        space.keep_title(Some(ada.clone()));
+        assert!(!space.rename(String::new(), ada.clone()));
+        assert_eq!((space.title.as_str(), space.renamed_by()), ("Title", None));
+        // Kept as renamed across a restart, it does not take what its session reports until cleared.
+        space.keep_title(Some(ada.clone()));
+        space.apply(Event::TitleChanged {
+            title: "Not yet".into(),
+        });
+        assert_eq!(space.title, "Title");
+        assert!(space.rename(String::new(), ada));
+        assert_eq!(space.title, "Not yet");
+        // A closed space no longer follows.
+        let mut space = model();
+        space.apply(Event::Closed { reason: None });
+        space.apply(Event::TitleChanged {
+            title: "Too late".into(),
+        });
+        assert_eq!(space.title, "Title");
     }
 
     #[test]
@@ -2302,6 +2435,7 @@ mod tests {
                 workers: Vec::new(),
                 workers_incomplete: None,
                 modes: Modes::default(),
+                title: None,
             },
         });
         let state = space.state(Vec::new(), "");

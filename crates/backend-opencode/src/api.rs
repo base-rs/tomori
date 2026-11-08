@@ -1198,6 +1198,8 @@ pub struct SnapshotParts {
     /// Child sessions may be background drains, whose absence from the active
     /// endpoint does not by itself establish that they are idle.
     pub has_parent: bool,
+    /// The session's own title, as its record gives it, if it gives one.
+    pub title: Option<String>,
 }
 
 impl SnapshotParts {
@@ -1301,6 +1303,7 @@ impl SnapshotParts {
             children: Vec::new(),
             busy,
             has_parent: info.get("parentID").is_some(),
+            title: info.get("title").and_then(Value::as_str).map(str::to_owned),
         })
     }
 }
@@ -1854,6 +1857,7 @@ pub(crate) mod tests {
             ],
             busy: None,
             has_parent: false,
+            title: None,
         };
         assert_eq!(
             parts

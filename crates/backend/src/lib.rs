@@ -346,6 +346,11 @@ pub struct Snapshot {
     pub workers_incomplete: Option<String>,
     #[serde(default)]
     pub modes: Modes,
+    /// The session's own title, as the agent's interface shows it, when the backend can read it; `None` otherwise. A
+    /// space whose title follows its session takes it, so that a session renamed while the server was stopped is
+    /// shown by its new title once bound again. See `design/spaces.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// A fact reported by a session, in order.
@@ -438,6 +443,11 @@ pub enum Event {
     /// it ended. It replaces that message's text and tools; a message the space does not hold is ignored.
     MessageRestored {
         message: SnapshotMessage,
+    },
+    /// The session's own title changed, as when its user renamed it in the agent's interface, or the agent titled it
+    /// after its first turn. A space whose title follows its session takes it. See `design/spaces.md`.
+    TitleChanged {
+        title: String,
     },
     /// The session ended and produces no more events.
     Closed {

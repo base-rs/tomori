@@ -101,7 +101,10 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::DeleteSpace { .. }
         // Walls change the space for everyone in it, as its environment does. See `design/projection.md`.
         | ClientMessage::AddWall { .. }
-        | ClientMessage::RemoveWall { .. } => owner,
+        | ClientMessage::RemoveWall { .. }
+        // A space's title is how everyone, in it and in the lobby, tells it apart, typed or said. See `design/spaces.md`.
+        | ClientMessage::RenameSpace { .. }
+        | ClientMessage::UtteranceBegin { titling: true, .. } => owner,
         ClientMessage::Gate { .. }
         | ClientMessage::UtteranceBegin { .. }
         | ClientMessage::UtteranceEnd { .. }
@@ -175,6 +178,7 @@ mod tests {
                 answer: None,
                 progress: false,
                 naming: false,
+                titling: false,
                 attention: Vec::new(),
             },
             ClientMessage::UtteranceEnd {
@@ -221,6 +225,7 @@ mod tests {
                 space: "s".into(),
                 session: true,
             },
+            ClientMessage::RenameSpace { title: "t".into() },
             ClientMessage::PairBegin {
                 commitment: "c".into(),
             },
@@ -264,6 +269,27 @@ mod tests {
                 json["type"].as_str().unwrap().to_owned()
             })
             .collect()
+    }
+
+    #[test]
+    fn only_an_owner_says_a_space_s_new_title() {
+        let titling = ClientMessage::UtteranceBegin {
+            utterance: "u".into(),
+            answer: None,
+            progress: false,
+            naming: false,
+            titling: true,
+            attention: Vec::new(),
+        };
+        assert_eq!(refusal(ConnectionRole::Owner, &titling), None);
+        assert_eq!(
+            refusal(ConnectionRole::Collaborator, &titling),
+            Some("Only owners can do that.")
+        );
+        assert_eq!(
+            refusal(ConnectionRole::Visitor, &titling),
+            Some("Visitors can watch, but not act in a space.")
+        );
     }
 
     #[test]
@@ -313,6 +339,7 @@ mod tests {
                     && kind != "set_instructions"
                     && kind != "set_environment"
                     && kind != "delete_space"
+                    && kind != "rename_space"
                     && kind != "add_wall"
                     && kind != "remove_wall"
             })

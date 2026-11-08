@@ -176,26 +176,27 @@ fn closing_a_recording_waits_for_its_thread_without_deadlock() {
     let client = client();
     let rate = Arc::new(AtomicU32::new(16_000));
     let mut voice = voice(&rate, true, None);
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(utterance(&voice).as_deref(), Some("u1"));
     voice.finish(Some(&client), true).unwrap();
     assert!(voice.recording.is_none());
     assert_eq!(utterance(&voice), None);
 
-    voice
-        .begin(&client, "u2".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u2", 0)).unwrap();
     std::thread::sleep(Duration::from_millis(5));
     voice.abandon();
     assert_eq!(utterance(&voice), None);
 
-    // Words that say a new name are recorded the same way.
+    // Words that say a new name, or the space's title, are recorded the same way.
     voice
-        .begin(&client, "u3".into(), 0, None, true, Vec::new())
+        .begin(&client, Utterance::new("u3", 0).naming())
         .unwrap();
+    voice.reset();
+    voice
+        .begin(&client, Utterance::new("u4", 0).titling())
+        .unwrap();
+    assert_eq!(utterance(&voice).as_deref(), Some("u4"));
     voice.reset();
     assert!(voice.lock().microphone.is_none());
     client.close();
@@ -206,14 +207,10 @@ fn a_new_rate_gets_a_new_microphone() {
     let client = client();
     let rate = Arc::new(AtomicU32::new(16_000));
     let mut voice = voice(&rate, true, None);
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     voice.finish(Some(&client), false).unwrap();
     rate.store(48_000, Ordering::Relaxed);
-    voice
-        .begin(&client, "u2".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u2", 0)).unwrap();
     let sample_rate = voice.lock().microphone.as_ref().unwrap().sample_rate();
     assert_eq!(sample_rate, 48_000);
     voice.finish(Some(&client), false).unwrap();
@@ -226,9 +223,7 @@ fn nothing_records_without_permission() {
     let rate = Arc::new(AtomicU32::new(16_000));
     let mut voice = voice(&rate, false, None);
     assert_eq!(voice.request_permission(), Ok(false));
-    let error = voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap_err();
+    let error = voice.begin(&client, Utterance::new("u1", 0)).unwrap_err();
     assert!(error.contains("Allow the microphone"), "{error}");
     assert!(voice.recording.is_none());
     assert_eq!(utterance(&voice), None);
@@ -242,9 +237,7 @@ fn live_microphone_resumes_after_agent_and_can_be_muted_during_it() {
     let mut voice = voice(&rate, true, None);
     voice.start_live(&client, 0).unwrap();
     assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Live);
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     assert!(voice.talking());
     assert_eq!(
         voice.lock().microphone.as_ref().unwrap().gate(),
@@ -253,9 +246,7 @@ fn live_microphone_resumes_after_agent_and_can_be_muted_during_it() {
     voice.finish(Some(&client), true).unwrap();
     assert!(voice.recording.is_some());
     assert_eq!(voice.lock().microphone.as_ref().unwrap().gate(), Gate::Live);
-    voice
-        .begin(&client, "u2".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u2", 0)).unwrap();
     voice.stop_live();
     assert_eq!(
         voice.lock().microphone.as_ref().unwrap().gate(),
@@ -323,15 +314,13 @@ fn microphone_access_is_requested_early_without_using_up_the_recording_request()
     // The first recording still makes its own request.
     assert!(
         voice
-            .begin(&client, "u1".into(), 0, None, false, Vec::new())
+            .begin(&client, Utterance::new("u1", 0))
             .unwrap_err()
             .contains("hold X again")
     );
     assert_eq!(*calls.lock().unwrap(), ["request", "permit"]);
     // Allowed, the next recording opens the microphone.
-    voice
-        .begin(&client, "u2".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u2", 0)).unwrap();
     assert_eq!(
         *calls.lock().unwrap(),
         ["request", "permit", "permit", "open"]
@@ -344,9 +333,7 @@ fn a_capture_failure_is_reported_only_while_recording() {
     let client = client();
     let rate = Arc::new(AtomicU32::new(16_000));
     let mut voice = voice(&rate, true, Some("The microphone failed."));
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     // Waits at least once, however soon the capture fails, so that how the race went changes no coverage.
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut failure = None;
@@ -359,9 +346,7 @@ fn a_capture_failure_is_reported_only_while_recording() {
     voice.finish(Some(&client), false).unwrap();
 
     // Closed before it is noticed: nothing is reported once the recording has ended.
-    voice
-        .begin(&client, "u2".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u2", 0)).unwrap();
     voice.finish(Some(&client), false).unwrap();
     assert_eq!(voice.failure(), None);
     client.close();
@@ -373,9 +358,7 @@ fn failure_before_end_cancels_the_utterance_and_keeps_the_microphone() {
     let rate = Arc::new(AtomicU32::new(16_000));
     let mut voice = voice(&rate, true, None);
     voice.start_live(&client, 0).unwrap();
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     voice.lock().failure = Some("capture failed".into());
     assert_eq!(
         voice.finish(Some(&client), true).unwrap_err(),
@@ -423,9 +406,7 @@ fn push_to_talk_during_live_audio_captures_for_recognition() {
     let client = client();
     let (mut voice, opened) = kind_voice();
     voice.start_live(&client, 0).unwrap();
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     voice.finish(Some(&client), true).unwrap();
     assert_eq!(*opened.lock().unwrap(), ["live", "agent", "live"]);
     client.close();
@@ -460,9 +441,7 @@ fn a_failed_live_reopen_after_a_sent_utterance_is_reported_separately() {
         generation: None,
     };
     voice.start_live(&client, 0).unwrap();
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     // The utterance was ended; only the live microphone failed afterwards.
     assert_eq!(
         voice.finish(Some(&client), true).unwrap_err(),
@@ -480,11 +459,7 @@ fn a_capture_for_one_connection_is_never_reused_for_another() {
     // Neither live audio nor push-to-talk for a later connection may use
     // the earlier connection's open capture.
     assert!(voice.start_live(&client, 1).is_err());
-    assert!(
-        voice
-            .begin(&client, "u1".into(), 1, None, false, Vec::new())
-            .is_err()
-    );
+    assert!(voice.begin(&client, Utterance::new("u1", 1)).is_err());
     assert_eq!(*opened.lock().unwrap(), ["live"]);
     // The capture feeds only a microphone bound to its own connection.
     assert_eq!(
@@ -543,9 +518,7 @@ fn live_and_agent_capture_threads_stop_before_the_gate_changes() {
         generation: None,
     };
     voice.start_live(&client, 0).unwrap();
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     voice.finish(Some(&client), true).unwrap();
     voice.stop_live();
     assert_eq!(
@@ -596,9 +569,7 @@ fn failure_reported_during_capture_shutdown_cancels_the_agent_utterance() {
         generation: None,
     };
     voice.start_live(&client, 0).unwrap();
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     assert_eq!(
         voice.finish(Some(&client), true).unwrap_err(),
         Finish::Utterance("read failed while stopping".into())
@@ -703,9 +674,7 @@ fn scripted(capture: Scripted) -> Voice {
 fn a_recording_for_one_connection_is_not_reopened_for_another() {
     let client = client();
     let mut voice = scripted(Scripted::default());
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     assert_eq!(
         voice.open(&client, false, 1),
         Err("Connection lost; microphone stopped.".into())
@@ -723,7 +692,7 @@ fn a_refused_or_failed_microphone_is_reported() {
         ..Default::default()
     });
     assert_eq!(
-        refused.begin(&client, "u1".into(), 0, None, false, Vec::new()),
+        refused.begin(&client, Utterance::new("u1", 0)),
         Err("No microphone permission.".into())
     );
     let mut failing = scripted(Scripted {
@@ -731,7 +700,7 @@ fn a_refused_or_failed_microphone_is_reported() {
         ..Default::default()
     });
     assert_eq!(
-        failing.begin(&client, "u1".into(), 0, None, false, Vec::new()),
+        failing.begin(&client, Utterance::new("u1", 0)),
         Err("The microphone is busy.".into())
     );
     // What failed is the utterance's failure, though no microphone was made.
@@ -769,13 +738,9 @@ fn samples_from_a_capture_for_an_earlier_connection_are_not_sent() {
         samples: samples.clone(),
         ..Default::default()
     });
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     voice.finish(Some(&client), false).unwrap();
-    voice
-        .begin(&client, "u2".into(), 1, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u2", 1)).unwrap();
     let mut samples = samples.lock().unwrap();
     // The first capture's callback still runs, as a device may call it late: nothing reaches the second's microphone.
     samples[0](&[0.5; 320]);
@@ -789,19 +754,14 @@ fn what_cannot_be_sent_once_the_client_is_closed_is_reported() {
     let closed = client();
     let mut voice = scripted(Scripted::default());
     // The microphone is made for one client, which is closed while it is kept.
-    voice
-        .begin(&closed, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&closed, Utterance::new("u1", 0)).unwrap();
     voice.finish(Some(&closed), false).unwrap();
     closed.close();
     let open = client();
     let closed = Err("Cannot send: the client is closed".to_owned());
     assert_eq!(voice.start_live(&open, 0), closed);
     assert!(voice.recording.is_none());
-    assert_eq!(
-        voice.begin(&open, "u2".into(), 0, None, false, Vec::new()),
-        closed
-    );
+    assert_eq!(voice.begin(&open, Utterance::new("u2", 0)), closed);
     open.close();
 }
 
@@ -810,9 +770,7 @@ fn an_utterance_or_the_live_gate_that_cannot_be_sent_is_reported() {
     let first = client();
     let mut voice = scripted(Scripted::default());
     voice.start_live(&first, 0).unwrap();
-    voice
-        .begin(&first, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&first, Utterance::new("u1", 0)).unwrap();
     let sender = first.sender();
     first.close();
     let _ = sender;
@@ -838,12 +796,12 @@ fn a_failure_while_live_stops_the_next_utterance_and_its_reopening() {
     voice.start_live(&client, 0).unwrap();
     voice.lock().failure = Some("Overrun.".into());
     assert_eq!(
-        voice.begin(&client, "u1".into(), 0, None, false, Vec::new()),
+        voice.begin(&client, Utterance::new("u1", 0)),
         Err("Overrun.".into())
     );
     voice.recording = Some(Recording::new(16_000, ()));
     assert_eq!(
-        voice.begin(&client, "u2".into(), 0, None, false, Vec::new()),
+        voice.begin(&client, Utterance::new("u2", 0)),
         Err("The microphone stopped.".into())
     );
     assert!(!voice.talking());
@@ -855,9 +813,7 @@ fn a_live_microphone_without_its_connection_is_not_reopened_after_an_utterance()
     let client = client();
     let mut voice = scripted(Scripted::default());
     voice.start_live(&client, 0).unwrap();
-    voice
-        .begin(&client, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&client, Utterance::new("u1", 0)).unwrap();
     assert_eq!(
         voice.finish(None, true),
         Err(Finish::Live(
@@ -871,9 +827,7 @@ fn a_live_microphone_without_its_connection_is_not_reopened_after_an_utterance()
 fn a_cancelled_utterance_that_cannot_be_cancelled_or_abandoned_says_why() {
     let first = client();
     let mut voice = scripted(Scripted::default());
-    voice
-        .begin(&first, "u1".into(), 0, None, false, Vec::new())
-        .unwrap();
+    voice.begin(&first, Utterance::new("u1", 0)).unwrap();
     voice.lock().failure = Some("Overrun.".into());
     first.close();
     assert_eq!(
