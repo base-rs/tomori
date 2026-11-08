@@ -48,7 +48,11 @@ pub enum Attention {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    /// The session's own directory: the one listed, or one beneath it. A space bound to the session runs in it.
     pub directory: String,
+    /// The agent is running a turn in the session. Absent from older servers, which listed no busy sessions apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 /// A backend the server can bind spaces to, as offered to a client so it can show only working actions.
@@ -494,6 +498,24 @@ mod tests {
         assert_eq!(next(None).as_deref(), Some("default"));
         assert_eq!(SpaceState::default().next_mode(), None);
         assert_eq!(modes(Some("dontAsk")).current_mode(), None);
+    }
+
+    #[test]
+    fn a_session_is_busy_only_when_said_and_idle_from_older_servers() {
+        let older: SessionSummary = serde_json::from_value(
+            serde_json::json!({"id": "s", "title": "T", "directory": "/work"}),
+        )
+        .unwrap();
+        assert!(!older.busy);
+        assert_eq!(
+            serde_json::to_value(&older).unwrap(),
+            serde_json::json!({"id": "s", "title": "T", "directory": "/work"})
+        );
+        let busy = SessionSummary {
+            busy: true,
+            ..older
+        };
+        assert_eq!(serde_json::to_value(&busy).unwrap()["busy"], true);
     }
 
     #[test]

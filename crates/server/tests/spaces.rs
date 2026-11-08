@@ -188,50 +188,84 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
     assert_eq!(bob.space(|state| state.title == "Older").environment, "sky");
 }
 
-#[test]
-fn listing_the_backend_sessions_returns_the_created_ones() {
-    let server = TestServer::start();
-    let mut ada = server.connect("ada", "Ada");
-    // A created session is listed for the directory it ran in.
-    ada.create_space("First");
-    ada.create_space("Second");
-
-    ada.send(&ClientMessage::ListSessions {
+/// The sessions `client` is told `backend` has in `directory` or beneath it.
+fn sessions_in(client: &mut TestClient, directory: &str) -> Vec<tomori_protocol::SessionSummary> {
+    client.send(&ClientMessage::ListSessions {
         backend: "fake".into(),
-        directory: "/tmp".into(),
+        directory: directory.into(),
     });
-    let sessions = ada.wait_for(|message| match message {
+    client.wait_for(|message| match message {
         ServerMessage::Sessions { sessions } => Some(sessions.clone()),
         _ => None,
+    })
+}
+
+#[test]
+fn listing_the_backend_sessions_returns_those_beneath_the_directory_not_in_a_space() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_backend(backend.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("First");
+    ada.create_space("Second");
+    // A session in a directory beneath the one listed, as an agent started in a project within the root.
+    let nested = std::path::Path::new("/tmp")
+        .join(format!(
+            "tomori-list-sessions-nested-{}",
+            std::process::id()
+        ))
+        .join("project");
+    std::fs::create_dir_all(&nested).unwrap();
+    let nested = nested.canonicalize().unwrap();
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Nested".into(),
+        backend: "fake".into(),
+        directory: nested.to_string_lossy().into_owned(),
+        session: None,
+        environment: None,
+        instructions: None,
     });
-    let titles: Vec<&str> = sessions
+    ada.space(|state| state.title == "Nested");
+
+    // A session bound to an open space is not offered, since binding it again would be refused.
+    assert!(sessions_in(&mut ada, "/tmp").is_empty());
+
+    // Once their spaces have closed, every session beneath the directory is listed, the most recent first, a busy one
+    // marked so, each in its own directory.
+    let started = backend.started();
+    started[0].emit(Event::Busy);
+    for session in &started {
+        session.emit(Event::Closed { reason: None });
+    }
+    let sessions = eventually(|| {
+        let sessions = sessions_in(&mut ada, "/tmp");
+        (sessions.len() == 3).then_some(sessions)
+    });
+    let listed: Vec<(&str, bool)> = sessions
         .iter()
-        .map(|session| session.title.as_str())
+        .map(|session| (session.title.as_str(), session.busy))
         .collect();
-    assert_eq!(titles, vec!["First", "Second"]);
+    assert_eq!(
+        listed,
+        [("Nested", false), ("Second", false), ("First", true)]
+    );
     // Sessions report the canonical directory, which differs from `/tmp` where it is a symbolic link, as on macOS.
     let tmp = std::fs::canonicalize("/tmp").unwrap();
-    assert!(
-        sessions
-            .iter()
-            .all(|session| std::path::Path::new(&session.directory) == tmp)
-    );
+    assert_eq!(std::path::Path::new(&sessions[1].directory), tmp);
+    assert_eq!(std::path::Path::new(&sessions[0].directory), nested);
+
+    // Listing the nested directory lists only its own session.
+    let only = sessions_in(&mut ada, &nested.to_string_lossy());
+    assert_eq!(only.len(), 1);
+    assert_eq!(only[0].title, "Nested");
 
     // A directory that resolves, beneath a root, but holds no sessions lists none.
     let empty_dir =
         std::env::temp_dir().join(format!("tomori-list-sessions-empty-{}", std::process::id()));
     std::fs::create_dir_all(&empty_dir).unwrap();
     let empty_dir = empty_dir.canonicalize().unwrap();
-    ada.send(&ClientMessage::ListSessions {
-        backend: "fake".into(),
-        directory: empty_dir.to_string_lossy().into_owned(),
-    });
-    let empty = ada.wait_for(|message| match message {
-        ServerMessage::Sessions { sessions } => Some(sessions.clone()),
-        _ => None,
-    });
-    assert!(empty.is_empty());
+    assert!(sessions_in(&mut ada, &empty_dir.to_string_lossy()).is_empty());
     std::fs::remove_dir(&empty_dir).ok();
+    std::fs::remove_dir_all(nested.parent().unwrap()).ok();
 }
 
 #[test]

@@ -262,7 +262,8 @@ pub enum ClientMessage {
         projection: bool,
     },
     ListSpaces,
-    /// The existing sessions of `backend` in `directory`, for attaching. A backend without attaching answers with an error.
+    /// The existing sessions of `backend` in `directory` or beneath it, for attaching. A backend without attaching answers
+    /// with an error.
     ListSessions {
         backend: String,
         directory: String,
@@ -520,7 +521,7 @@ pub enum ServerMessage {
     Role {
         role: ConnectionRole,
     },
-    /// The answer to [`ClientMessage::ListSessions`].
+    /// The answer to [`ClientMessage::ListSessions`], most recently active first, without those already bound to a space.
     Sessions {
         sessions: Vec<SessionSummary>,
     },

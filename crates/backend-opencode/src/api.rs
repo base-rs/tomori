@@ -186,38 +186,94 @@ pub async fn create_session<'scope>(
     Ok(value.get("data").cloned().unwrap_or(value))
 }
 
-/// The listing of sessions a participant can attach to: the directory's own
-/// top-level, unarchived sessions. Subagents' child sessions are workers of
-/// their parent, not conversations to join.
-fn session_list_path(directory: &str) -> String {
-    format!(
-        "/api/session?directory={}&parentID=null&archived=false",
-        urlencoding(directory)
-    )
+/// Sessions asked for on each page of a session listing.
+const SESSION_PAGE: usize = 200;
+/// The most sessions a listing reads, newest first, across every directory, before it stops with those it found.
+pub(crate) const MAX_SCANNED_SESSIONS: usize = 4096;
+/// The most sessions a listing returns, newest first.
+pub(crate) const MAX_LISTED_SESSIONS: usize = 1000;
+/// The most pages a listing reads, so that a server answering empty pages with a cursor cannot keep it reading.
+const MAX_SESSION_PAGES: usize = 64;
+
+/// One page of the listing of sessions a participant can attach to: top-level,
+/// unarchived sessions, newest first. Subagents' child sessions are workers of
+/// their parent, not conversations to join. OpenCode's `directory` filter
+/// matches one directory exactly, so the sessions of every directory are read
+/// and those beneath the one asked for kept.
+fn session_list_path(cursor: Option<&str>) -> String {
+    let mut path = format!("/api/session?parentID=null&archived=false&limit={SESSION_PAGE}");
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&urlencoding(cursor));
+    }
+    path
 }
 
-/// `GET /api/session?directory=&parentID=null&archived=false`: the existing
-/// top-level, unarchived sessions in a directory.
+/// Whether a session in `directory`, as OpenCode records it, is in `root` or beneath it, compared component by
+/// component, so that `/home/sam2` is not beneath `/home/sam`, and a trailing slash changes nothing. A directory that
+/// is relative or goes up with `..` is not beneath anything, since it could name a directory outside `root`.
+pub(crate) fn beneath(directory: &str, root: &str) -> bool {
+    let path = std::path::Path::new(directory);
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        && path.starts_with(root)
+}
+
+/// `GET /api/session?parentID=null&archived=false`, page by page: the existing top-level, unarchived sessions whose
+/// `location.directory` is `directory` or beneath it, newest first. It reads at most [`MAX_SCANNED_SESSIONS`]
+/// sessions and returns at most [`MAX_LISTED_SESSIONS`], stopping with those it found at either bound, at the last
+/// page, or at a cursor it has already followed.
 pub async fn list_sessions<'scope>(
     client: &Client<'scope>,
     resolved: &Resolved,
     directory: &str,
     cancellation: &Cancellation,
 ) -> Result<Vec<Value>, Failure> {
-    let path = session_list_path(directory);
-    let response = exchange(
-        client,
-        get(&path),
-        resolved.authorization_header().as_deref(),
-        cancellation,
-    )
-    .await?;
-    let value = read_json(response, cancellation).await?;
-    Ok(value
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
+    let mut sessions = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    let mut cursors = std::collections::HashSet::new();
+    let mut scanned = 0usize;
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_SESSION_PAGES {
+        let response = exchange(
+            client,
+            get(&session_list_path(cursor.as_deref())),
+            resolved.authorization_header().as_deref(),
+            cancellation,
+        )
+        .await?;
+        let value = read_json(response, cancellation).await?;
+        let page = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Failure {
+                status: None,
+                message: "the server did not return a session list".to_owned(),
+            })?;
+        for session in page {
+            scanned += 1;
+            let id = session.get("id").and_then(Value::as_str);
+            let within = session
+                .pointer("/location/directory")
+                .and_then(Value::as_str)
+                .is_some_and(|found| beneath(found, directory));
+            if within && id.is_some_and(|id| ids.insert(id.to_owned())) {
+                sessions.push(session.clone());
+            }
+            if sessions.len() == MAX_LISTED_SESSIONS || scanned == MAX_SCANNED_SESSIONS {
+                return Ok(sessions);
+            }
+        }
+        match value.pointer("/cursor/next").and_then(Value::as_str) {
+            Some(next) if !next.is_empty() && cursors.insert(next.to_owned()) => {
+                cursor = Some(next.to_owned())
+            }
+            _ => break,
+        }
+    }
+    Ok(sessions)
 }
 
 /// `GET /api/session/:id`: one session's record.
@@ -242,7 +298,7 @@ pub async fn session_info<'scope>(
 
 /// How long the optional active-session lookup may take alongside the
 /// session record during reconciliation.
-const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Process-owned active session drains. An ID in this map is positive,
 /// point-in-time evidence that the OpenCode process is running it.
@@ -1262,7 +1318,7 @@ pub async fn session_running<'scope, S: Timers>(
 }
 
 /// A session's first running turn has `busy` but no earlier `idle` timestamp.
-fn running_from_record(info: &Value) -> Option<bool> {
+pub(crate) fn running_from_record(info: &Value) -> Option<bool> {
     let time = info.get("time")?.as_object()?;
     let timestamp = |key| match time.get(key) {
         None => Some(None),
@@ -2051,11 +2107,148 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn session_listing_asks_for_top_level_unarchived_sessions() {
+    fn session_listing_asks_for_top_level_unarchived_sessions_page_by_page() {
         assert_eq!(
-            session_list_path("/home/a b"),
-            "/api/session?directory=%2Fhome%2Fa%20b&parentID=null&archived=false"
+            session_list_path(None),
+            "/api/session?parentID=null&archived=false&limit=200"
         );
+        assert_eq!(
+            session_list_path(Some("a b")),
+            "/api/session?parentID=null&archived=false&limit=200&cursor=a%20b"
+        );
+    }
+
+    #[test]
+    fn a_directory_is_beneath_a_root_component_by_component() {
+        assert!(beneath("/home/sam", "/home/sam"));
+        assert!(beneath("/home/sam/", "/home/sam"));
+        assert!(beneath("/home/sam/base/scheduler", "/home/sam"));
+        assert!(beneath("/home/sam/base", "/home/sam/"));
+        assert!(beneath("/home//sam/./base", "/home/sam"));
+        assert!(!beneath("/home/sam2", "/home/sam"));
+        assert!(!beneath("/home", "/home/sam"));
+        assert!(!beneath("/home/sam/../other", "/home/sam"));
+        assert!(!beneath("home/sam", "home"));
+        assert!(!beneath("", "/home/sam"));
+    }
+
+    /// A top-level session record in `directory`, as OpenCode lists it.
+    fn listed(id: &str, directory: &str) -> Value {
+        json!({"id":id,"projectID":"p","location":{"directory":directory},"time":{"created":1,"updated":1}})
+    }
+
+    /// The cursor a listing's request follows, if any.
+    fn cursor_of(path: &str) -> Option<&str> {
+        path.split_once("&cursor=").map(|(_, cursor)| cursor)
+    }
+
+    /// Every page is read, and only the sessions beneath the directory, by their `location.directory`, are kept, in the
+    /// order OpenCode lists them, each once.
+    #[test]
+    fn every_page_is_read_and_sessions_beneath_the_directory_kept() {
+        let port = service(|_, path| {
+            assert!(path.starts_with("/api/session?parentID=null&archived=false&limit=200"));
+            match cursor_of(path) {
+                None => page(
+                    vec![
+                        listed("root", "/work"),
+                        listed("elsewhere", "/home/other"),
+                        listed("deep", "/work/base-rs/base-scheduler"),
+                        listed("sibling", "/work2/project"),
+                        json!({"id":"no-location"}),
+                        listed("slashed", "/work/tomori/"),
+                    ],
+                    json!("c1"),
+                ),
+                Some("c1") => page(
+                    vec![
+                        listed("escaping", "/work/../etc"),
+                        listed("deep", "/work/base-rs/base-scheduler"),
+                        json!({"location":{"directory":"/work"}}),
+                        listed("older", "/work/tomori"),
+                    ],
+                    json!("c2"),
+                ),
+                // The last page, after `c2`.
+                Some(_) => page(Vec::new(), Value::Null),
+            }
+        });
+        with_client(port, async |client, resolved, cancellation, _| {
+            let sessions = list_sessions(client, resolved, "/work", cancellation)
+                .await
+                .unwrap();
+            let ids: Vec<_> = sessions
+                .iter()
+                .map(|session| session["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, ["root", "deep", "slashed", "older"]);
+        });
+    }
+
+    /// A listing stops at a cursor it has already followed, or at one that is not a string, with what it found.
+    #[test]
+    fn a_listing_stops_at_a_repeated_or_invalid_cursor() {
+        let repeating = service(|_, path| match cursor_of(path) {
+            None => page(vec![listed("a", "/work")], json!("again")),
+            Some(_) => page(vec![listed("b", "/work")], json!("again")),
+        });
+        let invalid = service(|_, _| page(vec![listed("a", "/work")], json!(7)));
+        for (port, expected) in [(repeating, vec!["a", "b"]), (invalid, vec!["a"])] {
+            with_client(port, async |client, resolved, cancellation, _| {
+                let sessions = list_sessions(client, resolved, "/work", cancellation)
+                    .await
+                    .unwrap();
+                let ids: Vec<_> = sessions
+                    .iter()
+                    .map(|session| session["id"].as_str().unwrap())
+                    .collect();
+                assert_eq!(ids, expected);
+            });
+        }
+    }
+
+    /// A listing that never ends is bounded: by the sessions it returns, by those it reads, and by its pages.
+    #[test]
+    fn a_listing_is_bounded() {
+        /// The page after `cursor`, numbered from 0, as the next cursor.
+        fn next(path: &str) -> u64 {
+            cursor_of(path).map_or(0, |cursor| cursor.parse::<u64>().unwrap() + 1)
+        }
+        /// A page of `SESSION_PAGE` sessions in `directory`, named after `number`.
+        fn full(number: u64, directory: &str) -> Vec<Value> {
+            (0..SESSION_PAGE)
+                .map(|index| listed(&format!("s{number}-{index}"), directory))
+                .collect()
+        }
+        let matching = service(|_, path| {
+            let number = next(path);
+            page(full(number, "/work"), json!(number.to_string()))
+        });
+        let elsewhere = service(|_, path| {
+            let number = next(path);
+            page(full(number, "/other"), json!(number.to_string()))
+        });
+        let empty = service(|_, path| page(Vec::new(), json!(next(path).to_string())));
+        for (port, expected) in [(matching, MAX_LISTED_SESSIONS), (elsewhere, 0), (empty, 0)] {
+            with_client(port, async |client, resolved, cancellation, _| {
+                let sessions = list_sessions(client, resolved, "/work", cancellation)
+                    .await
+                    .unwrap();
+                assert_eq!(sessions.len(), expected);
+            });
+        }
+    }
+
+    /// A page without a list of sessions fails the listing.
+    #[test]
+    fn a_page_without_sessions_fails_the_listing() {
+        let port = service(|_, _| ("200 OK", r#"{"data":{}}"#.to_owned()));
+        with_client(port, async |client, resolved, cancellation, _| {
+            assert_eq!(
+                failed(list_sessions(client, resolved, "/work", cancellation).await),
+                (None, "the server did not return a session list".to_owned())
+            );
+        });
     }
 
     #[test]

@@ -115,7 +115,11 @@ pub struct SessionSpec {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    /// The session's own directory: the one asked for, or one beneath it.
     pub directory: String,
+    /// Whether the agent is running a turn in the session, as far as the backend can tell.
+    #[serde(default)]
+    pub busy: bool,
 }
 
 /// Input delivered to the agent as one user turn.
@@ -486,7 +490,8 @@ pub trait Backend: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
-    /// Existing sessions that can be attached. Empty when attaching is unsupported.
+    /// Existing sessions that can be attached, in `directory` or beneath it, most recently active first. Empty when
+    /// attaching is unsupported.
     fn sessions(&self, directory: &str)
     -> impl Future<Output = Result<Vec<SessionSummary>>> + Send;
 
