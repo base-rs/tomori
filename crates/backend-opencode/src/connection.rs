@@ -890,6 +890,28 @@ impl Registration {
         }
     }
 
+    /// Stop observing the worker `id`, which OpenCode deleted, remembering the
+    /// deletion against any listing still in flight, returning whether it was
+    /// known.
+    fn forget_deleted(&mut self, id: &str) -> bool {
+        let discovering = self.discovering_workers();
+        let removed = self.remove_worker(id);
+        if discovering {
+            // A delete event has no parent ID. Before bootstrap, keep
+            // even an unknown ID: a stale page may later list it.
+            if self.initial_deletions.contains(id)
+                || self.initial_deletions.len() < api::MAX_TRACKED_WORKERS
+            {
+                self.initial_deletions.insert(id.to_owned());
+            } else {
+                self.mark_workers_incomplete();
+            }
+        }
+        self.initial_changes.remove(id);
+        self.initial_creations.remove(id);
+        removed
+    }
+
     /// Remove an observed deletion, remembering it against any snapshot
     /// whose listing is still in flight.
     fn remove_worker(&mut self, id: &str) -> bool {
@@ -1197,6 +1219,15 @@ pub enum Command {
     /// this is performed: then a space was bound to it again, and it is that space's.
     DeleteSession {
         id: String,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
+    },
+    /// Delete the worker session `worker` of the session `session`, with its own workers, once OpenCode's records say
+    /// that it descends from `session` through no session a space is bound to, and, unless `force`, that neither it nor
+    /// any of its own workers known is running; with `force`, those are stopped first.
+    DeleteWorker {
+        session: String,
+        worker: String,
+        force: bool,
         reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     /// Register Tomori's MCP server for `directory`, replacing one of its name.
@@ -1598,6 +1629,7 @@ fn refuse(command: Command, error: tomori_backend::Error) {
         | Command::Instruction { reply, .. }
         | Command::ForgetInstructions { reply, .. }
         | Command::DeleteSession { reply, .. }
+        | Command::DeleteWorker { reply, .. }
         | Command::RegisterTools { reply, .. }
         | Command::UnregisterTools { reply, .. } => {
             let _ = reply.try_send(Err(error));
@@ -1623,6 +1655,7 @@ fn abandoned(command: &Command) -> bool {
         | Command::Instruction { reply, .. }
         | Command::ForgetInstructions { reply, .. }
         | Command::DeleteSession { reply, .. }
+        | Command::DeleteWorker { reply, .. }
         | Command::RegisterTools { reply, .. }
         | Command::UnregisterTools { reply, .. } => reply.is_closed(),
         Command::Close { .. } | Command::Shutdown => {
@@ -2384,7 +2417,8 @@ fn command_session(command: &Command) -> Option<&str> {
         | Command::SetMode { id, .. }
         | Command::Instruction { id, .. }
         | Command::ForgetInstructions { id, .. }
-        | Command::DeleteSession { id, .. } => Some(id),
+        | Command::DeleteSession { id, .. }
+        | Command::DeleteWorker { worker: id, .. } => Some(id),
         Command::Sessions { .. }
         | Command::Create { .. }
         | Command::Snapshot { .. }
@@ -3665,23 +3699,7 @@ fn apply_worker_event(value: &Value, registrations: &mut HashMap<String, Registr
                     true
                 }
             }
-            "session.deleted" => {
-                let removed = registration.remove_worker(child);
-                if discovering {
-                    // A delete event has no parent ID. Before bootstrap, keep
-                    // even an unknown ID: a stale page may later list it.
-                    if registration.initial_deletions.contains(child)
-                        || registration.initial_deletions.len() < api::MAX_TRACKED_WORKERS
-                    {
-                        registration.initial_deletions.insert(child.to_owned());
-                    } else {
-                        registration.mark_workers_incomplete();
-                    }
-                }
-                registration.initial_changes.remove(child);
-                registration.initial_creations.remove(child);
-                removed
-            }
+            "session.deleted" => registration.forget_deleted(child),
             "session.renamed" => match (
                 registration.children.get_mut(child),
                 data.get("title").and_then(Value::as_str),
@@ -3858,6 +3876,12 @@ enum Completion {
         directory: String,
         modes: Modes,
         reply: async_channel::Sender<tomori_backend::Result<RegistrationEvents>>,
+    },
+    /// A worker of `session` was deleted, or no longer existed: it and its own workers are no longer observed.
+    WorkerDeleted {
+        session: String,
+        worker: String,
+        reply: async_channel::Sender<tomori_backend::Result<()>>,
     },
     /// Agents listed for a session that offered none.
     Listed {
@@ -4153,6 +4177,53 @@ fn prepare_command<'a, S: Timers>(
             let _ = reply.try_send(result.map_err(map_failure));
             None
         }),
+        // A session attached is a space's own, never a worker to delete.
+        Command::DeleteWorker { worker, reply, .. } if registrations.contains_key(&worker) => {
+            let _ = reply.try_send(Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Invalid,
+                "the worker's session is bound to a space",
+            )));
+            return None;
+        }
+        Command::DeleteWorker {
+            session,
+            worker,
+            force,
+            reply,
+        } => {
+            let bound: HashSet<String> = registrations
+                .keys()
+                .filter(|id| **id != session)
+                .cloned()
+                .collect();
+            let known = registrations.get(&session);
+            let family = known
+                .map(|registration| known_family(&registration.children, &worker))
+                .unwrap_or_default();
+            let state = known
+                .and_then(|registration| registration.children.get(&worker))
+                .map(|known| known.state);
+            Box::pin(async move {
+                let found = WorkerFamily {
+                    session: &session,
+                    worker: &worker,
+                    state,
+                    bound: &bound,
+                    known: &family,
+                };
+                match delete_worker(client, resolved, found, force, cancellation).await {
+                    Ok(()) => Some(Completion::WorkerDeleted {
+                        session,
+                        worker,
+                        reply,
+                    }),
+                    Err(error) => {
+                        let _ = reply.try_send(Err(error));
+                        None
+                    }
+                }
+            })
+        }
         Command::ForgetInstructions { id, keys, reply } => Box::pin(async move {
             let mut result = Ok(());
             for key in keys {
@@ -4231,9 +4302,157 @@ fn removed(result: Result<(), Failure>) -> Result<(), Failure> {
     }
 }
 
+/// The most sessions followed up a worker's chain of parents to the session it is to descend from.
+const MAX_WORKER_DEPTH: usize = 32;
+
+/// `worker`'s own workers among `children`, a session's known workers, at any depth, each with its state as last
+/// observed, not including `worker` itself. Each worker has one parent, so each is found once, unless its parents
+/// lead back to `worker`, which is not taken again.
+fn known_family(children: &BTreeMap<String, Worker>, worker: &str) -> Vec<(String, WorkerState)> {
+    let mut family: Vec<(String, WorkerState)> = Vec::new();
+    let mut parents = vec![worker.to_owned()];
+    while let Some(parent) = parents.pop() {
+        for child in children.values() {
+            if child.parent.as_deref() == Some(parent.as_str()) && child.id != worker {
+                family.push((child.id.clone(), child.state));
+                parents.push(child.id.clone());
+            }
+        }
+    }
+    family
+}
+
+/// A worker to delete, and what is known around it: the session it is to descend from, its state as observed, if it
+/// was, the sessions bound to other spaces, and its own workers known, with their states.
+struct WorkerFamily<'a> {
+    session: &'a str,
+    worker: &'a str,
+    state: Option<WorkerState>,
+    bound: &'a HashSet<String>,
+    known: &'a [(String, WorkerState)],
+}
+
+/// The session a record names as its parent.
+fn parent_of(record: &Value) -> Option<String> {
+    record
+        .get("parentID")
+        .and_then(Value::as_str)
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_owned)
+}
+
+/// Delete `found.worker`, with its own workers, after checking OpenCode's own records: its chain of parents must reach
+/// `found.session` through no session bound to another space, and, unless `force`, neither it nor its own workers known
+/// may be running, as observed, or, for a worker never observed, as its record's times say. It is stopped first, as a
+/// deleted session is, and with `force`, so are its own workers known to run. One that no longer exists is already
+/// gone.
+async fn delete_worker(
+    client: &Client<'_>,
+    resolved: &Resolved,
+    found: WorkerFamily<'_>,
+    force: bool,
+    cancellation: &Cancellation,
+) -> tomori_backend::Result<()> {
+    let refused =
+        |message: &str| tomori_backend::Error::new(tomori_backend::ErrorKind::Invalid, message);
+    let record = match api::session_info(client, resolved, found.worker, cancellation).await {
+        Err(Failure {
+            status: Some(404), ..
+        }) => return Ok(()),
+        record => record.map_err(map_failure)?,
+    };
+    let mut parent = parent_of(&record);
+    for depth in 0.. {
+        match parent {
+            None => {
+                return Err(refused(
+                    "the session is not a worker of this space's session",
+                ));
+            }
+            Some(above) if above == found.session => break,
+            Some(above) if found.bound.contains(&above) => {
+                return Err(refused(
+                    "a session it descends from is bound to another space",
+                ));
+            }
+            Some(_) if depth + 1 >= MAX_WORKER_DEPTH => {
+                return Err(refused(
+                    "its chain of parents is too long to follow to this space's session",
+                ));
+            }
+            Some(above) => {
+                parent = match api::session_info(client, resolved, &above, cancellation).await {
+                    Err(Failure {
+                        status: Some(404), ..
+                    }) => {
+                        return Err(refused("a session it descends from no longer exists"));
+                    }
+                    record => parent_of(&record.map_err(map_failure)?),
+                };
+            }
+        }
+    }
+    let runs = |state: WorkerState| matches!(state, WorkerState::Running | WorkerState::Waiting);
+    let running: Vec<&str> = found
+        .known
+        .iter()
+        .filter(|(_, state)| runs(*state))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    // A record's times outlive the process that wrote them, so they are taken only for a worker never observed.
+    let itself = found
+        .state
+        .map_or_else(|| api::running_from_record(&record) == Some(true), runs);
+    if !force {
+        if itself {
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Busy,
+                "the worker is running",
+            ));
+        }
+        if !running.is_empty() {
+            return Err(tomori_backend::Error::new(
+                tomori_backend::ErrorKind::Busy,
+                "one of the worker's own workers is running",
+            ));
+        }
+    }
+    // Stopped first, so that no turn goes on in a session being deleted; one that no longer exists is already gone.
+    let mut stopping = vec![found.worker];
+    if force {
+        stopping.extend(running);
+    }
+    for id in stopping {
+        removed(api::interrupt(client, resolved, id, cancellation).await).map_err(map_failure)?;
+    }
+    removed(api::delete_session(client, resolved, found.worker, cancellation).await)
+        .map_err(map_failure)
+}
+
 /// Apply a finished request to the registrations.
 fn complete(completion: Completion, registrations: &mut HashMap<String, Registration>) {
     match completion {
+        Completion::WorkerDeleted {
+            session,
+            worker,
+            reply,
+        } => {
+            if let Some(registration) = registrations.get_mut(&session) {
+                let mut gone: Vec<String> = known_family(&registration.children, &worker)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+                gone.push(worker);
+                let mut changed = false;
+                for id in gone {
+                    changed |= registration.forget_deleted(&id);
+                }
+                if changed {
+                    registration.publish_workers();
+                }
+            }
+            let _ = reply.try_send(Ok(()));
+        }
         Completion::Created {
             id,
             directory,
@@ -6471,6 +6690,10 @@ mod tests {
         active: HashSet<String>,
         /// Sessions whose child listing fails.
         failing_children: HashSet<String>,
+        /// Each session's record, where it is not the plain one.
+        records: HashMap<String, Value>,
+        /// Sessions whose replies, interruptions and agent switches fail.
+        failing_actions: HashSet<String>,
         stopping: bool,
     }
 
@@ -6878,13 +7101,21 @@ mod tests {
                 }
                 Some(_) if path.ends_with("/form") => ("200 OK", r#"{"data":[]}"#.to_owned()),
                 Some(_) if path.ends_with("/prompt") => ("200 OK", "{}".to_owned()),
+                Some(_) if method == "POST" && state.failing_actions.contains(&id) => (
+                    "500 Internal Server Error",
+                    r#"{"message":"refused"}"#.to_owned(),
+                ),
                 Some(_) if method == "POST" => {
                     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
                     state.actions.push((path.clone(), body));
                     shared.changed.notify_all();
                     ("200 OK", "{}".to_owned())
                 }
-                Some(_) => ("200 OK", json!({ "data": fake_record(&id) }).to_string()),
+                Some(_) => (
+                    "200 OK",
+                    json!({ "data": state.records.get(&id).cloned().unwrap_or_else(|| fake_record(&id)) })
+                        .to_string(),
+                ),
             }
         } else {
             ("404 Not Found", r#"{"message":"unexpected"}"#.to_owned())
@@ -7491,6 +7722,244 @@ mod tests {
         drop((session, attached));
     }
 
+    /// A worker is deleted only once OpenCode's records say it descends from the
+    /// session through no other space's session, and, unless forced, that it
+    /// is not running; it then leaves the session's workers with its own.
+    #[test]
+    fn a_worker_is_deleted_only_beneath_its_session_and_takes_its_own_workers() {
+        use tomori_backend::{Backend, ErrorKind, Session};
+
+        let shared = Arc::new(FakeShared::default());
+        let finished = |id: &str, parent: &str, created: u64| {
+            let mut record = fake_child(id, parent, created);
+            record["outcome"] = json!("succeeded");
+            record
+        };
+        shared.update(|state| {
+            for id in ["root", "w1", "w2", "w3", "w4", "other", "o1", "loose"] {
+                state.sessions.insert(id.into(), Vec::new());
+            }
+            // OpenCode runs w3, so it is observed running; w4 is never observed, and its record looks busy.
+            state.active.insert("w3".into());
+            let mut running = fake_child("w3", "root", 3);
+            running["time"]["busy"] = json!(5);
+            let mut unobserved = fake_child("w4", "root", 6);
+            unobserved["time"]["busy"] = json!(5);
+            state.records.insert("w4".into(), unobserved);
+            state.children.insert(
+                "root".into(),
+                vec![finished("w1", "root", 1), running.clone()],
+            );
+            state
+                .children
+                .insert("w1".into(), vec![finished("w2", "w1", 2)]);
+            // Another space's session, itself started by root, and its worker.
+            for record in [
+                finished("w1", "root", 1),
+                finished("w2", "w1", 2),
+                running,
+                finished("other", "root", 4),
+                finished("o1", "other", 5),
+            ] {
+                state
+                    .records
+                    .insert(record["id"].as_str().unwrap().to_owned(), record);
+            }
+        });
+        let service = FakeService::start(shared.clone(), "");
+        let backend = crate::OpenCode::new(crate::Config {
+            url: Some(format!("http://{}", service.address)),
+        });
+        let root = Arc::new(block_on(backend.attach("root", "/tmp")).unwrap());
+        let other = block_on(backend.attach("other", "/tmp")).unwrap();
+        let snapshot = block_on(root.snapshot()).unwrap();
+        assert_eq!(worker_ids(&snapshot.workers), ["w1", "w2", "w3"]);
+        let (tx, events) = std::sync::mpsc::channel();
+        let watched = root.clone();
+        std::thread::spawn(move || {
+            while let Ok(event) = block_on(watched.next_event())
+                && tx.send(event).is_ok()
+            {}
+        });
+        let refused = |worker: &str, force: bool| {
+            let error = block_on(backend.delete_worker("root", worker, force)).unwrap_err();
+            (error.kind, error.message)
+        };
+        let invalid = |message: &str| (ErrorKind::Invalid, message.to_owned());
+        // The space's own session, another space's, one of that space's workers and an unrelated session are
+        // refused, and nothing is stopped or deleted.
+        assert_eq!(
+            refused("root", true),
+            invalid("the worker's session is bound to a space")
+        );
+        assert_eq!(
+            refused("other", true),
+            invalid("the worker's session is bound to a space")
+        );
+        assert_eq!(
+            refused("o1", true),
+            invalid("a session it descends from is bound to another space")
+        );
+        assert_eq!(
+            refused("loose", true),
+            invalid("the session is not a worker of this space's session")
+        );
+        // A running worker is refused unless forced, and so is a worker whose own worker is running.
+        assert_eq!(
+            refused("w3", false),
+            (ErrorKind::Busy, "the worker is running".to_owned())
+        );
+        assert_eq!(
+            refused("w4", false),
+            (ErrorKind::Busy, "the worker is running".to_owned())
+        );
+        // A worker observed as not running is not refused for its record's times, which may be stale.
+        shared.update(|state| {
+            let mut stale = finished("w2", "w1", 2);
+            stale["time"]["busy"] = json!(5);
+            state.records.insert("w2".into(), stale);
+            state.failing_actions.insert("w2".into());
+        });
+        let error = block_on(backend.delete_worker("root", "w2", false)).unwrap_err();
+        assert_eq!(error.message, "refused", "it went on to stop it");
+        shared.update(|state| {
+            state.failing_actions.clear();
+        });
+        assert!(shared.state.lock().unwrap().actions.is_empty());
+        // A finished worker is stopped and deleted, and leaves the workers with its own.
+        block_on(backend.delete_worker("root", "w1", false)).unwrap();
+        let seen = until(&events, "the workers without w1", |event| {
+            reported_ids(event).is_some_and(|(ids, _)| ids == ["w3"])
+        });
+        // Its own worker went with it, never after it.
+        assert!(
+            seen.iter()
+                .filter_map(reported_ids)
+                .all(|(ids, _)| ids.contains(&"w1") == ids.contains(&"w2"))
+        );
+        // Forced, a running worker is stopped first.
+        block_on(backend.delete_worker("root", "w3", true)).unwrap();
+        until(&events, "no workers", |event| {
+            reported_ids(event).is_some_and(|(ids, _)| ids.is_empty())
+        });
+        // One that no longer exists is already gone.
+        block_on(backend.delete_worker("root", "w1", false)).unwrap();
+        assert_eq!(
+            shared.state.lock().unwrap().actions,
+            [
+                ("/api/session/w1/interrupt".to_owned(), json!({})),
+                ("DELETE /api/session/w1".to_owned(), Value::Null),
+                ("/api/session/w3/interrupt".to_owned(), json!({})),
+                ("DELETE /api/session/w3".to_owned(), Value::Null),
+            ]
+        );
+        // A worker whose parent is gone cannot be followed to the session.
+        shared.update(|state| {
+            state.sessions.insert("orphan".into(), Vec::new());
+            state
+                .records
+                .insert("orphan".into(), finished("orphan", "w3", 6));
+        });
+        assert_eq!(
+            refused("orphan", false),
+            invalid("a session it descends from no longer exists")
+        );
+        // A chain too long to follow is refused.
+        shared.update(|state| {
+            for depth in 0..MAX_WORKER_DEPTH {
+                let id = format!("deep{depth}");
+                let parent = format!("deep{}", depth + 1);
+                state.sessions.insert(id.clone(), Vec::new());
+                state.records.insert(id.clone(), finished(&id, &parent, 7));
+            }
+        });
+        assert_eq!(
+            refused("deep0", false),
+            invalid("its chain of parents is too long to follow to this space's session")
+        );
+        // A failure reading a record, its own or one it descends from, or stopping it, is said, and nothing is deleted.
+        shared.update(|state| {
+            state.failing_records.insert("w2".into());
+            state.sessions.insert("w9".into(), Vec::new());
+            state.records.insert("w9".into(), finished("w9", "w2", 8));
+            state.failing_actions.insert("w3".into());
+            state.sessions.insert("w3".into(), Vec::new());
+        });
+        let failed = block_on(backend.delete_worker("root", "w2", false)).unwrap_err();
+        assert_eq!(failed.kind, ErrorKind::Unavailable);
+        let failed = block_on(backend.delete_worker("root", "w9", false)).unwrap_err();
+        assert_eq!(failed.kind, ErrorKind::Unavailable);
+        let failed = block_on(backend.delete_worker("root", "w3", true)).unwrap_err();
+        assert_eq!(
+            (failed.kind, failed.message.as_str()),
+            (ErrorKind::Unavailable, "refused")
+        );
+        assert!(shared.state.lock().unwrap().sessions.contains_key("w3"));
+        // A worker of a session no space is attached to is deleted all the same, with nobody to tell.
+        shared.update(|state| {
+            state.sessions.insert("solo".into(), Vec::new());
+            state.sessions.insert("s1".into(), Vec::new());
+            state.records.insert("s1".into(), finished("s1", "solo", 9));
+        });
+        block_on(backend.delete_worker("solo", "s1", false)).unwrap();
+        assert!(!shared.state.lock().unwrap().sessions.contains_key("s1"));
+        backend.shutdown();
+        assert_eq!(
+            refused("w2", false).0,
+            ErrorKind::Unavailable,
+            "a backend shut down deletes nothing"
+        );
+        drop(other);
+    }
+
+    /// Of a worker's own workers known, one running refuses its deletion
+    /// unless forced, and with force is stopped first.
+    #[test]
+    fn a_worker_whose_own_worker_runs_is_deleted_only_when_forced() {
+        use tomori_backend::{Backend, ErrorKind, Session};
+
+        let shared = Arc::new(FakeShared::default());
+        shared.update(|state| {
+            for id in ["root", "w1", "w2"] {
+                state.sessions.insert(id.into(), Vec::new());
+            }
+            let mut done = fake_child("w1", "root", 1);
+            done["outcome"] = json!("succeeded");
+            state.children.insert("root".into(), vec![done.clone()]);
+            state.records.insert("w1".into(), done);
+            let mut running = fake_child("w2", "w1", 2);
+            running["time"]["busy"] = json!(5);
+            state.children.insert("w1".into(), vec![running]);
+            // OpenCode says it is running it, so it is known to run.
+            state.active.insert("w2".into());
+        });
+        let service = FakeService::start(shared.clone(), "");
+        let backend = crate::OpenCode::new(crate::Config {
+            url: Some(format!("http://{}", service.address)),
+        });
+        let root = block_on(backend.attach("root", "/tmp")).unwrap();
+        let snapshot = block_on(root.snapshot()).unwrap();
+        assert_eq!(worker_ids(&snapshot.workers), ["w1", "w2"]);
+        let error = block_on(backend.delete_worker("root", "w1", false)).unwrap_err();
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (
+                ErrorKind::Busy,
+                "one of the worker's own workers is running"
+            )
+        );
+        block_on(backend.delete_worker("root", "w1", true)).unwrap();
+        assert_eq!(
+            shared.state.lock().unwrap().actions,
+            [
+                ("/api/session/w1/interrupt".to_owned(), json!({})),
+                ("/api/session/w2/interrupt".to_owned(), json!({})),
+                ("DELETE /api/session/w1".to_owned(), Value::Null),
+            ]
+        );
+        backend.shutdown();
+    }
+
     /// A backend shut down before its first use never starts its connection.
     #[test]
     fn a_backend_shut_down_before_use_never_connects() {
@@ -7519,6 +7988,7 @@ mod tests {
             backend.forget_instructions("s1", vec!["tomori".into()]),
         ));
         refused(block_on(backend.delete_session("s1")));
+        refused(block_on(backend.delete_worker("s1", "w1", false)));
         let server = tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp");
         refused(block_on(backend.register_tools("/tmp", &server)));
         refused(block_on(backend.unregister_tools("/tmp", "tomori")));
@@ -11281,6 +11751,12 @@ mod tests {
                 reply,
             }),
             answer(|reply| Command::DeleteSession { id: id(), reply }),
+            answer(|reply| Command::DeleteWorker {
+                session: id(),
+                worker: "w".into(),
+                force: false,
+                reply,
+            }),
             answer(|reply| Command::RegisterTools {
                 directory: "/tmp".into(),
                 server: tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:9/mcp"),

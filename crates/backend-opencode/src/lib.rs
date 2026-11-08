@@ -162,6 +162,20 @@ impl Backend for OpenCode {
             .await
     }
 
+    async fn delete_worker(&self, session: &str, worker: &str, force: bool) -> Result<()> {
+        let commands = self.connection()?;
+        let session = session.to_owned();
+        let worker = worker.to_owned();
+        commands
+            .reply_with(move |reply| connection::Command::DeleteWorker {
+                session,
+                worker,
+                force,
+                reply,
+            })
+            .await
+    }
+
     async fn register_tools(&self, directory: &str, server: &ToolServer) -> Result<()> {
         let commands = self.connection()?;
         let directory = directory.to_owned();

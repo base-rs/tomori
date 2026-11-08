@@ -432,7 +432,9 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "set_environment",
             "pairing",
             "confirm_pairing",
-            "decline_pairing"
+            "decline_pairing",
+            "workers",
+            "remove_workers"
         ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {

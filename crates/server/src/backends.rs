@@ -25,6 +25,8 @@ trait DynamicBackend: Send + Sync {
     fn attach<'a>(&'a self, id: &'a str, directory: &'a str) -> Boxed<'a, AnySession>;
     fn forget_instructions<'a>(&'a self, id: &'a str, keys: Vec<String>) -> Boxed<'a, ()>;
     fn delete_session<'a>(&'a self, id: &'a str) -> Boxed<'a, ()>;
+    fn delete_worker<'a>(&'a self, session: &'a str, worker: &'a str, force: bool)
+    -> Boxed<'a, ()>;
     fn register_tools<'a>(&'a self, directory: &'a str, server: &'a ToolServer) -> Boxed<'a, ()>;
     fn unregister_tools<'a>(&'a self, directory: &'a str, name: &'a str) -> Boxed<'a, ()>;
     fn shutdown(&self);
@@ -59,6 +61,15 @@ impl<B: Backend> DynamicBackend for B {
 
     fn delete_session<'a>(&'a self, id: &'a str) -> Boxed<'a, ()> {
         Box::pin(Backend::delete_session(self, id))
+    }
+
+    fn delete_worker<'a>(
+        &'a self,
+        session: &'a str,
+        worker: &'a str,
+        force: bool,
+    ) -> Boxed<'a, ()> {
+        Box::pin(Backend::delete_worker(self, session, worker, force))
     }
 
     fn register_tools<'a>(&'a self, directory: &'a str, server: &'a ToolServer) -> Boxed<'a, ()> {
@@ -186,6 +197,10 @@ impl Backend for AnyBackend {
 
     async fn delete_session(&self, id: &str) -> Result<()> {
         self.0.delete_session(id).await
+    }
+
+    async fn delete_worker(&self, session: &str, worker: &str, force: bool) -> Result<()> {
+        self.0.delete_worker(session, worker, force).await
     }
 
     async fn register_tools(&self, directory: &str, server: &ToolServer) -> Result<()> {

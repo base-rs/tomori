@@ -32,6 +32,7 @@ use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
 mod agent_pairing;
+pub(crate) mod agent_workers;
 pub(crate) mod tools;
 
 pub(crate) use agent_pairing::Decision;

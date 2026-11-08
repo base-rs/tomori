@@ -457,6 +457,9 @@ pub enum ErrorKind {
     Unavailable,
     /// The session has closed.
     Closed,
+    /// The worker or session is running a turn, and the request would stop it, which was not asked for, as when
+    /// removing a running worker without `force` through [`Backend::delete_worker`].
+    Busy,
     Other,
 }
 
@@ -532,6 +535,28 @@ pub trait Backend: Send + Sync {
         std::future::ready(Err(Error::new(
             ErrorKind::Unsupported,
             "the backend does not delete sessions",
+        )))
+    }
+
+    /// Delete the worker session `worker` of the session `session`, with its own workers' sessions, as the agent's own
+    /// interface deletes a session, when the space bound to `session` removes it (see `design/mcp.md`). The backend
+    /// checks the agent's own records as this is performed, never only what it reported before: `worker` must descend
+    /// from `session` through its chain of parents, and neither it nor any session on that chain below `session` may be
+    /// bound to a space; otherwise it fails with [`ErrorKind::Invalid`] and deletes nothing. A worker, or one of its own
+    /// workers, that the agent says is running fails with [`ErrorKind::Busy`] unless `force` is given, when each is
+    /// stopped first. A worker that no longer exists is not an error. Once deleted, the worker and its own workers leave
+    /// the workers `session` reports, with [`Event::WorkersChanged`]. Fails with [`ErrorKind::Unsupported`] unless the
+    /// backend has [`Capabilities::workers`] and [`Capabilities::delete`].
+    fn delete_worker(
+        &self,
+        session: &str,
+        worker: &str,
+        force: bool,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let _ = (session, worker, force);
+        std::future::ready(Err(Error::new(
+            ErrorKind::Unsupported,
+            "the backend does not remove workers",
         )))
     }
 

@@ -3,8 +3,8 @@
 
 //! A scripted in-memory backend for tests and for running the server without an agent.
 //!
-//! Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. They take instruction entries, which tests can read with [`FakeSession::instructions`], unless the backend was told to take none with [`FakeBackend::take_no_instructions`]. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
-use std::collections::{BTreeMap, HashSet, VecDeque};
+//! Each session keeps the family of workers it last reported with [`Event::WorkersChanged`] or [`Event::WorkersPartial`], as the agent's own record, which [`Backend::delete_worker`] checks and changes; [`FakeSession::set_family`] changes the record alone, as the agent changing behind what it reported would. Sessions offer two modes, `default` and `plan`, and confirm every switch to one of them. They take instruction entries, which tests can read with [`FakeSession::instructions`], unless the backend was told to take none with [`FakeBackend::take_no_instructions`]. In automatic mode, each prompt is answered immediately with a streamed echo. In manual mode, a turn stays busy until the test calls [`FakeSession::reply`] or scripts the reply's text deltas with [`FakeSession::stream`], so input queues up behind it. Tests can inject any [`Event`] and inspect what reached the session.
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -12,6 +12,7 @@ use base_scheduler::Cancellation;
 use tomori_backend::{
     AnswerValue, Backend, Capabilities, Decision, Error, ErrorKind, Event, Mode, Modes, Permission,
     Prompt, Question, Result, Role, Session, SessionSpec, SessionSummary, Snapshot, ToolServer,
+    Worker, WorkerState,
 };
 
 /// The backend name used in `CreateSpace` requests.
@@ -68,6 +69,14 @@ struct FakeShared {
     delete_failure: Mutex<Option<Error>>,
     /// The sessions the server deleted, in order.
     deleted: Mutex<Vec<String>>,
+    /// Removing each of these workers fails, as its error; see [`FakeBackend::fail_removing`].
+    worker_failures: Mutex<HashMap<String, Error>>,
+    /// The workers the server removed, with their own workers, in order.
+    removed_workers: Mutex<Vec<String>>,
+    /// The running workers stopped to remove them, in order.
+    stopped_workers: Mutex<Vec<String>>,
+    /// The backend reports no workers; see [`FakeBackend::report_no_workers`].
+    no_workers: AtomicBool,
     /// The backend takes no tools; see [`FakeBackend::take_no_tools`].
     no_tools: AtomicBool,
     /// Registering and unregistering tools fails; see [`FakeBackend::fail_tools`].
@@ -114,6 +123,11 @@ impl FakeBackend {
         self.shared
             .instruction_failure
             .store(fail, Ordering::SeqCst);
+    }
+
+    /// Report no workers, as a backend without [`Capabilities::workers`].
+    pub fn report_no_workers(&self) {
+        self.shared.no_workers.store(true, Ordering::SeqCst);
     }
 
     /// Take no tools, as a backend without [`Capabilities::tools`].
@@ -171,6 +185,25 @@ impl FakeBackend {
     /// The sessions the server deleted, in order.
     pub fn deleted(&self) -> Vec<String> {
         self.shared.deleted.lock().unwrap().clone()
+    }
+
+    /// Make removing the worker `worker` fail with `error`, or succeed again with `None`.
+    pub fn fail_removing(&self, worker: &str, error: Option<Error>) {
+        let mut failures = self.shared.worker_failures.lock().unwrap();
+        match error {
+            Some(error) => failures.insert(worker.to_owned(), error),
+            None => failures.remove(worker),
+        };
+    }
+
+    /// The workers the server removed, with their own workers, in order.
+    pub fn removed_workers(&self) -> Vec<String> {
+        self.shared.removed_workers.lock().unwrap().clone()
+    }
+
+    /// The running workers stopped to remove them, in order.
+    pub fn stopped_workers(&self) -> Vec<String> {
+        self.shared.stopped_workers.lock().unwrap().clone()
     }
 
     /// Make creating and attaching sessions wait until [`release_creation`](Self::release_creation), as a slow agent start would.
@@ -243,6 +276,7 @@ impl FakeBackend {
                 questions: Mutex::new(Vec::new()),
                 next_message: AtomicU64::new(0),
                 delivered: Mutex::new(HashSet::new()),
+                family: Mutex::new(Vec::new()),
                 modes: Mutex::new(Modes {
                     offered: ["default", "plan"]
                         .map(|id| Mode {
@@ -273,7 +307,7 @@ impl Backend for FakeBackend {
             attach: !self.shared.no_attach.load(Ordering::SeqCst),
             interrupt: true,
             questions: true,
-            workers: true,
+            workers: !self.shared.no_workers.load(Ordering::SeqCst),
             instructions: !self.shared.no_instructions.load(Ordering::SeqCst),
             delete: !self.shared.no_delete.load(Ordering::SeqCst),
             tools: !self.shared.no_tools.load(Ordering::SeqCst),
@@ -307,6 +341,85 @@ impl Backend for FakeBackend {
         }
         sessions.retain(|session| session.id() != id);
         self.shared.deleted.lock().unwrap().push(id.to_owned());
+        Ok(())
+    }
+
+    /// Waits while commands are held; checks the worker's chain of parents in the family the session `session` last
+    /// reported, as the agent's own record; refuses a session bound to a space, a worker of another session and,
+    /// without `force`, a running worker or one with running workers of its own; and then removes it with its own
+    /// workers, reporting the family left.
+    async fn delete_worker(&self, session: &str, worker: &str, force: bool) -> Result<()> {
+        if self.shared.no_delete.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Unsupported, "no deleting"));
+        }
+        loop {
+            let released = self.shared.commands_released.listen();
+            if !self.shared.commands_held.load(Ordering::SeqCst) {
+                break;
+            }
+            released.await;
+        }
+        if let Some(error) = self.shared.worker_failures.lock().unwrap().get(worker) {
+            return Err(error.clone());
+        }
+        let sessions = self.started();
+        if sessions
+            .iter()
+            .any(|bound| bound.id() == worker && bound.inner.bound.lock().unwrap().is_some())
+        {
+            return Err(Error::new(
+                ErrorKind::Invalid,
+                "the fake session is bound to a space",
+            ));
+        }
+        let root = sessions
+            .iter()
+            .find(|root| root.id() == session)
+            .ok_or_else(|| Error::new(ErrorKind::Invalid, "no such fake session"))?;
+        let family = root.inner.family.lock().unwrap().clone();
+        if !family.iter().any(|known| known.id == worker) {
+            // Another session's worker is refused; one that no longer exists anywhere is already gone.
+            return if sessions.iter().any(|other| {
+                other
+                    .inner
+                    .family
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|known| known.id == worker)
+            }) {
+                Err(Error::new(
+                    ErrorKind::Invalid,
+                    "the fake worker is not this session's",
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        let gone = descendants(&family, worker);
+        let running: Vec<&String> = gone
+            .iter()
+            .filter(|id| {
+                family.iter().any(|known| {
+                    &known.id == *id
+                        && matches!(known.state, WorkerState::Running | WorkerState::Waiting)
+                })
+            })
+            .collect();
+        if !running.is_empty() && !force {
+            return Err(Error::new(ErrorKind::Busy, "the fake worker is running"));
+        }
+        self.shared
+            .stopped_workers
+            .lock()
+            .unwrap()
+            .extend(running.into_iter().cloned());
+        let left: Vec<Worker> = family
+            .into_iter()
+            .filter(|known| !gone.contains(&known.id))
+            .collect();
+        self.shared.removed_workers.lock().unwrap().extend(gone);
+        root.emit(Event::WorkersChanged { workers: left });
         Ok(())
     }
 
@@ -450,8 +563,26 @@ struct FakeSessionInner {
     questions: Mutex<Vec<Question>>,
     next_message: AtomicU64,
     delivered: Mutex<HashSet<String>>,
+    /// The family of workers the session last reported, as the agent's own record.
+    family: Mutex<Vec<Worker>>,
     modes: Mutex<Modes>,
     log: Mutex<FakeLog>,
+}
+
+/// `worker` and its own workers in `family`, at any depth, `worker` first.
+fn descendants(family: &[Worker], worker: &str) -> Vec<String> {
+    let mut gone = vec![worker.to_owned()];
+    let mut index = 0;
+    while let Some(parent) = gone.get(index).cloned() {
+        gone.extend(
+            family
+                .iter()
+                .filter(|known| known.parent.as_deref() == Some(parent.as_str()))
+                .map(|known| known.id.clone()),
+        );
+        index += 1;
+    }
+    gone
 }
 
 impl FakeSession {
@@ -496,6 +627,9 @@ impl FakeSession {
                 .lock()
                 .unwrap()
                 .retain(|entry| entry.id != *id),
+            Event::WorkersChanged { workers } | Event::WorkersPartial { workers, .. } => {
+                self.inner.family.lock().unwrap().clone_from(workers);
+            }
             _ => {}
         }
         let mut outbound = self.inner.outbound.lock().unwrap();
@@ -554,6 +688,12 @@ impl FakeSession {
 
     pub fn log(&self) -> FakeLog {
         self.inner.log.lock().unwrap().clone()
+    }
+
+    /// Change the family of workers the agent records for this session, without reporting it, as the agent changing
+    /// behind what the space was told would.
+    pub fn set_family(&self, workers: Vec<Worker>) {
+        *self.inner.family.lock().unwrap() = workers;
     }
 
     /// Name the session anew, as an agent may once it starts.
@@ -829,6 +969,43 @@ mod tests {
         while session.handle.receiver.try_recv().is_ok() {}
         session.delta(&message, "");
         assert!(session.handle.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_worker_is_removed_only_from_its_own_session_s_family() {
+        let backend = FakeBackend::new();
+        let root = block_on(backend.create(spec())).unwrap();
+        let other = block_on(backend.create(spec())).unwrap();
+        let worker = |id: &str, parent: &str, state| Worker {
+            id: id.into(),
+            parent: Some(parent.into()),
+            title: id.into(),
+            state,
+        };
+        root.emit(Event::WorkersChanged {
+            workers: vec![
+                worker("w1", &root.id(), WorkerState::Completed),
+                worker("w2", "w1", WorkerState::Waiting),
+            ],
+        });
+        let refused = |session: &str, worker: &str| {
+            block_on(backend.delete_worker(session, worker, true))
+                .unwrap_err()
+                .kind
+        };
+        // A session bound to a space, or a session the backend does not have, is refused.
+        assert_eq!(refused(&root.id(), &other.id()), ErrorKind::Invalid);
+        assert_eq!(refused("fake-99", "w1"), ErrorKind::Invalid);
+        // A worker waiting on its own worker is running.
+        assert_eq!(
+            block_on(backend.delete_worker(&root.id(), "w1", false))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Busy
+        );
+        backend.delete_nothing();
+        assert_eq!(refused(&root.id(), "w1"), ErrorKind::Unsupported);
+        assert!(backend.removed_workers().is_empty());
     }
 
     #[test]
