@@ -41,6 +41,12 @@ pub const FLOATING: usize = 12;
 /// environment left longest ago.
 pub const ROOMS: usize = 8;
 
+/// The most panels kept for a space, shown or hidden. A space shows at most [`WALL_SLOTS`] on the Tomori wall and, in
+/// its current environment, [`WALL_SLOTS`] on each of [`DECLARED_WALLS`] and [`ADDED_WALLS`] walls and [`FLOATING`]
+/// floating, fewer than this, so that beyond it the hidden panel put where it is longest ago is forgotten, and what a
+/// space keeps stays bounded however many environments it has been in.
+pub const PANELS: usize = 120;
+
 /// How far from the space's origin, on each axis, a wall or a floating panel may be, in metres.
 pub const REACH: f32 = 20.0;
 
@@ -188,7 +194,9 @@ impl Default for Stage {
     }
 }
 
-/// `pose`, with its orientation made a unit quaternion, if it is finite, within [`REACH`] and has an orientation.
+/// `pose`, with its orientation made a unit quaternion and upright, turned only about the vertical, as walls and panels
+/// stand, if it is finite, within [`REACH`] and has an orientation. One tilted is turned to face the way its +Z faces,
+/// levelled, or, where that is straight up or down, the way its +X faces turned a quarter towards it.
 fn valid(pose: &Pose) -> Option<Pose> {
     let length = pose
         .orientation
@@ -196,11 +204,30 @@ fn valid(pose: &Pose) -> Option<Pose> {
         .map(|value| value * value)
         .sum::<f32>()
         .sqrt();
-    (pose.position.iter().all(|value| value.abs() <= REACH) && length > 0.5 && length.is_finite())
-        .then(|| Pose {
+    if !(pose.position.iter().all(|value| value.abs() <= REACH)
+        && length > 0.5
+        && length.is_finite())
+    {
+        return None;
+    }
+    let orientation = pose.orientation.map(|value| value / length);
+    let [x, y, z, w] = orientation;
+    // Turned only about the vertical already, it is kept as it is.
+    if x.abs() < 1e-6 && z.abs() < 1e-6 {
+        return Some(Pose {
             position: pose.position,
-            orientation: pose.orientation.map(|value| value / length),
-        })
+            orientation,
+        });
+    }
+    let (mut ahead_x, mut ahead_z) = (2.0 * (x * z + w * y), 1.0 - 2.0 * (x * x + y * y));
+    if ahead_x.hypot(ahead_z) < 1e-3 {
+        (ahead_x, ahead_z) = (2.0 * (w * y - x * z), 1.0 - 2.0 * (y * y + z * z));
+    }
+    let [px, py, pz] = pose.position;
+    Some(Pose::upright_facing(
+        pose.position,
+        [px + ahead_x, py, pz + ahead_z],
+    ))
 }
 
 /// How long ago `seconds` was, as the agent is told.
@@ -261,6 +288,46 @@ impl Stage {
         let room = self.rooms.entry(environment.to_owned()).or_default();
         room.used = used;
         room
+    }
+
+    /// The space leaves `environment` for another: what it keeps for it, if anything, is the room left most recently, and
+    /// so the last forgotten.
+    pub(crate) fn leave(&mut self, environment: &str) {
+        let used = self.next + 1;
+        if let Some(room) = self.rooms.get_mut(environment) {
+            room.used = used;
+            self.next = used;
+        }
+    }
+
+    /// Forget the hidden panels, those of environments other than `environment`, put where they are longest ago, while
+    /// more than [`PANELS`] are kept.
+    fn bound(&mut self, environment: &str) {
+        let kept = self.tomori.len()
+            + self
+                .rooms
+                .values()
+                .map(|room| room.panels.len())
+                .sum::<usize>();
+        let mut hidden: Vec<(u64, &str)> = self
+            .rooms
+            .iter()
+            .filter(|(id, _)| id.as_str() != environment)
+            .flat_map(|(_, room)| {
+                room.panels
+                    .iter()
+                    .map(|kept| (kept.placed, kept.id.as_str()))
+            })
+            .collect();
+        hidden.sort_unstable();
+        let forgotten: Vec<String> = hidden
+            .into_iter()
+            .take(kept.saturating_sub(PANELS))
+            .map(|(_, id)| id.to_owned())
+            .collect();
+        for room in self.rooms.values_mut() {
+            room.panels.retain(|kept| !forgotten.contains(&kept.id));
+        }
     }
 
     /// The panels that the wall `wall` holds, or that float, in `environment`: the Tomori wall's own, or the room's.
@@ -372,6 +439,7 @@ impl Stage {
             },
         };
         self.put_on(walls.environment, kept, &wall);
+        self.bound(walls.environment);
         id
     }
 
@@ -483,7 +551,7 @@ impl Stage {
     }
 
     /// The panel `panel`, as the agent is told about one a participant points at in `walls`' environment at `now`, such
-    /// as `panel "Build status" (on the Tomori wall, projected 2 minutes ago; source: CI)`: everything in it cleaned onto
+    /// as `panel "Build status" (on the Tomori wall, projected 2 minutes ago; source: "CI")`: everything in it cleaned onto
     /// one line, without double quotes or square brackets, so that it cannot end the context block. `None` when it is
     /// not shown there.
     pub(crate) fn describe(&self, walls: &Walls<'_>, panel: &str, now: u64) -> Option<String> {
@@ -507,9 +575,10 @@ impl Stage {
             _ => "floating",
         };
         let mut details = format!("{place}, projected {}", ago(panel.age));
+        // Each value in quotes, as the title is, since it is the agent's text, and may be from what it read.
         for meta in &panel.meta {
             details.push_str(&format!(
-                "; {}: {}",
+                "; {}: \"{}\"",
                 crate::space::one_line(&meta.key, blocks::META_KEY_CHARS),
                 crate::space::one_line(&meta.value, blocks::META_VALUE_CHARS)
             ));
@@ -857,6 +926,152 @@ mod tests {
         assert!(stage.rooms.contains_key("e0"));
         assert!(!stage.rooms.contains_key("e1"));
         assert!(stage.rooms.contains_key("another"));
+        // Leaving one, unchanged since, makes it the last forgotten; leaving one with nothing kept changes nothing.
+        stage.leave("e2");
+        let next = stage.next;
+        stage.leave("unknown");
+        assert_eq!(stage.next, next);
+        stage.add_wall("more", &pose(0.0, 3.0)).unwrap();
+        assert!(stage.rooms.contains_key("e2"));
+        assert!(!stage.rooms.contains_key("e3"));
+    }
+
+    #[test]
+    fn beyond_the_limit_the_hidden_panel_placed_longest_ago_is_forgotten() {
+        let mut stage = Stage::default();
+        let kept = |placed: u64| Kept {
+            id: format!("hidden-{placed}"),
+            content: content("hidden"),
+            created: 0,
+            placed,
+            place: Placed::Free {
+                pose: pose(0.0, 0.0),
+            },
+        };
+        // More hidden in other environments than the limit allows, the earliest placed in the second.
+        for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {
+            stage.rooms.entry(environment.into()).or_default().panels = placed.map(kept).collect();
+        }
+        stage.next = 1_000;
+        let shown = stage.project(&SKY, content("new"), None, 0);
+        // The three placed longest ago are forgotten, and nothing shown is.
+        let hidden: Vec<&str> = stage
+            .rooms
+            .values()
+            .flat_map(|room| room.panels.iter().map(|kept| kept.id.as_str()))
+            .collect();
+        assert_eq!(hidden.len() + stage.tomori.len(), PANELS);
+        for forgotten in ["hidden-0", "hidden-1", "hidden-10"] {
+            assert!(!hidden.contains(&forgotten), "{forgotten}");
+        }
+        assert!(hidden.contains(&"hidden-11"));
+        assert!(stage.view("s", &SKY, 0).panel(&shown).is_some());
+        // Every panel a space can show in one environment is fewer than the limit.
+        assert!(WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS) + FLOATING < PANELS);
+    }
+
+    #[test]
+    fn walls_and_floating_panels_are_made_upright() {
+        let mut stage = Stage::default();
+        let id = stage.project(&SKY, content("tilted"), None, 0);
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        // Turned a quarter about the vertical and pitched down, it is turned only about the vertical, facing +X.
+        let pitched = Pose {
+            position: [0.0, 1.5, -1.0],
+            orientation: [0.0, half, 0.0, half],
+        };
+        let pitch = (0.3_f32 / 2.0).sin_cos();
+        let [x, y, z, w] = pitched.orientation;
+        let (s, c) = pitch;
+        // The yaw, then the pitch about its own +X.
+        let tilted = Pose {
+            orientation: [w * s + x * c, y * c + z * s, z * c - y * s, w * c - x * s],
+            ..pitched
+        };
+        let upright = |place: Place| -> [f32; 4] {
+            let Place::Free { pose } = place else {
+                unreachable!("floating")
+            };
+            pose.orientation
+        };
+        stage.place(&SKY, &id, Target::Free(tilted)).unwrap();
+        let [x, y, z, w] = upright(stage.view("s", &SKY, 0).panel(&id).unwrap().place.clone());
+        assert!(x == 0.0 && z == 0.0 && (y - half).abs() < 1e-5 && (w - half).abs() < 1e-5);
+        // Facing straight down, it faces the way its top did.
+        let down = Pose {
+            position: [0.0, 1.5, -1.0],
+            orientation: [half, 0.0, 0.0, half],
+        };
+        stage.place(&SKY, &id, Target::Free(down)).unwrap();
+        let [x, y, z, w] = upright(stage.view("s", &SKY, 0).panel(&id).unwrap().place.clone());
+        assert!(x == 0.0 && z == 0.0 && y.abs() < 1e-5 && (w.abs() - 1.0).abs() < 1e-5);
+        // A wall too.
+        let wall = stage.add_wall("sky", &tilted).unwrap();
+        let shown = stage.view("s", &SKY, 0);
+        let [x, _, z, _] = shown.wall(&wall).unwrap().pose.orientation;
+        assert!(x == 0.0 && z == 0.0);
+    }
+
+    #[test]
+    fn a_projection_at_every_limit_fits_in_one_frame() {
+        // Every panel as large as a block can make it, in characters of four bytes.
+        let wide = |count: usize| "\u{1F600}".repeat(count);
+        let source = format!(
+            "title: {}\na: {}\nb: {}\nc: {}\nd: {}\n---\n{}",
+            wide(200),
+            wide(200),
+            wide(200),
+            wide(200),
+            wide(200),
+            vec![wide(40); 2 * blocks::BODY_LINES].join("\n")
+        );
+        let largest = Content::parse(&source).unwrap();
+        assert_eq!(
+            largest.body.chars().filter(|c| *c != '\n').count(),
+            blocks::BODY_CHARS + 1
+        );
+        let declared: Vec<Pose> = (0..DECLARED_WALLS)
+            .map(|index| pose(index as f32 - 3.0, -5.0))
+            .collect();
+        let walls = Walls {
+            declared: &declared,
+            ..SKY
+        };
+        let mut stage = Stage::default();
+        // As many floating as there can be, then every wall full.
+        for index in 0..FLOATING {
+            let id = stage.project(&walls, largest.clone(), None, 0);
+            stage
+                .place(&walls, &id, Target::Free(pose(index as f32, 0.0)))
+                .unwrap();
+        }
+        let added: Vec<Pose> = (0..ADDED_WALLS)
+            .map(|index| pose(index as f32 - 3.0, 5.0))
+            .collect();
+        for pose in &added {
+            stage.add_wall("sky", pose).unwrap();
+        }
+        let near = std::iter::once(None).chain(
+            declared
+                .iter()
+                .chain(&added)
+                .map(|pose| Some(pose.position)),
+        );
+        for origin in near {
+            for _ in 0..WALL_SLOTS {
+                stage.project(&walls, largest.clone(), origin, 0);
+            }
+        }
+        let view = stage.view(&"s".repeat(64), &walls, u64::MAX);
+        assert_eq!(
+            view.panels.len(),
+            WALL_SLOTS as usize * (1 + DECLARED_WALLS + ADDED_WALLS) + FLOATING
+        );
+        let message = tomori_protocol::ServerMessage::Projection {
+            projection: Box::new(view),
+        };
+        let bytes = serde_json::to_vec(&message).unwrap().len();
+        assert!(bytes <= tomori_protocol::MAX_FRAME_BYTES, "{bytes} bytes");
     }
 
     #[test]
@@ -878,7 +1093,7 @@ mod tests {
         let id = stage.project(&SKY, content("Build status"), None, 1_000);
         assert_eq!(
             stage.describe(&SKY, &id, 1_130).unwrap(),
-            "panel \"Build status\" (on the Tomori wall, projected 2 minutes ago; source: CI)"
+            "panel \"Build status\" (on the Tomori wall, projected 2 minutes ago; source: \"CI\")"
         );
         let wall = stage.add_wall("sky", &pose(0.0, 3.0)).unwrap();
         stage.place(&SKY, &id, Target::Wall(wall)).unwrap();
@@ -910,7 +1125,7 @@ mod tests {
         );
         assert_eq!(
             stage.describe(&SKY, &untitled, 0).unwrap(),
-            "panel beginning \"Run 'cargo test' (now)\" (on the Tomori wall, projected just now; note): say 'hi')"
+            "panel beginning \"Run 'cargo test' (now)\" (on the Tomori wall, projected just now; note): \"say 'hi'\")"
         );
         assert!(stage.describe(&SKY, "panel-99", 0).is_none());
         let hostile = stage.project(

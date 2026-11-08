@@ -3283,12 +3283,15 @@ impl Hub {
                     return;
                 };
                 let record = state.space_mut(&space).expect("checked above");
+                let left = record.model.environment.clone();
                 match record.model.set_environment(environment) {
                     Ok(true) => {
                         log::info!(
                             "Space {space} is now in the {} environment.",
                             record.model.environment
                         );
+                        // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
+                        record.stage.leave(&left);
                         // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
                         record.instruct(true);
                         // Its server side, if it has one, runs for the space, and the previous environment's stops.

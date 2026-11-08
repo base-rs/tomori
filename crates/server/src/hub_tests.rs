@@ -3616,7 +3616,7 @@ fn a_panel_pointed_at_as_the_words_begin_is_described_from_the_stage_before_them
     );
     assert_eq!(
         prompt.text,
-        "ada: [Pointing at panel \"Build status\" (on the Tomori wall, projected just now; source: CI)] what's this?"
+        "ada: [Pointing at panel \"Build status\" (on the Tomori wall, projected just now; source: \"CI\")] what's this?"
     );
     deliver(&prompt);
     // An older client names it as the words end, and it is resolved in the same way.
