@@ -469,16 +469,32 @@ fn description(item: &Item) -> String {
     }
 }
 
-/// The label's lines: the label, then each line of the detail, each clipped to [`LABEL_COLUMNS`].
+/// The label's lines: the label, then each line of the detail, each clipped to [`LABEL_COLUMNS`], a line of parts
+/// leaving out whole parts from its end, as [`fitted`] does.
 fn lines(item: &Item) -> Vec<String> {
     let mut lines = vec![clip(&item.label, LABEL_COLUMNS)];
     lines.extend(
         item.detail
             .iter()
             .flat_map(|detail| detail.lines())
-            .map(|line| clip(line, LABEL_COLUMNS)),
+            .map(fitted),
     );
     lines
+}
+
+/// One line of a label's detail in at most [`LABEL_COLUMNS`]: a line of parts separated by " · ", such as a space's
+/// status, participants and age, leaves out whole parts from its end until it fits, rather than ending in a part cut
+/// short, such as "5…"; a quotation, and a part too long alone, are clipped. The heading shows every part.
+fn fitted(line: &str) -> String {
+    let mut parts: Vec<&str> = if line.starts_with('“') {
+        vec![line]
+    } else {
+        line.split(" · ").collect()
+    };
+    while parts.len() > 1 && crate::ui_text::width(&parts.join(" · ")) > LABEL_COLUMNS {
+        parts.pop();
+    }
+    clip(&parts.join(" · "), LABEL_COLUMNS)
 }
 
 /// How large a font pixel of the label anchored at `anchor` is, in metres: large enough that its x-height, 5.6 font
@@ -940,10 +956,21 @@ mod tests {
             object.label.lines,
             [
                 "Tomori development fr…",
-                "ioquatix/tomori · Far…",
-                "running · 12 here · 5…",
+                "ioquatix/tomori",
+                "running · 12 here",
                 "“All 42 tests pass, a…",
             ]
+        );
+        // A line of parts fits whole parts, a part too long alone is clipped, and a quotation is clipped as written.
+        assert_eq!(fitted("needs you · 1 here · 5m ago"), "needs you · 1 here");
+        assert_eq!(fitted("idle · 1d ago"), "idle · 1d ago");
+        assert_eq!(
+            fitted("base-rs/base-scheduler/timers · Sky"),
+            "base-rs/base-schedule…"
+        );
+        assert_eq!(
+            fitted("“A · B · C, and much more”"),
+            "“A · B · C, and much …"
         );
         assert_eq!(
             object.description,
