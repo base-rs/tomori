@@ -46,6 +46,11 @@ const HEADING_ABOVE: f32 = 0.3;
 const TARGET_MARGIN: f32 = 1.5;
 /// Labels are clipped to this many characters; the full text of the object pointed at is shown in the heading.
 pub const LABEL_COLUMNS: usize = 22;
+/// The least angle, in degrees, the x-height of a label beneath an object takes from [`HOME`]: legible on the headset,
+/// as `design/text.md` says.
+pub const LABEL_ANGLE: f32 = 0.47;
+/// The font pixel of a label beneath an object near enough that [`LABEL_ANGLE`] needs no more, in metres.
+const LABEL_PIXEL: f32 = 0.0026;
 /// How far above its server a jump object stands: clear of the server and of a row above it.
 const JUMP_ABOVE: f32 = 0.18;
 
@@ -454,17 +459,49 @@ fn size(kind: Kind) -> f32 {
     }
 }
 
+/// The label and detail in full, shown in the heading while the object is pointed at: on one line, or, for a detail of
+/// several lines, as a space's is, the label and then each of its lines.
 fn description(item: &Item) -> String {
     match &item.detail {
+        Some(detail) if detail.contains('\n') => format!("{}\n{detail}", item.label),
         Some(detail) => format!("{}: {detail}", item.label),
         None => item.label.clone(),
     }
 }
 
+/// The label's lines: the label, then each line of the detail, each clipped to [`LABEL_COLUMNS`], a line of parts
+/// leaving out whole parts from its end, as [`fitted`] does.
 fn lines(item: &Item) -> Vec<String> {
     let mut lines = vec![clip(&item.label, LABEL_COLUMNS)];
-    lines.extend(item.detail.iter().map(|detail| clip(detail, LABEL_COLUMNS)));
+    lines.extend(
+        item.detail
+            .iter()
+            .flat_map(|detail| detail.lines())
+            .map(fitted),
+    );
     lines
+}
+
+/// One line of a label's detail in at most [`LABEL_COLUMNS`]: a line of parts separated by " · ", such as a space's
+/// status, participants and age, leaves out whole parts from its end until it fits, rather than ending in a part cut
+/// short, such as "5…"; a quotation, and a part too long alone, are clipped. The heading shows every part.
+fn fitted(line: &str) -> String {
+    let mut parts: Vec<&str> = if line.starts_with('“') {
+        vec![line]
+    } else {
+        line.split(" · ").collect()
+    };
+    while parts.len() > 1 && crate::ui_text::width(&parts.join(" · ")) > LABEL_COLUMNS {
+        parts.pop();
+    }
+    clip(&parts.join(" · "), LABEL_COLUMNS)
+}
+
+/// How large a font pixel of the label anchored at `anchor` is, in metres: large enough that its x-height, 5.6 font
+/// pixels, takes at least [`LABEL_ANGLE`] from [`HOME`], and never smaller than a near row's labels have been, so that a
+/// label on an outer orbit, further away, is as legible as one nearby. See `design/text.md`.
+fn label_pixel(anchor: Vec3) -> f32 {
+    (anchor.distance(HOME) * LABEL_ANGLE.to_radians() / 5.6).max(LABEL_PIXEL)
 }
 
 /// An object with its label centred beneath it.
@@ -479,7 +516,7 @@ fn row_object(item: &Item, position: Vec3, dimmed: bool) -> Object {
             anchor: position - Vec3::Y * (size * 1.6 + 0.03),
             lines: lines(item),
             align: Align::Centre,
-            pixel: 0.0026,
+            pixel: label_pixel(position - Vec3::Y * (size * 1.6 + 0.03)),
             alpha: 1.0,
             tilt: false,
         },
@@ -905,6 +942,51 @@ mod tests {
         }
     }
 
+    /// What the lobby says beneath a busy space's title, at its longest.
+    const SPACE_DETAIL: &str = "ioquatix/tomori · Farmyard\nrunning · 12 here · 59m ago\n“All 42 tests pass, and the build is green.”";
+
+    #[test]
+    fn a_space_s_detail_is_a_line_each_beneath_its_title_and_in_full_when_pointed_at() {
+        let mut view = lobby(1, None);
+        view.items[0].label = "Tomori development from the headset".into();
+        view.items[0].detail = Some(SPACE_DETAIL.into());
+        let scene = Scene::layout(&view);
+        let object = scene.object(&Key::Space("space-0".into())).unwrap();
+        assert_eq!(
+            object.label.lines,
+            [
+                "Tomori development fr…",
+                "ioquatix/tomori",
+                "running · 12 here",
+                "“All 42 tests pass, a…",
+            ]
+        );
+        // A line of parts fits whole parts, a part too long alone is clipped, and a quotation is clipped as written.
+        assert_eq!(fitted("needs you · 1 here · 5m ago"), "needs you · 1 here");
+        assert_eq!(fitted("idle · 1d ago"), "idle · 1d ago");
+        assert_eq!(
+            fitted("base-rs/base-scheduler/timers · Sky"),
+            "base-rs/base-schedule…"
+        );
+        assert_eq!(
+            fitted("“A · B · C, and much more”"),
+            "“A · B · C, and much …"
+        );
+        assert_eq!(
+            object.description,
+            format!("Tomori development from the headset\n{SPACE_DETAIL}")
+        );
+        // A detail of one line is said after the label, as before.
+        let mut view = lobby(1, None);
+        view.items[0].detail = Some("running".into());
+        let scene = Scene::layout(&view);
+        let object = scene.object(&Key::Space("space-0".into())).unwrap();
+        assert_eq!(object.description, "space-0: running");
+        // A near label keeps its size, and a far one grows with its distance.
+        assert_eq!(label_pixel(HOME + Vec3::NEG_Z), LABEL_PIXEL);
+        assert!((label_pixel(HOME + Vec3::NEG_Z * 4.0) / LABEL_PIXEL - 2.25).abs() < 0.05);
+    }
+
     #[test]
     fn labels_on_the_orbit_never_overlap() {
         for count in 0..=30 {
@@ -912,10 +994,19 @@ mod tests {
             for item in &mut view.items {
                 if matches!(item.key, Key::Space(_)) {
                     item.label = format!("A long space title {}", item.label);
-                    item.detail = Some("waiting for you".into());
+                    item.detail = Some(SPACE_DETAIL.into());
                 }
             }
             let scene = Scene::layout(&view);
+            // Every space's label is legible from home, however far its orbit.
+            for object in &scene.objects {
+                if matches!(object.key, Key::Space(_)) {
+                    assert_eq!(object.label.lines.len(), 4);
+                    let x_height = (object.label.pixel * 5.6 / object.label.anchor.distance(HOME))
+                        .to_degrees();
+                    assert!(x_height >= LABEL_ANGLE - 1e-4, "{count}: {x_height}");
+                }
+            }
             let bounds = |label: &Label| {
                 let half = half_width(label);
                 let (bottom, top) = label_span(label);
@@ -1080,6 +1171,9 @@ mod tests {
             participants: 0,
             attention,
             attention_age: age,
+            folder: None,
+            active_age: None,
+            latest: None,
         }
     }
 

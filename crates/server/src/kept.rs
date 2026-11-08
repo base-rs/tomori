@@ -49,6 +49,10 @@ pub struct KeptSpace {
     /// `design/projection.md`.
     #[serde(default, skip_serializing_if = "Stage::is_empty")]
     pub stage: Stage,
+    /// When the space was last active, in seconds since the Unix epoch, to the minute, if known. See
+    /// `design/arrival.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -196,6 +200,7 @@ mod tests {
             closed_order: None,
             placements: Default::default(),
             stage: Stage::default(),
+            active: None,
         }
     }
 

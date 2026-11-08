@@ -489,11 +489,17 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
     }
 }
 
-/// The heading, with the full text of the object pointed at beneath it.
+/// The heading, with the full text of the object pointed at beneath it. A description of several lines, such as a
+/// space's, raises the heading by the lines beyond its first, so that it grows upwards, clear of the objects below.
 fn heading(scene: &Scene, hovered: Option<&Key>) -> Option<Label> {
     let mut heading = scene.heading.clone()?;
     if let Some(object) = hovered.and_then(|key| scene.object(key)) {
-        heading.lines.push(clip(&object.description, 48));
+        let before = heading.lines.len();
+        heading
+            .lines
+            .extend(object.description.lines().map(|line| clip(line, 48)));
+        let raised = heading.lines.len().saturating_sub(before + 1);
+        heading.anchor.y += raised as f32 * 11.0 * heading.pixel;
     }
     Some(heading)
 }
@@ -754,9 +760,28 @@ mod tests {
             16
         );
         assert!(hovered.len() > plain.len());
-        let lines = heading(&scene, Some(&key)).unwrap().lines;
-        assert_eq!(lines.last().unwrap(), "one: running");
+        let shown = heading(&scene, Some(&key)).unwrap();
+        assert_eq!(shown.lines.last().unwrap(), "one: running");
+        // A one-line description leaves the heading where it was.
+        assert_eq!(shown.anchor, scene.heading.as_ref().unwrap().anchor);
         assert_ne!(label_mesh(&scene, Some(&key)), label_mesh(&scene, None));
+
+        // A space's description, a line each, is shown whole, and raises the heading by the lines beyond its first.
+        let mut described = view();
+        described.items[0].detail = Some("ioquatix/tomori · Sky\nrunning · 2 here\n“Done.”".into());
+        let scene = Scene::layout(&described);
+        let plain = scene.heading.clone().unwrap();
+        let shown = heading(&scene, Some(&key)).unwrap();
+        assert_eq!(
+            shown.lines[plain.lines.len()..],
+            [
+                "one",
+                "ioquatix/tomori · Sky",
+                "running · 2 here",
+                "“Done.”"
+            ]
+        );
+        assert!((shown.anchor.y - plain.anchor.y - 3.0 * 11.0 * plain.pixel).abs() < 1e-6);
     }
 
     #[test]
@@ -1244,6 +1269,235 @@ mod tests {
     }
 
     /// The label's text is solid when seen from where it faces: before its quads were built along the label's up, a label tilted by 45° drew each pixel row about 70% as tall as the rows' spacing, leaving stripes, and its background short of its last row.
+    /// `scene` drawn for one eye looking through `matrix` onto an image `width` by `height`, with `hovered` pointed at,
+    /// or `None` without a Vulkan adapter.
+    fn render(
+        scene: &Scene,
+        hovered: Option<&Key>,
+        matrix: glam::Mat4,
+        (width, height): (u32, u32),
+    ) -> Option<image::RgbaImage> {
+        crate::test_gpu::with(|gpu| {
+            let device = &gpu.device;
+            let queue = &gpu.queue;
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("arrival preview eye"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = crate::graphics::Renderer::new(device, queue, format, width, height);
+            renderer.update_arrival(
+                device,
+                queue,
+                &Frame {
+                    scene,
+                    hovered,
+                    ray: None,
+                    time: 0.0,
+                },
+            );
+            renderer.render(
+                device,
+                queue,
+                std::slice::from_ref(&view),
+                &[matrix],
+                glam::Mat4::IDENTITY,
+                &[],
+            );
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("arrival preview readback"),
+                size: u64::from(width * height * 4),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width * 4),
+                        rows_per_image: Some(height),
+                    },
+                },
+                texture.size(),
+            );
+            queue.submit([encoder.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+            buffer.unmap();
+            image::RgbaImage::from_raw(width, height, data).unwrap()
+        })
+    }
+
+    /// The lobby of a server with spaces in several projects, each with its title, project folder and environment, what
+    /// it is doing, who is here and when it was last active, and the start of its newest reply, as the headset sees it
+    /// from home, at about a Quest 3 eye image's 13 pixels a degree, with the second space pointed at. Set
+    /// `TOMORI_LOBBY_PREVIEW` to a PNG path to save it.
+    #[test]
+    fn the_lobby_tells_spaces_apart_at_a_glance() {
+        const SIZE: (u32, u32) = (1280, 960);
+        let spaces = [
+            (
+                "Tomori development from the headset",
+                "ioquatix/tomori · Sky",
+                "running · 2 here · just now",
+                Some("All 42 tests pass, and the build is green."),
+                None,
+            ),
+            (
+                "Release planning",
+                "ioquatix/tomori · Farmyard",
+                "needs you · 1 here · 5m ago",
+                Some("Shall I tag v0.3.0 now?"),
+                Some(Attention::Input),
+            ),
+            (
+                "Base scheduler",
+                "base-rs/base-scheduler · Sky",
+                "new reply · 2h ago",
+                Some("The timer wheel now handles long sleeps."),
+                Some(Attention::Reply),
+            ),
+            (
+                "Shrine lighting",
+                "tomori-assets · Sky",
+                "idle · 1d ago",
+                Some("I baked the lanterns' light into the floor."),
+                None,
+            ),
+            (
+                "Old session",
+                "Developer · Sky",
+                "closed · 3d ago",
+                None,
+                None,
+            ),
+            (
+                "Coverage",
+                "ioquatix/tomori · Minimal",
+                "problem · 4h ago",
+                Some("The coverage run failed to start."),
+                Some(Attention::Problem),
+            ),
+        ];
+        let mut items: Vec<Item> = spaces
+            .iter()
+            .enumerate()
+            .map(|(index, (title, place, status, latest, attention))| {
+                let mut detail = format!("{place}\n{status}");
+                if let Some(latest) = latest {
+                    detail.push_str(&format!("\n“{latest}”"));
+                }
+                let id = format!("space-{index}");
+                Item {
+                    key: Key::Space(id.clone()),
+                    kind: Kind::Space {
+                        activity: if status.starts_with("closed") {
+                            Activity::Closed
+                        } else {
+                            Activity::Idle
+                        },
+                        participants: 1,
+                        hue: crate::arrival::hue(&id),
+                        attention: *attention,
+                    },
+                    label: (*title).into(),
+                    detail: Some(detail),
+                    selected: false,
+                }
+            })
+            .collect();
+        items.push(Item {
+            key: Key::Create,
+            kind: Kind::Create { open: false },
+            label: "New space".into(),
+            detail: None,
+            selected: false,
+        });
+        let view = View {
+            heading: "Spaces on Studio".into(),
+            connected: Some(Item {
+                key: Key::Connected("studio:8765".into()),
+                kind: Kind::Connected,
+                label: "Studio".into(),
+                detail: Some("Choose to change".into()),
+                selected: false,
+            }),
+            items,
+            ..Default::default()
+        };
+        let scene = Scene {
+            viewer: Some(HOME),
+            ..Scene::layout(&view)
+        };
+        let hovered = Key::Space("space-1".into());
+        // About 13 pixels a degree across the image's 960 rows.
+        let fov = (SIZE.1 as f32 / 13.0).to_radians();
+        let matrix = glam::Mat4::perspective_rh(fov, SIZE.0 as f32 / SIZE.1 as f32, 0.05, 50.0)
+            * glam::Mat4::look_at_rh(HOME, crate::arrival::CENTRE, Vec3::Y);
+        let checked = render(&scene, Some(&hovered), matrix, SIZE)
+            .inspect(|image| crate::test_support::preview("TOMORI_LOBBY_PREVIEW", image));
+        // Each space's label is drawn, every line of it: light text beneath its object, in view.
+        let at = |point: Vec3| {
+            let clip = matrix * point.extend(1.0);
+            let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+            (
+                ((x * 0.5 + 0.5) * SIZE.0 as f32) as i64,
+                ((0.5 - y * 0.5) * SIZE.1 as f32) as i64,
+            )
+        };
+        for (object, image) in scene
+            .objects
+            .iter()
+            .filter(|object| matches!(object.key, Key::Space(_)))
+            .flat_map(|object| checked.as_ref().map(|image| (object, image)))
+        {
+            let label = &object.label;
+            let line = 11.0 * label.pixel;
+            for (index, _) in label.lines.iter().enumerate() {
+                let middle = label.anchor - Vec3::Y * line * (index as f32 + 0.5);
+                let (x, y) = at(middle);
+                let (left, _) = at(middle - Vec3::X * 0.08);
+                let (right, _) = at(middle + Vec3::X * 0.08);
+                let lit = (left..right)
+                    .flat_map(|x| (y - 3..=y + 3).map(move |y| (x, y)))
+                    .filter(|&(x, y)| {
+                        x >= 0 && y >= 0 && (x as u32) < SIZE.0 && (y as u32) < SIZE.1
+                    })
+                    .filter(|&(x, y)| {
+                        let pixel = image.get_pixel(x as u32, y as u32);
+                        pixel[0] > 150 && pixel[1] > 150 && pixel[2] > 150
+                    })
+                    .count();
+                assert!(
+                    lit > 10,
+                    "{:?} line {index} at ({x}, {y}): {lit}",
+                    object.key
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_tilted_label_draws_solid_glyphs_over_its_whole_background() {
         const SIZE: u32 = 256;

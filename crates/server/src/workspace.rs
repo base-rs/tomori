@@ -22,6 +22,41 @@ pub const MAX_RESOLVING: usize = 8;
 /// How long a directory check may take before the directory is refused.
 pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The most characters of a space's project folder the lobby's listing shows; a longer one keeps its end, after "…".
+pub const FOLDER_CHARS: usize = 64;
+
+/// The project folder of a space in `directory`, as the lobby's listing shows it: its path relative to the deepest of
+/// `roots` that holds it, component by component, such as `ioquatix/tomori`, or the root's label when it is the root
+/// itself; and, beneath none of them, as for a space kept from before a root was removed, its final component. A
+/// folder longer than [`FOLDER_CHARS`] keeps its end. See `design/arrival.md`.
+pub fn folder(roots: &[tomori_protocol::WorkspaceRoot], directory: &str) -> String {
+    let directory = Path::new(directory);
+    let found = roots
+        .iter()
+        .filter_map(|root| {
+            directory
+                .strip_prefix(&root.path)
+                .ok()
+                .map(|relative| (root, relative))
+        })
+        .max_by_key(|(root, _)| root.path.len());
+    let folder = match found {
+        Some((root, relative)) if relative.as_os_str().is_empty() => root.label.clone(),
+        Some((_, relative)) => relative.to_string_lossy().into_owned(),
+        None => directory
+            .file_name()
+            .unwrap_or(directory.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let count = folder.chars().count();
+    if count <= FOLDER_CHARS {
+        return folder;
+    }
+    let tail: String = folder.chars().skip(count - (FOLDER_CHARS - 1)).collect();
+    format!("…{tail}")
+}
+
 /// The canonical directories under which spaces may run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceRoots {
@@ -325,6 +360,41 @@ impl Drop for SpaceSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_space_s_folder_is_its_directory_beneath_the_deepest_root_that_holds_it() {
+        let root = |path: &str, label: &str| tomori_protocol::WorkspaceRoot {
+            path: path.into(),
+            label: label.into(),
+        };
+        let roots = [
+            root("/home/ada/Developer", "Developer"),
+            root("/home/ada/Developer/ioquatix", "ioquatix"),
+            root("/srv/work", "work"),
+        ];
+        assert_eq!(
+            folder(&roots, "/srv/work/ioquatix/tomori"),
+            "ioquatix/tomori"
+        );
+        // The deepest root wins, and a root itself is named by its label.
+        assert_eq!(
+            folder(&roots, "/home/ada/Developer/ioquatix/tomori"),
+            "tomori"
+        );
+        assert_eq!(folder(&roots, "/home/ada/Developer/base-rs"), "base-rs");
+        assert_eq!(folder(&roots, "/srv/work"), "work");
+        // Component by component: a sibling that shares a prefix is beneath no root, and is named by its last part.
+        assert_eq!(folder(&roots, "/srv/workshop/tomori"), "tomori");
+        assert_eq!(folder(&[], "/"), "/");
+        // A long folder keeps its end.
+        let deep = format!("/srv/work/{}tomori", "a/".repeat(40));
+        let shown = folder(&roots, &deep);
+        assert_eq!(shown.chars().count(), FOLDER_CHARS);
+        assert!(
+            shown.starts_with('…') && shown.ends_with("a/tomori"),
+            "{shown}"
+        );
+    }
 
     /// A directory removed when dropped.
     struct Scratch(PathBuf);

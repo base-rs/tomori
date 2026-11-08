@@ -367,6 +367,79 @@ fn is_reply(message: &MessageModel) -> bool {
         && !message.text.trim().is_empty()
 }
 
+/// The most characters of the newest reply's start that the lobby's listing shows of a space. See `design/arrival.md`.
+pub const LATEST_CHARS: usize = 60;
+
+/// The start of a reply's `text`, as the lobby's listing shows it: its words outside code blocks, without Markdown's
+/// marks for headings, quotes, lists and emphasis, on one line as a display name is cleaned, and cut at a word with
+/// "…" to at most [`LATEST_CHARS`] characters; `None` when no words are left.
+pub fn excerpt(text: &str) -> Option<String> {
+    let mut words = Vec::new();
+    let mut fenced = false;
+    // Only the start is shown, so a long reply is read no further than enough words for it.
+    for line in text.lines() {
+        if words
+            .iter()
+            .map(|word: &String| word.len() + 1)
+            .sum::<usize>()
+            > LATEST_CHARS * 4
+        {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let line = trimmed.trim_start_matches(['#', '>', '-', '*', '+', ' ']);
+        words.extend(
+            line.split_whitespace()
+                .map(|word| word.trim_matches(['*', '_', '`']))
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    let line = tomori_protocol::text::clean_name(&words.join(" "));
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= LATEST_CHARS {
+        return Some(line);
+    }
+    // Cut at the last space that leaves room for the mark, or within a word longer than that.
+    let room: String = line.chars().take(LATEST_CHARS - 1).collect();
+    let cut = room
+        .rfind(' ')
+        .map_or(room.as_str(), |space| &room[..space]);
+    Some(format!(
+        "{}…",
+        cut.trim_end_matches([',', ';', ':', '.', ' '])
+    ))
+}
+
+/// Whether `event` shows the agent working in its space, so that the space was active as it arrived: a turn starting
+/// or ending, a message or a tool starting, changing or ending, input reaching the agent, or a request asked of the
+/// participants. Reconnecting, reading the session again and changes of workers, modes or title are not. See
+/// `design/arrival.md`.
+pub fn is_activity(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Busy
+            | Event::Idle
+            | Event::Delivered { .. }
+            | Event::MessageStarted { .. }
+            | Event::TextDelta { .. }
+            | Event::MessageCompleted { .. }
+            | Event::ToolStarted { .. }
+            | Event::ToolFinished { .. }
+            | Event::PermissionRequested(_)
+            | Event::QuestionAsked(_)
+    )
+}
+
 /// The text delivered to the agent for a queue entry. With attribution, the speaker's display name prefixes the text as `Name: text`.
 pub fn attributed(speaker: &str, text: &str, attribution: bool) -> String {
     if attribution && !speaker.is_empty() {
@@ -1642,6 +1715,15 @@ impl SpaceModel {
             attention: self.attention(),
             // How long it has needed it is known to the hub, which stamps when the level changes.
             attention_age: None,
+            // The hub knows the workspace roots and when the space was last active.
+            folder: None,
+            active_age: None,
+            latest: self
+                .messages
+                .iter()
+                .rev()
+                .filter(|message| is_reply(message))
+                .find_map(|message| excerpt(&message.text)),
         }
     }
 }
@@ -1729,6 +1811,78 @@ mod tests {
         );
         assert_eq!(space.worker_finished_at("c"), None);
         assert_eq!(space.workers_complete(), (true, None));
+    }
+
+    #[test]
+    fn the_listing_shows_the_start_of_the_newest_reply_without_code_or_marks() {
+        assert_eq!(
+            excerpt(
+                "## Done\n\n**All 42 tests** pass.\n```rust\nfn main() {}\n```\n- `cargo` is happy"
+            )
+            .as_deref(),
+            Some("Done All 42 tests pass. cargo is happy")
+        );
+        // Cut at a word, with the mark, within the limit; a long word is cut within itself.
+        let long = excerpt(&"word ".repeat(40)).unwrap();
+        assert!(
+            long.ends_with("word…") && long.chars().count() <= LATEST_CHARS,
+            "{long}"
+        );
+        let unbroken = excerpt(&"w".repeat(100)).unwrap();
+        assert_eq!(unbroken.chars().count(), LATEST_CHARS);
+        // Nothing but code, or nothing at all, is none; a line break of any kind is a space.
+        assert_eq!(excerpt("```\nls\n```"), None);
+        assert_eq!(excerpt("~~~\nls\n~~~\n"), None);
+        assert_eq!(excerpt("   "), None);
+        assert_eq!(excerpt("One\u{2028}two").as_deref(), Some("One two"));
+        // A long reply is read only as far as its start needs.
+        let lines = format!("{}\n", "word ".repeat(20)).repeat(1000);
+        assert!(excerpt(&lines).unwrap().ends_with("word…"));
+
+        // Only a completed reply with text is shown, the newest first.
+        let mut space = model();
+        assert_eq!(space.summary().latest, None);
+        reply(&mut space, "m1", "First reply.");
+        reply(&mut space, "m2", "Second reply.");
+        space.apply(Event::MessageStarted {
+            message: "m3".into(),
+            role: tomori_backend::Role::Assistant,
+        });
+        space.apply(Event::TextDelta {
+            message: "m3".into(),
+            text: "Still being written".into(),
+        });
+        assert_eq!(space.summary().latest.as_deref(), Some("Second reply."));
+    }
+
+    #[test]
+    fn only_the_agent_working_makes_a_space_active() {
+        for event in [
+            Event::Busy,
+            Event::Idle,
+            Event::Delivered { key: "k".into() },
+            Event::TextDelta {
+                message: "m".into(),
+                text: "t".into(),
+            },
+            Event::ToolFinished {
+                id: "t".into(),
+                error: None,
+            },
+        ] {
+            assert!(is_activity(&event), "{event:?}");
+        }
+        for event in [
+            Event::Reconnecting { reason: "r".into() },
+            Event::Resynchronized {
+                snapshot: Snapshot::default(),
+            },
+            Event::TitleChanged { title: "t".into() },
+            Event::ModesChanged(Modes::default()),
+            Event::Closed { reason: None },
+        ] {
+            assert!(!is_activity(&event), "{event:?}");
+        }
     }
 
     #[test]

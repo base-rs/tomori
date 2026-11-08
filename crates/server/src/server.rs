@@ -2699,6 +2699,7 @@ mod tests {
                         closed_order: None,
                         placements: Default::default(),
                         stage: Default::default(),
+                        active: None,
                     }])
                 })
                 .unwrap();

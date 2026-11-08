@@ -1100,6 +1100,39 @@ fn progress_is_told_only_to_a_client_that_asks_from_the_end_until_the_outcome() 
 }
 
 #[test]
+fn input_queued_in_a_space_makes_it_active() {
+    let (hub, _jobs) = hub_waiting();
+    let id = stopped(&hub, Snapshot::default());
+    // Last active long ago.
+    hub.lock().space_mut(&id).unwrap().active = Some(0);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    ada.join(&id);
+    ada.send(ClientMessage::UtteranceBegin {
+        utterance: "u1".to_owned(),
+        answer: None,
+        progress: false,
+        naming: false,
+        titling: false,
+        attention: Vec::new(),
+    });
+    ada.send(ClientMessage::UtteranceEnd {
+        utterance: "u1".to_owned(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.transcript_finished(utterance, "Deploy it.");
+    let active = hub.lock().space(&id).unwrap().active.unwrap();
+    assert!(active > 0 && active % ACTIVE_RESOLUTION == 0, "{active}");
+    // The listing says how long ago that was.
+    let state = hub.lock();
+    let summary = state
+        .space(&id)
+        .unwrap()
+        .summary(Instant::now(), active + 30, &[]);
+    assert_eq!(summary.active_age, Some(30));
+}
+
+#[test]
 fn progress_is_told_only_on_the_connection_that_asked_while_it_is_the_participants() {
     let (hub, _jobs) = hub_waiting();
     let first = stopped(&hub, Snapshot::default());
