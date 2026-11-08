@@ -424,7 +424,16 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
         .collect();
     assert_eq!(
         names,
-        ["server", "spaces", "space", "set_speech", "set_environment"]
+        [
+            "server",
+            "spaces",
+            "space",
+            "set_speech",
+            "set_environment",
+            "pairing",
+            "confirm_pairing",
+            "decline_pairing"
+        ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");

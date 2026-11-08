@@ -205,6 +205,14 @@ pub fn status(
             "<p>Pairing is paused, since too many pairings began recently.</p>\n<form method=\"post\" action=\"{ALLOW_PAIRING_PATH}\"><button>Allow pairing</button></form>"
         );
     }
+    // What agents did through Tomori's tools, so that an owner sees each confirmation, decline and refusal.
+    if !status.pairing_decisions.is_empty() {
+        body.push_str("<h3>By agents</h3>\n<ul>\n");
+        for decision in &status.pairing_decisions {
+            let _ = writeln!(body, "<li>{}</li>", escape(decision));
+        }
+        body.push_str("</ul>\n");
+    }
     if let Some(tokens) = tokens {
         body.push_str("<h2>Tokens</h2>\n");
         if tokens.is_empty() {
@@ -285,8 +293,10 @@ mod tests {
             }],
             lobby: vec![],
             visitors: 3,
+            pairing_decisions: vec!["The agent of space \"<Studio>\" declined pairing.".into()],
         };
         let page = status_page(&status);
+        assert!(page.contains("<h3>By agents</h3>\n<ul>\n<li>The agent of space &quot;&lt;Studio&gt;&quot; declined pairing.</li>"), "{page}");
         assert!(page.contains("&lt;Studio&gt;"));
         assert!(page.contains("Ada (owner), Bob (collaborator)"));
         assert!(page.contains("<td>running</td>"));

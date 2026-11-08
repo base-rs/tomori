@@ -30,7 +30,10 @@ use crate::space::{AnswerOutcome, SpaceModel};
 use crate::transcriber::{Transcriber, TranscriptSink, UtteranceId};
 use crate::workspace::SpaceSlots;
 
+mod agent_pairing;
 pub(crate) mod tools;
+
+pub(crate) use agent_pairing::Decision;
 
 pub type ConnectionId = u64;
 
@@ -51,6 +54,8 @@ pub struct Status {
     pub lobby: Vec<(String, ConnectionRole)>,
     /// Visitors connected, wherever they are.
     pub visitors: usize,
+    /// What spaces' agents recently did with pairings, through Tomori's tools, newest last. See `design/security.md`.
+    pub pairing_decisions: Vec<String>,
 }
 
 /// One space on the status page.
@@ -99,6 +104,9 @@ pub const REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PAIRING_ATTEMPTS: usize = 3;
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(600);
 
+/// The most of what spaces' agents did with pairings that the status page shows.
+pub const PAIRING_DECISIONS: usize = 8;
+
 /// A pairing as the console and status page show it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairingView {
@@ -109,11 +117,12 @@ pub struct PairingView {
     pub code: Option<String>,
 }
 
-/// How a pairing is confirmed: by typing the code the device shows, on the console, or by the pairing the status page showed, whose code an owner compared.
+/// How a pairing is confirmed: by typing the code the device shows, on the console; by the pairing the status page showed, whose code an owner compared; or by the code a space's agent was given, read aloud from the device, which declines the pairing if it does not match. See `design/security.md`.
 #[derive(Clone, Copy, Debug)]
 pub enum Confirmation<'a> {
     Typed(&'a str),
     Shown(u64),
+    Agent(&'a str),
 }
 
 /// A device pairing: its commitment, the server's value, and the code once the device has revealed its own value.
@@ -148,6 +157,8 @@ pub enum PairingEvent {
     Waiting { name: String, code: String },
     /// Pairings are paused, since too many began recently.
     Paused,
+    /// A space's agent confirmed or declined a pairing through Tomori's tools, or was refused, as `notice` says, naming the space and the calling session.
+    Agent { notice: String },
 }
 
 /// Shows [`PairingEvent`]s on the server's console.
@@ -363,6 +374,8 @@ struct HubState {
     next_pairing: u64,
     /// When recent pairings began, for [`PAIRING_ATTEMPTS`].
     pairing_attempts: std::collections::VecDeque<Instant>,
+    /// What spaces' agents recently did with pairings, newest last, for the status page; at most [`PAIRING_DECISIONS`].
+    pairing_decisions: std::collections::VecDeque<String>,
     /// Knocks waiting for an answer, oldest first.
     knocks: Vec<KnockRecord>,
     next_knock: u64,
@@ -1393,6 +1406,59 @@ impl HubState {
         true
     }
 
+    /// Take the pairing waiting, if `confirmation` confirms it, for its device to be issued a token. A code the agent was given that does not match declines the pairing, telling its device, so that each pairing gives a code from anywhere but the device one try; a code typed on the console that does not match confirms nothing and leaves it waiting. See `design/security.md`.
+    fn take_confirmed(
+        &mut self,
+        confirmation: Confirmation<'_>,
+    ) -> Result<PendingPairing, &'static str> {
+        let pairing = self.pairing.as_ref().ok_or("No pairing is waiting.")?;
+        let code = pairing
+            .code
+            .as_deref()
+            .ok_or("The device has not shown its code yet.")?;
+        let confirmed = match confirmation {
+            Confirmation::Typed(typed) | Confirmation::Agent(typed) => typed == code,
+            Confirmation::Shown(serial) => serial == pairing.serial,
+        };
+        if !confirmed {
+            return Err(match confirmation {
+                Confirmation::Typed(_) => "That code does not match, so nothing was confirmed.",
+                Confirmation::Agent(_) => {
+                    self.end_pairing(
+                        None,
+                        "The code given did not match, so the pairing was declined.",
+                    );
+                    "That code does not match, so the pairing was declined."
+                }
+                Confirmation::Shown(_) => {
+                    "A different pairing is waiting now, so nothing was confirmed."
+                }
+            });
+        }
+        Ok(self.pairing.take().expect("checked above"))
+    }
+
+    /// Whether pairings are paused at `now`, since [`PAIRING_ATTEMPTS`] began within [`PAIRING_WINDOW`].
+    fn pairing_paused(&self, now: Instant) -> bool {
+        self.pairing_attempts
+            .iter()
+            .filter(|began| now.saturating_duration_since(**began) < PAIRING_WINDOW)
+            .count()
+            >= PAIRING_ATTEMPTS
+    }
+
+    /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
+    fn decline_pairing(&mut self, serial: Option<u64>) -> bool {
+        if serial.is_some_and(|serial| {
+            self.pairing
+                .as_ref()
+                .is_none_or(|pairing| pairing.serial != serial)
+        }) {
+            return false;
+        }
+        self.end_pairing(None, "The pairing was declined.")
+    }
+
     /// Forget the longest gone disconnected visitors beyond [`RETAINED_VISITORS`].
     fn forget_excess_visitors(&mut self) {
         let mut departed: Vec<(u64, String)> = self
@@ -1818,30 +1884,13 @@ impl Hub {
 
     /// Confirm the pairing waiting, issuing its device an owner token. Returns the device's name.
     pub fn confirm_pairing(&self, confirmation: Confirmation<'_>) -> Result<String, &'static str> {
-        let (pairing, outbox) = {
-            let mut state = self.lock();
-            let pairing = state.pairing.as_ref().ok_or("No pairing is waiting.")?;
-            let code = pairing
-                .code
-                .as_deref()
-                .ok_or("The device has not shown its code yet.")?;
-            let confirmed = match confirmation {
-                Confirmation::Typed(typed) => typed == code,
-                Confirmation::Shown(serial) => serial == pairing.serial,
-            };
-            if !confirmed {
-                return Err(match confirmation {
-                    Confirmation::Typed(_) => "That code does not match, so nothing was confirmed.",
-                    Confirmation::Shown(_) => {
-                        "A different pairing is waiting now, so nothing was confirmed."
-                    }
-                });
-            }
-            let pairing = state.pairing.take().expect("checked above");
-            let outbox = pairing.outbox.clone();
-            (pairing, outbox)
-        };
-        // The token is issued outside the hub's lock, since issuing writes the token store.
+        let pairing = self.lock().take_confirmed(confirmation)?;
+        self.issue_pairing(pairing)
+    }
+
+    /// Issue the device of `pairing`, which was confirmed, an owner token, telling it. Returns the device's name. The token is issued outside the hub's lock, since issuing writes the token store.
+    fn issue_pairing(&self, pairing: PendingPairing) -> Result<String, &'static str> {
+        let outbox = pairing.outbox.clone();
         let issued = pairing
             .setup
             .tokens
@@ -1867,14 +1916,7 @@ impl Hub {
 
     /// Whether pairings are paused, since [`PAIRING_ATTEMPTS`] began within [`PAIRING_WINDOW`].
     pub fn pairing_paused(&self) -> bool {
-        let state = self.lock();
-        let now = Instant::now();
-        state
-            .pairing_attempts
-            .iter()
-            .filter(|began| now.saturating_duration_since(**began) < PAIRING_WINDOW)
-            .count()
-            >= PAIRING_ATTEMPTS
+        self.lock().pairing_paused(Instant::now())
     }
 
     /// Allow pairings again, forgetting those that began recently, as the operator or an owner may when pairing is paused, such as by someone using up the attempts.
@@ -1884,16 +1926,7 @@ impl Hub {
 
     /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
     pub fn decline_pairing(&self, serial: Option<u64>) -> bool {
-        let mut state = self.lock();
-        if serial.is_some_and(|serial| {
-            state
-                .pairing
-                .as_ref()
-                .is_none_or(|pairing| pairing.serial != serial)
-        }) {
-            return false;
-        }
-        state.end_pairing(None, "The pairing was declined.")
+        self.lock().decline_pairing(serial)
     }
 
     /// Change the most visitors connected at once; see [`Hub::connect`].
@@ -1974,6 +2007,7 @@ impl Hub {
             spaces,
             lobby,
             visitors,
+            pairing_decisions: state.pairing_decisions.iter().cloned().collect(),
         }
     }
 

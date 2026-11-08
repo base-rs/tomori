@@ -800,6 +800,53 @@ fn a_pairing_whose_token_cannot_be_issued_fails_and_says_so() {
 }
 
 #[test]
+fn an_agent_s_confirmation_whose_token_cannot_be_issued_says_so() {
+    let store = Store::new("agent-unpaired");
+    let (hub, device) = pairing(&store);
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let space = stopped(&hub, Snapshot::default());
+    pair(&device);
+    let code = hub.pending_pairing().unwrap().code.unwrap();
+    store.refuse_writes();
+    assert_eq!(
+        hub.agent_decide_pairing("session", crate::hub::Decision::Confirm(&code)),
+        Err("The token could not be issued. Tomori has said so on the space's wall; tell everyone there too.".to_owned())
+    );
+    assert_eq!(
+        hub.status().pairing_decisions,
+        [format!(
+            "The agent of space {space} (\"Space\"), session session, confirmed pairing for \"quest\" with nobody in the space, but the token could not be issued."
+        )]
+    );
+}
+
+#[test]
+fn the_status_page_shows_only_the_latest_of_what_agents_did_with_pairings() {
+    let store = Store::new("agent-many");
+    let (hub, _device) = pairing(&store);
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    stopped(&hub, Snapshot::default());
+    for _ in 0..=PAIRING_DECISIONS {
+        assert!(
+            hub.agent_decide_pairing("session", crate::hub::Decision::Decline)
+                .unwrap_err()
+                .starts_with("No pairing is waiting.")
+        );
+    }
+    let decisions = hub.status().pairing_decisions;
+    assert_eq!(decisions.len(), PAIRING_DECISIONS);
+    assert!(decisions.iter().all(|line| {
+        line.ends_with("asked to decline a pairing and was refused: No pairing is waiting.")
+    }));
+}
+
+#[test]
 fn pairings_begun_long_ago_no_longer_count_against_beginning_another() {
     let store = Store::new("window");
     let (hub, device) = pairing(&store);

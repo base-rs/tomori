@@ -142,6 +142,22 @@ impl TestServer {
         visitors: bool,
         configure: impl FnOnce(Server) -> Server + Send + 'static,
     ) -> Self {
+        Self::admitting(visitors, configure, false)
+    }
+
+    /// A server as [`TestServer::with_tokens`] makes, also serving Tomori's MCP endpoint, as [`TestServer::with_tools`] does.
+    pub fn with_tokens_and_tools(
+        visitors: bool,
+        configure: impl FnOnce(Server) -> Server + Send + 'static,
+    ) -> Self {
+        Self::admitting(visitors, configure, true)
+    }
+
+    fn admitting(
+        visitors: bool,
+        configure: impl FnOnce(Server) -> Server + Send + 'static,
+        tools: bool,
+    ) -> Self {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let state = std::env::temp_dir().join(format!(
             "tomori-test-tokens-{}-{}",
@@ -152,13 +168,14 @@ impl TestServer {
         let store =
             Arc::new(tomori_security::TokenStore::open(&state).expect("the token store opens"));
         let tokens = store.clone();
-        let mut server = Self::with_server(FakeBackend::new(), move |backends| {
+        let build = move |backends| {
             configure(
                 Server::new(backends, Arc::new(TextTranscriber::default()))
                     .with_environments(environments())
                     .with_tokens(tokens, visitors),
             )
-        });
+        };
+        let mut server = Self::launch(FakeBackend::new(), build, tools);
         server.tokens = Some(store);
         server.state = Some(state);
         server
@@ -460,12 +477,27 @@ impl TestClient {
         self.hello_presenting(participant, name, None);
     }
 
+    /// Say hello as [`Self::hello`] does, as a client that reads what is projected in its space. See `design/projection.md`.
+    pub fn hello_projected(&mut self, participant: &str, name: &str) {
+        self.greet(participant, name, None, true);
+    }
+
     /// Say hello as [`Self::hello`] does, listing the environments this client `presents`, and return those the welcome offers it. See `design/environments.md`.
     pub fn hello_presenting(
         &mut self,
         participant: &str,
         name: &str,
         presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
+    ) -> Vec<tomori_protocol::EnvironmentInfo> {
+        self.greet(participant, name, presents, false)
+    }
+
+    fn greet(
+        &mut self,
+        participant: &str,
+        name: &str,
+        presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
+        projection: bool,
     ) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.send(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
@@ -474,7 +506,7 @@ impl TestClient {
             names: false,
             environments: presents,
             environment_state: false,
-            projection: false,
+            projection,
         });
         // The welcome is the first reply to hello.
         let environments;
