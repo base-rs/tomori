@@ -23,12 +23,13 @@ mod blocks;
 mod code;
 
 pub use blocks::panels;
+pub use code::Source;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tomori_protocol::{
-    CODE_LINES, Code, Meta, Panel, Place, Pose, Projection, TOMORI_WALL, WALL_SLOTS, Wall,
+    CODE_LINES, Code, Meta, Panel, Place, Pose, Projection, Span, TOMORI_WALL, WALL_SLOTS, Wall,
     WallKind, WallShape,
 };
 
@@ -80,6 +81,102 @@ pub struct Content {
     pub meta: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<Code>,
+}
+
+/// A panel found in a reply, as its block is read: its content, and, for a code panel, the code to highlight, which is
+/// highlighted later, outside the hub's lock, since highlighting takes far longer than reading. Until then a code
+/// panel is plain.
+#[derive(Debug)]
+pub struct Found {
+    pub content: Content,
+    source: Option<code::Source>,
+}
+
+impl Found {
+    /// The text panel `content`.
+    pub fn text(content: Content) -> Self {
+        Self {
+            content,
+            source: None,
+        }
+    }
+
+    /// The code panel `content`, plain, whose code is `source`.
+    fn code(content: Content, source: code::Source) -> Self {
+        Self {
+            content,
+            source: Some(source),
+        }
+    }
+}
+
+/// The panels of the replies that one event completed, in order, each reply's with where whoever asked for it stood,
+/// as [`Stage::project_reply`] projects them.
+pub type Replies = Vec<(Vec<Content>, Option<[f32; 3]>)>;
+
+/// The panels of the replies that one event completed, waiting for their code to be highlighted before they are
+/// projected, which the hub does outside its lock. See `design/projection.md`.
+#[derive(Debug)]
+pub struct Projecting {
+    replies: Replies,
+    /// The code panels to highlight, by reply and by panel, and their code: only the last reply's with any, since a
+    /// reply's code panels replace the code panels of the replies before it as each is projected, and these are
+    /// projected together, so that no earlier reply's would ever be seen. Those stay plain.
+    code: Vec<(usize, usize, code::Source)>,
+}
+
+impl Projecting {
+    /// The panels of `replies`, each with where whoever asked for it stood, in order.
+    pub fn new(replies: Vec<(Vec<Found>, Option<[f32; 3]>)>) -> Self {
+        let last = replies
+            .iter()
+            .rposition(|(panels, _)| panels.iter().any(|found| found.source.is_some()));
+        let mut code = Vec::new();
+        let replies = replies
+            .into_iter()
+            .enumerate()
+            .map(|(reply, (panels, origin))| {
+                let contents = panels
+                    .into_iter()
+                    .enumerate()
+                    .map(|(panel, found)| {
+                        if let Some(source) = found.source.filter(|_| Some(reply) == last) {
+                            code.push((reply, panel, source));
+                        }
+                        found.content
+                    })
+                    .collect();
+                (contents, origin)
+            })
+            .collect();
+        Self { replies, code }
+    }
+
+    /// The code to highlight, in order.
+    pub fn sources(&self) -> Vec<code::Source> {
+        self.code
+            .iter()
+            .map(|(_, _, source)| source.clone())
+            .collect()
+    }
+
+    /// The replies' panels, the code of each in [`Self::sources`] given the next of `spans`, which a highlighter found
+    /// over its text: those past the last of `spans` stay plain.
+    pub fn highlighted(mut self, spans: Vec<Vec<Span>>) -> Replies {
+        for ((reply, panel, source), found) in self.code.into_iter().zip(spans) {
+            let content = &mut self.replies[reply].0[panel];
+            content.code = content
+                .code
+                .take()
+                .map(|code| code.with_spans(source.shown(found)));
+        }
+        self.replies
+    }
+
+    /// The replies' panels, every code panel plain.
+    pub fn plain(self) -> Replies {
+        self.highlighted(Vec::new())
+    }
 }
 
 /// Where the walls of a space stand in its current environment: the environment, the Tomori wall's pose there, and

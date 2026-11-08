@@ -17,7 +17,7 @@
 //! ````
 //!
 //! `title` is the panel's title, and every other key is its metadata. Without a header, the whole block is its body.
-use super::Content;
+use super::{Content, Found};
 
 /// The longest panel block taken, in bytes of its source; a longer one is not projected.
 pub const BLOCK_BYTES: usize = 8 * 1024;
@@ -76,7 +76,7 @@ enum Source {
 /// more than one line, at most [`super::code::CODE_PER_REPLY`], as a code panel. A block is taken whole, so that a
 /// panel block quoted inside another is part of that block. A block left open runs to the end of the reply, as
 /// CommonMark reads it.
-pub fn panels(text: &str) -> Vec<Content> {
+pub fn panels(text: &str) -> Vec<Found> {
     struct Open {
         marker: char,
         run: usize,
@@ -89,9 +89,9 @@ pub fn panels(text: &str) -> Vec<Content> {
     // blocks costs no more than one of a few.
     let mut finish = |source: Source| {
         let content = match source {
-            Source::Panel(source) if texts < PANELS_PER_REPLY => {
-                Content::parse(&source).inspect(|_| texts += 1)
-            }
+            Source::Panel(source) if texts < PANELS_PER_REPLY => Content::parse(&source)
+                .inspect(|_| texts += 1)
+                .map(Found::text),
             Source::Code(lines) if codes < super::code::CODE_PER_REPLY => {
                 lines.content().inspect(|_| codes += 1)
             }
@@ -233,6 +233,14 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panels of `text`, each as found, its code not yet highlighted.
+    fn panels(text: &str) -> Vec<Content> {
+        super::panels(text)
+            .into_iter()
+            .map(|found| found.content)
+            .collect()
+    }
 
     fn content(title: &str, body: &str, meta: &[(&str, &str)]) -> Content {
         Content {

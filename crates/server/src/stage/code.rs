@@ -8,10 +8,13 @@
 //!
 //! A block of a single line, such as a command, is left in the transcript and not projected: it reads as well there,
 //! and a panel for each would crowd the walls and replace the code panels of the reply before.
+//!
+//! A block is read into a plain code panel and its [`Source`], which is highlighted later, outside the hub's lock, since
+//! highlighting takes far longer than reading; see `crate::highlighting`.
 use tomori_protocol::{CODE_LINE_CHARS, CODE_LINES, CODE_SPANS, Code, Span};
 
-use super::Content;
 use super::blocks::{META_KEY_CHARS, TITLE_CHARS};
+use super::{Content, Found};
 
 /// The most code panels projected from one reply; later blocks stay only in the transcript.
 pub const CODE_PER_REPLY: usize = 4;
@@ -69,9 +72,9 @@ impl Lines {
         }
     }
 
-    /// The code panel the block makes, or `None` for a block of one line or none, without its blank lines at either
-    /// end.
-    pub fn content(self) -> Option<Content> {
+    /// The code panel the block makes, plain, with its code to highlight, or `None` for a block of one line or none,
+    /// without its blank lines at either end.
+    pub fn content(self) -> Option<Found> {
         let total = self.total - self.blank;
         if total <= 1 {
             return None;
@@ -93,9 +96,8 @@ impl Lines {
                 tomori_protocol::text::one_line(language, META_KEY_CHARS).to_lowercase()
             })
             .unwrap_or_default();
-        let found = spans(&language, &lines.join("\n"));
-        let (body, spans) = shown(&lines, found);
-        Some(Content {
+        let (body, _) = shown(&lines, Vec::new());
+        let content = Content {
             title: if title.is_empty() {
                 UNTITLED.to_owned()
             } else {
@@ -103,8 +105,29 @@ impl Lines {
             },
             body,
             meta: Vec::new(),
-            code: Some(Code::new(language, total).with_spans(spans)),
-        })
+            code: Some(Code::new(language.clone(), total)),
+        };
+        Some(Found::code(content, Source { language, lines }))
+    }
+}
+
+/// A code panel's code, as it is highlighted: its language, and its first lines, cleaned, each cut to
+/// [`HIGHLIGHTED_CHARS`], longer than they are shown.
+#[derive(Clone, Debug)]
+pub struct Source {
+    language: String,
+    lines: Vec<String>,
+}
+
+impl Source {
+    /// The language and the text `highlight` is given.
+    pub fn code(&self) -> (&str, String) {
+        (&self.language, self.lines.join("\n"))
+    }
+
+    /// Its spans over what its panel shows, from `found`, the spans a highlighter found over its text.
+    pub fn shown(&self, found: Vec<Span>) -> Vec<Span> {
+        shown(&self.lines, found).1
     }
 }
 
@@ -133,27 +156,6 @@ fn clean(line: &str) -> String {
     }
     cleaned.truncate(cleaned.trim_end().len());
     cleaned
-}
-
-/// How long highlighting a block may take, once its grammar is ready: the highlighters' own budget, or, in the server's
-/// tests, longer, so that what they check does not depend on how busy the machine running them is.
-#[cfg(feature = "highlight")]
-const BUDGET: std::time::Duration = if cfg!(test) {
-    std::time::Duration::from_secs(10)
-} else {
-    tomori_highlight::BUDGET
-};
-
-/// The spans of `text`, code in `language`, by the server's highlighters.
-#[cfg(feature = "highlight")]
-fn spans(language: &str, text: &str) -> Vec<Span> {
-    tomori_highlight::highlight_within(language, text, BUDGET).spans
-}
-
-/// Without the server's highlighters, code is plain.
-#[cfg(not(feature = "highlight"))]
-fn spans(_language: &str, _text: &str) -> Vec<Span> {
-    Vec::new()
 }
 
 /// `lines` as a code panel shows them, each cut to [`CODE_LINE_CHARS`] with "…", and `found`, their spans over the

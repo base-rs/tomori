@@ -327,6 +327,8 @@ pub struct Hub {
     knock_timeout: RwLock<Duration>,
     /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
     tools: tools::Tools,
+    /// What highlights the agent's code panels, outside the lock; see [`crate::highlighting`].
+    highlighter: RwLock<crate::highlighting::Highlighter>,
     this: Weak<Hub>,
 }
 
@@ -1500,6 +1502,7 @@ impl Hub {
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             tools: tools::Tools::default(),
+            highlighter: RwLock::new(crate::highlighting::highlighter()),
             this: this.clone(),
         });
         let this = Arc::downgrade(&hub);
@@ -4329,29 +4332,22 @@ impl Hub {
         state.send(participant, message);
     }
 
-    pub(crate) fn space_event(&self, space: &str, event: Event) {
+    /// Apply `event`, from the agent session of `space`. Returns the panels of the replies it completed, if any, whose
+    /// code is to be highlighted outside the lock, with [`crate::highlighting::highlight`], and which are then projected
+    /// with [`Self::project`], before the space's next event, so that each reply's panels are projected in order.
+    #[must_use]
+    pub(crate) fn space_event(
+        &self,
+        space: &str,
+        event: Event,
+    ) -> Option<crate::stage::Projecting> {
         let mut state = self.lock();
         let shutting_down = state.shutting_down;
-        let Some(record) = state.space_mut(space) else {
-            return;
-        };
+        let record = state.space_mut(space)?;
         let resynchronized = matches!(event, Event::Resynchronized { .. });
         let was_open = !record.model.is_closed();
         record.model.apply(event);
-        // The panels of a reply it completed go onto the wall nearest whoever asked, or else the Tomori wall, its code
-        // panels replacing those of the replies before.
         let replies = record.model.take_projected();
-        let projected = !replies.is_empty();
-        if projected {
-            let environments = self.environments();
-            let walls = environments.walls(&record.model.environment);
-            let now = crate::cards::unix_now();
-            for (contents, origin) in replies {
-                for id in record.stage.project_reply(&walls, contents, origin, now) {
-                    log::info!("Space {space} projected {id}.");
-                }
-            }
-        }
         if resynchronized {
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
             record.instruct(true);
@@ -4380,11 +4376,50 @@ impl Hub {
         }
         // The space's attention may have changed.
         self.recount(&mut state);
-        if projected {
-            state.touch_projection(space);
-            drop(state);
-            self.keep();
+        (!replies.is_empty()).then(|| crate::stage::Projecting::new(replies))
+    }
+
+    /// Project the panels of `replies`, which events of `space` completed, highlighted: each reply's onto the wall
+    /// nearest whoever asked for it, or else the Tomori wall, its code panels replacing those of the replies before.
+    pub(crate) fn project(&self, space: &str, replies: crate::stage::Replies) {
+        let mut state = self.lock();
+        let Some(record) = state.space_mut(space) else {
+            return;
+        };
+        let environments = self.environments();
+        let walls = environments.walls(&record.model.environment);
+        let now = crate::cards::unix_now();
+        for (contents, origin) in replies {
+            for id in record.stage.project_reply(&walls, contents, origin, now) {
+                log::info!("Space {space} projected {id}.");
+            }
         }
+        state.touch_projection(space);
+        drop(state);
+        self.keep();
+    }
+
+    /// Apply `event` as the space's driver does, highlighting and projecting the panels of the replies it completes.
+    #[cfg(test)]
+    pub(crate) fn drive_event(&self, space: &str, event: Event) {
+        if let Some(projecting) = self.space_event(space, event) {
+            let highlighting = crate::highlighting::highlight(projecting, self.highlighter());
+            self.project(space, futures_lite::future::block_on(highlighting));
+        }
+    }
+
+    /// What highlights the agent's code panels.
+    pub(crate) fn highlighter(&self) -> crate::highlighting::Highlighter {
+        self.highlighter
+            .read()
+            .expect("never left poisoned")
+            .clone()
+    }
+
+    /// Highlight the agent's code panels with `highlighter`, as a test does to see what happens while it is slow.
+    #[cfg(test)]
+    pub(crate) fn set_highlighter(&self, highlighter: crate::highlighting::Highlighter) {
+        *self.highlighter.write().expect("never left poisoned") = highlighter;
     }
 
     /// When the earliest deferred snapshot is due, if any.
@@ -5230,7 +5265,7 @@ mod tests {
             options: Vec::new(),
         };
         assert!(notifies(&hub, || hub
-            .space_event(&space, Event::PermissionRequested(permission))));
+            .drive_event(&space, Event::PermissionRequested(permission))));
         assert_eq!(hub.counts(), needing(counts(1, 1), 1, 0, 0));
         let listed = listing(&hub, ada);
         assert_eq!(listed[0].attention, Some(Attention::Input));
@@ -5252,7 +5287,7 @@ mod tests {
         assert_eq!(level, Attention::Input);
         assert_eq!(later.attention_age, Some(90));
 
-        hub.space_event(&space, Event::PermissionResolved { id: "p".into() });
+        hub.drive_event(&space, Event::PermissionResolved { id: "p".into() });
         for event in [
             Event::Busy,
             Event::MessageStarted {
@@ -5268,7 +5303,7 @@ mod tests {
             },
             Event::Idle,
         ] {
-            hub.space_event(&space, event);
+            hub.drive_event(&space, event);
         }
         // A deferred snapshot stamps the new level once it is sent.
         hub.flush_snapshots(Instant::now() + SNAPSHOT_INTERVAL);
@@ -5310,7 +5345,7 @@ mod tests {
             },
             Event::Idle,
         ] {
-            hub.space_event(&space, event);
+            hub.drive_event(&space, event);
         }
         assert_eq!(hub.counts(), needing(counts(1, 0), 0, 0, 1));
         // Reconnecting puts her back in the space, which she has not seen yet; a jump would move on from it.

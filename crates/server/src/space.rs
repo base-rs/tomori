@@ -91,7 +91,7 @@ pub struct SpaceModel {
     /// projects in its turn goes onto the wall nearest there.
     origin: Option<[f32; 3]>,
     /// The panels of each reply completed since the hub last took them, with where its asker stood.
-    projected: Vec<(Vec<crate::stage::Content>, Option<[f32; 3]>)>,
+    projected: Vec<(Vec<crate::stage::Found>, Option<[f32; 3]>)>,
     /// The latest replies whose panels were taken, so that none is projected twice.
     projected_replies: VecDeque<String>,
 }
@@ -1226,7 +1226,7 @@ impl SpaceModel {
 
     /// The panels of each reply completed since this was last called, with where whoever asked for it stood, if the
     /// space knows, for the replies that have any. See `design/projection.md`.
-    pub fn take_projected(&mut self) -> Vec<(Vec<crate::stage::Content>, Option<[f32; 3]>)> {
+    pub fn take_projected(&mut self) -> Vec<(Vec<crate::stage::Found>, Option<[f32; 3]>)> {
         std::mem::take(&mut self.projected)
     }
 
@@ -3341,10 +3341,10 @@ mod tests {
         space
             .take_projected()
             .into_iter()
-            .flat_map(|(contents, origin)| {
-                contents
+            .flat_map(|(panels, origin)| {
+                panels
                     .into_iter()
-                    .map(move |content| (content.title, origin))
+                    .map(move |found| (found.content.title, origin))
             })
             .collect()
     }
