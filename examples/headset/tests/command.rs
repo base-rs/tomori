@@ -24,7 +24,8 @@ fn headset(arguments: &[&str]) -> Output {
 fn it_takes_the_tomori_command_line() {
     let output = headset(&["--help"]);
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("tomori [MODE]"));
+    // Under its own name.
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("tomori-example-headset [MODE]"));
 }
 
 #[test]

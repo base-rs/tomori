@@ -20,9 +20,10 @@ pub fn environment() -> Environment {
     Environment::new(ENVIRONMENT, "Placeholder").with_instructions(INSTRUCTIONS)
 }
 
-/// A server with Tomori's own backends, Sky and the Minimal grid, each registered by the identity its crate gives, and the placeholder backend and environment too. The library's builder offers no environment until it is registered.
+/// A server with Tomori's own backends, Sky and the Minimal grid, each registered by the identity its crate gives, and the placeholder backend and environment too, whose usage names its executable, `tomori-example-server`. The library's builder offers no environment until it is registered.
 pub fn builder() -> Builder {
     Server::builder()
+        .program_name("tomori-example-server")
         .backend(placeholder::NAME, || Ok(Placeholder))
         .environment(
             Environment::new(tomori_environment_sky::ID, tomori_environment_sky::LABEL)

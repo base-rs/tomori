@@ -32,9 +32,37 @@ pub const CONTROLLER_LICENSE: &str = include_str!("../assets/controllers/LICENSE
 pub const BASISU_LICENSE: &str = include_str!("../assets/licenses/basisu-LICENSE.txt");
 /// The licences of the fonts that text is drawn with, which `tomori-text` bundles, also in `assets/licenses/fonts-LICENSE.txt` for an APK's assets.
 pub const FONT_LICENSES: &str = tomori_text::fonts::LICENSES;
+/// The licence notices of what this crate compiles in, which a headset's APK carries in its assets, each by its path beneath the APK's `assets/` and its text: the controller models', the Basis Universal transcoder's and the fonts'. They are this package's own `assets/controllers/LICENSE.md` and `assets/licenses`, so a build of another project's can copy those folders or write these, and check its copies against them in a test; see `crates/client-quest/context/android.md`.
+pub const LICENSE_NOTICES: &[(&str, &str)] = &[
+    ("controllers/LICENSE.md", CONTROLLER_LICENSE),
+    ("licenses/basisu-LICENSE.txt", BASISU_LICENSE),
+    ("licenses/fonts-LICENSE.txt", FONT_LICENSES),
+];
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_licence_notices_are_this_packages_assets() {
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        for &(path, text) in super::LICENSE_NOTICES {
+            assert_eq!(
+                std::fs::read_to_string(assets.join(path)).unwrap(),
+                text,
+                "{path}"
+            );
+        }
+        // Every licence in the assets is among them.
+        let mut licenses: Vec<String> = std::fs::read_dir(assets.join("licenses"))
+            .unwrap()
+            .map(|entry| format!("licenses/{}", entry.unwrap().file_name().to_str().unwrap()))
+            .collect();
+        licenses.sort();
+        assert_eq!(
+            licenses,
+            ["licenses/basisu-LICENSE.txt", "licenses/fonts-LICENSE.txt"]
+        );
+    }
+
     #[test]
     fn the_font_licences_in_the_assets_are_the_bundled_fonts_own() {
         assert_eq!(

@@ -80,6 +80,19 @@ The `sherpa-onnx` crate links prebuilt sherpa-onnx and ONNX Runtime libraries fr
 
 Outside this repository, such as when a project depends on `tomori-speech` or `tomori-server` from crates.io, or runs `cargo install tomori-server-app`, this repository's `.cargo/config.toml` does not apply. Set `SHERPA_ONNX_ARCHIVE_DIR` to a directory holding the archive that [`scripts/fetch-sherpa-onnx.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/fetch-sherpa-onnx.sh) has verified, or the `sherpa-onnx` build script downloads the archive from GitHub without checking it. On docs.rs, it downloads and links nothing.
 
+This crate has no build script of its own: the archive is found only through `SHERPA_ONNX_ARCHIVE_DIR`, so nothing assumes a Tomori checkout. A project of its own, such as a server built on `tomori-server`, gets the same verified libraries this way:
+
+1. Copy `scripts/fetch-sherpa-onnx.sh` from the Tomori release whose `tomori-speech` it depends on, such as the tag `v0.2.0`, into its own repository's `scripts/` folder, unchanged. The script works in the directory above its own, which must hold the project's Cargo manifest, and needs `curl` and `python3`, besides `sha256sum` or `shasum`: it downloads into that directory's `.tools/sherpa-onnx`, refuses an archive whose SHA-256 is not the one it pins, and clears an unverified copy from the target directory that `cargo metadata` reports there. The version it pins is the `sherpa-onnx` version this crate pins, so a copy from another release may fetch libraries this crate does not link.
+2. Add the same setting to the project's own `.cargo/config.toml`:
+
+   ```toml
+   [env]
+   SHERPA_ONNX_ARCHIVE_DIR = { value = ".tools/sherpa-onnx", relative = true }
+   ```
+3. Run `bash scripts/fetch-sherpa-onnx.sh` before building, as here, and in its CI.
+
+Without the script, download the archive the script names for the machine, `sherpa-onnx-v1.13.8-PLATFORM-static-lib.tar.bz2` from `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/`, check it against the SHA-256 the script pins for it, and set `SHERPA_ONNX_ARCHIVE_DIR` to the directory holding it. The script is the only place the digests are kept.
+
 By default the libraries are linked statically and run on the CPU, so `tomori-server` needs no extra shared libraries at run time:
 
 - macOS (arm64 or x86_64): links `libc++` and the Foundation framework from the system.

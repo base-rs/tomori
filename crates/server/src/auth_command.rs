@@ -31,12 +31,29 @@ pub fn default_state_directory(state_home: Option<&str>, home: Option<&str>) -> 
     }
 }
 
+/// [`USAGE`], for the program named `program`, such as `tomori-server`.
+pub(crate) fn usage(program: &str) -> String {
+    USAGE.replace("tomori-server", program)
+}
+
 /// Run an `auth` command, returning what to print, or an error.
 pub fn run(
+    arguments: impl Iterator<Item = String>,
+    default_state: Option<PathBuf>,
+) -> Result<String, String> {
+    run_named("tomori-server", arguments, default_state)
+}
+
+/// Run an `auth` command of the program named `program`, as [`run`] does, its usage naming `program`.
+pub(crate) fn run_named(
+    program: &str,
     mut arguments: impl Iterator<Item = String>,
     default_state: Option<PathBuf>,
 ) -> Result<String, String> {
-    let command = arguments.next().ok_or(USAGE)?;
+    let usage = usage(program);
+    let Some(command) = arguments.next() else {
+        return Err(usage);
+    };
     let mut state = default_state;
     let mut owner = false;
     let mut name = None;
@@ -56,7 +73,7 @@ pub fn run(
             "--name" if command == "mint" => {
                 name = Some(arguments.next().ok_or("--name needs a name")?)
             }
-            "--help" | "-h" => return Err(USAGE.to_owned()),
+            "--help" | "-h" => return Err(usage),
             other
                 if matches!(command.as_str(), "revoke" | "rename")
                     && id.is_none()
@@ -67,7 +84,7 @@ pub fn run(
             other if command == "rename" && id.is_some() && new_name.is_none() => {
                 new_name = Some(other.to_owned())
             }
-            other => return Err(format!("unknown argument {other:?}\n\n{USAGE}")),
+            other => return Err(format!("unknown argument {other:?}\n\n{usage}")),
         }
     }
     let state = state.ok_or("no state directory: set --state-directory, XDG_STATE_HOME or HOME")?;
@@ -82,9 +99,9 @@ pub fn run(
     match command.as_str() {
         "mint" => {
             if !owner {
-                return Err(format!("mint needs --owner\n\n{USAGE}"));
+                return Err(format!("mint needs --owner\n\n{usage}"));
             }
-            let name = name.ok_or_else(|| format!("mint needs --name\n\n{USAGE}"))?;
+            let name = name.ok_or_else(|| format!("mint needs --name\n\n{usage}"))?;
             let name = crate::limits::name(&name)?;
             let (entry, token) = open()?
                 .issue(&name, Grant::Owner)
@@ -113,7 +130,7 @@ pub fn run(
         "rename" => {
             let (Some(id), Some(name)) = (id, new_name) else {
                 return Err(format!(
-                    "rename needs a token identifier and a name\n\n{USAGE}"
+                    "rename needs a token identifier and a name\n\n{usage}"
                 ));
             };
             let name = crate::limits::name(&name)?;
@@ -133,7 +150,7 @@ pub fn run(
             }
         }
         "revoke" => {
-            let id = id.ok_or_else(|| format!("revoke needs a token identifier\n\n{USAGE}"))?;
+            let id = id.ok_or_else(|| format!("revoke needs a token identifier\n\n{usage}"))?;
             if open()?
                 .revoke(&id)
                 .map_err(|error| format!("Could not revoke the token: {error}."))?
@@ -143,7 +160,7 @@ pub fn run(
                 Err(format!("No token has the identifier {id:?}."))
             }
         }
-        other => Err(format!("unknown auth command {other:?}\n\n{USAGE}")),
+        other => Err(format!("unknown auth command {other:?}\n\n{usage}")),
     }
 }
 
@@ -280,6 +297,35 @@ mod tests {
         .unwrap();
         assert_eq!(listed, "No tokens are issued.\n");
         let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn the_usage_names_the_program() {
+        let help = |program: &str, arguments: &[&str]| {
+            run_named(
+                program,
+                arguments.iter().map(|argument| (*argument).to_owned()),
+                // Never opened, since none of these commands is run.
+                Some(std::env::temp_dir()),
+            )
+            .unwrap_err()
+        };
+        assert_eq!(help("tomori-server", &[]), USAGE);
+        assert_eq!(
+            run(["list", "-h"].map(str::to_owned).into_iter(), None).unwrap_err(),
+            USAGE
+        );
+        // Another program's, every line of it.
+        let usage = help("observe-server", &["list", "--help"]);
+        assert!(usage.starts_with(
+            "Usage: observe-server auth mint --owner --name NAME [--state-directory PATH]\n       observe-server auth list"
+        ));
+        assert!(usage.contains("\n       observe-server auth revoke ID"));
+        assert!(!usage.contains("tomori-server"));
+        assert_eq!(
+            help("observe-server", &["forge"]),
+            format!("unknown auth command \"forge\"\n\n{usage}")
+        );
     }
 
     #[test]

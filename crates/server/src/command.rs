@@ -10,23 +10,26 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{
-    Backends, Builder, CommandOption, NullTranscriber, Server, Transcriber, WorkspaceRoots,
+    Backends, Builder, CommandOption, Environment, NullTranscriber, Server, Transcriber,
+    WorkspaceRoots,
 };
 use base_scheduler::{Cancellation, SocketLocalAddress};
 use base_scheduler_native::NativeScheduler;
 use tomori_protocol::Keepalive;
 
-/// The command line's usage, naming `backends`, those it can offer, such as `fake, opencode`, with the `options` an application added, after Tomori's own.
-pub(crate) fn usage(backends: &str, options: &[CommandOption]) -> String {
+/// The command line's usage, for the program named `program`, such as `tomori-server`, naming `backends`, those it can offer, such as `fake, opencode`, with the `options` an application added, after Tomori's own, and the speech options only if `speech`, when the server is built with speech, and then listing `environments`, those it offers, in order.
+pub(crate) fn usage(
+    program: &str,
+    backends: &str,
+    environments: &[Environment],
+    options: &[CommandOption],
+    speech: bool,
+) -> String {
+    // The synopsis's later lines line up after the program's name.
+    let indent = " ".repeat("Usage: ".len() + program.chars().count() + 1);
     let synopsis: String = options
         .iter()
-        .map(|option| {
-            format!(
-                "\n                     [{} {}]",
-                option.flag(),
-                option.value()
-            )
-        })
+        .map(|option| format!("\n{indent}[{} {}]", option.flag(), option.value()))
         .collect();
     let described: String = options
         .iter()
@@ -39,15 +42,21 @@ pub(crate) fn usage(backends: &str, options: &[CommandOption]) -> String {
             format!("  {} {}{lines}\n", option.flag(), option.value())
         })
         .collect();
+    let (speech_root, speech_provider, speech) = if speech {
+        (" [--speech-root PATH]", "[--speech-provider NAME] ", SPEECH)
+    } else {
+        ("", "", "")
+    };
+    let listed = listed(environments);
     format!(
-        "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]
-                     [--speech-provider NAME] [--name NAME] [--no-advertise] [--no-advertise-attention]
-                     [--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
-                     [--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
-                                          [--auth MODE] [--no-visitors]
-                     [--max-visitors COUNT] [--state-directory PATH] [--mcp-bind ADDRESS]
-                     [--no-mcp] [--open-pairing]{synopsis}
-       tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)
+        "Usage: {program} [--bind ADDRESS] [--backend NAME]...{speech_root}
+{indent}{speech_provider}[--name NAME] [--no-advertise] [--no-advertise-attention]
+{indent}[--keepalive-interval SECONDS] [--keepalive-timeout SECONDS] [--request-timeout SECONDS]
+{indent}[--workspace-root PATH]... [--max-spaces COUNT] [--opencode-url URL]
+{indent}                     [--auth MODE] [--no-visitors]
+{indent}[--max-visitors COUNT] [--state-directory PATH] [--mcp-bind ADDRESS]
+{indent}[--no-mcp] [--open-pairing]{synopsis}
+       {program} auth (mint|list|revoke) ...   (see {program} auth --help)
 
 Options:
   --bind ADDRESS       Listen address (default 0.0.0.0:8765).
@@ -55,26 +64,7 @@ Options:
   --opencode-url URL   Where the opencode backend reaches its `opencode serve` process. Defaults
                        to the OPENCODE_URL environment variable, then the `opencode serve
                        --service` registration file, then http://127.0.0.1:4096.
-  
-  --speech-root PATH   The directory holding .tools/ with the speech models; see
-                       crates/speech/readme.md. Without it, there is no speech recognition or
-                       synthesis.
-  --speech-provider NAME
-                       The ONNX Runtime execution provider for speech recognition: cpu (default), or
-                       cuda in a server built with the speech-shared feature and the CUDA libraries.
-  --speech-backend NAME
-                       How utterances are transcribed: streaming (default, a transducer that reports
-                       words as you speak) or offline (a whole-clip model, more accurate, that reports
-                       the transcript a couple of seconds after you stop, for messages of up to 5
-                       minutes).
-  --speech-offline-model NAME
-                       The Whisper model the offline backend uses, from
-                       .tools/asr/sherpa-onnx-whisper-NAME: small.en (default) or tiny.en, which is
-                       smaller and faster but less accurate.
-  --speech-segmentation NAME
-                       How a reply is spoken, by document-level block: block (default, a whole block
-                       in one go) or sentence (each sentence separately, so a long block starts sooner).
-  --name NAME          The name clients list for this server (default: the host name).
+{speech}  --name NAME          The name clients list for this server (default: the host name).
   --no-advertise       Do not advertise the server with Bonjour (_tomori._tcp); clients must enter
                        its address.
   --no-advertise-attention
@@ -110,8 +100,62 @@ Options:
                        pair, as typing \"pair\" on its console does: how the first device pairs
                        where there is no console, and the way back in for an owner who has lost
                        every paired device. Pairing is otherwise closed, also with no owner.
-{described}  --help               Show this help."
+{described}  --help               Show this help.{listed}"
     )
+}
+
+/// The speech options' part of the usage, in a server built with speech.
+const SPEECH: &str = "  
+  --speech-root PATH   The directory holding .tools/ with the speech models; see
+                       crates/speech/readme.md. Without it, there is no speech recognition or
+                       synthesis.
+  --speech-provider NAME
+                       The ONNX Runtime execution provider for speech recognition: cpu (default), or
+                       cuda in a server built with the speech-shared feature and the CUDA libraries.
+  --speech-backend NAME
+                       How utterances are transcribed: streaming (default, a transducer that reports
+                       words as you speak) or offline (a whole-clip model, more accurate, that reports
+                       the transcript a couple of seconds after you stop, for messages of up to 5
+                       minutes).
+  --speech-offline-model NAME
+                       The Whisper model the offline backend uses, from
+                       .tools/asr/sherpa-onnx-whisper-NAME: small.en (default) or tiny.en, which is
+                       smaller and faster but less accurate.
+  --speech-segmentation NAME
+                       How a reply is spoken, by document-level block: block (default, a whole block
+                       in one go) or sentence (each sentence separately, so a long block starts sooner).
+";
+
+/// `text` with each control character, such as a line break, replaced with `?`, so that it keeps to its line of the usage.
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// What the usage says of `environments`, those the server offers: each by its identifier, with its label and version, in the order they are offered, their control characters replaced.
+fn listed(environments: &[Environment]) -> String {
+    if environments.is_empty() {
+        return "\n\nEnvironments: none, so every space creation is refused.".to_owned();
+    }
+    let listed: String = environments
+        .iter()
+        .map(|environment| {
+            format!(
+                "\n  {:<20} {}, version {}.",
+                plain(environment.id()),
+                plain(environment.label()),
+                environment.version()
+            )
+        })
+        .collect();
+    format!("\n\nEnvironments, offered in this order, the first by default:{listed}")
 }
 
 #[cfg_attr(test, derive(Clone))]
@@ -201,6 +245,19 @@ pub(crate) fn parse(
         options: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
+        // Hidden from the usage of a server built without speech, and refused, as `--speech-root` is, rather than ignored.
+        #[cfg(not(feature = "speech"))]
+        if matches!(
+            argument.as_str(),
+            "--speech-provider"
+                | "--speech-backend"
+                | "--speech-offline-model"
+                | "--speech-segmentation"
+        ) {
+            return Err(format!(
+                "This server was built without the speech feature, so {argument} is not supported."
+            ));
+        }
         match argument.as_str() {
             "--bind" => {
                 let value = arguments.next().ok_or("--bind needs an address")?;
@@ -428,11 +485,12 @@ fn keep_spaces(
     Ok(server.with_kept_spaces(std::sync::Arc::new(store)))
 }
 
-/// Configure who the server admits, and say so. A server that accepts tokens serves only TLS, with the certificate in its state directory, whose fingerprint is returned for advertising. See `design/security.md`.
+/// Configure who the server admits, and say so, naming the program `program` where it says to run `auth`. A server that accepts tokens serves only TLS, with the certificate in its state directory, whose fingerprint is returned for advertising. See `design/security.md`.
 fn admission(
     server: Server,
     arguments: &Arguments,
     default_state: Option<&Path>,
+    program: &str,
 ) -> Result<(Server, Option<String>), String> {
     if arguments.open {
         let warning = "Anyone who can reach this server can create spaces and approve tool use (--auth open).";
@@ -468,7 +526,7 @@ fn admission(
     let length = crate::hub::spoken(crate::PAIRING_OPEN_FOR);
     if owners == 0 {
         eprintln!(
-            "No owner token is issued yet, and pairing is closed. To pair this server's first device, type \"pair\" here, which opens pairing for {length}, or start the server with --open-pairing; then choose the pairing object on the device and type the code it shows. Or run `tomori-server auth mint --owner --name NAME`."
+            "No owner token is issued yet, and pairing is closed. To pair this server's first device, type \"pair\" here, which opens pairing for {length}, or start the server with --open-pairing; then choose the pairing object on the device and type the code it shows. Or run `{program} auth mint --owner --name NAME`."
         );
     } else {
         eprintln!(
@@ -916,7 +974,8 @@ pub(crate) fn run(
     let mut command = command.peekable();
     let result = if command.peek().map(String::as_str) == Some("auth") {
         command.next();
-        crate::auth_command::run(command, default_state).map(|output| print!("{output}"))
+        crate::auth_command::run_named(builder.program(), command, default_state)
+            .map(|output| print!("{output}"))
     } else {
         parse(command, &builder.usage(), builder.options()).and_then(|arguments| {
             let (server, fingerprint) =
@@ -957,6 +1016,7 @@ pub(crate) fn configure(
         arguments.speech_offline_model.as_deref(),
         engines,
     );
+    let program = builder.program().to_owned();
     let (environments, hooks, options) = builder.into_parts();
     let server = Server::new(backends, transcriber)
         .with_environments(environments)
@@ -964,7 +1024,7 @@ pub(crate) fn configure(
         .with_workspace_roots(roots)
         .with_max_spaces(arguments.max_spaces)
         .with_attention_advertised(arguments.advertise_attention);
-    let (server, fingerprint) = admission(server, arguments, default_state)?;
+    let (server, fingerprint) = admission(server, arguments, default_state, &program)?;
     let mut server = keep_spaces(server, arguments, default_state)?;
     if let Some(timeout) = arguments.request_timeout {
         server = server.with_request_timeout(timeout);
@@ -1063,6 +1123,53 @@ mod tests {
         Server::builder().usage()
     }
 
+    #[test]
+    fn the_usage_lists_the_speech_options_only_in_a_server_built_with_speech() {
+        let with = super::usage("tomori-server", "fake", &[], &[], true);
+        assert!(with.starts_with(
+            "Usage: tomori-server [--bind ADDRESS] [--backend NAME]... [--speech-root PATH]\n                     [--speech-provider NAME] [--name NAME] [--no-advertise]"
+        ));
+        assert!(with.contains(&format!(
+            "--service` registration file, then http://127.0.0.1:4096.\n{SPEECH}  --name NAME "
+        )));
+        let without = super::usage("tomori-server", "fake", &[], &[], false);
+        assert!(without.starts_with(
+            "Usage: tomori-server [--bind ADDRESS] [--backend NAME]...\n                     [--name NAME] [--no-advertise]"
+        ));
+        assert!(
+            without.contains(
+                "--service` registration file, then http://127.0.0.1:4096.\n  --name NAME "
+            )
+        );
+        assert!(!without.contains("speech"), "{without}");
+        // Nothing else changes.
+        assert_eq!(
+            without,
+            with.replace(" [--speech-root PATH]", "")
+                .replace("[--speech-provider NAME] ", "")
+                .replace(SPEECH, "")
+        );
+    }
+
+    /// A server built without speech refuses its speech options, as it refuses `--speech-root`, rather than ignoring them.
+    #[cfg(not(feature = "speech"))]
+    #[test]
+    fn a_server_without_speech_refuses_its_options() {
+        for flag in [
+            "--speech-provider",
+            "--speech-backend",
+            "--speech-offline-model",
+            "--speech-segmentation",
+        ] {
+            assert_eq!(
+                arguments(&[flag, "cpu"]).err(),
+                Some(format!(
+                    "This server was built without the speech feature, so {flag} is not supported."
+                ))
+            );
+        }
+    }
+
     /// An empty directory of its own for the test named `name`.
     fn directory(name: &str) -> PathBuf {
         let directory =
@@ -1101,10 +1208,6 @@ mod tests {
             "http://127.0.0.1:4096",
             "--speech-root",
             "/srv/speech",
-            "--speech-backend",
-            "offline",
-            "--speech-segmentation",
-            "sentence",
             "--name",
             "Studio",
             "--no-advertise",
@@ -1117,9 +1220,37 @@ mod tests {
             Some("http://127.0.0.1:4096")
         );
         assert_eq!(parsed.speech_root, Some(PathBuf::from("/srv/speech")));
-        assert_eq!(parsed.speech_backend, "offline");
-        assert_eq!(parsed.speech_segmentation, "sentence");
         assert_eq!(parsed.name.as_deref(), Some("Studio"));
+        // The speech options, which only a server built with speech takes.
+        #[cfg(feature = "speech")]
+        {
+            let parsed = arguments(&[
+                "--speech-backend",
+                "offline",
+                "--speech-segmentation",
+                "sentence",
+            ])
+            .unwrap();
+            assert_eq!(parsed.speech_backend, "offline");
+            assert_eq!(parsed.speech_segmentation, "sentence");
+            for (list, error) in [
+                (&["--speech-backend"][..], "--speech-backend needs a name"),
+                (
+                    &["--speech-backend", "batch"],
+                    "--speech-backend needs streaming or offline, not \"batch\"",
+                ),
+                (
+                    &["--speech-segmentation"],
+                    "--speech-segmentation needs a name",
+                ),
+                (
+                    &["--speech-segmentation", "word"],
+                    "--speech-segmentation needs block or sentence, not \"word\"",
+                ),
+            ] {
+                assert_eq!(arguments(list).err().as_deref(), Some(error), "{list:?}");
+            }
+        }
         assert!(!parsed.advertise);
 
         // Without any, the fake backend is offered, on the default port on every interface, streaming and speaking whole blocks.
@@ -1137,19 +1268,6 @@ mod tests {
             (&["--backend"], "--backend needs a name"),
             (&["--opencode-url"], "--opencode-url needs a URL"),
             (&["--speech-root"], "--speech-root needs a directory"),
-            (&["--speech-backend"], "--speech-backend needs a name"),
-            (
-                &["--speech-backend", "batch"],
-                "--speech-backend needs streaming or offline, not \"batch\"",
-            ),
-            (
-                &["--speech-segmentation"],
-                "--speech-segmentation needs a name",
-            ),
-            (
-                &["--speech-segmentation", "word"],
-                "--speech-segmentation needs block or sentence, not \"word\"",
-            ),
             (&["--name"], "--name needs a name"),
             (
                 &["--max-visitors", "many"],
@@ -1375,6 +1493,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "speech")]
     #[test]
     fn speech_without_models_starts_no_engine_and_the_server_still_starts() {
         let directory = directory("speech");
@@ -2059,6 +2178,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "speech")]
     #[test]
     fn the_speech_provider_must_be_one_this_build_supports() {
         assert_eq!(arguments(&[]).unwrap().speech_provider, "cpu");
@@ -2080,6 +2200,7 @@ mod tests {
         assert!(arguments(&["--speech-provider"]).is_err());
     }
 
+    #[cfg(feature = "speech")]
     #[test]
     fn the_offline_model_is_configurable() {
         assert_eq!(arguments(&[]).unwrap().speech_offline_model, None);

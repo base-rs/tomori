@@ -22,7 +22,11 @@ fn main() -> ExitCode {
 }
 ```
 
-The executable takes the same command line as `tomori-server`, including `auth` for tokens, and serves the same way: token authentication with TLS, pairing, Bonjour, speech, kept spaces and orderly shutdown. `--help` lists the registered backends. `Builder::run` takes a command line of your own instead of the process's, and `Builder::main` also sets up logging unless the program has already.
+The executable takes the same command line as `tomori-server`, including `auth` for tokens, and serves the same way: token authentication with TLS, pairing, Bonjour, speech, kept spaces and orderly shutdown. `--help` and the error for an unknown argument list the registered backends and environments, and the speech options only when the library's `speech` feature is on. `Builder::program_name` names your executable in `--help`, `auth`'s usage and the server's advice to run `auth`, which otherwise say `tomori-server`. `Builder::run` takes a command line of your own instead of the process's, and `Builder::main` also sets up logging unless the program has already.
+
+## Speech
+
+The library's default `speech` feature links prebuilt sherpa-onnx libraries through `tomori-speech`, which takes them only from the archive in the directory `SHERPA_ONNX_ARCHIVE_DIR` names; without it, the `sherpa-onnx` build script downloads one without checking it. Copy Tomori's `scripts/fetch-sherpa-onnx.sh`, from the release whose crates you depend on, into your repository's `scripts/`, set `SHERPA_ONNX_ARCHIVE_DIR` to `.tools/sherpa-onnx` in your `.cargo/config.toml`, and run the script before building, as `tomori-speech`'s readme describes under Building and linking. The script needs `bash`, `curl`, `python3` and a Cargo manifest in the directory above its own. For a server without speech, depend on `tomori-server` with `default-features = false` and the other features you want, such as `opencode`. Its `--help` then leaves out the speech options, and it refuses them.
 
 ## Backends
 
