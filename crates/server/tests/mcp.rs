@@ -428,6 +428,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "server",
             "spaces",
             "space",
+            "presence",
             "set_speech",
             "set_environment",
             "pairing",
@@ -493,6 +494,10 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         "{entry}"
     );
     assert!(!entry.contains("tomori_"), "{entry}");
+    assert!(
+        entry.contains("presence says where the people in this space are"),
+        "{entry}"
+    );
 
     // The global tools need no session, and say nothing secret.
     let described = call(&server, &token, None, "server", json!({}));
@@ -517,7 +522,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         }],
     });
     ada.space(|state| state.workers.len() == 1);
-    for tool in ["space", "set_speech", "set_environment"] {
+    for tool in ["space", "presence", "set_speech", "set_environment"] {
         let arguments = json!({"speech": "brief", "environment": "minimal"});
         assert_eq!(
             failure(&call(&server, &token, None, tool, arguments.clone())),
@@ -601,7 +606,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
             .as_bool()
             .filter(|refused| *refused)
     });
-    for tool in ["space", "set_speech", "set_environment"] {
+    for tool in ["space", "presence", "set_speech", "set_environment"] {
         assert_eq!(
             failure(&call(
                 &server,
@@ -949,4 +954,228 @@ fn no_token_is_logged_while_requests_and_their_sessions_are() {
     for line in &lines {
         assert!(!line.contains(&token), "{line}");
     }
+}
+
+/// A pose at `position` whose -Z, the way a head looks or a controller points, faces `target`.
+fn looking(position: [f32; 3], target: [f32; 3]) -> tomori_protocol::Pose {
+    let direction: Vec<f32> = (0..3).map(|axis| target[axis] - position[axis]).collect();
+    let yaw = (-direction[0]).atan2(-direction[2]);
+    let pitch = direction[1].atan2(direction[0].hypot(direction[2]));
+    let (a, c) = (yaw / 2.0).sin_cos();
+    let (e, f) = (pitch / 2.0).sin_cos();
+    tomori_protocol::Pose {
+        position,
+        orientation: [c * e, a * f, -a * e, c * f],
+    }
+}
+
+/// Where the middle of each of the Tomori wall's slots is, where it stands by default.
+fn tomori_slots() -> Vec<[f32; 3]> {
+    use tomori_protocol::{Pose, TOMORI_WALL, Wall, WallKind, WallShape};
+    let wall = Wall::new(
+        TOMORI_WALL,
+        WallKind::Tomori,
+        Pose::upright_facing([0.0, 0.52, -2.3], [0.0, 0.52, 0.0]),
+    )
+    .with_shape(WallShape::Arc { radius: 2.3 });
+    tomori_server::presence::slot_centres(&wall)
+}
+
+#[test]
+fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_agent_alone() {
+    use tomori_protocol::ServerMessage;
+    use tomori_security::Grant;
+    let server = TestServer::with_tokens_and_tools(true, |server| server);
+    let (_, owner) = server.issue("Ada", Grant::Owner);
+    let mut ada = server.connect_with_token("ada", "Ada", &owner);
+    let other = ada.create_space("Other").id;
+    let studio = ada.create_space("Studio").id;
+    let (_, collaborator) = server.issue(
+        "Bob",
+        Grant::Collaborator {
+            space: studio.clone(),
+        },
+    );
+    let mut bob = server.connect_with_token("bob", "Bob", &collaborator);
+    bob.send(&ClientMessage::Join {
+        space: studio.clone(),
+    });
+    let mut vic = server.connect("vic", "Vic");
+    vic.send(&ClientMessage::Join {
+        space: studio.clone(),
+    });
+    ada.space(|state| state.id == studio && state.participants.len() == 2 && state.visitors == 1);
+    let token = eventually(|| server.tools_token());
+    let sessions = server.backend.started();
+    let (elsewhere, session) = (id(&sessions[0]), id(&sessions[1]));
+    let presence = |session: &str| {
+        let result = call(&server, &token, Some(session), "presence", json!({}));
+        assert_ne!(result["isError"], true, "{result}");
+        result["structuredContent"].clone()
+    };
+
+    // Before anyone reports, each is named with their role, and nothing more is known.
+    let before = presence(&session);
+    assert_eq!(before["space"], studio);
+    assert_eq!(before["environment"], "sky");
+    assert!(
+        before["coordinates"]
+            .as_str()
+            .unwrap()
+            .contains("in metres")
+    );
+    let people = before["people"].as_array().unwrap();
+    let named: Vec<(&str, &str)> = people
+        .iter()
+        .map(|person| {
+            (
+                person["name"].as_str().unwrap(),
+                person["role"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("Ada", "owner"),
+            ("Bob", "collaborator"),
+            ("Vic", "visitor")
+        ]
+    );
+    assert_eq!(
+        people[0]["presence"],
+        "Their client has not reported where they are."
+    );
+    assert_eq!(
+        people[2]["presence"],
+        "Visitors send no presence, so where they are is not known."
+    );
+    // The Tomori wall, with every slot free.
+    assert_eq!(before["walls"][0]["id"], "tomori");
+    assert_eq!(before["walls"][0]["free"], json!([0, 1, 2, 3, 4, 5]));
+    assert_eq!(before["floating"], json!([]));
+
+    // Ada, on a headset, looks at the Tomori wall's slot 4 and points at its slot 2; Bob, at a desktop, looks at her.
+    let slots = tomori_slots();
+    let home = [0.0, 1.6, 0.0];
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, slots[4]),
+        left: Some(looking([-0.2, 1.1, -0.3], [-0.2, 1.1, -1.0])),
+        right: Some(looking([0.2, 1.1, -0.3], slots[2])),
+        hands: None,
+    });
+    let bob_head = [1.5, 1.7, 1.5];
+    bob.send(&ClientMessage::Presence {
+        head: looking(bob_head, home),
+        left: None,
+        right: None,
+        hands: Some(Box::new([None, None])),
+    });
+    // A visitor's presence is refused, and reaches nobody.
+    vic.send(&ClientMessage::Presence {
+        head: looking([0.0, 1.6, 1.0], home),
+        left: None,
+        right: None,
+        hands: None,
+    });
+    assert!(!vic.error().is_empty());
+    bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
+    ada.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
+    let seen = presence(&session);
+    let people = seen["people"].as_array().unwrap();
+    let (ada_seen, bob_seen, vic_seen) = (&people[0], &people[1], &people[2]);
+    assert_eq!(ada_seen["device"], "headset");
+    assert_eq!(ada_seen["stale"], false);
+    assert!(ada_seen["updated_seconds_ago"].as_f64().unwrap() < 5.0);
+    assert_eq!(ada_seen["head"]["position"], json!([0.0, 1.6, 0.0]));
+    assert!(ada_seen["head"]["pitch"].as_f64().unwrap() < -15.0);
+    assert_eq!(ada_seen["looking_at"]["kind"], "wall");
+    assert_eq!(ada_seen["looking_at"]["wall"], "tomori");
+    assert_eq!(ada_seen["looking_at"]["slot"], 4);
+    assert_eq!(ada_seen["pointing_at"]["slot"], 2);
+    assert_eq!(ada_seen["left_hand"]["tracked"], "controller");
+    assert_eq!(ada_seen["right_hand"]["position"], json!([0.2, 1.1, -0.3]));
+    assert_eq!(ada_seen["nearest_wall"]["wall"], "tomori");
+    assert_eq!(ada_seen["walls_in_view"], json!(["tomori"]));
+    assert_eq!(bob_seen["device"], "desktop");
+    assert_eq!(bob_seen["head"]["position"], json!([1.5, 1.7, 1.5]));
+    assert_eq!(bob_seen["head"]["yaw"], -45.0);
+    assert_eq!(bob_seen["looking_at"]["kind"], "person");
+    assert_eq!(bob_seen["looking_at"]["name"], "Ada");
+    assert!(bob_seen.get("pointing_at").is_none());
+    assert_eq!(bob_seen["walls_in_view"], json!(["tomori"]));
+    assert_eq!(vic_seen["role"], "visitor");
+    assert!(vic_seen.get("head").is_none());
+
+    // The agent projects a panel; it takes the Tomori wall's first slot, and Ada, looking at it, is told its title.
+    sessions[1].emit(Event::MessageStarted {
+        message: "m1".into(),
+        role: tomori_backend::Role::Assistant,
+    });
+    sessions[1].emit(Event::TextDelta {
+        message: "m1".into(),
+        text: "Here.\n\n```panel\ntitle: Build status\n---\nAll green.\n```\n".into(),
+    });
+    sessions[1].emit(Event::MessageCompleted {
+        message: "m1".into(),
+    });
+    let projected = eventually(|| {
+        let seen = presence(&session);
+        (seen["walls"][0]["used"].as_array()?.len() == 1).then_some(seen)
+    });
+    let used = &projected["walls"][0]["used"][0];
+    assert_eq!(used["slot"], 0);
+    assert_eq!(used["title"], "Build status");
+    assert_eq!(projected["walls"][0]["free"], json!([1, 2, 3, 4, 5]));
+    ada.send(&ClientMessage::Presence {
+        head: looking(home, slots[0]),
+        left: None,
+        right: None,
+        hands: None,
+    });
+    let looked = eventually(|| {
+        let seen = presence(&session);
+        (seen["people"][0]["looking_at"]["kind"] == "panel").then_some(seen)
+    });
+    let at = &looked["people"][0]["looking_at"];
+    assert_eq!(at["title"], "Build status");
+    assert_eq!(at["wall"], "tomori");
+    assert_eq!(at["slot"], 0);
+    // The headset still says so, though its controllers are not tracked now, and nothing is pointed at.
+    assert_eq!(looked["people"][0]["device"], "headset");
+    assert_eq!(looked["people"][0]["right_hand"], Value::Null);
+    assert_eq!(looked["people"][0]["pointing_at"], Value::Null);
+
+    // Another space's agent is told only of its own space, where nobody has reported anything; others are refused.
+    let theirs = presence(&elsewhere);
+    assert_eq!(theirs["space"], other);
+    assert_eq!(theirs["people"], json!([]));
+    assert!(
+        failure(&call(
+            &server,
+            &token,
+            Some("ses_other"),
+            "presence",
+            json!({})
+        ))
+        .starts_with("This session is not bound to a Tomori space")
+    );
+    assert!(
+        failure(&call(&server, &token, None, "presence", json!({})))
+            .ends_with("and this call names no session.")
+    );
+
+    // Joining another space, Ada's presence is forgotten until she reports there.
+    ada.send(&ClientMessage::Join {
+        space: other.clone(),
+    });
+    let moved = eventually(|| {
+        let theirs = presence(&elsewhere);
+        (theirs["people"].as_array()?.len() == 1).then_some(theirs)
+    });
+    assert_eq!(moved["people"][0]["name"], "Ada");
+    assert_eq!(
+        moved["people"][0]["presence"],
+        "Their client has not reported where they are."
+    );
 }

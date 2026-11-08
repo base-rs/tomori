@@ -336,6 +336,12 @@ fn tools() -> Value {
             "annotations": read,
         },
         {
+            "name": "presence",
+            "description": "Where the people in your space are, as their devices last reported, in the space's coordinates: each participant's and visitor's name, role, engagement and device; their head's position, yaw and pitch; on a headset, both hands' or controllers' positions and where the right controller points; what they are looking and pointing at, a wall, a slot, a panel or a person; the wall nearest them and the walls in their view; and how long ago they were reported, marked stale when their device has stopped reporting. Also the space's walls, where each stands and faces, its size and which slots hold which panels and which are free, and the panels floating. Visitors report no position.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": read,
+        },
+        {
             "name": "set_speech",
             "description": "Set how much of each of your replies is spoken in your space, from the next reply on, for everyone in it: full, or brief, which speaks the start of each message and leaves the rest on the panel. Only when someone in the space asks; then tell them.",
             "inputSchema": {
@@ -466,6 +472,7 @@ async fn call(
         "server" => Ok(structured(hub.tool_server())),
         "spaces" => Ok(structured(hub.tool_spaces())),
         "space" => session.and_then(|session| hub.tool_space(session).map(structured)),
+        "presence" => session.and_then(|session| hub.tool_presence(session).map(structured)),
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
         "pairing" => session.and_then(|session| hub.tool_pairing(session).map(structured)),
