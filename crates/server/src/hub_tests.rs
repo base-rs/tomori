@@ -3191,6 +3191,24 @@ fn standing(at: [f32; 3]) -> ClientMessage {
     }
 }
 
+/// Where a participant stands, as their presence says, looking at `target`, as a head looks along its -Z.
+fn looking(at: [f32; 3], target: [f32; 3]) -> ClientMessage {
+    let direction: Vec<f32> = (0..3).map(|axis| target[axis] - at[axis]).collect();
+    let yaw = (-direction[0]).atan2(-direction[2]);
+    let pitch = direction[1].atan2(direction[0].hypot(direction[2]));
+    let (a, c) = (yaw / 2.0).sin_cos();
+    let (e, f) = (pitch / 2.0).sin_cos();
+    ClientMessage::Presence {
+        head: tomori_protocol::Pose {
+            position: at,
+            orientation: [c * e, a * f, -a * e, c * f],
+        },
+        left: None,
+        right: None,
+        hands: None,
+    }
+}
+
 fn upright(position: [f32; 3]) -> tomori_protocol::Pose {
     tomori_protocol::Pose {
         position,
@@ -3390,12 +3408,12 @@ fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() 
         state,
         Some(ServerMessage::Space { state }) if state.messages.iter().any(|message| message.text == PANEL_REPLY.trim_end_matches('\n') || message.text == PANEL_REPLY)
     ));
-    // An owner adds a wall behind home; asked from beside it, the agent's panel goes onto it.
+    // An owner adds a wall behind home; asked from beside it, looking at it, the agent's panel goes onto it.
     ada.send(ClientMessage::AddWall {
         pose: upright([0.0, 1.5, 3.0]),
     });
     let wall = ada.projection().walls[1].id.clone();
-    ada.send(standing([0.2, 1.6, 2.5]));
+    ada.send(looking([0.2, 1.6, 2.5], [0.2, 1.5, 3.0]));
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
     // Where they move after they began speaking changes nothing.
     ada.send(standing([1.9, 1.6, -2.0]));
@@ -3427,6 +3445,65 @@ fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() 
             .values()
             .any(|record| record.name == "ada" && record.seen.is_none())
     );
+}
+
+#[test]
+fn a_reply_s_panels_go_where_their_blocks_say_and_otherwise_where_whoever_asked_was_looking() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    let bob = Client::projecting(&hub, Access::open(), "bob");
+    bob.join(&space);
+    // An added wall behind home; Ada, at home, looks at the Tomori wall's slot 4, and Bob stands by the added wall,
+    // looking towards home.
+    ada.send(ClientMessage::AddWall {
+        pose: upright([0.0, 1.5, 3.0]),
+    });
+    let projection = ada.projection();
+    let added = projection.walls[1].id.clone();
+    let slots = crate::presence::slot_centres(&projection.walls[0]);
+    ada.send(looking([0.0, 1.6, 0.0], slots[4]));
+    bob.send(looking([0.3, 1.6, 2.4], [0.0, 1.6, 0.0]));
+    let prompt = said(&hub, &ada, &commands, Vec::new(), None);
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
+    let text = [
+        "Here.",
+        "```panel\ntitle: Default\n---\nWhere Ada looks.\n```",
+        "```panel\ntitle: Near Bob\nplace: near Bob\n---\nBy Bob.\n```",
+        "```panel\ntitle: Front\nplace: front\n---\nIn front of Ada.\n```",
+        "```panel\ntitle: Nobody\nplace: near Zed\n---\nAs none.\n```",
+        "```rust place=\"wall added wall 1\"\nfn main() {\n}\n```",
+    ]
+    .join("\n\n");
+    reply(&hub, &space, "m1", &text);
+    let projection = bob.projection();
+    let placed = |title: &str| {
+        projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .map(|panel| panel.place.clone())
+            .unwrap()
+    };
+    let on = |wall: &str, slot| tomori_protocol::Place::Wall {
+        wall: wall.to_owned(),
+        slot,
+    };
+    // Without a placement, in the empty slot Ada was looking at as she began speaking.
+    assert_eq!(placed("Default"), on(tomori_protocol::TOMORI_WALL, 4));
+    // Near Bob, onto the wall nearest him; the code block onto the wall it names, titled without its attribute.
+    assert_eq!(placed("Near Bob"), on(&added, 0));
+    assert_eq!(placed("rust"), on(&added, 1));
+    // In front of Ada, floating, facing her.
+    let tomori_protocol::Place::Free { pose } = placed("Front") else {
+        unreachable!("in front of someone is floating");
+    };
+    assert!(pose.position[2] < -1.0 && pose.position[1] < 1.6);
+    // Someone not here is as no placement: where Ada looks, though its slot is taken now, so the wall's first.
+    assert_eq!(placed("Nobody"), on(tomori_protocol::TOMORI_WALL, 0));
+    // Everyone sees the same.
+    assert_eq!(ada.projection().panels, projection.panels);
 }
 
 #[test]

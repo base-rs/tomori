@@ -3863,6 +3863,7 @@ dependencies = [
  "tomori-client",
  "tomori-protocol",
  "tomori-scene",
+ "tomori-server",
  "tomori-text",
  "wgpu",
 ]

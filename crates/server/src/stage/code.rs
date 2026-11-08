@@ -37,6 +37,8 @@ const UNTITLED: &str = "code";
 #[derive(Debug)]
 pub struct Lines {
     info: String,
+    /// Where its info string's `place=` attribute says it goes, taken out of `info`.
+    place: Option<super::placement::Placement>,
     /// Its first [`CODE_LINES`] lines, from the first that is not blank, cut where they reach [`HIGHLIGHTED_CHARS`]
     /// together, and how many characters they have.
     kept: Vec<String>,
@@ -49,8 +51,10 @@ pub struct Lines {
 impl Lines {
     /// A block whose info string is `info`.
     pub fn new(info: &str) -> Self {
+        let (info, place) = super::placement::Placement::from_info(info);
         Self {
             info: info.chars().take(INFO_CHARS).collect(),
+            place,
             kept: Vec::new(),
             characters: 0,
             total: 0,
@@ -113,7 +117,7 @@ impl Lines {
             meta: Vec::new(),
             code: Some(Code::new(language.clone(), total)),
         };
-        Some(Found::code(content, Source { language, lines }))
+        Some(Found::code(content, Source { language, lines }).placed(self.place))
     }
 }
 

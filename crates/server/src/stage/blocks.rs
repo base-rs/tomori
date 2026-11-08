@@ -16,7 +16,9 @@
 //! ```
 //! ````
 //!
-//! `title` is the panel's title, and every other key is its metadata. Without a header, the whole block is its body.
+//! `title` is the panel's title, `place` says where it goes (see [`super::placement`]), and every other key is its
+//! metadata. Without a header, the whole block is its body.
+use super::placement::Placement;
 use super::{Content, Found};
 
 /// The longest panel block taken, in bytes of its source; a longer one is not projected.
@@ -89,9 +91,9 @@ pub fn panels(text: &str) -> Vec<Found> {
     // blocks costs no more than one of a few.
     let mut finish = |source: Source| {
         let content = match source {
-            Source::Panel(source) if texts < PANELS_PER_REPLY => Content::parse(&source)
+            Source::Panel(source) if texts < PANELS_PER_REPLY => Content::parse_placed(&source)
                 .inspect(|_| texts += 1)
-                .map(Found::text),
+                .map(|(content, place)| Found::text(content).placed(place)),
             Source::Code(lines) if codes < super::code::CODE_PER_REPLY => {
                 lines.content().inspect(|_| codes += 1)
             }
@@ -187,7 +189,14 @@ fn body<'a>(lines: impl Iterator<Item = &'a str>) -> String {
 
 impl Content {
     /// The panel `source`, a panel block's text, describes, or `None` when it holds neither a title nor a body.
+    #[cfg(test)]
     pub fn parse(source: &str) -> Option<Self> {
+        Self::parse_placed(source).map(|(content, _)| content)
+    }
+
+    /// The panel `source`, a panel block's text, describes, and where its `place` header says it goes, if it says
+    /// anywhere the server knows; or `None` when it holds neither a title nor a body.
+    pub fn parse_placed(source: &str) -> Option<(Self, Option<Placement>)> {
         let lines: Vec<&str> = source.lines().collect();
         let header = lines
             .iter()
@@ -203,9 +212,13 @@ impl Content {
         };
         let mut title = String::new();
         let mut meta: Vec<(String, String)> = Vec::new();
+        let mut place = None;
         for (key, value) in header.iter().filter_map(|line| key_value(line)) {
             let key = key.to_ascii_lowercase();
-            if key == "title" {
+            if key == "place" {
+                // The first a block gives decides, whether it is known or not, and none is metadata.
+                place.get_or_insert_with(|| Placement::parse(value));
+            } else if key == "title" {
                 if title.is_empty() {
                     title = tomori_protocol::text::one_line(value, TITLE_CHARS)
                         .trim()
@@ -221,18 +234,44 @@ impl Content {
             }
         }
         let body = body(rest.iter().copied());
-        (!title.is_empty() || !body.is_empty()).then_some(Self {
-            title,
-            body,
-            meta,
-            code: None,
-        })
+        (!title.is_empty() || !body.is_empty()).then_some((
+            Self {
+                title,
+                body,
+                meta,
+                code: None,
+            },
+            place.flatten(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_says_where_its_panel_goes_with_a_place_header_or_a_code_block_s_attribute() {
+        let found = super::panels(
+            "```panel\ntitle: Status\nplace: near Ada\nplace: wall tomori\nsource: CI\n---\nGreen.\n```\n\n```panel\nplace: behind Ada\n---\nOther.\n```\n\n```rust place=looking:Bob title=main.rs\nfn main() {\n}\n```\n\n```panel\nPlain.\n```\n",
+        );
+        assert_eq!(found.len(), 4);
+        // The first place a block gives decides, and none is metadata.
+        assert_eq!(found[0].place, Some(Placement::Near(Some("Ada".into()))));
+        assert_eq!(
+            found[0].content.meta,
+            [("source".to_owned(), "CI".to_owned())]
+        );
+        // A form the server does not know is ignored, and is not metadata either.
+        assert_eq!(found[1].place, None);
+        assert!(found[1].content.meta.is_empty());
+        assert_eq!(found[1].content.body, "Other.");
+        // A code block's attribute is taken out of its title and language.
+        assert_eq!(found[2].place, Some(Placement::Looking(Some("Bob".into()))));
+        assert_eq!(found[2].content.title, "rust title=main.rs");
+        assert_eq!(found[2].content.code.as_ref().unwrap().language, "rust");
+        assert_eq!(found[3].place, None);
+    }
 
     /// The panels of `text`, each as found, its code not yet highlighted.
     fn panels(text: &str) -> Vec<Content> {

@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tomori_protocol::{Panel, Place, Pose, Projection, WALL_SLOTS, Wall, WallKind};
 
+use crate::stage::{Destination, Placement};
+
 /// How long a report stays current: a client in a space reports with every frame, so one not heard from for this long
 /// has stopped, such as while its headset sleeps.
 pub(crate) const STALE: Duration = Duration::from_secs(5);
@@ -406,10 +408,9 @@ pub(crate) fn meet(
     met
 }
 
-/// The wall of `projection` nearest `point`, and how far its nearest slot, or board, is.
-pub(crate) fn nearest_wall(projection: &Projection, point: Vec3) -> Option<(&Wall, f32)> {
-    projection
-        .walls
+/// The wall of `walls` nearest `point`, and how far its nearest slot, or board, is.
+pub(crate) fn nearest_wall(walls: &[Wall], point: Vec3) -> Option<(&Wall, f32)> {
+    walls
         .iter()
         .map(|wall| {
             let (slots, board) = surfaces(wall);
@@ -434,11 +435,10 @@ fn off_ahead(head: &Pose, point: Vec3) -> Option<(f32, f32)> {
     (z < 0.0).then(|| (x.atan2(-z).to_degrees(), y.atan2(-z).to_degrees()))
 }
 
-/// The walls of `projection` in the view of someone whose head is at `head`, nearest the middle of it first, each with
-/// how far off the middle of the view, in degrees, its nearest slot is: one with a slot within a headset's field of view.
-pub(crate) fn walls_in_view<'a>(projection: &'a Projection, head: &Pose) -> Vec<(&'a Wall, f32)> {
-    let mut shown: Vec<(&Wall, f32)> = projection
-        .walls
+/// The walls of `walls` in the view of someone whose head is at `head`, nearest the middle of it first, each with how
+/// far off the middle of the view, in degrees, its nearest slot is: one with a slot within a headset's field of view.
+pub(crate) fn walls_in_view<'a>(walls: &'a [Wall], head: &Pose) -> Vec<(&'a Wall, f32)> {
+    let mut shown: Vec<(&Wall, f32)> = walls
         .iter()
         .filter_map(|wall| {
             slots(wall)
@@ -575,14 +575,14 @@ pub(crate) fn report(
                 described(&met, along, projection)
             });
     }
-    report["nearest_wall"] = nearest_wall(projection, seen.head.position).map_or(
+    report["nearest_wall"] = nearest_wall(&projection.walls, seen.head.position).map_or(
         Value::Null,
         |(wall, distance)| {
             json!({ "wall": wall.id, "wall_name": wall_name(projection, wall), "distance": round(distance, 2) })
         },
     );
     report["walls_in_view"] = json!(
-        walls_in_view(projection, &seen.head)
+        walls_in_view(&projection.walls, &seen.head)
             .iter()
             .map(|(wall, _)| wall.id.as_str())
             .collect::<Vec<_>>()
@@ -664,6 +664,107 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
         })
         .collect::<Vec<_>>();
     (json!(walls), json!(floating))
+}
+
+/// How far in front of someone a panel the agent floats in front of them stands, in metres, and how far below their
+/// eyes: within reach, and low enough to read without hiding what is behind it.
+const FRONT: (f32, f32) = (1.2, 0.15);
+
+/// Where the agent's panel goes when it asks for none, for whoever asked, whose head was at `asker` as they began
+/// speaking: where they were looking, or onto the Tomori wall when nobody asked.
+pub(crate) fn by_default(asker: Option<&Pose>, projection: &Projection) -> Destination {
+    asker.map_or(Destination::Tomori, |head| looking_at(head, projection))
+}
+
+/// Where someone whose head is at `head` is looking, for a panel: the wall the ray from their eyes meets, in the slot
+/// it meets if that is empty, or the wall of the panel it meets; else the wall in their view nearest where they look;
+/// else the wall nearest them. A person in the way is looked past.
+fn looking_at(head: &Pose, projection: &Projection) -> Destination {
+    match meet(head.position, forward(head), projection, &[]) {
+        Some((Met::Wall { wall, slot }, _)) => Destination::Wall { wall, slot },
+        Some((
+            Met::Panel {
+                wall: Some((wall, _)),
+                ..
+            },
+            _,
+        )) => Destination::Wall { wall, slot: None },
+        _ => walls_in_view(&projection.walls, head).first().map_or(
+            Destination::Nearest(head.position),
+            |(wall, _)| Destination::Wall {
+                wall: wall.id.clone(),
+                slot: None,
+            },
+        ),
+    }
+}
+
+/// Floating in front of someone whose head is at `head`, facing them, level, the way they face about the vertical, or,
+/// looking straight up or down, the way the top of their head faces.
+fn in_front(head: &Pose) -> Destination {
+    let ahead = forward(head);
+    let top = rotate(head.orientation, [0.0, 1.0, 0.0]);
+    let level = |[x, _, z]: Vec3| x.hypot(z);
+    let (x, z) = if level(ahead) > 1e-3 {
+        (ahead[0] / level(ahead), ahead[2] / level(ahead))
+    } else {
+        let toward = if ahead[1] > 0.0 { -1.0 } else { 1.0 };
+        let length = level(top).max(1e-6);
+        (toward * top[0] / length, toward * top[2] / length)
+    };
+    let [px, py, pz] = head.position;
+    let at = [px + x * FRONT.0, py - FRONT.1, pz + z * FRONT.0];
+    Destination::Free(Pose::upright_facing(at, [px, py - FRONT.1, pz]))
+}
+
+/// Where `place` puts the agent's panel, in `projection`, for whoever asked, whose head was at `asker` as they began
+/// speaking, among `people`, the names and heads of the participants in the space as they last reported; or why it
+/// cannot, as when it names someone who has not reported or a wall that is not here. A form that names nobody is about
+/// whoever asked.
+pub(crate) fn destination(
+    place: &Placement,
+    asker: Option<&Pose>,
+    people: &[(String, Pose)],
+    projection: &Projection,
+) -> Result<Destination, String> {
+    let whose = |name: &Option<String>| -> Result<Pose, String> {
+        match name {
+            Some(name) => people
+                .iter()
+                .find(|(person, _)| person.to_lowercase() == name.to_lowercase())
+                .map(|(_, head)| *head)
+                .ok_or_else(|| {
+                    format!("Nobody called {name:?} in this space has reported where they are.")
+                }),
+            None => asker.copied().ok_or_else(|| {
+                "Nobody asked for this as they spoke, so name whom it is for.".to_owned()
+            }),
+        }
+    };
+    Ok(match place {
+        Placement::Near(name) => Destination::Nearest(whose(name)?.position),
+        Placement::Looking(name) => looking_at(&whose(name)?, projection),
+        Placement::Front(name) => in_front(&whose(name)?),
+        Placement::Wall(named) => {
+            let named = named.trim();
+            let named = named
+                .get(..4)
+                .filter(|the| the.eq_ignore_ascii_case("the "))
+                .map_or(named, |_| &named[4..]);
+            let wall = projection
+                .walls
+                .iter()
+                .find(|wall| {
+                    wall.id.eq_ignore_ascii_case(named)
+                        || wall_name(projection, wall).eq_ignore_ascii_case(named)
+                })
+                .ok_or_else(|| format!("There is no wall called {named:?} here."))?;
+            Destination::Wall {
+                wall: wall.id.clone(),
+                slot: None,
+            }
+        }
+    })
 }
 
 /// How the `presence` tool's numbers are to be read.

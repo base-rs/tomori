@@ -36,7 +36,7 @@ fn highlighted(found: Found) -> Content {
     let highlighter = crate::highlighting::highlighter();
     let spans = crate::highlighting::highlight_all(&projecting.sources(), &highlighter);
     let mut replies = projecting.highlighted(spans);
-    replies.remove(0).0.remove(0)
+    replies.remove(0).0.remove(0).0
 }
 
 /// The text each of `content`'s spans covers, with its kind, checking that they are valid for its body.

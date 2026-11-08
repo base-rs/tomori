@@ -752,6 +752,155 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_PLACEMENT_PREVIEW` to a PNG path to save what this renders: a participant at home, who added a wall
+    /// to their right and is looking at it as they ask, sees the agent's answer there, while the Tomori wall ahead of
+    /// them stays empty, as a running fake server places it.
+    #[test]
+    fn the_agent_s_panel_is_drawn_on_the_wall_whoever_asked_was_looking_at() {
+        use tomori_protocol::{ClientMessage, ServerMessage};
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 480;
+        // A server whose agent answers only when told to, and a participant whose client reads the projection.
+        let backend = tomori_server::fake::FakeBackend::manual();
+        let server = tomori_server::test_support::TestServer::with_backend(backend.clone());
+        let mut client = tomori_server::test_support::TestClient::open(server.address);
+        client.send(&ClientMessage::Hello {
+            protocol: tomori_protocol::PROTOCOL_VERSION,
+            participant: "ada".into(),
+            name: "Ada".into(),
+            names: false,
+            environments: None,
+            environment_state: false,
+            projection: true,
+        });
+        client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
+        client.create_space("Studio");
+        // A wall to the right of home, facing it, and Ada looking at it as she asks.
+        let at = Vec3::new(2.2, 1.5, -0.8);
+        client.send(&ClientMessage::AddWall {
+            pose: tomori_protocol::Pose::upright_facing(at.to_array(), [0.0, 1.5, 0.0]),
+        });
+        let added = client.wait_for(|message| match message {
+            ServerMessage::Projection { projection } if projection.walls.len() == 2 => {
+                Some(projection.walls[1].clone())
+            }
+            _ => None,
+        });
+        let towards = at - arrival::HOME;
+        let looking = glam::Quat::from_rotation_y((-towards.x).atan2(-towards.z))
+            * glam::Quat::from_rotation_x(towards.y.atan2(towards.x.hypot(towards.z)));
+        let head = Mat4::from_rotation_translation(looking, arrival::HOME);
+        client.send(&ClientMessage::Presence {
+            head: tomori_protocol::Pose {
+                position: arrival::HOME.to_array(),
+                orientation: looking.to_array(),
+            },
+            left: None,
+            right: None,
+            hands: None,
+        });
+        client.say("u1", "show me the build status");
+        let session = tomori_server::test_support::eventually(|| {
+            backend
+                .started()
+                .into_iter()
+                .find(|session| !session.log().prompts.is_empty())
+        });
+        session.reply("Here.\n\n```panel\ntitle: Build status\n---\n**All green.**\n```\n");
+        let projection = client.wait_for(|message| match message {
+            ServerMessage::Projection { projection } if !projection.panels.is_empty() => {
+                Some(projection.clone())
+            }
+            _ => None,
+        });
+        assert!(matches!(
+            &projection.panels[0].place,
+            tomori_protocol::Place::Wall { wall, .. } if *wall == added.id
+        ));
+
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("placement test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let at_wall = lens * Mat4::look_at_rh(arrival::HOME, at, Vec3::Y);
+            let ahead = lens * Mat4::look_at_rh(arrival::HOME, Vec3::new(0.0, 1.0, -2.3), Vec3::Y);
+            let capture = |renderer: &Renderer, panels: &Panels, matrix: Mat4| {
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            // The space as the server sent it, and the same space before the agent answered.
+            let mut shown = |panels_shown: Vec<tomori_protocol::Panel>| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, vec![added.clone()], panels_shown);
+                let mut step = Step::default();
+                let frame = step.update(
+                    &senses,
+                    &mut conversation,
+                    &mut felt(),
+                    Instant::now(),
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                (
+                    capture(&renderer, &panels, at_wall),
+                    capture(&renderer, &panels, ahead),
+                )
+            };
+            let (answered, answered_ahead) = shown(projection.panels.clone());
+            let (asked, asked_ahead) = shown(Vec::new());
+            // The panel is drawn on the wall Ada looks at, and nothing changes on the Tomori wall ahead of her.
+            assert_ne!(
+                answered, asked,
+                "the panel must be drawn on the wall she looks at"
+            );
+            assert_eq!(
+                answered_ahead, asked_ahead,
+                "nothing is drawn on the Tomori wall"
+            );
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+            image::imageops::replace(&mut sheet, &answered, 0, 0);
+            image::imageops::replace(&mut sheet, &answered_ahead, 0, HEIGHT.into());
+            crate::test_support::preview("TOMORI_PLACEMENT_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// What `texture`, `width` by `height`, holds once drawn.
     fn read_back(
         device: &wgpu::Device,

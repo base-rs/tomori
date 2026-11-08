@@ -2,6 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
+use std::f32::consts::FRAC_1_SQRT_2;
+
 use tomori_protocol::{Code, Hand, Joint, TOMORI_WALL, WallShape};
 
 /// A pose at `position` whose -Z, the way a head looks or a controller points, faces `target`.
@@ -244,31 +246,31 @@ fn a_ray_meets_the_nearest_panel_slot_wall_or_person_along_it() {
 fn the_nearest_wall_is_measured_to_its_nearest_slot_or_board_and_walls_in_view_to_their_slots() {
     let projection = projection();
     let home = [0.0, 1.6, 0.0];
-    let (wall, distance) = nearest_wall(&projection, home).unwrap();
+    let (wall, distance) = nearest_wall(&projection.walls, home).unwrap();
     assert_eq!(wall.id, TOMORI_WALL);
     assert!(distance > 2.3 && distance < 2.6, "{distance}");
     // Before a flat wall's slot, the slot is nearer than its board, which is a lift behind it.
-    let (wall, distance) = nearest_wall(&projection, [2.5, 1.5 + 0.2071, 0.0]).unwrap();
+    let (wall, distance) = nearest_wall(&projection.walls, [2.5, 1.5 + 0.2071, 0.0]).unwrap();
     assert_eq!(wall.id, "environment-0");
     assert!((distance - (0.5 - LIFT)).abs() < 1e-3, "{distance}");
-    assert!(nearest_wall(&Projection::new("space-1", "sky"), home).is_none());
+    assert!(nearest_wall(&[], home).is_none());
     // Looking ahead and a little down, the Tomori wall is in view, and the wall to the right is not.
     let ahead = looking(home, [0.0, 1.0, -2.3]);
-    let shown: Vec<&str> = walls_in_view(&projection, &ahead)
+    let shown: Vec<&str> = walls_in_view(&projection.walls, &ahead)
         .iter()
         .map(|(wall, _)| wall.id.as_str())
         .collect();
     assert_eq!(shown, [TOMORI_WALL]);
     // Turned half right, both are, the one nearer the middle of the view first.
     let half = looking(home, [3.0, 1.2, -1.0]);
-    let shown: Vec<&str> = walls_in_view(&projection, &half)
+    let shown: Vec<&str> = walls_in_view(&projection.walls, &half)
         .iter()
         .map(|(wall, _)| wall.id.as_str())
         .collect();
     assert_eq!(shown, ["environment-0", TOMORI_WALL]);
     // Turned away, or looking up, neither is.
-    assert!(walls_in_view(&projection, &looking(home, [0.0, 1.6, 3.0])).is_empty());
-    assert!(walls_in_view(&projection, &looking(home, [0.0, 9.0, -0.5])).is_empty());
+    assert!(walls_in_view(&projection.walls, &looking(home, [0.0, 1.6, 3.0])).is_empty());
+    assert!(walls_in_view(&projection.walls, &looking(home, [0.0, 9.0, -0.5])).is_empty());
 }
 
 #[test]
@@ -585,4 +587,109 @@ fn a_panel_s_title_is_told_on_one_line_bounded_and_unable_to_end_a_quotation() {
         },
     );
     assert_eq!(title(&untitled), "First line");
+}
+
+#[test]
+fn a_placement_goes_near_someone_where_they_look_in_front_of_them_or_onto_a_named_wall() {
+    let projection = projection();
+    let slots = slots(&tomori());
+    let home = [0.0, 1.6, 0.0];
+    let ada = looking(home, slots[4].middle);
+    let bob_at = [2.0, 1.6, 0.0];
+    let bob = looking(bob_at, [3.0, 1.5, 0.3249]);
+    let people = vec![("Ada".to_owned(), ada), ("Bob".to_owned(), bob)];
+    let to = |place: &str, asker: Option<&Pose>| {
+        destination(
+            &Placement::parse(place).unwrap(),
+            asker,
+            &people,
+            &projection,
+        )
+    };
+    let onto = |wall: &str, slot| Destination::Wall {
+        wall: wall.into(),
+        slot,
+    };
+    // Near someone, by name in any case, or whoever asked: the wall nearest them.
+    assert_eq!(to("near bob", None), Ok(Destination::Nearest(bob_at)));
+    assert_eq!(to("nearest", Some(&ada)), Ok(Destination::Nearest(home)));
+    // Where they look: the empty slot they look at, the wall whose board they look at, or the wall of the panel.
+    assert_eq!(to("looking", Some(&ada)), Ok(onto(TOMORI_WALL, Some(4))));
+    assert_eq!(
+        to("looking Bob", Some(&ada)),
+        Ok(onto("environment-0", None))
+    );
+    let at_panel = looking(home, slots[2].middle);
+    assert_eq!(to("looking", Some(&at_panel)), Ok(onto(TOMORI_WALL, None)));
+    // Between two slots, or at a person, the wall in view nearest where they look; with none in view, the nearest.
+    let between = looking(home, [0.0, 0.52, -2.3]);
+    assert_eq!(to("looking", Some(&between)), Ok(onto(TOMORI_WALL, None)));
+    let up = looking(home, [0.0, 9.0, -0.5]);
+    assert_eq!(to("looking", Some(&up)), Ok(Destination::Nearest(home)));
+    let at_float = looking(home, [0.0, 1.6, 2.0]);
+    assert_eq!(
+        to("looking", Some(&at_float)),
+        Ok(Destination::Nearest(home))
+    );
+    // In front of them: 1.2 m ahead, level, a little below their eyes, facing them.
+    let Ok(Destination::Free(front)) = to("front Ada", None) else {
+        unreachable!("in front of someone is floating");
+    };
+    let ahead = sub(front.position, home);
+    assert!((ahead[0].hypot(ahead[2]) - FRONT.0).abs() < 1e-4);
+    assert!((ahead[1] + FRONT.1).abs() < 1e-4);
+    assert!(ahead[0] > 0.0 && ahead[2] < 0.0);
+    assert_eq!(
+        front,
+        Pose::upright_facing(front.position, [0.0, home[1] - FRONT.1, 0.0])
+    );
+    // Looking straight down, or up, in front is the way they face about the vertical.
+    let down = Pose {
+        position: home,
+        orientation: [-FRAC_1_SQRT_2, 0.0, 0.0, FRAC_1_SQRT_2],
+    };
+    let up = Pose {
+        position: home,
+        orientation: [FRAC_1_SQRT_2, 0.0, 0.0, FRAC_1_SQRT_2],
+    };
+    for head in [down, up] {
+        let Ok(Destination::Free(front)) = to("front", Some(&head)) else {
+            unreachable!("in front of someone is floating");
+        };
+        assert!(
+            near(front.position, [0.0, home[1] - FRONT.1, -FRONT.0]),
+            "{front:?}"
+        );
+    }
+    // A wall by its identity or its name, in any case, with or without "the".
+    assert_eq!(to("wall Tomori wall", None), Ok(onto(TOMORI_WALL, None)));
+    assert_eq!(
+        to("wall the environment wall 1", None),
+        Ok(onto("environment-0", None))
+    );
+    assert_eq!(
+        to("wall ENVIRONMENT-0", None),
+        Ok(onto("environment-0", None))
+    );
+    assert_eq!(
+        to("wall attic", None),
+        Err("There is no wall called \"attic\" here.".to_owned())
+    );
+    // Someone who has not reported, or nobody asking, is said.
+    assert_eq!(
+        to("near Zed", Some(&ada)),
+        Err("Nobody called \"Zed\" in this space has reported where they are.".to_owned())
+    );
+    assert_eq!(
+        to("looking", None),
+        Err("Nobody asked for this as they spoke, so name whom it is for.".to_owned())
+    );
+    assert!(to("front Zed", None).is_err());
+    assert!(to("looking Zed", None).is_err());
+    // Without a placement, where whoever asked was looking, or the Tomori wall when nobody asked.
+    assert_eq!(
+        by_default(Some(&ada), &projection),
+        onto(TOMORI_WALL, Some(4))
+    );
+    assert_eq!(by_default(None, &projection), Destination::Tomori);
 }

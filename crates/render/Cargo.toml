@@ -42,3 +42,5 @@ pollster = "0.4"
 serde_json = "1"
 # The scene's test devices and fixtures.
 tomori-scene = { version = "0.2.0", path = "../scene", features = ["testing"] }
+# A fake server, which places the agent's panels as a real one does, without highlighting code.
+tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
