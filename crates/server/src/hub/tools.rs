@@ -358,7 +358,11 @@ impl Hub {
             &projection,
         )?;
         let pinned = projection.panel(&id).is_some_and(|shown| shown.pinned);
-        let moved = record.stage.relocate(&walls, &id, &to)?;
+        // The panel was found in this view, under the same lock, so it is here to move.
+        let moved = record
+            .stage
+            .relocate(&walls, &id, &to)
+            .expect("a panel shown is here");
         // Where it is now: on a wall, in a slot, or floating at a pose, as participants are sent it.
         let shown = record.stage.view(&space, &walls, now);
         let place = json!(shown.panel(&id).map(|panel| &panel.place));

@@ -1169,8 +1169,10 @@ impl HubState {
                 .model
                 .participants
                 .iter()
-                .filter_map(|key| self.participants.get(key)?.seen.as_ref())
-                .filter_map(|seen| seen.carried(now))
+                .filter_map(|key| self.participants.get(key))
+                .filter_map(|participant| {
+                    participant.seen.as_ref().and_then(|seen| seen.carried(now))
+                })
                 .map(str::to_owned)
                 .collect()
         })
