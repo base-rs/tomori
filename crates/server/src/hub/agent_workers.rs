@@ -20,6 +20,9 @@ const NOTICE: &str = "workers";
 /// The most workers a notice names; the rest are counted.
 const NOTICE_NAMES: usize = 5;
 
+/// The most characters of a worker's title the `workers` tool gives, on one line.
+const TITLE_CHARS: usize = 120;
+
 /// What the agent asked `remove_workers` to remove: the workers it names in `sessions`, every finished worker of the space with `finished`, and, with `force`, those still running, stopped first.
 #[derive(Debug, Default)]
 pub(crate) struct Removal {
@@ -166,7 +169,8 @@ impl Hub {
                 let finished = worker_finished(worker.state);
                 json!({
                     "session": worker.id,
-                    "title": worker.title,
+                    // Written by whatever named the worker, so on one line and bounded; see `design/mcp.md`.
+                    "title": crate::space::one_line(&worker.title, TITLE_CHARS),
                     "state": state_name(worker.state),
                     "running": running(worker.state),
                     "finished": finished,
