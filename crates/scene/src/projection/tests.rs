@@ -311,6 +311,15 @@ fn code_breaks_at_spaces_or_punctuation_and_hard_breaks_a_long_token_never_throu
     let wrapped = wrap_code(&cells(&wide), 20, 4);
     assert_eq!(crate::ui_text::plain(&wrapped[0]), "x".repeat(19));
     assert!(wrapped.iter().all(|row| crate::ui_text::whole(row)));
+    // A letter and the marks it composes with take one cell, and are never parted by a break, nor is an emoji, wide.
+    let marked = "e\u{301}".repeat(30);
+    let wrapped = rows(&marked, 20, 4);
+    assert_eq!(wrapped[0], "\u{e9}".repeat(20));
+    assert_eq!(wrapped.concat().replace(' ', ""), "\u{e9}".repeat(30));
+    let emoji = format!("{}😀😀", "x".repeat(19));
+    let wrapped = wrap_code(&cells(&emoji), 20, 4);
+    assert!(wrapped.iter().all(|row| crate::ui_text::whole(row)));
+    assert!(wrapped.iter().all(|row| row.len() <= 20));
     // The hanging indent keeps some room for code, however deeply the line is indented.
     let deep = format!("{}{}", " ".repeat(40), "y ".repeat(20));
     let wrapped = wrap_code(&cells(&deep), 45, 4);
