@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use tomori_client::discovery::{self, Servers};
 use tomori_client::{Client, Event, Options, Sender};
-use tomori_protocol::{ClientMessage, Decision, Gate, ServerMessage};
+use tomori_protocol::{ClientMessage, Decision, Gate, QueueState, ServerMessage};
 
 const COMMANDS: &str = "commands: list, create <backend> <directory> [title], join <space>, leave, gate off|live|agent, allow <request>, deny <request>, grant <request> <option>, quit";
 
@@ -108,13 +108,18 @@ fn describe(message: &ServerMessage) -> String {
     match message {
         ServerMessage::Space { state } => {
             let mut text = format!(
-                "space {} ({}) environment={} activity={:?} messages={} queue={} participants={}",
+                "space {} ({}) environment={} activity={:?} messages={} queued={} participants={}",
                 state.id,
                 state.title,
                 state.environment,
                 state.activity,
                 state.messages.len(),
-                state.queue.len(),
+                // Entries not yet delivered, as clients count them; the queue also keeps recently finished ones.
+                state
+                    .queue
+                    .iter()
+                    .filter(|entry| matches!(entry.state, QueueState::Queued | QueueState::Sending))
+                    .count(),
                 state.participants.len()
             );
             if let Some(approval) = &state.approval {
