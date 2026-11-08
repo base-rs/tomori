@@ -204,6 +204,7 @@ mod tests {
                 left: None,
                 right: None,
                 hands: None,
+                carrying: None,
             },
             ClientMessage::SetAttribution { enabled: true },
             ClientMessage::SetMode {

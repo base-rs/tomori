@@ -525,6 +525,7 @@ fn what_needs_a_space_is_refused_in_the_lobby() {
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     });
     client.send(ClientMessage::StopReplay);
     assert!(client.read().is_empty());
@@ -3271,6 +3272,7 @@ fn standing(at: [f32; 3]) -> ClientMessage {
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     }
 }
 
@@ -3289,6 +3291,7 @@ fn looking(at: [f32; 3], target: [f32; 3]) -> ClientMessage {
         left: None,
         right: None,
         hands: None,
+        carrying: None,
     }
 }
 

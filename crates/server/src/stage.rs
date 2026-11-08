@@ -787,8 +787,9 @@ impl Stage {
             .collect()
     }
 
-    /// Move the agent's panel `panel` where `to` says in `walls`' environment, as its agent asked: one a participant has
-    /// put where it is stays there. Returns whether that moved it, or why it was refused.
+    /// Move the panel `panel` where `to` says in `walls`' environment, as its agent asked. One a participant put where it
+    /// was stays theirs: still pinned, and arranged on a wall, so that the agent's next panels and code panels leave it
+    /// as they leave what participants placed. Returns whether that moved it, or why it was refused.
     pub(crate) fn relocate(
         &mut self,
         walls: &Walls<'_>,
@@ -799,9 +800,6 @@ impl Stage {
         let Some(current) = shown.panel(panel) else {
             return Err("That panel is not here.");
         };
-        if current.pinned {
-            return Err("A participant put that panel where it is, so it stays there.");
-        }
         let unchanged = match (self.resolve(walls, to), &current.place) {
             (Spot::Wall(wall, slot), Place::Wall { wall: on, slot: at }) => {
                 wall == *on && slot.is_none_or(|slot| slot == *at)
@@ -814,7 +812,21 @@ impl Stage {
         let kept = self
             .take(walls.environment, panel)
             .expect("a panel shown is kept");
+        let pinned = kept.pinned;
         self.put(walls, kept, to);
+        if pinned
+            && let Some(kept) = self
+                .tomori
+                .iter_mut()
+                .chain(
+                    self.rooms
+                        .values_mut()
+                        .flat_map(|room| room.panels.iter_mut()),
+                )
+                .find(|kept| kept.id == panel)
+        {
+            kept.arranged = matches!(kept.place, Placed::Wall { .. });
+        }
         Ok(true)
     }
 
@@ -1204,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_moves_its_own_panels_but_not_one_a_participant_put_where_it_is() {
+    fn the_agent_moves_its_own_panels_and_those_participants_placed_which_stay_theirs() {
         let declared = [pose(-3.0, -3.0)];
         let walls = Walls {
             declared: &declared,
@@ -1246,14 +1258,12 @@ mod tests {
                 ("a".into(), on("environment-0", 3)),
             ]
         );
-        // Once a participant puts it somewhere, it stays there; a panel not here is refused.
+        // A panel a participant put somewhere moves too, when the agent is asked, and stays theirs: pinned, and arranged
+        // on its new wall, so that the agent's next panels take the others' slots first.
         stage
             .place(&walls, &b, Target::Slot(TOMORI_WALL.into(), 5))
             .unwrap();
-        assert_eq!(
-            stage.relocate(&walls, &b, &Destination::Tomori),
-            Err("A participant put that panel where it is, so it stays there.")
-        );
+        assert_eq!(stage.relocate(&walls, &b, &onto(Some(1))), Ok(true));
         assert_eq!(
             stage.relocate(&walls, "panel-99", &Destination::Tomori),
             Err("That panel is not here.")
@@ -1261,9 +1271,28 @@ mod tests {
         assert_eq!(
             shown(&stage, &walls),
             [
-                ("b".into(), on(TOMORI_WALL, 5)),
                 ("a".into(), on("environment-0", 3)),
+                ("b".into(), on("environment-0", 1)),
             ]
+        );
+        assert!(stage.view("s", &walls, 0).panel(&b).unwrap().pinned);
+        for index in 0..WALL_SLOTS {
+            stage.project_to(&walls, content(&index.to_string()), &onto(None), 0);
+        }
+        let view = stage.view("s", &walls, 0);
+        assert_eq!(view.panel(&b).unwrap().place, on("environment-0", 1));
+        assert!(view.panel(&a).is_none(), "the agent's own panel made room");
+        // Left floating, it is still pinned.
+        let floating = Pose::upright_facing([0.5, 1.5, -1.0], [0.5, 1.5, 0.0]);
+        assert_eq!(
+            stage.relocate(&walls, &b, &Destination::Free(floating)),
+            Ok(true)
+        );
+        let view = stage.view("s", &walls, 0);
+        assert!(view.panel(&b).unwrap().pinned);
+        assert_eq!(
+            view.panel(&b).unwrap().place,
+            Place::Free { pose: floating }
         );
     }
 

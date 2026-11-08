@@ -1130,13 +1130,14 @@ impl Connection {
         self.voice.request_permission()
     }
 
-    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays them to the other participants. Without a connection, nothing is sent.
+    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them, and the panel they are `carrying`, if any, so that the space's agent leaves it in their hand. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays the poses to the other participants. Without a connection, nothing is sent.
     pub fn send_presence(
         &mut self,
         head: Pose,
         left: Option<Pose>,
         right: Option<Pose>,
         hands: [Option<tomori_protocol::Hand>; 2],
+        carrying: Option<&str>,
     ) {
         let Some(client) = &self.client else {
             return;
@@ -1146,6 +1147,7 @@ impl Connection {
             left,
             right,
             hands: Some(Box::new(hands)),
+            carrying: carrying.map(str::to_owned),
         };
         // The client is open while it is kept, and the server relays only the latest presence, so nothing is lost by a send that fails.
         let _ = client.send(message);

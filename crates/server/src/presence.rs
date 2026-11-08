@@ -57,6 +57,8 @@ pub(crate) struct Seen {
     pub hands: [Option<[f32; 3]>; 2],
     /// When it was reported.
     pub at: Instant,
+    /// The panel they are carrying, by its identity, as their client said.
+    pub carrying: Option<String>,
 }
 
 impl Seen {
@@ -82,7 +84,22 @@ impl Seen {
             controllers: [left.and_then(sound), right.and_then(sound)],
             hands: hands.map_or([None, None], |hands| [palm(&hands[0]), palm(&hands[1])]),
             at,
+            carrying: None,
         })
+    }
+
+    /// It, carrying `panel`, if its identity is within bounds; one beyond them names no panel there is.
+    pub(crate) fn carrying(mut self, panel: Option<String>) -> Self {
+        self.carrying = panel.filter(|panel| panel.len() <= crate::limits::IDENTIFIER_BYTES);
+        self
+    }
+
+    /// The panel it says is being carried at `now`, if any: a report gone [`STALE`] says nothing, since its client has
+    /// stopped, as when its headset sleeps.
+    pub(crate) fn carried(&self, now: Instant) -> Option<&str> {
+        self.carrying
+            .as_deref()
+            .filter(|_| now.saturating_duration_since(self.at) < STALE)
     }
 
     /// Whether it says anything only a headset reports: a controller or a hand.
@@ -412,16 +429,18 @@ pub(crate) fn meet(
 pub(crate) fn nearest_wall(walls: &[Wall], point: Vec3) -> Option<(&Wall, f32)> {
     walls
         .iter()
-        .map(|wall| {
-            let (slots, board) = surfaces(wall);
-            let distance = slots
-                .iter()
-                .chain(board.as_ref())
-                .map(|rectangle| rectangle.distance(point))
-                .fold(f32::INFINITY, f32::min);
-            (wall, distance)
-        })
+        .map(|wall| (wall, wall_distance(wall, point)))
         .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// How far `point` is from `wall`'s nearest slot, or board.
+fn wall_distance(wall: &Wall, point: Vec3) -> f32 {
+    let (slots, board) = surfaces(wall);
+    slots
+        .iter()
+        .chain(board.as_ref())
+        .map(|rectangle| rectangle.distance(point))
+        .fold(f32::INFINITY, f32::min)
 }
 
 /// How far off straight ahead of `head`, across and up, `point` is, in degrees, if it is ahead of it at all.
@@ -676,26 +695,76 @@ pub(crate) fn by_default(asker: Option<&Pose>, projection: &Projection) -> Desti
     asker.map_or(Destination::Tomori, |head| looking_at(head, projection))
 }
 
-/// Where someone whose head is at `head` is looking, for a panel: the wall the ray from their eyes meets, in the slot
-/// it meets if that is empty, or the wall of the panel it meets; else the wall in their view nearest where they look;
-/// else the wall nearest them. A person in the way is looked past.
+/// How far from someone's eyes a wall may be, in metres, for the agent's panel to be put on it for them by where they
+/// look: within it, a flat wall's text, at its 1.9 mm font pixel, is about as sharp as the curved Tomori wall's, at
+/// seven tenths of that, from home, about 2.6 m away, which is as far as walls are designed to be read from.
+/// Comfortable reading, an x-height of about 0.45° (see `design/text.md`), would need a slot's text within about 1.4 m,
+/// nearer than any wall stands from home, so the cap follows the walls' own design rather than that. Beyond it, as on
+/// a wall 7 m away, a slot's text is too small to read without pulling the panel off. See `design/projection.md`.
+pub(crate) const READING: f32 = 4.0;
+
+/// How far off the ray from someone's eyes a wall's slot may be, in degrees, for them to be looking at the wall: a head
+/// faces a little above what its eyes look at, and passes above a low wall, such as the Tomori wall below the swarm,
+/// that they plainly look towards.
+pub(crate) const GAZE: f32 = 10.0;
+
+/// The angle between the unit `ahead` and `toward`, in degrees.
+fn angle(ahead: Vec3, toward: Vec3) -> f32 {
+    (dot(ahead, toward) / length(toward).max(1e-6))
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees()
+}
+
+/// Where someone whose head is at `head` is looking, for a panel, of the walls within [`READING`] of their eyes: the
+/// nearest of those they look at, which are the wall the ray from their eyes meets, in the slot it meets if that is
+/// empty, and those with a slot within [`GAZE`] of the ray; else the nearest wall in their view; else the nearest wall;
+/// else, with no wall within reading, floating in front of them. A person in the way is looked past.
 fn looking_at(head: &Pose, projection: &Projection) -> Destination {
-    match meet(head.position, forward(head), projection, &[]) {
-        Some((Met::Wall { wall, slot }, _)) => Destination::Wall { wall, slot },
+    let (eyes, ahead) = (head.position, forward(head));
+    let met = match meet(eyes, ahead, projection, &[]) {
+        Some((Met::Wall { wall, slot }, _)) => Some((wall, slot)),
         Some((
             Met::Panel {
                 wall: Some((wall, _)),
                 ..
             },
             _,
-        )) => Destination::Wall { wall, slot: None },
-        _ => walls_in_view(&projection.walls, head).first().map_or(
-            Destination::Nearest(head.position),
-            |(wall, _)| Destination::Wall {
-                wall: wall.id.clone(),
-                slot: None,
-            },
-        ),
+        )) => Some((wall, None)),
+        _ => None,
+    };
+    let readable: Vec<(&Wall, f32)> = projection
+        .walls
+        .iter()
+        .map(|wall| (wall, wall_distance(wall, eyes)))
+        .filter(|(_, distance)| *distance <= READING)
+        .collect();
+    let nearest = |walls: &mut dyn Iterator<Item = &(&Wall, f32)>| {
+        walls
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(wall, _)| wall.id.clone())
+    };
+    // The walls looked at: the one met, and those with a slot near the ray.
+    let looked = nearest(&mut readable.iter().filter(|(wall, _)| {
+        met.as_ref().is_some_and(|(id, _)| *id == wall.id)
+            || slots(wall)
+                .iter()
+                .any(|slot| angle(ahead, sub(slot.middle, eyes)) <= GAZE)
+    }));
+    if let Some(wall) = looked {
+        let slot = met.and_then(|(id, slot)| slot.filter(|_| id == wall));
+        return Destination::Wall { wall, slot };
+    }
+    let in_view = walls_in_view(&projection.walls, head);
+    let shown = nearest(
+        &mut readable
+            .iter()
+            .filter(|(wall, _)| in_view.iter().any(|(seen, _)| seen.id == wall.id)),
+    );
+    match shown {
+        Some(wall) => Destination::Wall { wall, slot: None },
+        None if !readable.is_empty() => Destination::Nearest(eyes),
+        None => in_front(head),
     }
 }
 
