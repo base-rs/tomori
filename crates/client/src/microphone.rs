@@ -117,7 +117,7 @@ impl Microphone {
         utterance: impl Into<String>,
         answer: Option<tomori_protocol::AnswerTarget>,
     ) -> Result<(), SendError> {
-        self.start(utterance.into(), answer, false, Vec::new())
+        self.start(utterance.into(), answer, (false, false), Vec::new())
     }
 
     /// Start push-to-talk as [`Self::begin`] does, attending to `attention` as it begins, such as the worker the
@@ -127,21 +127,27 @@ impl Microphone {
         utterance: impl Into<String>,
         attention: Vec<tomori_protocol::Resource>,
     ) -> Result<(), SendError> {
-        self.start(utterance.into(), None, false, attention)
+        self.start(utterance.into(), None, (false, false), attention)
     }
 
     /// Start push-to-talk as [`Self::begin`] does, for words that say the participant's new display name, which the server renames them with instead of queueing. Only for a server that renames; see `design/security.md`.
     pub fn begin_naming(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
-        self.start(utterance.into(), None, true, Vec::new())
+        self.start(utterance.into(), None, (true, false), Vec::new())
     }
 
-    /// Start push-to-talk as the utterance `utterance`, answering `answer`, saying a new name when `naming`, and
-    /// attending to `attention`, as the other ways to begin do.
+    /// Start push-to-talk as [`Self::begin`] does, for words that say the space's new title, which the server renames
+    /// the space with instead of queueing. Only for an owner, on a server that renames spaces; see `design/hand-menu.md`.
+    pub fn begin_titling(&mut self, utterance: impl Into<String>) -> Result<(), SendError> {
+        self.start(utterance.into(), None, (false, true), Vec::new())
+    }
+
+    /// Start push-to-talk as the utterance `utterance`, answering `answer`, saying a new name or the space's new title
+    /// as `(naming, titling)` says, and attending to `attention`, as the other ways to begin do.
     pub(crate) fn start(
         &mut self,
         utterance: String,
         answer: Option<tomori_protocol::AnswerTarget>,
-        naming: bool,
+        (naming, titling): (bool, bool),
         attention: Vec<tomori_protocol::Resource>,
     ) -> Result<(), SendError> {
         if self.utterance.is_some() {
@@ -157,6 +163,7 @@ impl Microphone {
                     answer,
                     progress: true,
                     naming,
+                    titling,
                     attention,
                 })
             })?;
@@ -379,6 +386,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    titling: false,
                     attention: vec![worker],
                 },
                 ClientMessage::UtteranceEnd {
@@ -413,6 +421,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    titling: false,
                     attention: Vec::new(),
                 },
                 ClientMessage::UtteranceEnd {
@@ -494,6 +503,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    titling: false,
                     attention: Vec::new(),
                 },
                 ClientMessage::UtteranceCancel {
@@ -523,6 +533,7 @@ mod tests {
                     answer: None,
                     progress: true,
                     naming: false,
+                    titling: false,
                     attention: Vec::new(),
                 },
                 ClientMessage::Gate { gate: Gate::Off },
@@ -549,6 +560,24 @@ mod tests {
                 answer: None,
                 progress: true,
                 naming: true,
+                titling: false,
+                attention: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_utterance_can_say_the_space_s_new_title() {
+        let (mut microphone, sender) = microphone();
+        microphone.begin_titling("u1").unwrap();
+        assert_eq!(
+            controls(&sent(sender.outbox())).last(),
+            Some(&ClientMessage::UtteranceBegin {
+                utterance: "u1".into(),
+                answer: None,
+                progress: true,
+                naming: false,
+                titling: true,
                 attention: Vec::new(),
             })
         );
@@ -571,6 +600,7 @@ mod tests {
                 answer: None,
                 progress: true,
                 naming: false,
+                titling: false,
                 attention: Vec::new(),
             })
         );

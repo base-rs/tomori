@@ -233,6 +233,28 @@ pub struct SpaceState {
     /// this is set, as well as [`Self::deletes`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deletes_session: bool,
+    /// Who gave the space its title, when someone did: absent while the title follows the space's agent session, and
+    /// from older servers. A client that sees the title change while it is in the space says who changed it. See
+    /// `design/spaces.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_by: Option<Renamer>,
+    /// Whether the server accepts [`crate::ClientMessage::RenameSpace`] from an owner, and an utterance marked as
+    /// titling the space. False from older servers; a client offers renaming the space only when this is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub renames: bool,
+}
+
+/// Who gave a space its title, in place of its agent session's. See `design/spaces.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Renamer {
+    /// The space's agent, through Tomori's tools, as someone in the space asked it.
+    Agent,
+    /// An owner in the space, by their display name as the server knew them.
+    Participant { name: String },
+    /// Someone a newer server names that this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and
@@ -657,6 +679,40 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(summary.activity, Activity::Unknown);
+    }
+
+    #[test]
+    fn who_renamed_a_space_is_optional_and_one_a_newer_server_names_is_unknown() {
+        // From an older server, a space neither says who renamed it nor that it renames.
+        let older: SpaceState = serde_json::from_value(serde_json::json!({
+            "id": "s", "title": "T", "backend": "b", "directory": "/", "activity": "idle", "messages": [],
+            "queue": [], "approval": null, "question": null, "workers": [], "presentations": [],
+            "participants": [], "attribution": true, "error": null,
+        }))
+        .unwrap();
+        assert_eq!((older.renamed_by.clone(), older.renames), (None, false));
+        // A space that follows its session adds nothing to the wire.
+        let json = serde_json::to_value(&older).unwrap();
+        assert!(json.get("renamed_by").is_none() && json.get("renames").is_none());
+
+        let renamed = SpaceState {
+            renamed_by: Some(Renamer::Participant { name: "Ada".into() }),
+            renames: true,
+            ..older
+        };
+        let json = serde_json::to_value(&renamed).unwrap();
+        assert_eq!(
+            json["renamed_by"],
+            serde_json::json!({"kind": "participant", "name": "Ada"})
+        );
+        assert_eq!(json["renames"], true);
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), renamed);
+        for (json, renamer) in [
+            (serde_json::json!({"kind": "agent"}), Renamer::Agent),
+            (serde_json::json!({"kind": "operator"}), Renamer::Unknown),
+        ] {
+            assert_eq!(serde_json::from_value::<Renamer>(json).unwrap(), renamer);
+        }
     }
 
     #[test]

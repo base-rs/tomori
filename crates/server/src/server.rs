@@ -2687,6 +2687,7 @@ mod tests {
                     Some(vec![crate::kept::KeptSpace {
                         id: "space-kept".to_owned(),
                         title: "Kept".to_owned(),
+                        renamed_by: None,
                         backend: backend.to_owned(),
                         directory: directory.to_owned(),
                         session: session.to_owned(),

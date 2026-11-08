@@ -306,6 +306,11 @@ pub enum ClientMessage {
         /// Set when the words say the participant's new display name, so that the server renames them with the transcript rather than queueing it. Sent only to a server whose [`ServerMessage::Welcome`] gives a `name`, as an older server would queue it. See `design/security.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         naming: bool,
+        /// Set when the words say the space's new title, so that the server renames the space with the transcript, as
+        /// [`ClientMessage::RenameSpace`] does, rather than queueing it. Owners only, and sent only to a server whose
+        /// [`crate::SpaceState::renames`] is set, as an older server would queue it. See `design/hand-menu.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        titling: bool,
         /// What the participant attends to as they begin speaking, such as what they point at, by identity only and
         /// most relevant first. The server resolves it from its own state as the utterance begins, and tells the agent
         /// about it with their words; a change while they speak does not change it. Absent from older clients, and
@@ -393,6 +398,12 @@ pub enum ClientMessage {
         space: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         session: bool,
+    },
+    /// Give the current space the title `title`, for everyone in it, in place of its agent session's, or, when `title`
+    /// is empty, let it follow its session's title again. Owners only. Sent only to a server whose
+    /// [`crate::SpaceState::renames`] is set. See `design/spaces.md`.
+    RenameSpace {
+        title: String,
     },
     /// Start receiving [`ServerMessage::Cards`] for the current space, until leaving it. Participants only. Sent only to
     /// a server whose [`crate::SpaceState::cards`] is set. See `design/github.md`.
@@ -843,6 +854,7 @@ mod tests {
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention,
         };
         assert_eq!(bare, begin(Vec::new()));
@@ -880,6 +892,7 @@ mod tests {
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention,
         };
         // A known kind in the wrong shape, an entry that is not an object, one without a kind and one of an unknown
@@ -982,6 +995,7 @@ mod tests {
                 answer: None,
                 progress: false,
                 naming: false,
+                titling: false,
                 attention: Vec::new(),
             }
         );
@@ -994,6 +1008,7 @@ mod tests {
             answer: None,
             progress: true,
             naming: false,
+            titling: false,
             attention: Vec::new(),
         };
         assert_eq!(serde_json::to_value(&asking).unwrap()["progress"], true);
@@ -1073,6 +1088,7 @@ mod tests {
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention: vec![Resource::card("github://o/r/pull/2")],
         };
         let json = serde_json::json!({
@@ -1094,6 +1110,7 @@ mod tests {
                 answer: None,
                 progress: false,
                 naming: false,
+                titling: false,
                 attention: Vec::new(),
             }
         );
@@ -1520,6 +1537,7 @@ mod tests {
             answer: None,
             progress: false,
             naming: true,
+            titling: false,
             attention: Vec::new(),
         };
         let json = serde_json::to_value(&begin).unwrap();
@@ -1541,8 +1559,38 @@ mod tests {
                 answer: None,
                 progress: false,
                 naming: false,
+                titling: false,
                 attention: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn renaming_a_space_typed_or_said_is_an_addition() {
+        assert_eq!(
+            serde_json::to_value(ClientMessage::RenameSpace {
+                title: "Release planning".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"type": "rename_space", "title": "Release planning"})
+        );
+        // Titling is marked only when set, so words from an older client, or for the agent, are as before.
+        let begin = ClientMessage::UtteranceBegin {
+            utterance: "u".into(),
+            answer: None,
+            progress: false,
+            naming: false,
+            titling: true,
+            attention: Vec::new(),
+        };
+        let json = serde_json::to_value(&begin).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "utterance_begin", "utterance": "u", "titling": true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(json).unwrap(),
+            begin
         );
     }
 

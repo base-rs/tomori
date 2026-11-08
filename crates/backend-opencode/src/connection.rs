@@ -4529,6 +4529,7 @@ fn snapshot(
     let mut workers = parts.workers();
     running_evidence(&mut workers, active);
     Snapshot {
+        title: parts.title.clone(),
         modes,
         busy,
         messages,
@@ -6694,6 +6695,8 @@ mod tests {
         records: HashMap<String, Value>,
         /// Sessions whose replies, interruptions and agent switches fail.
         failing_actions: HashSet<String>,
+        /// Each session's title, if its record gives one.
+        titles: HashMap<String, String>,
         stopping: bool,
     }
 
@@ -7111,11 +7114,17 @@ mod tests {
                     shared.changed.notify_all();
                     ("200 OK", "{}".to_owned())
                 }
-                Some(_) => (
-                    "200 OK",
-                    json!({ "data": state.records.get(&id).cloned().unwrap_or_else(|| fake_record(&id)) })
-                        .to_string(),
-                ),
+                Some(_) => {
+                    let mut record = state
+                        .records
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| fake_record(&id));
+                    if let Some(title) = state.titles.get(&id) {
+                        record["title"] = json!(title);
+                    }
+                    ("200 OK", json!({ "data": record }).to_string())
+                }
             }
         } else {
             ("404 Not Found", r#"{"message":"unexpected"}"#.to_owned())
@@ -9438,6 +9447,40 @@ mod tests {
         assert_eq!(worker_ids(workers), names);
         assert_eq!(workers[0].parent.as_deref(), Some("s1"));
         assert_eq!(workers[63].parent.as_deref(), Some("w62"));
+
+        drop(commands);
+        join_within(connection, Duration::from_secs(5));
+        shared.update(|state| state.stopping = true);
+        drop(service);
+    }
+
+    /// A session's own title is read with it, and a rename of it, but of no
+    /// other session, is reported as its new title.
+    #[test]
+    fn a_session_s_title_is_read_with_it_and_its_renames_are_reported() {
+        let shared = Arc::new(FakeShared::default());
+        let service = FakeService::start(shared.clone(), "secret");
+        let (commands, connection) = connect_to(&Arc::new(Mutex::new(service.address)));
+        shared.update(|state| {
+            state
+                .titles
+                .insert("s1".into(), "Tomori opencode support".into());
+        });
+        let (id, events) = create_session(&commands);
+        let snapshot = read_snapshot(&commands, &id, &events).unwrap();
+        assert_eq!(snapshot.title.as_deref(), Some("Tomori opencode support"));
+
+        let watched = watch(&events);
+        service.send(
+            json!({"type":"session.renamed","data":{"sessionID":"other","title":"Not this one"}}),
+        );
+        service.send(json!({"type":"session.renamed","data":{"sessionID":"s1","title":"Tomori development from the headset"}}));
+        let renamed = Event::TitleChanged {
+            title: "Tomori development from the headset".into(),
+        };
+        let seen = until(&watched, "the rename", |event| *event == renamed);
+        // A rename of another session reports nothing.
+        assert_eq!(seen, [renamed]);
 
         drop(commands);
         join_within(connection, Duration::from_secs(5));
@@ -12136,6 +12179,7 @@ mod tests {
             children: Vec::new(),
             busy: Some(false),
             has_parent: false,
+            title: None,
         };
         let snapshot = snapshot(
             parts,

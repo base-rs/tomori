@@ -128,7 +128,8 @@ fn only_an_owner_deletes_the_space_they_are_in_and_everyone_in_it_is_returned_to
         environment: None,
         instructions: None,
     });
-    let again = ada.space(|state| state.title == "Again");
+    // Bound to the kept session, the new space takes the session's own title, which it follows.
+    let again = ada.space(|state| state.title == "Studio");
     assert_ne!(again.id, studio.id);
 
     // Outside a space there is nothing to delete.
@@ -371,7 +372,8 @@ fn a_session_another_space_is_bound_to_is_never_deleted_with_a_space() {
         environment: None,
         instructions: None,
     });
-    let second = ada.space(|state| state.title == "Second");
+    // Bound to the first space's session, the second takes that session's own title.
+    let second = ada.space(|state| state.title == "First" && state.id != first.id);
     ada.send(&ClientMessage::Join {
         space: first.id.clone(),
     });

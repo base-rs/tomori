@@ -20,6 +20,10 @@ pub const SPACES_FILE: &str = "spaces.json";
 pub struct KeptSpace {
     pub id: String,
     pub title: String,
+    /// Who gave the space its title in place of its session's, if anyone did; absent while the title follows its
+    /// session, and for a space kept before titles followed sessions. See `design/spaces.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_by: Option<tomori_protocol::Renamer>,
     pub backend: String,
     pub directory: String,
     /// The backend's identifier of the session the space is bound to.
@@ -180,6 +184,7 @@ mod tests {
         KeptSpace {
             id: id.into(),
             title: "Studio".into(),
+            renamed_by: None,
             backend: "fake".into(),
             directory: "/tmp".into(),
             session: "session-1".into(),

@@ -4,6 +4,7 @@
 //! The panel's conversation with a Tomori server: choosing a server, the lobby, then the joined space.
 //!
 //! This is pure state. It applies [`tomori_client::Event`]s and controller input, and queues [`Action`]s for a [`tomori_client::connection::Connection`] to carry out, as its [`Session`], so nothing here touches the network.
+use crate::recording::Naming;
 use crate::{
     arrival,
     caption::{COLUMNS, ROWS, wrapped_lines},
@@ -84,8 +85,8 @@ impl std::fmt::Debug for Pairing {
 }
 
 /// The problem shown when words that said a new name did not change it, for `reason`.
-fn name_not_changed(reason: &str) -> String {
-    format!("Name not changed: {reason}")
+fn name_not_changed(naming: Naming, reason: &str) -> String {
+    format!("{}{reason}", naming.not_changed())
 }
 
 /// How long the device waits for a pairing to be confirmed before it gives up itself: the server's timeout and a margin. A pairing the device gives up on is cancelled, so one choice of the pairing object allows the server one try. See `design/security.md`.
@@ -102,8 +103,8 @@ enum Talk {
         heard: String,
         /// Whether the words answer the presented question rather than being queued.
         answering: bool,
-        /// Whether the words say the participant's new display name rather than being queued.
-        naming: bool,
+        /// What the words name rather than being queued, if anything: the participant or the space.
+        naming: Option<Naming>,
         /// The worker or card pointed at as X was pressed, which the utterance began attending to, unless it answers
         /// the presented question. See `design/interaction.md`.
         pointed: Option<tomori_protocol::Resource>,
@@ -116,7 +117,7 @@ enum Talk {
         /// What the server last said it is doing with the words, once it has them all; `None` until then, and
         /// throughout from a server that does not say. See `design/speech.md`.
         received: Option<crate::recording::Received>,
-        naming: bool,
+        naming: Option<Naming>,
     },
 }
 
@@ -142,14 +143,14 @@ struct TranscriptKey {
 enum Outcome {
     /// Transcribed as `text`, and queued, or applied as an answer.
     Sent { answered: bool, text: String },
-    /// Taken as the participant's new display name.
-    Named(String),
+    /// Taken as the participant's new display name, or the space's new title.
+    Named(Naming, String),
     /// Not sent, with why, which is also the problem shown.
     Failed(String),
     /// Not sent, as no speech was heard in it: nothing was lost, so the recording card shows it briefly, and it is no problem. See `design/speech.md`.
     Unheard,
-    /// Words that said a new name did not change it, with why; the problem shown says so, and X says the name again until B cancels. See `design/hand-menu.md`.
-    NameFailed(String),
+    /// Words that said a new name, or title, did not change it, with why; the problem shown says so, and X says it again until B cancels. See `design/hand-menu.md`.
+    NameFailed(Naming, String),
 }
 
 impl Talk {
@@ -165,7 +166,7 @@ impl Talk {
         }
     }
 
-    fn naming(&self) -> bool {
+    fn naming(&self) -> Option<Naming> {
         match self {
             Talk::Recording { naming, .. } | Talk::Sending { naming, .. } => *naming,
         }
@@ -224,6 +225,9 @@ pub struct Conversation {
     server_name: Option<String>,
     /// Whether the next press of X says a new display name, as chosen in the hand menu.
     naming: bool,
+    /// Whether the next press of X says the space's new title, as an owner chose in the hand menu. See
+    /// `design/hand-menu.md`.
+    titling: bool,
     mode: Mode,
     servers: Vec<Choice>,
     server: usize,
@@ -399,6 +403,7 @@ impl Conversation {
             name: name.into(),
             server_name: None,
             naming: false,
+            titling: false,
             mode: Mode::Servers,
             servers: Vec::new(),
             server: 0,
@@ -588,6 +593,7 @@ impl Conversation {
         // Each server keeps its own name for this participant.
         self.server_name = None;
         self.naming = false;
+        self.titling = false;
 
         self.spaces.clear();
         self.listed = false;
@@ -658,7 +664,7 @@ impl Conversation {
                 if let Event::UtteranceFailed(failed) = event
                     && self.talk.as_ref().map(Talk::utterance) == Some(failed.utterance.as_str())
                 {
-                    let naming = self.talk.as_ref().is_some_and(Talk::naming);
+                    let naming = self.talk.as_ref().and_then(Talk::naming);
                     self.stop_talking();
                     self.talk = None;
                     let error: String = match failed.failure {
@@ -678,7 +684,7 @@ impl Conversation {
             // A pairing belongs to its connection; the server withdraws it.
             self.pairing = None;
             self.stop_live();
-            let naming = self.talk.as_ref().is_some_and(Talk::naming);
+            let naming = self.talk.as_ref().and_then(Talk::naming);
             match &self.talk {
                 Some(Talk::Recording { .. }) => {
                     self.stop_talking();
@@ -687,7 +693,7 @@ impl Conversation {
                 // The server may still queue it, but its transcript cannot reach us. A name may still be taken, and says so if it is; until then, X says it again.
                 Some(Talk::Sending { .. }) => {
                     self.talk = None;
-                    self.naming = naming && self.renames();
+                    self.resume_naming(naming);
                     self.notice = Some("Connection lost while sending your words.".into());
                 }
                 None => {}
@@ -944,10 +950,12 @@ impl Conversation {
                 if ours && finished {
                     // The queue entry now shows the words, and replaces an earlier utterance's failure.
                     let talk = self.talk.take();
-                    let outcome = if talk.as_ref().is_some_and(Talk::naming) {
-                        // The words were the name the server now uses.
-                        self.server_name = Some(text.clone());
-                        Outcome::Named(text)
+                    let outcome = if let Some(naming) = talk.as_ref().and_then(Talk::naming) {
+                        // The words were the name the server now uses, or the space's title, which its state shows.
+                        if naming == Naming::Name {
+                            self.server_name = Some(text.clone());
+                        }
+                        Outcome::Named(naming, text)
                     } else {
                         let answered = talk.is_some_and(|talk| talk.answering());
                         Outcome::Sent { answered, text }
@@ -979,16 +987,16 @@ impl Conversation {
             }
             ServerMessage::TranscriptFailed { utterance, error } => {
                 log::warn!("Utterance {utterance} failed: {error}");
-                let mut naming = false;
+                let mut naming = None;
                 if self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str()) {
                     let talk = self.talk.take();
-                    naming = talk.as_ref().is_some_and(Talk::naming);
+                    naming = talk.as_ref().and_then(Talk::naming);
                     // Cancelling would be refused, since the server has already ended it.
                     if matches!(talk, Some(Talk::Recording { .. })) {
                         self.actions.push(Action::AbandonUtterance);
                     }
                 }
-                if error == tomori_protocol::NO_SPEECH && !naming {
+                if error == tomori_protocol::NO_SPEECH && naming.is_none() {
                     // Nothing said was lost: the card says so for a moment, and the problem line, the pill and the right wrist are not troubled.
                     self.outcome = Some((Outcome::Unheard, Instant::now()));
                 } else {
@@ -1025,6 +1033,15 @@ impl Conversation {
             log::info!("Joined space {} ({})", state.title, state.id);
             self.close_space();
             self.mode = Mode::Space;
+        } else if self
+            .space
+            .as_ref()
+            .is_some_and(|space| space.title != state.title)
+        {
+            // Renamed while this participant is in it: say so, and by whom, unless it followed its session. See
+            // `design/spaces.md`.
+            log::info!("Space {} is now titled {:?}", state.id, state.title);
+            self.notice = Some(retitled(&state));
         }
         // A late update from a space being left does not end a join of another.
         if entered || self.joining.as_deref() == Some(state.id.as_str()) {
@@ -1267,8 +1284,9 @@ impl Conversation {
     fn close_space(&mut self) {
         self.stop_live();
         self.stop_talking();
-        // A new name is said in a space; leaving it stops waiting for one.
+        // A new name, or title, is said in a space; leaving it stops waiting for one.
         self.naming = false;
+        self.titling = false;
         // Knocks belong to the space.
         self.knocks.clear();
         self.knock = None;
@@ -1325,6 +1343,7 @@ impl Conversation {
             name: self.display_name().to_owned(),
             renames: self.renames(),
             naming: self.naming,
+            titling: self.titling,
             role: self.role,
             in_space: space.is_some(),
             participants: space
@@ -1381,6 +1400,8 @@ impl Conversation {
                     .then(|| self.nearest_added_wall().is_some()),
                 deletion: (self.role == ConnectionRole::Owner && space.deletes)
                     .then_some(space.deletes_session),
+                renamed_by: space.renamed_by.as_ref().map(renamer),
+                retitles: self.retitles(),
             }),
             people: space
                 .map(|space| {
@@ -1418,6 +1439,38 @@ impl Conversation {
             && self.mode == Mode::Space
             && self.space.is_some()
             && self.role.participates()
+    }
+
+    /// Whether this participant can rename the space they are in: they are an owner, on a server whose space state
+    /// says it renames spaces. See `design/hand-menu.md`.
+    fn retitles(&self) -> bool {
+        self.role == ConnectionRole::Owner
+            && self.mode == Mode::Space
+            && self.space.as_ref().is_some_and(|space| space.renames)
+    }
+
+    /// Give the joined space `title`, as typed on the console, or let it follow its agent session's title again when
+    /// `title` is empty. Only owners can, on a server that renames spaces. Says why not in the notice.
+    pub fn retitle(&mut self, title: &str) {
+        if !self.retitles() {
+            self.notice = Some(if self.space.is_none() || self.mode != Mode::Space {
+                "Join a space to rename it.".into()
+            } else if self.role != ConnectionRole::Owner {
+                "Only owners can rename a space.".into()
+            } else {
+                "This server cannot rename spaces.".into()
+            });
+            return;
+        }
+        let title = title.trim();
+        self.notice = Some(if title.is_empty() {
+            "Following the agent session's title again.".into()
+        } else {
+            format!("Renaming this space to “{title}”.")
+        });
+        self.send(ClientMessage::RenameSpace {
+            title: title.to_owned(),
+        });
     }
 
     /// Change this participant's display name to `name`, as typed on the console, on a server that renames. The server keeps it with their token, or for a visitor while it keeps them. Says what happened in the notice.
@@ -1592,7 +1645,16 @@ impl Conversation {
             }
             crate::hand_menu::Choice::Mono => self.set_mono(!self.feedback.mono),
             // The next press of X says the new name; choosing again changes nothing after all.
-            crate::hand_menu::Choice::Rename => self.naming = !self.naming && self.renames(),
+            crate::hand_menu::Choice::Rename => {
+                self.naming = !self.naming && self.renames();
+                self.titling &= !self.naming;
+            }
+            // The next press of X says the space's new title, as for a name.
+            crate::hand_menu::Choice::RenameSpace => {
+                self.titling = !self.titling && self.retitles();
+                self.naming &= !self.titling;
+            }
+            crate::hand_menu::Choice::FollowSession => self.retitle(""),
         }
     }
 
@@ -2769,9 +2831,9 @@ impl Conversation {
                 if self.space_menu.take().is_some() || self.queue_selected.take().is_some() {
                     return;
                 }
-                // Stop waiting for a new name, and dismiss why the last was not changed.
-                if std::mem::take(&mut self.naming) {
-                    if matches!(self.outcome, Some((Outcome::NameFailed(_), _))) {
+                // Stop waiting for a new name or title, and dismiss why the last was not changed.
+                if std::mem::take(&mut self.naming) | std::mem::take(&mut self.titling) {
+                    if matches!(self.outcome, Some((Outcome::NameFailed(..), _))) {
                         self.error = None;
                     }
                     return;
@@ -2899,15 +2961,15 @@ impl Conversation {
         self.outcome = None;
         // A problem shown stays until it is dismissed or replaced; see `design/interaction.md`.
         self.notice = None;
-        // Words chosen to say a new name answer nothing; see `design/security.md`.
-        let naming = std::mem::take(&mut self.naming) && self.renames();
-        let answer =
-            self.answerable()
-                .filter(|_| !naming)
-                .map(|question| tomori_protocol::AnswerTarget {
-                    question: question.id.clone(),
-                    field: question.field.clone(),
-                });
+        // Words chosen to say a new name, or title, answer nothing; see `design/security.md`.
+        let naming = self.take_naming();
+        let answer = self
+            .answerable()
+            .filter(|_| naming.is_none())
+            .map(|question| tomori_protocol::AnswerTarget {
+                question: question.id.clone(),
+                field: question.field.clone(),
+            });
         let answering = answer.is_some();
         // What is pointed at as X is pressed is what the words are about, captured now, as the server captures it;
         // pointing elsewhere while talking does not change it. An answer goes to the question presented, and a name to
@@ -2915,14 +2977,13 @@ impl Conversation {
         let pointed = self
             .pointing_at
             .clone()
-            .filter(|target| !naming && self.knows(target));
+            .filter(|target| naming.is_none() && self.knows(target));
         let attention = pointed.iter().filter(|_| !answering).cloned().collect();
-        self.actions.push(Action::BeginUtterance(if naming {
-            Utterance::new(utterance.clone(), self.capture_generation).naming()
-        } else {
-            Utterance::new(utterance.clone(), self.capture_generation)
-                .answering(answer)
-                .attending(attention)
+        let begun = Utterance::new(utterance.clone(), self.capture_generation);
+        self.actions.push(Action::BeginUtterance(match naming {
+            Some(Naming::Name) => begun.naming(),
+            Some(Naming::Title) => begun.titling(),
+            None => begun.answering(answer).attending(attention),
         }));
         self.talk = Some(Talk::Recording {
             utterance,
@@ -3239,10 +3300,10 @@ impl Conversation {
     pub fn stop_talking(&mut self) {
         if let Some(Talk::Recording {
             utterance, naming, ..
-        }) = &self.talk
+        }) = self.talk.clone()
         {
             // A name not said yet is still to be said: X says it again.
-            self.naming = *naming && self.renames();
+            self.resume_naming(naming);
             let pending = self.actions.iter().any(
                 |action| matches!(action, Action::BeginUtterance(begun) if begun.id == *utterance),
             );
@@ -3258,7 +3319,7 @@ impl Conversation {
 
     /// The microphone could not record, so the recording is abandoned.
     pub fn microphone_failed(&mut self, error: impl Into<String>) {
-        let naming = self.talk.as_ref().is_some_and(Talk::naming);
+        let naming = self.talk.as_ref().and_then(Talk::naming);
         // Words being recorded are lost with the capture.
         let recording = matches!(self.talk, Some(Talk::Recording { .. }));
         self.stop_live();
@@ -3297,12 +3358,34 @@ impl Conversation {
         }
     }
 
-    /// Show `error` as the problem, and on the recording indicator, as words that were not sent, or, if they were `naming` the participant, as a name not changed, which X then says again. See `design/hand-menu.md`.
-    fn failed(&mut self, error: String, naming: bool) {
-        let problem = if naming {
-            self.naming = self.renames();
-            let problem = name_not_changed(&error);
-            self.outcome = Some((Outcome::NameFailed(error), Instant::now()));
+    /// Whether the next press of X says a new name, `Naming::Name`, or the space's title, `Naming::Title`, taking it, so
+    /// that the press after says words for the agent again; `None` when it says neither, or the participant can no
+    /// longer say the one chosen here.
+    fn take_naming(&mut self) -> Option<Naming> {
+        let naming = std::mem::take(&mut self.naming) && self.renames();
+        let titling = std::mem::take(&mut self.titling) && self.retitles();
+        if naming {
+            Some(Naming::Name)
+        } else {
+            titling.then_some(Naming::Title)
+        }
+    }
+
+    /// Words that were to say `naming` were not said after all, so the next press of X says it again, where it still can.
+    fn resume_naming(&mut self, naming: Option<Naming>) {
+        match naming {
+            Some(Naming::Name) => self.naming = self.renames(),
+            Some(Naming::Title) => self.titling = self.retitles(),
+            None => {}
+        }
+    }
+
+    /// Show `error` as the problem, and on the recording indicator, as words that were not sent, or, if they were `naming` the participant or the space, as a name not changed, which X then says again. See `design/hand-menu.md`.
+    fn failed(&mut self, error: String, naming: Option<Naming>) {
+        let problem = if let Some(naming) = naming {
+            self.resume_naming(Some(naming));
+            let problem = name_not_changed(naming, &error);
+            self.outcome = Some((Outcome::NameFailed(naming, error), Instant::now()));
             problem
         } else {
             self.outcome = Some((Outcome::Failed(error.clone()), Instant::now()));
@@ -3333,20 +3416,22 @@ impl Conversation {
             Some(Talk::Recording {
                 started,
                 heard,
-                naming: true,
+                naming: Some(what),
                 ..
             }) => {
                 return Some(Phase::Naming {
+                    what: *what,
                     elapsed: now.saturating_duration_since(*started),
                     heard: heard.clone(),
                 });
             }
             Some(Talk::Sending {
                 heard,
-                naming: true,
+                naming: Some(what),
                 ..
             }) => {
                 return Some(Phase::Renaming {
+                    what: *what,
                     heard: heard.clone(),
                 });
             }
@@ -3420,10 +3505,13 @@ impl Conversation {
                     position,
                 })
             }
-            Some((Outcome::Named(name), at))
+            Some((Outcome::Named(what, name), at))
                 if now.saturating_duration_since(*at) < crate::recording::OUTCOME =>
             {
-                Some(Phase::Named { name: name.clone() })
+                Some(Phase::Named {
+                    what: *what,
+                    name: name.clone(),
+                })
             }
             // For a few seconds, unless B dismisses the problem or another recording starts first.
             Some((Outcome::Failed(reason), at))
@@ -3437,10 +3525,11 @@ impl Conversation {
             Some((Outcome::Unheard, at)) if self.unheard_shown(now, *at) => Some(Phase::Failed {
                 reason: tomori_protocol::NO_SPEECH.into(),
             }),
-            Some((Outcome::NameFailed(reason), _))
-                if self.error.as_deref() == Some(name_not_changed(reason).as_str()) =>
+            Some((Outcome::NameFailed(what, reason), _))
+                if self.error.as_deref() == Some(name_not_changed(*what, reason).as_str()) =>
             {
                 Some(Phase::NameFailed {
+                    what: *what,
                     reason: reason.clone(),
                 })
             }
@@ -4175,7 +4264,7 @@ impl Conversation {
             Some(Talk::Recording {
                 heard,
                 answering: false,
-                naming: false,
+                naming: None,
                 pointed: Some(pointed),
                 ..
             }) if heard.is_empty() && self.knows(pointed) => Some(short(&format!(
@@ -4187,8 +4276,10 @@ impl Conversation {
                     heard, answering, ..
                 },
             ) => {
-                let label = if talk.naming() {
+                let label = if talk.naming() == Some(Naming::Name) {
                     "MIC NAME"
+                } else if talk.naming() == Some(Naming::Title) {
+                    "MIC TITLE"
                 } else if *answering {
                     "MIC ANSWER"
                 } else {
@@ -4417,11 +4508,13 @@ impl Conversation {
             "R-stick choose | A confirm"
         } else if space.approval.is_some() {
             "Sending decision..."
-        } else if self.naming && self.renames() {
-            if matches!(self.outcome, Some((Outcome::NameFailed(_), _))) && !problem.is_empty() {
+        } else if (self.naming && self.renames()) || (self.titling && self.retitles()) {
+            if matches!(self.outcome, Some((Outcome::NameFailed(..), _))) && !problem.is_empty() {
                 "Hold X to try again | B cancel"
-            } else {
+            } else if self.naming {
                 "Hold X to say your name | B cancel"
+            } else {
+                "Hold X to say the title | B cancel"
             }
         } else if self.answerable().is_some() {
             "Hold X to answer | hold B leave"
@@ -4452,6 +4545,23 @@ fn menu_label(item: &MenuItem) -> String {
         MenuItem::Mode(mode) => format!("Mode: {}", mode.name),
         MenuItem::Speech(SpeechSetting::Brief) => "Speech: brief".into(),
         MenuItem::Speech(_) => "Speech: full".into(),
+    }
+}
+
+/// What a participant in a space is told when its title changes to the one `state` has.
+fn retitled(state: &SpaceState) -> String {
+    match &state.renamed_by {
+        Some(by) => format!("{} renamed this space to “{}”.", renamer(by), state.title),
+        None => format!("This space is now called “{}”.", state.title),
+    }
+}
+
+/// Who renamed a space, as the hand menu names them: the agent as Tomori, which is how people in a space speak of it.
+fn renamer(renamer: &tomori_protocol::Renamer) -> String {
+    match renamer {
+        tomori_protocol::Renamer::Agent => "Tomori".into(),
+        tomori_protocol::Renamer::Participant { name } => name.clone(),
+        tomori_protocol::Renamer::Unknown => "someone".into(),
     }
 }
 
@@ -7050,6 +7160,7 @@ mod tests {
         assert_eq!(
             conversation.recording_phase(now),
             Some(Phase::Renaming {
+                what: Naming::Name,
                 heard: "Ada Love".into()
             })
         );
@@ -7062,6 +7173,7 @@ mod tests {
         assert_eq!(
             conversation.recording_phase(Instant::now()),
             Some(Phase::Named {
+                what: Naming::Name,
                 name: "Ada Lovelace".into()
             })
         );
@@ -7090,6 +7202,208 @@ mod tests {
         conversation.connect(Choice::new("Other", "10.0.0.2:8765", Source::Discovered));
         assert_eq!(conversation.display_name(), "Ada");
         assert!(!conversation.menu_model().naming);
+    }
+
+    /// Press X, which begins words that say the space's new title; returns the utterance.
+    fn say_title(conversation: &mut Conversation) -> String {
+        conversation.talk(true);
+        let actions = conversation.take_actions();
+        let [Action::BeginUtterance(begun)] = &actions[..] else {
+            unreachable!("{actions:?}")
+        };
+        assert!(begun.titling && !begun.naming, "{actions:?}");
+        assert!(begun.answer.is_none() && begun.attention.is_empty());
+        begun.id.clone()
+    }
+
+    #[test]
+    fn an_owner_says_the_space_s_new_title_and_x_says_it_again_until_b_cancels() {
+        use crate::hand_menu::Choice as MenuChoice;
+        use crate::recording::Phase;
+        // From a server that does not rename spaces, nothing is offered, and X talks to the agent.
+        let mut conversation = joined(|_| {});
+        assert!(!conversation.menu_model().space.unwrap().retitles);
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        assert!(!conversation.menu_model().titling);
+        say(&mut conversation, false);
+
+        let mut conversation = joined(|state| state.renames = true);
+        assert!(conversation.menu_model().space.unwrap().retitles);
+        // Choosing it twice changes nothing after all; choosing a name instead stops waiting for the title.
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        assert!(!conversation.menu_model().titling);
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        assert!(conversation.menu_model().titling);
+        assert!(
+            conversation
+                .text()
+                .ends_with("Hold X to say the title | B cancel")
+        );
+        let utterance = say_title(&mut conversation);
+        assert!(!conversation.menu_model().titling, "once only");
+        let Some(Phase::Naming {
+            what: Naming::Title,
+            ..
+        }) = conversation.recording_phase(Instant::now())
+        else {
+            unreachable!("saying the title")
+        };
+        assert!(conversation.text().contains("MIC TITLE"));
+        conversation.talk(false);
+        conversation.take_actions();
+        // Refused, the title is not changed, and X says it again until B cancels.
+        conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
+            utterance,
+            error: "No title was heard.".into(),
+        }));
+        assert!(conversation.menu_model().titling);
+        assert_eq!(
+            conversation.error.as_deref(),
+            Some("Title not changed: No title was heard.")
+        );
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::NameFailed {
+                what: Naming::Title,
+                reason: "No title was heard.".into()
+            })
+        );
+        let again = say_title(&mut conversation);
+        conversation.talk(false);
+        conversation.take_actions();
+        conversation.apply(Event::Message(ServerMessage::Transcript {
+            utterance: again,
+            text: "Release planning".into(),
+            finished: true,
+        }));
+        assert_eq!(
+            conversation.recording_phase(Instant::now()),
+            Some(Phase::Named {
+                what: Naming::Title,
+                name: "Release planning".into()
+            })
+        );
+        // The participant's own name is not the title.
+        assert_eq!(conversation.display_name(), "Ada");
+        say(&mut conversation, false);
+        conversation.talk(false);
+        conversation.take_actions();
+
+        // B stops waiting for the title, and leaving the space does too.
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        conversation.back();
+        assert!(!conversation.menu_model().titling);
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        conversation.leave();
+        assert!(!conversation.menu_model().titling);
+
+        // A collaborator is offered none of it.
+        let mut conversation = joined(|state| state.renames = true);
+        conversation.apply(role(ConnectionRole::Collaborator));
+        assert!(!conversation.menu_model().space.unwrap().retitles);
+        conversation.choose_menu(MenuChoice::RenameSpace);
+        assert!(!conversation.menu_model().titling);
+        conversation.retitle("Mine");
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Only owners can rename a space.")
+        );
+        assert!(conversation.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_change_of_title_is_told_with_who_made_it_and_an_owner_lets_it_follow_its_session() {
+        use crate::hand_menu::Choice as MenuChoice;
+        let mut conversation = joined(|state| state.renames = true);
+        // Following its session, it says only what the space is now called.
+        conversation.apply(space(|state| {
+            state.renames = true;
+            state.title = "Tomori development".into();
+        }));
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("This space is now called “Tomori development”.")
+        );
+        // Renamed by the agent, or an owner, it says by whom, and the menu shows it.
+        conversation.apply(space(|state| {
+            state.renames = true;
+            state.title = "Release planning".into();
+            state.renamed_by = Some(tomori_protocol::Renamer::Agent);
+        }));
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Tomori renamed this space to “Release planning”.")
+        );
+        let menu = conversation.menu_model();
+        assert_eq!(
+            menu.space.as_ref().unwrap().renamed_by.as_deref(),
+            Some("Tomori")
+        );
+        conversation.apply(space(|state| {
+            state.renames = true;
+            state.title = "Ada's".into();
+            state.renamed_by = Some(tomori_protocol::Renamer::Participant { name: "Bob".into() });
+        }));
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Bob renamed this space to “Ada's”.")
+        );
+        // Someone a newer server names that this build does not know.
+        conversation.apply(space(|state| {
+            state.renames = true;
+            state.title = "Theirs".into();
+            state.renamed_by = Some(tomori_protocol::Renamer::Unknown);
+        }));
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("someone renamed this space to “Theirs”.")
+        );
+        conversation.apply(space(|state| {
+            state.renames = true;
+            state.title = "Ada's".into();
+            state.renamed_by = Some(tomori_protocol::Renamer::Participant { name: "Bob".into() });
+        }));
+        // The same title again tells nothing.
+        conversation.notice = None;
+        conversation.apply(space(|state| {
+            state.renames = true;
+            state.title = "Ada's".into();
+        }));
+        assert_eq!(conversation.menu_model().notice, None);
+        // Following its session again is asked of the server with an empty title, as typing nothing on the console is.
+        conversation.take_actions();
+        conversation.choose_menu(MenuChoice::FollowSession);
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(ClientMessage::RenameSpace {
+                title: String::new()
+            })]
+        );
+        conversation.retitle("  Release planning ");
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(ClientMessage::RenameSpace {
+                title: "Release planning".into()
+            })]
+        );
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Renaming this space to “Release planning”.")
+        );
+        // From a server that does not rename spaces, or outside a space, it says why not.
+        let mut conversation = joined(|_| {});
+        conversation.retitle("Nope");
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("This server cannot rename spaces.")
+        );
+        conversation.leave();
+        conversation.retitle("Nope");
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Join a space to rename it.")
+        );
     }
 
     /// A conversation on a server that renames, in a space, choosing to say a new name.
@@ -7143,6 +7457,7 @@ mod tests {
             assert_eq!(
                 conversation.recording_phase(Instant::now()),
                 Some(Phase::NameFailed {
+                    what: Naming::Name,
                     reason: error.into()
                 })
             );

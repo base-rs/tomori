@@ -83,6 +83,15 @@ pub fn event_for(
         "session.deleted" => for_session(data, session_id).then(|| Event::Closed {
             reason: Some("the OpenCode session was deleted".into()),
         }),
+        // The session's own title; a worker's is routed to its parent by the connection.
+        "session.renamed" => {
+            if !for_session(data, session_id) {
+                return None;
+            }
+            Some(Event::TitleChanged {
+                title: data.get("title")?.as_str()?.to_owned(),
+            })
+        }
         // Child creation is routed to its parent by the connection.
         "session.created" | "session.forked" => None,
         _ => None,
@@ -527,6 +536,24 @@ mod tests {
             worker_from_session(&info).unwrap().state,
             WorkerState::Unknown
         );
+    }
+
+    #[test]
+    fn renaming_the_registered_session_retitles_it_and_a_rename_without_a_title_is_none() {
+        let renamed =
+            serde_json::json!({"type":"session.renamed","data":{"sessionID":"s","title":"New"}});
+        assert_eq!(
+            event_for(&renamed, "s", &mut Default::default()),
+            Some(Event::TitleChanged {
+                title: "New".into()
+            })
+        );
+        assert!(event_for(&renamed, "other", &mut Default::default()).is_none());
+        let untitled = serde_json::json!({"type":"session.renamed","data":{"sessionID":"s"}});
+        assert!(event_for(&untitled, "s", &mut Default::default()).is_none());
+        let numbered =
+            serde_json::json!({"type":"session.renamed","data":{"sessionID":"s","title":1}});
+        assert!(event_for(&numbered, "s", &mut Default::default()).is_none());
     }
 
     #[test]

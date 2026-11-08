@@ -350,6 +350,7 @@ fn a_space_whose_session_cannot_be_bound_again_is_listed_closed() {
     let kept = |id: &str, backend: &str, session: &str| KeptSpace {
         id: id.into(),
         title: "Gone".into(),
+        renamed_by: None,
         backend: backend.into(),
         directory: std::env::temp_dir().to_string_lossy().into_owned(),
         session: session.into(),

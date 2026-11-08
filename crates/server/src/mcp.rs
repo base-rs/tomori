@@ -379,6 +379,18 @@ fn tools() -> Value {
             "annotations": change,
         },
         {
+            "name": "rename_space",
+            "description": "Rename your space, for everyone in it and in the server's list of spaces, in place of your session's own title, which it otherwise follows; an empty title lets it follow your session's title again. At most 200 bytes, on one line. Only when someone in the space asks; then tell them.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "maxLength": crate::limits::TITLE_BYTES },
+                },
+                "required": ["title"],
+            },
+            "annotations": change,
+        },
+        {
             "name": "pairing",
             "description": "The device pairing waiting on this Tomori server, if any: how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is paused. It never gives the code, since only the device shows it, nor the device's name, which the device chose itself.",
             "inputSchema": { "type": "object", "properties": {} },
@@ -489,6 +501,7 @@ async fn call(
         "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
+        "rename_space" => session.and_then(|session| rename_space(hub, session, arguments)),
         "pairing" => session.and_then(|session| hub.tool_pairing(session).map(structured)),
         "confirm_pairing" => session.and_then(|session| confirm_pairing(hub, session, arguments)),
         "decline_pairing" => {
@@ -556,6 +569,19 @@ fn set_environment(hub: &Hub, session: &str, arguments: &Value) -> Result<Value,
         ("environment", environment),
         format!("you moved the space to the {environment} environment"),
     ))
+}
+
+/// The `rename_space` tool.
+fn rename_space(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let asked = text(arguments, "title")?;
+    let result = hub.agent_rename_space(session, asked)?;
+    let title = hub.space_title(&result.space).unwrap_or_default();
+    let announcement = if crate::limits::title(asked).is_ok_and(|asked| asked.is_empty()) {
+        format!("the space follows your session's title again, so it is now called {title}")
+    } else {
+        format!("you renamed the space to {title}")
+    };
+    Ok(changed(result, ("title", &title), announcement))
 }
 
 /// The `confirm_pairing` tool.

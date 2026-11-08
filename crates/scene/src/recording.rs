@@ -73,14 +73,62 @@ pub enum Phase {
     },
     /// The words were not sent, with why. Shown for [`NOT_SENT`], until X is pressed again or B dismisses the problem.
     Failed { reason: String },
-    /// X is held to say the participant's new display name, as chosen in the hand menu. See `design/security.md`.
-    Naming { elapsed: Duration, heard: String },
+    /// X is held to say a new name, `what`, as chosen in the hand menu: the participant's display name, or their space's
+    /// title. See `design/hand-menu.md`.
+    Naming {
+        what: Naming,
+        elapsed: Duration,
+        heard: String,
+    },
     /// X was released; the server is taking the words as the new name.
-    Renaming { heard: String },
-    /// The server now calls the participant `name`.
-    Named { name: String },
+    Renaming { what: Naming, heard: String },
+    /// The server now calls the participant, or the space, `name`.
+    Named { what: Naming, name: String },
     /// Words that said a new name did not change it, with why. X says the name again, until B cancels.
-    NameFailed { reason: String },
+    NameFailed { what: Naming, reason: String },
+}
+
+/// What words said in place of the agent's input name. See `design/hand-menu.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Naming {
+    /// The participant's new display name. See `design/security.md`.
+    Name,
+    /// Their space's new title, said by an owner. See `design/spaces.md`.
+    Title,
+}
+
+impl Naming {
+    /// The card's tag while the words are said.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Name => "NAME ",
+            Self::Title => "TITLE ",
+        }
+    }
+
+    /// What to say.
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Name => "Say your new name",
+            Self::Title => "Say this space's new title",
+        }
+    }
+
+    /// Why the name was not changed begins with this.
+    pub fn not_changed(self) -> &'static str {
+        match self {
+            Self::Name => "Name not changed: ",
+            Self::Title => "Title not changed: ",
+        }
+    }
+
+    /// The name taken follows this.
+    fn named(self) -> &'static str {
+        match self {
+            Self::Name => "✓ You are ",
+            Self::Title => "✓ Renamed: ",
+        }
+    }
 }
 
 /// The time against the limit, as "1:42 / 5:00", or alone without a limit.
@@ -273,18 +321,22 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             rows.push(Row::text("B dismisses", Style::plain(DIM), COLUMNS));
             canvas.border = Some(RED);
         }
-        Phase::Naming { elapsed, heard } => {
+        Phase::Naming {
+            what,
+            elapsed,
+            heard,
+        } => {
             let dot = [AMBER[0], AMBER[1], AMBER[2], 0.45 + 0.55 * pulse];
             let rows = &mut canvas.rows;
             rows.push(Row::new(cut(
                 &[
                     Span::new("● ", Style::plain(dot)),
-                    Span::new("NAME ", Style::bold(AMBER)),
+                    Span::new(what.tag(), Style::bold(AMBER)),
                     Span::new(clock(*elapsed, None), Style::plain(AMBER)),
                 ],
                 COLUMNS,
             )));
-            rows.push(Row::text("Say your new name", Style::plain(DIM), COLUMNS));
+            rows.push(Row::text(what.prompt(), Style::plain(DIM), COLUMNS));
             if heard.trim().is_empty() {
                 rows.push(Row::text("Listening…", Style::plain(DIM), COLUMNS));
             } else {
@@ -296,18 +348,18 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
                 COLUMNS,
             ));
         }
-        Phase::Renaming { heard } => {
+        Phase::Renaming { heard, .. } => {
             let rows = &mut canvas.rows;
             rows.push(Row::text("Renaming…", Style::bold(TEXT), COLUMNS));
             if !heard.trim().is_empty() {
                 rows.extend(tail(heard, 2, Style::plain(DIM)));
             }
         }
-        Phase::NameFailed { reason } => {
+        Phase::NameFailed { what, reason } => {
             let rows = &mut canvas.rows;
             let mut lines = wrap(
                 &[
-                    Span::new("Name not changed: ", Style::bold(RED)),
+                    Span::new(what.not_changed(), Style::bold(RED)),
                     Span::new(reason.as_str(), Style::plain(TEXT)),
                 ],
                 COLUMNS,
@@ -322,10 +374,10 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             ));
             canvas.border = Some(RED);
         }
-        Phase::Named { name } => {
+        Phase::Named { what, name } => {
             canvas.rows.push(Row::new(cut(
                 &[
-                    Span::new("✓ You are ", Style::bold(GREEN)),
+                    Span::new(what.named(), Style::bold(GREEN)),
                     Span::new(name.as_str(), Style::bold(TEXT)),
                 ],
                 COLUMNS,
@@ -669,6 +721,7 @@ mod tests {
         let naming = |heard: &str| {
             text(&canvas(
                 &Phase::Naming {
+                    what: Naming::Name,
                     elapsed: Duration::from_secs(2),
                     heard: heard.into(),
                 },
@@ -684,6 +737,7 @@ mod tests {
         let renaming = |heard: &str| {
             text(&canvas(
                 &Phase::Renaming {
+                    what: Naming::Name,
                     heard: heard.into(),
                 },
                 None,
@@ -693,11 +747,19 @@ mod tests {
         assert_eq!(renaming(" "), "Renaming…");
         assert!(renaming("Ada").contains("\"Ada\""));
         assert_eq!(
-            text(&canvas(&Phase::Named { name: "Ada".into() }, None, 0.0)),
+            text(&canvas(
+                &Phase::Named {
+                    what: Naming::Name,
+                    name: "Ada".into()
+                },
+                None,
+                0.0
+            )),
             "✓ You are Ada"
         );
         let refused = canvas(
             &Phase::NameFailed {
+                what: Naming::Name,
                 reason: "That name is taken.".into(),
             },
             None,
@@ -710,6 +772,42 @@ mod tests {
     }
 
     #[test]
+    fn saying_a_space_s_new_title_says_so_from_holding_x_to_the_title_taken() {
+        let titling = text(&canvas(
+            &Phase::Naming {
+                what: Naming::Title,
+                elapsed: Duration::from_secs(3),
+                heard: String::new(),
+            },
+            None,
+            0.0,
+        ));
+        assert!(titling.starts_with("● TITLE 0:03"), "{titling}");
+        assert!(titling.contains("Say this space's new title"), "{titling}");
+        assert!(titling.ends_with("Release X to rename"), "{titling}");
+        assert_eq!(
+            text(&canvas(
+                &Phase::Named {
+                    what: Naming::Title,
+                    name: "Release planning".into()
+                },
+                None,
+                0.0
+            )),
+            "✓ Renamed: Release planning"
+        );
+        let refused = text(&canvas(
+            &Phase::NameFailed {
+                what: Naming::Title,
+                reason: "Only owners can do that.".into(),
+            },
+            None,
+            0.0,
+        ));
+        assert!(refused.starts_with("Title not changed: Only"), "{refused}");
+    }
+
+    #[test]
     fn every_state_fits_the_indicator() {
         let limit = Some(Duration::from_secs(300));
         for phase in [
@@ -719,14 +817,21 @@ mod tests {
                 reason: "x".repeat(500),
             },
             Phase::NameFailed {
+                what: Naming::Name,
                 reason: "x".repeat(500),
             },
             Phase::Naming {
+                what: Naming::Title,
                 elapsed: Duration::from_secs(4),
                 heard: "word ".repeat(80),
             },
             Phase::Named {
+                what: Naming::Name,
                 name: "W".repeat(64),
+            },
+            Phase::Named {
+                what: Naming::Title,
+                name: "W".repeat(200),
             },
         ] {
             let canvas = canvas(&phase, limit, 0.5);

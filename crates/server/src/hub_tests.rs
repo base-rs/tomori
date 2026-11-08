@@ -296,6 +296,7 @@ fn a_new_utterance_fails_the_one_still_open() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     };
     client.send(begin("one"));
@@ -983,6 +984,7 @@ fn utterances_are_ended_or_cancelled_only_while_open() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     };
     client.send(begin.clone());
@@ -1045,6 +1047,7 @@ fn progress_is_told_only_to_a_client_that_asks_from_the_end_until_the_outcome() 
             answer: None,
             progress: asks,
             naming: false,
+            titling: false,
             attention: Vec::new(),
         });
     }
@@ -1108,6 +1111,7 @@ fn progress_is_told_only_on_the_connection_that_asked_while_it_is_the_participan
         answer: None,
         progress: true,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     newer.send(ClientMessage::UtteranceEnd {
@@ -1156,6 +1160,7 @@ fn an_utterance_transcribed_before_it_ended_is_still_ended() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
@@ -1260,6 +1265,7 @@ fn a_transcript_comes_to_nothing_for_an_utterance_unknown_unheard_or_left_behind
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention: Vec::new(),
         });
         client.send(ClientMessage::UtteranceEnd {
@@ -1317,6 +1323,7 @@ fn only_the_latest_spoken_answers_are_remembered() {
         }),
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     client.send(ClientMessage::UtteranceEnd {
@@ -1388,6 +1395,7 @@ fn words_for_a_driver_that_has_stopped_are_marked_unsent() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     let utterance = *hub.lock().utterances.keys().next().unwrap();
@@ -1660,6 +1668,7 @@ fn a_token_holder_is_known_by_the_name_kept_with_their_token_on_every_device() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     laptop.send(ClientMessage::UtteranceEnd {
@@ -1845,6 +1854,7 @@ fn say_name(hub: &Arc<Hub>, client: &Client, text: &str) -> Vec<ServerMessage> {
         }),
         progress: false,
         naming: true,
+        titling: false,
         attention: Vec::new(),
     });
     client.send(ClientMessage::UtteranceEnd {
@@ -1906,6 +1916,43 @@ fn a_name_said_aloud_renames_the_speaker_and_is_never_queued() {
     assert_eq!(finished(&said), Some(Ok("Bob".to_owned())));
     assert_eq!(present(&said), ["Ada Lovelace", "Bob"]);
     assert_eq!(store.tokens.entries().len(), 1);
+}
+
+#[test]
+fn words_say_a_name_or_a_title_but_not_both_and_a_title_for_a_space_gone_is_not_taken() {
+    let (hub, _jobs) = hub_waiting();
+    let id = stopped(&hub, Snapshot::default());
+    let owner = Client::greeted(&hub, Access::open(), "ada");
+    owner.join(&id);
+    owner.read();
+    let begin = |naming| ClientMessage::UtteranceBegin {
+        utterance: "title".to_owned(),
+        answer: None,
+        progress: false,
+        naming,
+        titling: true,
+        attention: Vec::new(),
+    };
+    owner.send(begin(true));
+    assert_eq!(
+        owner.errors(),
+        ["Words cannot say both your name and the space's title."]
+    );
+    assert!(hub.lock().utterances.is_empty());
+
+    // Said, and the space forgotten before its words are transcribed, the title renames nothing.
+    owner.send(begin(false));
+    owner.send(ClientMessage::UtteranceEnd {
+        utterance: "title".to_owned(),
+        pointed: None,
+    });
+    let utterance = *hub.lock().utterances.keys().next().unwrap();
+    hub.lock().spaces.clear();
+    hub.transcript_finished(utterance, "Release planning");
+    assert_eq!(
+        finished(&owner.read()),
+        Some(Err("That space is no longer listed.".to_owned()))
+    );
 }
 
 #[test]
@@ -2015,6 +2062,7 @@ fn hostile_names_are_cleaned_or_refused_before_anyone_reads_them() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     quest.send(ClientMessage::UtteranceEnd {
@@ -2379,6 +2427,7 @@ fn a_card_attended_to_as_the_words_begin_is_described_from_the_board_before_them
             answer: None,
             progress: false,
             naming: false,
+            titling: false,
             attention,
         });
         // What the board says after the words begin changes nothing they attend to.
@@ -2965,6 +3014,7 @@ fn an_environment_s_side_shares_its_state_with_those_who_present_it_and_takes_pa
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: vec![
             tomori_protocol::Resource::object("thing-1"),
             tomori_protocol::Resource::object("thing-1"),
@@ -3269,6 +3319,7 @@ fn said(
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention,
     });
     client.send(ClientMessage::UtteranceEnd { utterance, pointed });

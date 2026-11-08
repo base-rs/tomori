@@ -201,6 +201,10 @@ pub enum MenuKey {
     Pair,
     /// Say a new display name with the next press of X, or not after all.
     Rename,
+    /// Say the space's new title with the next press of X, or not after all, as an owner.
+    RenameSpace,
+    /// Let the space's title follow its agent session's again, as an owner.
+    FollowSession,
     /// Open a layer of the agent's instructions.
     Layer(Layer),
     /// Remove the space's own instructions, as an owner.
@@ -271,6 +275,8 @@ pub struct Model {
     pub renames: bool,
     /// Whether the next press of X says their new name.
     pub naming: bool,
+    /// Whether the next press of X says the space's new title.
+    pub titling: bool,
     pub role: ConnectionRole,
     pub in_space: bool,
     pub participants: Vec<String>,
@@ -325,6 +331,10 @@ pub struct SpaceInfo {
     /// For an owner on a server that deletes spaces, whether its agent session can be deleted with it; `None` for
     /// anyone else, who cannot delete it. See `design/spaces.md`.
     pub deletion: Option<bool>,
+    /// Who renamed the space, in place of its agent session's title, if anyone did.
+    pub renamed_by: Option<String>,
+    /// Whether this participant can rename the space: an owner, on a server that renames spaces.
+    pub retitles: bool,
 }
 
 /// A participant, as People & security shows them.
@@ -352,6 +362,10 @@ pub enum Choice {
     Pair,
     /// Say a new display name with the next press of X, or not after all.
     Rename,
+    /// Say the space's new title with the next press of X, or not after all.
+    RenameSpace,
+    /// Let the space's title follow its agent session's again.
+    FollowSession,
     /// Remove the space's own instructions to the agent.
     ClearInstructions,
     /// Switch the agent to this mode.
@@ -530,6 +544,33 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     MenuKind::Text,
                     row(&[Part::Cut(&space.running)]),
                 );
+                // Who named it, if not its session, and, for an owner, renaming it aloud, since typing on the headset is
+                // not practical yet, or letting it follow its session again. See `design/hand-menu.md`.
+                if let Some(by) = &space.renamed_by {
+                    text(
+                        &mut items,
+                        MenuKind::Text,
+                        row(&[Part::Kept("Renamed by "), Part::Cut(by)]),
+                    );
+                }
+                if space.retitles {
+                    button(
+                        &mut items,
+                        MenuKey::RenameSpace,
+                        if model.titling {
+                            "Hold X, say the new title".into()
+                        } else {
+                            "Rename this space".into()
+                        },
+                    );
+                    if space.renamed_by.is_some() {
+                        button(
+                            &mut items,
+                            MenuKey::FollowSession,
+                            "Use its agent session's title".into(),
+                        );
+                    }
+                }
                 text(&mut items, MenuKind::Heading, "Mode".into());
                 if space.modes.is_empty() {
                     let mode = space.mode.as_deref().unwrap_or("none offered");
@@ -1066,6 +1107,8 @@ impl HandMenu {
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),
             MenuKey::Pair => Some(Choice::Pair),
             MenuKey::Rename => Some(Choice::Rename),
+            MenuKey::RenameSpace => Some(Choice::RenameSpace),
+            MenuKey::FollowSession => Some(Choice::FollowSession),
             MenuKey::Text(_) | MenuKey::Cue | MenuKey::WristCue => None,
         }
     }
@@ -1576,6 +1619,63 @@ mod tests {
     }
 
     #[test]
+    fn an_owner_renames_the_space_aloud_or_lets_it_follow_its_session_and_everyone_sees_who_named_it()
+     {
+        let mut model = in_space(ConnectionRole::Owner);
+        let space = model.space.as_mut().unwrap();
+        space.retitles = true;
+        let rows = items(Some(Section::Space), &model);
+        let at = rows
+            .iter()
+            .position(|item| item.key == MenuKey::RenameSpace)
+            .unwrap();
+        // Beneath what the space runs, before its modes.
+        assert_eq!(rows[at - 1].text, "opencode in tomori");
+        assert_eq!(
+            (rows[at].text.as_str(), rows[at].kind),
+            ("Rename this space", MenuKind::Button)
+        );
+        assert!(!rows.iter().any(|item| item.key == MenuKey::FollowSession));
+        let mut menu = HandMenu::default();
+        assert_eq!(
+            menu.choose(&MenuKey::RenameSpace),
+            Some(Choice::RenameSpace)
+        );
+        assert_eq!(
+            menu.choose(&MenuKey::FollowSession),
+            Some(Choice::FollowSession)
+        );
+        // Chosen, the next press of X says it.
+        model.titling = true;
+        assert!(texts(&items(Some(Section::Space), &model)).contains(&"Hold X, say the new title"));
+
+        // Renamed, everyone reads who named it, and an owner can let it follow its session again.
+        model.space.as_mut().unwrap().renamed_by = Some("Tomori".into());
+        let rows = items(Some(Section::Space), &model);
+        let texts = texts(&rows);
+        let at = texts
+            .iter()
+            .position(|text| *text == "Renamed by Tomori")
+            .unwrap();
+        assert_eq!(rows[at + 2].key, MenuKey::FollowSession);
+        assert_eq!(rows[at + 2].text, "Use its agent session's title");
+        let mut model = in_space(ConnectionRole::Collaborator);
+        model.space.as_mut().unwrap().renamed_by = Some("W".repeat(80));
+        let rows = items(Some(Section::Space), &model);
+        let shown = rows
+            .iter()
+            .find(|item| item.text.starts_with("Renamed by "))
+            .unwrap();
+        assert_eq!(shown.kind, MenuKind::Text);
+        assert!(shown.text.ends_with('…') && shown.text.chars().count() <= WIDTH);
+        assert!(
+            !rows
+                .iter()
+                .any(|item| matches!(item.key, MenuKey::RenameSpace | MenuKey::FollowSession))
+        );
+    }
+
+    #[test]
     fn the_agent_section_shows_each_layer_in_a_space_and_opens_it() {
         let mut model = Model {
             role: ConnectionRole::Owner,
@@ -1684,6 +1784,8 @@ mod tests {
                 here: "2 here".into(),
                 walls: None,
                 deletion: None,
+                renamed_by: None,
+                retitles: false,
             }),
             people: vec![
                 Person {

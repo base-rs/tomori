@@ -57,6 +57,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         answer: None,
         progress: false,
         naming: false,
+        titling: false,
         attention: Vec::new(),
     });
     let error = ada.error();

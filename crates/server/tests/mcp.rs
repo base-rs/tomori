@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tomori_backend::{Event, Snapshot, ToolServer, Worker, WorkerState};
-use tomori_protocol::{ClientMessage, QueueState, SpeechSetting};
+use tomori_protocol::{ClientMessage, QueueState, Renamer, ServerMessage, SpeechSetting};
 use tomori_server::Server;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
 use tomori_server::kept::SpaceStore;
@@ -432,6 +432,7 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "move_panel",
             "set_speech",
             "set_environment",
+            "rename_space",
             "pairing",
             "confirm_pairing",
             "decline_pairing",
@@ -529,8 +530,9 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         "move_panel",
         "set_speech",
         "set_environment",
+        "rename_space",
     ] {
-        let arguments = json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest"});
+        let arguments = json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest", "title": "Elsewhere"});
         assert_eq!(
             failure(&call(&server, &token, None, tool, arguments.clone())),
             "Tomori's space tools act on the space of the agent session that calls them, and this call names no session.",
@@ -619,6 +621,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
         "move_panel",
         "set_speech",
         "set_environment",
+        "rename_space",
     ] {
         assert_eq!(
             failure(&call(
@@ -626,7 +629,7 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
                 &token,
                 Some(&one),
                 tool,
-                json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest"})
+                json!({"speech": "brief", "environment": "minimal", "panel": "panel-1", "place": "nearest", "title": "Elsewhere"})
             )),
             "This session is bound to more than one open Tomori space, so Tomori cannot tell which one to act on.",
             "{tool}"
@@ -905,6 +908,136 @@ fn the_agent_changes_its_space_s_speech_and_environment_for_everyone_and_is_aske
             "{tool}"
         );
     }
+}
+
+#[test]
+fn the_agent_renames_its_own_space_for_everyone_within_the_limits_and_is_asked_to_say_so() {
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = server.connect("ada", "Ada");
+    let space = create(&mut ada, "Studio");
+    let other = create(&mut ada, "Other");
+    let token = token(registrations(&backend, 1)[0].1.as_ref().unwrap());
+    let session = backend.started()[0].clone();
+    let caller = id(&session);
+    let caller = Some(caller.as_str());
+    // A collaborator in the space and someone in the lobby see the change.
+    let mut bob = server.connect("bob", "Bob");
+    bob.send(&ClientMessage::Join {
+        space: space.clone(),
+    });
+    bob.space(|state| state.participants.len() == 1 && state.id == space);
+    let lobby = server.connect("cat", "Cat");
+
+    // The title is cleaned onto one line, and everyone, in the space and the lobby, sees that the agent renamed it.
+    let renamed = call(
+        &server,
+        &token,
+        caller,
+        "rename_space",
+        json!({"title": "  Release\nplanning  "}),
+    );
+    assert_eq!(
+        renamed["structuredContent"],
+        json!({
+            "space": space,
+            "title": "Release planning",
+            "changed": true,
+            "next": "Tell everyone in the space that you renamed the space to Release planning.",
+        })
+    );
+    let state = bob.space(|state| state.title == "Release planning");
+    assert_eq!(state.renamed_by, Some(Renamer::Agent));
+    assert!(state.renames);
+    lobby.wait_for(|message| {
+        matches!(message, ServerMessage::Spaces { spaces } if spaces
+            .iter()
+            .any(|summary| summary.id == space && summary.title == "Release planning"))
+        .then_some(())
+    });
+    eventually(|| {
+        logged()
+            .iter()
+            .any(|line| {
+                *line
+                    == format!(
+                        "Space {space} is now titled \"Release planning\", as its agent asked."
+                    )
+            })
+            .then_some(())
+    });
+    // Only its own space: the other keeps its title.
+    let listed = call(&server, &token, None, "spaces", json!({}))["structuredContent"].clone();
+    assert!(
+        listed["spaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|summary| summary["id"] == other && summary["title"] == "Other")
+    );
+    // Renamed, the space no longer follows its session's title.
+    session.retitle("Something else");
+    session.emit(Event::Busy);
+    let state = bob.space(|state| state.activity == tomori_protocol::Activity::Running);
+    assert_eq!(state.title, "Release planning");
+
+    // The same title again changes nothing and asks nothing.
+    let again = call(
+        &server,
+        &token,
+        caller,
+        "rename_space",
+        json!({"title": "Release planning"}),
+    );
+    assert_eq!(again["structuredContent"]["changed"], false);
+    assert!(
+        again["structuredContent"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("there is nothing to tell")
+    );
+    // Too long a title is refused, saying why, and changes nothing; so is a call without one.
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            caller,
+            "rename_space",
+            json!({"title": "t".repeat(201)})
+        )),
+        "That title is too long; the limit is 200 bytes."
+    );
+    assert_eq!(
+        failure(&call(&server, &token, caller, "rename_space", json!({}))),
+        "This tool needs title, as text."
+    );
+    // An empty title lets it follow its session's title again, which it takes at once.
+    let cleared = call(
+        &server,
+        &token,
+        caller,
+        "rename_space",
+        json!({"title": "  "}),
+    );
+    assert_eq!(
+        cleared["structuredContent"]["next"],
+        "Tell everyone in the space that the space follows your session's title again, so it is now called Something else."
+    );
+    let state = bob.space(|state| state.title == "Something else");
+    assert_eq!(state.renamed_by, None);
+    // In a closed space, the tool changes nothing.
+    session.emit(Event::Closed { reason: None });
+    bob.space(|state| state.activity == tomori_protocol::Activity::Closed);
+    assert_eq!(
+        failure(&call(
+            &server,
+            &token,
+            caller,
+            "rename_space",
+            json!({"title": "Late"})
+        )),
+        "This space's agent session has stopped."
+    );
 }
 
 #[test]
