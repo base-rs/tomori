@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate or on an app, in any kind of dependency, development dependencies included, or builds an environment's crate with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them; and, as `design/projection.md` requires, no client builds the server's code highlighting.
+//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate or on an app, in any kind of dependency, development dependencies included, or builds an environment's crate with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them; and, as `design/projection.md` requires, no client builds the server's code highlighting, nor, as `design/data-sources.md` requires, a data source.
 use std::path::Path;
 use std::process::Command;
 
@@ -351,6 +351,36 @@ fn highlighting_is_built_by_the_server_and_never_by_a_client() {
         assert!(
             highlighting.is_empty(),
             "{name} builds {highlighting:?}; code is highlighted on the server, and a client is sent its spans"
+        );
+    }
+    assert!(checked >= 10, "only {checked} client crates were found");
+}
+
+/// Whether `name` is a data source, which holds credentials and reaches the network, and so is read only by a server, as `design/data-sources.md` requires.
+fn data_source(name: &str) -> bool {
+    name == "tomori-prometheus"
+}
+
+#[test]
+fn data_sources_are_read_by_servers_and_never_by_a_client() {
+    // The rule's predicates tell a data source and a client apart, so that the rule below can fail.
+    assert!(data_source("tomori-prometheus") && !data_source("tomori-protocol"));
+    assert!(client("tomori-render") && !client("tomori-environment-github-server"));
+    let mut checked = 0;
+    for package in packages() {
+        let name = package["name"].as_str().unwrap();
+        if !client(name) {
+            continue;
+        }
+        checked += 1;
+        // A data source holds credentials and reaches the network, which `design/data-sources.md` keeps in the server, so no client builds one, with any feature, on any target.
+        let sources: Vec<String> = tree(name, "normal,build", &["--all-features"])
+            .into_iter()
+            .filter(|dependency| data_source(dependency))
+            .collect();
+        assert!(
+            sources.is_empty(),
+            "{name} builds {sources:?}; data sources are read on the server, and clients are sent what they need"
         );
     }
     assert!(checked >= 10, "only {checked} client crates were found");
