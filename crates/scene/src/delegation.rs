@@ -22,7 +22,7 @@ const MAX_CARDS: usize = 16;
 // Match the spectator's station ID bound.
 const MAX_ID_BYTES: usize = 160;
 const MAX_WORKERS: usize = MAX_NODES * 2;
-const SLOT_COUNT: usize = MAX_NODES * 3;
+pub(crate) const SLOT_COUNT: usize = MAX_NODES * 3;
 const PARTICLES: usize = 24;
 const MAX_COORDINATOR_SAMPLES: usize = 128;
 const ARRIVAL_SECONDS: f32 = 1.5;

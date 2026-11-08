@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use tomori_protocol::{
     CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, WALL_SLOTS, Wall, WallKind,
+    WallShape,
 };
 
 use crate::{
@@ -28,10 +29,22 @@ use crate::{
     ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style, cut},
 };
 
-/// A panel's face, in cells: a title, a row of metadata, a rule, and its body.
+/// A panel's face in a wall's slot, in cells: a title, a row of metadata, a rule, and its body.
 pub const COLUMNS: usize = 34;
 pub const BODY_ROWS: usize = 12;
 const ROWS: usize = BODY_ROWS + 3;
+/// A floating panel's face fits its text, within these bounds, in cells: never narrower or wider, so that it reads at a
+/// comfortable width, nor shorter or taller.
+pub const FIT_COLUMNS: (usize, usize) = (24, 48);
+pub const FIT_ROWS: (usize, usize) = (3, 30);
+/// How a curved wall's slots are sized, against a flat wall's: smaller, as they stand nearer, and a gap between them, in
+/// metres.
+pub const ARC_SCALE: f32 = 0.7;
+const ARC_GAP: f32 = 0.03;
+/// The furthest along the ray a slot is aimed at to put a panel carried in it, in metres.
+const AIM_REACH: f32 = 8.0;
+/// How far beyond a slot's edges the ray still aims at it, so that the gaps between slots aim at one, in metres.
+const AIM_MARGIN: f32 = 0.03;
 /// The size of a font pixel on a wall, in metres: a panel is about 60 by 36 cm, its text legible from about 3 m.
 pub const PIXEL: f32 = 0.0019;
 const PADDING: (usize, usize) = (6, 5);
@@ -81,21 +94,83 @@ const FRAME: [f32; 4] = [0.32, 0.38, 0.46, 0.9];
 const NEWEST: [f32; 4] = [0.3, 0.75, 0.95, 1.0];
 const HIGHLIGHT: [f32; 4] = [0.35, 0.95, 1.0, 1.0];
 const SLOT: [f32; 4] = [0.0, 0.0, 0.0, 0.3];
+const GHOST: [f32; 4] = [0.35, 0.95, 1.0, 0.16];
 
 /// Where a participant puts a panel they let go.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
-    /// Into the layout of the wall with this identity.
-    Wall(String),
+    /// Into this slot of the wall with this identity.
+    Wall(String, u32),
     /// Floating free at this pose.
     Free(Pose),
 }
 
-/// The size of a panel, in metres.
-pub fn panel_size() -> (f32, f32) {
-    let width = COLUMNS * CELL_WIDTH + 2 * PADDING.0;
-    let height = ROWS * CELL_HEIGHT + 2 * PADDING.1;
+/// How a panel's face is sized: to its wall's slot, or, floating, to fit its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    Slot,
+    Text,
+}
+
+/// The size of a panel's face of `columns` and `body` rows, in metres.
+fn sized(columns: usize, body: usize) -> (f32, f32) {
+    let width = columns * CELL_WIDTH + 2 * PADDING.0;
+    let height = (body + 3) * CELL_HEIGHT + 2 * PADDING.1;
     (width as f32 * PIXEL, height as f32 * PIXEL)
+}
+
+/// The size of a panel in a wall's slot, in metres.
+pub fn panel_size() -> (f32, f32) {
+    sized(COLUMNS, BODY_ROWS)
+}
+
+/// A panel's body, as the rows its face shows at `columns`, styled as the transcript styles a message. The one place a
+/// panel's content becomes rows, so that every kind of content sizes alike.
+fn body_rows(panel: &Panel, columns: usize) -> Vec<Vec<crate::ui_text::Cell>> {
+    crate::transcript::parse_markdown(&panel.body, columns)
+}
+
+/// How many columns and body rows `panel`'s face has when it is sized as `fit` says: a slot's, or, to fit its text, as
+/// wide as its widest row, title and metadata, within [`FIT_COLUMNS`], its body wrapped at that width, as many rows as
+/// that takes, within [`FIT_ROWS`]. A code panel is always a slot's size, as its code face is.
+pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
+    match fit {
+        Fit::Slot => (COLUMNS, BODY_ROWS),
+        Fit::Text if panel.code.is_some() => (COLUMNS, BODY_ROWS),
+        Fit::Text => {
+            let widest = body_rows(panel, FIT_COLUMNS.1)
+                .iter()
+                .map(Vec::len)
+                .chain([
+                    cut(
+                        &[crate::ui_text::Span::new(
+                            &panel.title,
+                            Style::plain(BRIGHT),
+                        )],
+                        usize::MAX,
+                    )
+                    .len(),
+                    cut(
+                        &[crate::ui_text::Span::new(about(panel), Style::plain(DIM))],
+                        usize::MAX,
+                    )
+                    .len(),
+                ])
+                .max()
+                .unwrap_or_default();
+            let columns = widest.clamp(FIT_COLUMNS.0, FIT_COLUMNS.1);
+            let rows = body_rows(panel, columns)
+                .len()
+                .clamp(FIT_ROWS.0, FIT_ROWS.1);
+            (columns, rows)
+        }
+    }
+}
+
+/// The size of `panel`, in metres, sized as `fit` says.
+pub fn fitted_size(panel: &Panel, fit: Fit) -> (f32, f32) {
+    let (columns, body) = self::fit(panel, fit);
+    sized(columns, body)
 }
 
 /// The size of a wall, in metres.
@@ -195,9 +270,10 @@ pub fn palette(kind: TokenKind) -> crate::ui_text::Rgba {
 }
 
 /// What a panel's face shows: its title, bold, its metadata and age, a rule, and its body as Markdown-lite, styled as
-/// the transcript styles a message, on [`BODY_ROWS`] rows, ending with "…" where it is longer. A `highlighted` panel,
-/// pointed at or carried, is framed brightly, and the `newest` on its wall in blue.
-pub fn face(panel: &Panel, highlighted: bool, newest: bool) -> Canvas {
+/// the transcript styles a message, as wide and on as many rows as `fit` says, ending with "…" where it is longer; a
+/// code panel's, its code face, the size of a slot however it is fitted. A `highlighted` panel, pointed at or carried,
+/// is framed brightly, and the `newest` on its wall in blue.
+pub fn face(panel: &Panel, highlighted: bool, newest: bool, fit: Fit) -> Canvas {
     let border = Some(if highlighted {
         HIGHLIGHT
     } else if newest {
@@ -210,23 +286,24 @@ pub fn face(panel: &Panel, highlighted: bool, newest: bool) -> Canvas {
         canvas.border = border;
         return canvas;
     }
-    let mut canvas = Canvas::new(COLUMNS, PIXEL);
+    let (columns, body_count) = self::fit(panel, fit);
+    let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
     canvas.background = [0.02, 0.035, 0.06, 0.94];
     canvas.border = border;
     let mut rows = vec![
-        Row::text(&panel.title, Style::bold(BRIGHT), COLUMNS),
-        Row::text(&about(panel), Style::plain(DIM), COLUMNS),
-        Row::text(&"─".repeat(COLUMNS), Style::plain(DIM), COLUMNS),
+        Row::text(&panel.title, Style::bold(BRIGHT), columns),
+        Row::text(&about(panel), Style::plain(DIM), columns),
+        Row::text(&"─".repeat(columns), Style::plain(DIM), columns),
     ];
-    let mut body = crate::transcript::parse_markdown(&panel.body, COLUMNS);
-    if body.len() > BODY_ROWS {
-        body.truncate(BODY_ROWS);
-        let last = &mut body[BODY_ROWS - 1];
-        last.truncate(COLUMNS - 1);
+    let mut body = body_rows(panel, columns);
+    if body.len() > body_count {
+        body.truncate(body_count);
+        let last = &mut body[body_count - 1];
+        last.truncate(columns - 1);
         last.push(('…', Style::plain(TEXT)));
     }
-    body.resize(BODY_ROWS, Vec::new());
+    body.resize(body_count, Vec::new());
     rows.extend(body.into_iter().map(Row::new));
     canvas.rows = rows;
     canvas
@@ -292,15 +369,21 @@ fn code_face(panel: &Panel, code: &Code) -> Canvas {
     canvas
 }
 
+/// The colour of a wall's frame, and its slots' on a curved wall.
+fn wall_border(wall: &Wall) -> [f32; 4] {
+    match wall.kind {
+        WallKind::Tomori => [0.35, 0.75, 0.95, 0.55],
+        _ => [0.5, 0.55, 0.62, 0.45],
+    }
+}
+
 /// A wall's own face: a translucent board labelled with whose it is, its slots faintly marked.
 fn wall_face(wall: &Wall) -> Canvas {
     let mut canvas = Canvas::new(WALL_COLUMNS, PIXEL);
     canvas.padding = WALL_PADDING;
     canvas.background = [0.01, 0.02, 0.04, 0.5];
-    let (label, color, border) = match wall.kind {
-        WallKind::Tomori => ("TOMORI", [0.6, 0.85, 1.0, 1.0], [0.35, 0.75, 0.95, 0.55]),
-        _ => ("WALL", DIM, [0.5, 0.55, 0.62, 0.45]),
-    };
+    let (label, color) = wall_label(wall);
+    let border = wall_border(wall);
     canvas.border = Some(border);
     let label = Row::text(label, Style::bold(color), WALL_COLUMNS);
     canvas.rows = vec![Row::new(
@@ -326,6 +409,74 @@ fn wall_face(wall: &Wall) -> Canvas {
         })
         .collect();
     canvas
+}
+
+/// A slot's own board on a curved wall: as large as a panel in it, faintly marked.
+fn slot_board(border: [f32; 4]) -> Canvas {
+    let mut canvas = Canvas::new(COLUMNS, PIXEL);
+    canvas.padding = PADDING;
+    canvas.background = [0.01, 0.02, 0.04, 0.45];
+    canvas.border = Some(border);
+    canvas.rows = vec![Row::default(); ROWS];
+    canvas
+}
+
+/// The outline a panel carried shows in the slot it would take if let go: as large as a panel in it, framed brightly
+/// and faintly filled.
+fn ghost() -> Canvas {
+    let mut canvas = slot_board(HIGHLIGHT);
+    canvas.background = GHOST;
+    canvas
+}
+
+/// A curved wall's label, below the middle of its row of slots.
+fn arc_label(wall: &Wall) -> Canvas {
+    let (label, color) = wall_label(wall);
+    let mut canvas = Canvas::new(label.len(), PIXEL);
+    canvas.padding = (CELL_WIDTH, 2);
+    canvas.background = [0.01, 0.02, 0.04, 0.5];
+    canvas.rows = vec![Row::text(label, Style::bold(color), label.len())];
+    canvas
+}
+
+/// What a wall is labelled, and in which colour.
+fn wall_label(wall: &Wall) -> (&'static str, [f32; 4]) {
+    match wall.kind {
+        WallKind::Tomori => ("TOMORI", [0.6, 0.85, 1.0, 1.0]),
+        _ => ("WALL", DIM),
+    }
+}
+
+/// The radius of a curved wall's arc, if `wall` is one this client can draw curved: one whose radius is long enough
+/// for its slots to stand side by side. Any other shape is drawn flat.
+fn arc(wall: &Wall) -> Option<f32> {
+    match wall.shape {
+        WallShape::Arc { radius } if radius.is_finite() && radius >= 1.0 => Some(radius),
+        _ => None,
+    }
+}
+
+/// Where each of a wall's slots stands, given its `frame`: the middle of a panel in it, facing out, scaled as the
+/// panel in it is drawn. A flat wall's are in its plane, just in front of it; a curved wall's stand along its arc,
+/// left to right as seen from in front, each turned to face the point the arc curves about.
+pub fn slot_frames(wall: &Wall, frame: Mat4) -> Vec<Mat4> {
+    let Some(radius) = arc(wall) else {
+        return (0..WALL_SLOTS)
+            .map(|slot| frame * Mat4::from_translation(slot_offset(slot)))
+            .collect();
+    };
+    let pitch = (panel_size().0 * ARC_SCALE + ARC_GAP) / radius;
+    (0..WALL_SLOTS)
+        .map(|slot| {
+            let angle = (slot as f32 - (WALL_SLOTS as f32 - 1.0) / 2.0) * pitch;
+            let at = Vec3::new(radius * angle.sin(), 0.0, radius * (1.0 - angle.cos()));
+            frame
+                * Mat4::from_translation(at)
+                * Mat4::from_rotation_y(-angle)
+                * Mat4::from_translation(Vec3::Z * LIFT)
+                * Mat4::from_scale(Vec3::splat(ARC_SCALE))
+        })
+        .collect()
 }
 
 /// The label on the ray naming `panel`, pointed at where the ray meets it, `at`, facing `viewer`: what it is called, its
@@ -384,9 +535,14 @@ pub fn label(panel: &Panel, at: Vec3, viewer: Vec3) -> Sheet {
     }
 }
 
-/// Where `ray` meets a panel drawn with `model`, as the distance along it, if it does.
-fn hit(model: Mat4, ray: &Ray) -> Option<f32> {
-    let (width, height) = panel_size();
+/// Where `ray` meets a panel of `size` drawn with `model`, as the distance along it, if it does.
+fn hit(model: Mat4, size: (f32, f32), ray: &Ray) -> Option<f32> {
+    hit_within(model, size, 0.0, ray)
+}
+
+/// Where `ray` meets a panel of `size` drawn with `model`, or within `margin` of its edges, in its own units, as the
+/// distance along it, if it does.
+fn hit_within(model: Mat4, (width, height): (f32, f32), margin: f32, ray: &Ray) -> Option<f32> {
     let local = model.inverse();
     let origin = local.transform_point3(ray.origin);
     let direction = local.transform_vector3(ray.direction);
@@ -395,31 +551,92 @@ fn hit(model: Mat4, ray: &Ray) -> Option<f32> {
     }
     let along = -origin.z / direction.z;
     let point = origin + direction * along;
-    (along >= 0.0 && point.x.abs() <= width / 2.0 && point.y.abs() <= height / 2.0).then_some(along)
+    (along >= 0.0
+        && point.x.abs() <= width / 2.0 + margin
+        && point.y.abs() <= height / 2.0 + margin)
+        .then_some(along)
 }
 
-/// The wall a panel let go at `model` snaps onto, if it is near enough to one: within [`SNAP_DEPTH`] of its plane and
-/// [`SNAP_MARGIN`] of its edges, the nearest such plane.
-fn snap(walls: &[(&Wall, Mat4)], model: Mat4) -> Option<String> {
-    let centre = model.w_axis.truncate();
-    let (width, height) = wall_size();
+/// A slot a panel carried would be put in if let go: the wall, the slot, where it stands, and where the ray meets it,
+/// when the ray chose it.
+#[derive(Clone, Debug, PartialEq)]
+struct Aim {
+    wall: String,
+    slot: u32,
+    model: Mat4,
+    point: Option<Vec3>,
+}
+
+/// The slot `ray` meets first, within [`AIM_REACH`] and [`AIM_MARGIN`] of its edges, in each slot's own plane, so that
+/// a curved wall's slots are aimed at as they stand.
+fn aim(walls: &[(&Wall, Mat4)], ray: &Ray) -> Option<Aim> {
+    let margin = AIM_MARGIN;
     walls
         .iter()
-        .filter_map(|(wall, frame)| {
-            let local = frame.inverse().transform_point3(centre);
-            (local.z.abs() <= SNAP_DEPTH
-                && local.x.abs() <= width / 2.0 + SNAP_MARGIN
-                && local.y.abs() <= height / 2.0 + SNAP_MARGIN)
-                .then_some((wall.id.clone(), local.z.abs()))
+        .flat_map(|(wall, frame)| {
+            slot_frames(wall, *frame)
+                .into_iter()
+                .enumerate()
+                .filter_map(move |(slot, model)| {
+                    let scale = model.x_axis.truncate().length();
+                    hit_within(model, panel_size(), margin / scale, ray)
+                        .filter(|distance| *distance <= AIM_REACH)
+                        .map(|distance| {
+                            (
+                                distance,
+                                Aim {
+                                    wall: wall.id.clone(),
+                                    slot: slot as u32,
+                                    model,
+                                    point: Some(ray.at(distance)),
+                                },
+                            )
+                        })
+                })
         })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(id, _)| id)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, aim)| aim)
+}
+
+/// The slot a panel carried at `centre` snaps into, if it is near enough to one: within [`SNAP_DEPTH`] of its plane and
+/// [`SNAP_MARGIN`] of its edges, the nearest such slot.
+fn snap(walls: &[(&Wall, Mat4)], centre: Vec3) -> Option<Aim> {
+    let (width, height) = panel_size();
+    walls
+        .iter()
+        .flat_map(|(wall, frame)| {
+            slot_frames(wall, *frame)
+                .into_iter()
+                .enumerate()
+                .filter_map(move |(slot, model)| {
+                    let scale = model.x_axis.truncate().length();
+                    let local = model.inverse().transform_point3(centre) * scale;
+                    (local.z.abs() <= SNAP_DEPTH
+                        && local.x.abs() <= width * scale / 2.0 + SNAP_MARGIN
+                        && local.y.abs() <= height * scale / 2.0 + SNAP_MARGIN)
+                        .then(|| {
+                            (
+                                local.length(),
+                                Aim {
+                                    wall: wall.id.clone(),
+                                    slot: slot as u32,
+                                    model,
+                                    point: None,
+                                },
+                            )
+                        })
+                })
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, aim)| aim)
 }
 
 /// Whether `place`, where the server says a panel is, is where it was put, `target`.
 fn agrees(place: &Place, target: &Target) -> bool {
     match (place, target) {
-        (Place::Wall { wall, .. }, Target::Wall(target)) => wall == target,
+        (Place::Wall { wall, slot }, Target::Wall(target, chosen)) => {
+            wall == target && slot == chosen
+        }
         (Place::Free { pose }, Target::Free(target)) => {
             Vec3::from_array(pose.position).distance(Vec3::from_array(target.position)) < 0.01
         }
@@ -500,19 +717,26 @@ pub struct Output {
     pub picked: bool,
     /// The panel carried turned a snap, or back to square.
     pub turned: bool,
-    /// A panel was let go, to send to the server: onto a wall, or floating.
+    /// A panel was let go, to send to the server: into a wall's slot, or floating.
     pub placed: Option<(String, Target)>,
+    /// The wall and slot a panel carried would be put in if let go now, whose outline is drawn.
+    pub preview: Option<(String, u32)>,
     /// Where the ray ends on a panel: where it meets the panel pointed at, or the middle of the one carried.
     pub end: Option<Vec3>,
 }
 
-/// The panels across frames: the one carried, and the one let go that the server has not yet confirmed.
+/// The panels across frames: the one carried, the slot it would be put in, and the one let go that the server has not
+/// yet confirmed.
 #[derive(Clone, Debug, Default)]
 pub struct Projector {
     grip: Grip,
     held: Option<Held>,
+    aim: Option<Aim>,
     pending: Option<Pending>,
 }
+
+/// A panel as it stands this frame: where, how its face is sized, and how large it is.
+type Standing<'a> = (&'a Panel, Mat4, Fit);
 
 impl Projector {
     /// Follow `input`, and say what to draw and send.
@@ -522,6 +746,7 @@ impl Projector {
         let (pressed, released) = self.grip.update(input.grip);
         let Some(projection) = input.projection else {
             self.held = None;
+            self.aim = None;
             self.pending = None;
             return Output::default();
         };
@@ -562,24 +787,38 @@ impl Projector {
                     * Mat4::from_rotation_y(held.manipulation.yaw());
             }
         }
-        // Let go, or taken by something else, it snaps onto a wall near it, or floats where it is.
+        // The slot it would be put in: the one the ray meets, or else one it is carried near. While a teleport is aimed,
+        // the ray chooses none.
+        self.aim = self.held.as_ref().and_then(|held| {
+            input
+                .ray
+                .filter(|_| input.active && input.pointing)
+                .and_then(|ray| aim(&walls, &ray))
+                .or_else(|| snap(&walls, held.model.w_axis.truncate()))
+        });
+        // Let go, or taken by something else, it goes into that slot, or floats where it is, as it is turned.
         if (released || !input.active)
             && let Some(held) = self.held.take()
         {
-            let target = snap(&walls, held.model)
-                .map_or_else(|| Target::Free(pose(held.model)), Target::Wall);
+            let (target, model) = match self.aim.take() {
+                Some(aim) => (Target::Wall(aim.wall, aim.slot), aim.model),
+                None => (Target::Free(pose(held.model)), held.model),
+            };
             self.pending = Some(Pending {
                 panel: held.panel.clone(),
                 target: target.clone(),
-                model: held.model,
+                model,
                 since: input.now,
             });
             output.placed = Some((held.panel, target));
         }
-        let models: Vec<(&Panel, Mat4)> = projection
+        let standing: Vec<Standing> = projection
             .panels
             .iter()
-            .filter_map(|panel| self.stands(panel, &walls).map(|model| (panel, model)))
+            .filter_map(|panel| {
+                self.stands(panel, &walls)
+                    .map(|(model, fit)| (panel, model, fit))
+            })
             .collect();
         // The nearest panel the ray meets, other than one carried, is pointed at.
         let carried = self.held();
@@ -587,11 +826,11 @@ impl Projector {
             .ray
             .filter(|_| input.active && input.pointing)
             .and_then(|ray| {
-                models
+                standing
                     .iter()
-                    .filter(|(panel, _)| Some(panel.id.as_str()) != carried)
-                    .filter_map(|(panel, model)| {
-                        hit(*model, &ray)
+                    .filter(|(panel, ..)| Some(panel.id.as_str()) != carried)
+                    .filter_map(|(panel, model, fit)| {
+                        hit(*model, fitted_size(panel, *fit), &ray)
                             .map(|distance| (panel.id.clone(), distance, ray.at(distance)))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -603,10 +842,10 @@ impl Projector {
                 .pointed
                 .take_if(|(_, distance, _)| *distance < input.nearer)
         {
-            let model = models
+            let model = standing
                 .iter()
-                .find(|(shown, _)| shown.id == panel)
-                .map(|(_, model)| *model)
+                .find(|(shown, ..)| shown.id == panel)
+                .map(|(_, model, _)| *model)
                 .expect("pointed at a panel shown");
             self.held = Some(Held {
                 panel,
@@ -616,28 +855,36 @@ impl Projector {
             self.pending = None;
             output.picked = true;
         }
+        output.preview = self.aim.as_ref().map(|aim| (aim.wall.clone(), aim.slot));
+        // The ray ends where it aims at a slot, or else at the middle of the panel carried, or where it meets the panel
+        // pointed at.
         output.end = match &self.held {
-            Some(held) => Some(held.model.w_axis.truncate()),
+            Some(held) => Some(
+                self.aim
+                    .as_ref()
+                    .and_then(|aim| aim.point)
+                    .unwrap_or(held.model.w_axis.truncate()),
+            ),
             None => output.pointed.as_ref().map(|(_, _, point)| *point),
         };
         output.sheets = self.sheets(
             projection,
             &walls,
-            &models,
+            &standing,
             viewer,
             output.pointed.as_ref().map(|(id, ..)| id.as_str()),
         );
         output
     }
 
-    /// What to draw: each wall with the panels in its layout, and each panel floating or carried, the groups farthest
-    /// from `viewer` first, since panels do not write depth, so that a nearer one covers one behind it, and a wall's
-    /// panels cover the wall.
+    /// What to draw: each wall with the panels in its layout, and the outline of the slot a panel carried would take,
+    /// and each panel floating or carried, the groups farthest from `viewer` first, since panels do not write depth, so
+    /// that a nearer one covers one behind it, and a wall's panels cover the wall.
     fn sheets(
         &self,
         projection: &Projection,
         walls: &[(&Wall, Mat4)],
-        models: &[(&Panel, Mat4)],
+        standing: &[Standing],
         viewer: Vec3,
         pointed: Option<&str>,
     ) -> Vec<Sheet> {
@@ -654,11 +901,12 @@ impl Projector {
                 .is_some_and(|other| other.id == panel.id),
             _ => false,
         };
-        let sheet = |panel: &Panel, model: Mat4| Sheet {
+        let sheet = |panel: &Panel, model: Mat4, fit: Fit| Sheet {
             canvas: Some(face(
                 panel,
                 highlighted == Some(panel.id.as_str()),
                 newest(panel),
+                fit,
             )),
             model: Some(model),
         };
@@ -675,27 +923,58 @@ impl Projector {
         let mut groups: Vec<(f32, Vec<Sheet>)> = walls
             .iter()
             .map(|(wall, frame)| {
-                let mut sheets = vec![Sheet {
-                    canvas: Some(wall_face(wall)),
-                    model: Some(*frame),
-                }];
+                // A flat wall is one board; a curved one, a board for each slot, and its label below their middle.
+                let mut sheets = match arc(wall) {
+                    None => vec![Sheet {
+                        canvas: Some(wall_face(wall)),
+                        model: Some(*frame),
+                    }],
+                    Some(_) => {
+                        let (_, height) = panel_size();
+                        let mut boards: Vec<Sheet> = slot_frames(wall, *frame)
+                            .into_iter()
+                            .map(|model| Sheet {
+                                canvas: Some(slot_board(wall_border(wall))),
+                                model: Some(model),
+                            })
+                            .collect();
+                        // Below the row, since the status pill stands just above it from home.
+                        boards.push(Sheet {
+                            canvas: Some(arc_label(wall)),
+                            model: Some(
+                                *frame
+                                    * Mat4::from_translation(
+                                        -Vec3::Y * (height * ARC_SCALE / 2.0 + 0.04),
+                                    ),
+                            ),
+                        });
+                        boards
+                    }
+                };
                 sheets.extend(
-                    models
+                    standing
                         .iter()
-                        .filter(|(panel, _)| in_layout(panel, moved) == Some(wall.id.as_str()))
-                        .map(|(panel, model)| sheet(panel, *model)),
+                        .filter(|(panel, ..)| in_layout(panel, moved) == Some(wall.id.as_str()))
+                        .map(|(panel, model, fit)| sheet(panel, *model, *fit)),
                 );
+                // The outline of the slot a panel carried would take, over any panel in it.
+                if let Some(aim) = self.aim.as_ref().filter(|aim| aim.wall == wall.id) {
+                    sheets.push(Sheet {
+                        canvas: Some(ghost()),
+                        model: Some(aim.model * Mat4::from_translation(Vec3::Z * LIFT)),
+                    });
+                }
                 (frame.w_axis.truncate().distance(viewer), sheets)
             })
             .collect();
         groups.extend(
-            models
+            standing
                 .iter()
-                .filter(|(panel, _)| in_layout(panel, moved).is_none())
-                .map(|(panel, model)| {
+                .filter(|(panel, ..)| in_layout(panel, moved).is_none())
+                .map(|(panel, model, fit)| {
                     (
                         model.w_axis.truncate().distance(viewer),
-                        vec![sheet(panel, *model)],
+                        vec![sheet(panel, *model, *fit)],
                     )
                 }),
         );
@@ -703,21 +982,28 @@ impl Projector {
         groups.into_iter().flat_map(|(_, sheets)| sheets).collect()
     }
 
-    /// Where `panel` stands: carried, let go but not yet confirmed, or where the server says it is, in its wall's slot
-    /// or floating. `None` for a panel on a wall not shown, in a slot past the last, or in a place this client does not
-    /// know.
-    fn stands(&self, panel: &Panel, walls: &[(&Wall, Mat4)]) -> Option<Mat4> {
+    /// Where `panel` stands, and how its face is sized: carried, fitting its text; let go but not yet confirmed, in the
+    /// slot it was put in, or floating where it was let go; or where the server says it is, in its wall's slot, or
+    /// floating, fitting its text. `None` for a panel on a wall not shown, in a slot past the last, or in a place this
+    /// client does not know.
+    fn stands(&self, panel: &Panel, walls: &[(&Wall, Mat4)]) -> Option<(Mat4, Fit)> {
         match (&self.held, &self.pending) {
-            (Some(held), _) if held.panel == panel.id => return Some(held.model),
-            (_, Some(pending)) if pending.panel == panel.id => return Some(pending.model),
+            (Some(held), _) if held.panel == panel.id => return Some((held.model, Fit::Text)),
+            (_, Some(pending)) if pending.panel == panel.id => {
+                let fit = match pending.target {
+                    Target::Wall(..) => Fit::Slot,
+                    Target::Free(_) => Fit::Text,
+                };
+                return Some((pending.model, fit));
+            }
             _ => {}
         }
         match &panel.place {
             Place::Wall { wall, slot } if *slot < WALL_SLOTS => walls
                 .iter()
                 .find(|(shown, _)| shown.id == *wall)
-                .map(|(_, frame)| *frame * Mat4::from_translation(slot_offset(*slot))),
-            Place::Free { pose } => model(pose),
+                .map(|(wall, frame)| (slot_frames(wall, *frame)[*slot as usize], Fit::Slot)),
+            Place::Free { pose } => model(pose).map(|model| (model, Fit::Text)),
             _ => None,
         }
     }

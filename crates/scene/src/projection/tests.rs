@@ -108,7 +108,7 @@ fn a_wall_holds_its_slots_in_three_columns_of_two_the_first_at_the_top_left() {
 
 #[test]
 fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
-    let shown = face(&panel("1", on(TOMORI_WALL, 0)), false, false);
+    let shown = face(&panel("1", on(TOMORI_WALL, 0)), false, false, Fit::Slot);
     let text = shown.plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines.len(), ROWS);
@@ -120,11 +120,11 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
     assert!(!text.contains("**"));
     assert_eq!(shown.border, Some(FRAME));
     assert_eq!(
-        face(&panel("1", on(TOMORI_WALL, 0)), true, true).border,
+        face(&panel("1", on(TOMORI_WALL, 0)), true, true, Fit::Slot).border,
         Some(HIGHLIGHT)
     );
     assert_eq!(
-        face(&panel("1", on(TOMORI_WALL, 0)), false, true).border,
+        face(&panel("1", on(TOMORI_WALL, 0)), false, true, Fit::Slot).border,
         Some(NEWEST)
     );
     // A body longer than the panel ends with "…" on its last row, and nothing is drawn past the panel's columns.
@@ -137,7 +137,7 @@ fn a_panel_shows_its_title_metadata_and_body_as_markdown_lite() {
             .join("\n\n"),
         Place::Unknown,
     );
-    let text = face(&long, false, false).plain();
+    let text = face(&long, false, false, Fit::Slot).plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines.len(), ROWS);
     assert!(lines[ROWS - 1].trim_end().ends_with('…'), "{text}");
@@ -183,7 +183,7 @@ fn colours(row: &crate::ui_text::Row, text: &str) -> Vec<crate::ui_text::Rgba> {
 
 #[test]
 fn a_code_panel_shows_its_lines_numbered_and_coloured_by_kind() {
-    let canvas = face(&code_panel("c", 3), false, false);
+    let canvas = face(&code_panel("c", 3), false, false, Fit::Slot);
     // The same size as a text panel, at a finer pixel, so that it fits its slot.
     let (width, height) = canvas.size();
     let (panel_width, panel_height) = panel_size();
@@ -213,10 +213,24 @@ fn a_code_panel_shows_its_lines_numbered_and_coloured_by_kind() {
     assert!(crate::ui_text::whole(&rows[4].cells));
     // Highlighted or newest, it is framed as a text panel is.
     assert_eq!(
-        face(&code_panel("c", 3), true, false).border,
+        face(&code_panel("c", 3), true, false, Fit::Slot).border,
         Some(HIGHLIGHT)
     );
-    assert_eq!(face(&code_panel("c", 3), false, true).border, Some(NEWEST));
+    assert_eq!(
+        face(&code_panel("c", 3), false, true, Fit::Slot).border,
+        Some(NEWEST)
+    );
+}
+
+#[test]
+fn a_code_panel_keeps_a_slots_size_floating() {
+    let panel = code_panel("c", 3);
+    assert_eq!(fit(&panel, Fit::Text), (COLUMNS, BODY_ROWS));
+    assert_eq!(fitted_size(&panel, Fit::Text), panel_size());
+    assert_eq!(
+        face(&panel, false, false, Fit::Text).plain(),
+        face(&panel, false, false, Fit::Slot).plain()
+    );
 }
 
 #[test]
@@ -229,7 +243,7 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_cuts_long_lines() {
     let mut panel = Panel::new("c", "text", body, Place::Unknown)
         .with_code(Code::new("", 40))
         .with_pinned(true);
-    let canvas = face(&panel, false, false);
+    let canvas = face(&panel, false, false, Fit::Slot);
     let text = canvas.plain();
     let lines: Vec<&str> = text.split('\n').collect();
     assert_eq!(lines[1].trim_end(), "40 lines · 0m · pinned");
@@ -241,17 +255,21 @@ fn a_long_code_panel_says_how_many_more_lines_it_has_and_cuts_long_lines() {
     assert_eq!(lines[CODE_ROWS - 1].trim_end(), "…24 more lines");
     // One more line is said as one.
     panel.code = Some(Code::new("", CODE_LINES as u32 + 1));
-    assert!(face(&panel, false, false).plain().ends_with("…1 more line"));
+    assert!(
+        face(&panel, false, false, Fit::Slot)
+            .plain()
+            .ends_with("…1 more line")
+    );
     // A code panel of one line says so; a server's lines beyond what a panel holds are not drawn.
     let one = Panel::new("c", "sh", "ls", Place::Unknown).with_code(Code::new("sh", 1));
     assert!(
-        face(&one, false, false)
+        face(&one, false, false, Fit::Slot)
             .plain()
             .contains("sh · 1 line · 0m")
     );
     let many = Panel::new("c", "sh", vec!["x"; 40].join("\n"), Place::Unknown)
         .with_code(Code::new("sh", 40));
-    let text = face(&many, false, false).plain();
+    let text = face(&many, false, false, Fit::Slot).plain();
     assert_eq!(text.split('\n').count(), CODE_ROWS);
     assert!(text.ends_with("…24 more lines"));
 }
@@ -269,7 +287,7 @@ fn a_code_panel_whose_spans_are_not_valid_is_drawn_plain() {
     ] {
         let mut panel = code_panel("c", 3);
         panel.code = Some(Code::new("rust", 3).with_spans(spans));
-        let canvas = face(&panel, false, false);
+        let canvas = face(&panel, false, false, Fit::Slot);
         assert_eq!(colours(&canvas.rows[3], "fn main"), [TEXT; 7]);
     }
     // Every kind has its colour, distinct from the others, and plain, as a kind this client does not know, is text.
@@ -309,7 +327,11 @@ fn the_ray_s_label_names_a_code_panel_with_its_language_and_lines() {
     // A text panel pinned by being put back says nothing of it, as only code panels are replaced.
     let text = panel("1", on(TOMORI_WALL, 0)).with_pinned(true);
     assert!(!lines(&text).concat().contains("pinned"));
-    assert!(!face(&text, false, false).plain().contains("pinned"));
+    assert!(
+        !face(&text, false, false, Fit::Slot)
+            .plain()
+            .contains("pinned")
+    );
 }
 
 #[test]
@@ -480,10 +502,10 @@ fn a_panel_let_go_near_a_wall_snaps_into_its_layout() {
     let output = projector.update(input(&shown, toward, 0.0, now));
     assert_eq!(
         output.placed,
-        Some(("a".to_owned(), Target::Wall("wall-1".to_owned())))
+        Some(("a".to_owned(), Target::Wall("wall-1".to_owned(), 5)))
     );
     // Shown where it was let go until the server puts it in the wall's layout.
-    let moved = projection(vec![panel("a", on("wall-1", 0))]);
+    let moved = projection(vec![panel("a", on("wall-1", 5))]);
     projector.update(input(&moved, None, 0.0, now));
     assert!(projector.pending.is_none());
 }
@@ -589,16 +611,34 @@ fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let
     let mut projector = Projector::default();
     projector.update(input(&shown, ray, 0.0, now));
     projector.update(input(&shown, ray, 1.0, now));
+    let carried_at = |output: &Output| {
+        output
+            .sheets
+            .iter()
+            .find(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .unwrap()
+                    .plain()
+                    .starts_with("Panel a")
+            })
+            .unwrap()
+            .model
+            .unwrap()
+            .w_axis
+            .truncate()
+    };
     // Forward for a fifth of a second pushes it further along the ray.
     let output = projector.update(stick(Vec2::Y, 0.2));
     let pushed = distance * (RATE * 0.2).exp();
-    assert!((output.end.unwrap() - ray.unwrap().at(pushed)).length() < 1e-3);
+    assert!((carried_at(&output) - ray.unwrap().at(pushed)).length() < 1e-3);
     // Back, long enough, pulls it to the nearest it goes; forward, to the farthest.
     projector.update(stick(Vec2::NEG_Y, 10.0));
     let output = projector.update(stick(Vec2::ZERO, 0.0));
-    assert!((output.end.unwrap() - ray.unwrap().at(NEAREST)).length() < 1e-3);
+    assert!((carried_at(&output) - ray.unwrap().at(NEAREST)).length() < 1e-3);
     let output = projector.update(stick(Vec2::Y, 10.0));
-    assert!((output.end.unwrap() - ray.unwrap().at(FARTHEST)).length() < 1e-3);
+    assert!((carried_at(&output) - ray.unwrap().at(FARTHEST)).length() < 1e-3);
     projector.update(stick(Vec2::ZERO, 0.0));
     // A flick right turns it a snap clockwise, seen from above, once, and says so.
     let facing_of = |output: &Output| {
@@ -638,10 +678,14 @@ fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let
     assert!(output.turned);
     assert!(facing_of(&output).distance(square) < 1e-4);
     assert!(!projector.update(click).turned);
-    // Turned and let go away from any wall, it floats turned, upright, as the server is told.
+    // Turned and let go away from any wall, as it is behind the wall the ray meets while a teleport is aimed, it floats
+    // turned, upright, as the server is told.
     projector.update(stick(Vec2::NEG_X, 0.1));
     projector.update(stick(Vec2::ZERO, 0.0));
-    let output = projector.update(input(&shown, ray, 0.0, now));
+    let output = projector.update(Input {
+        pointing: false,
+        ..input(&shown, ray, 0.0, now)
+    });
     let Some((_, Target::Free(left))) = output.placed else {
         unreachable!("floating, not {:?}", output.placed);
     };
@@ -679,29 +723,46 @@ fn the_nearest_panel_on_the_ray_is_pointed_at_and_a_panel_snaps_onto_the_nearest
     let ray = Ray::new(HOME, -Vec3::Z);
     let output = projector.update(input(&shown, ray, 0.0, now));
     assert_eq!(output.pointed.unwrap().0, "before");
-    // Pulled off and let go between the walls, nearer the far one, it snaps onto that.
+    // Pulled off and let go between the walls, nearer the far one, while the ray aims at no slot, as while a teleport is
+    // aimed, it snaps into the nearest slot of that, the slot it is carried in front of.
     projector.update(input(&shown, ray, 1.0, now));
     let between = Ray::new(HOME - Vec3::Z * (3.2 - 1.5), -Vec3::Z);
+    let aiming = |grip: f32| Input {
+        pointing: false,
+        ..input(&shown, between, grip, now)
+    };
+    let output = projector.update(aiming(1.0));
+    assert_eq!(output.preview, Some(("far".to_owned(), 1)));
+    let output = projector.update(aiming(0.0));
+    assert_eq!(
+        output.placed,
+        Some(("before".to_owned(), Target::Wall("far".to_owned(), 1)))
+    );
+    // Pointing, the slot the ray meets first decides, on the near wall.
+    let mut projector = Projector::default();
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
     projector.update(input(&shown, between, 1.0, now));
     let output = projector.update(input(&shown, between, 0.0, now));
     assert_eq!(
         output.placed,
-        Some(("before".to_owned(), Target::Wall("far".to_owned())))
+        Some(("before".to_owned(), Target::Wall("near".to_owned(), 1)))
     );
 }
 
 #[test]
 fn where_the_server_says_a_panel_is_agrees_with_where_it_was_put() {
     let pose = Pose::upright_facing([1.0, 1.5, -1.0], [0.0, 1.5, 0.0]);
-    assert!(agrees(&on("w", 0), &Target::Wall("w".into())));
-    assert!(!agrees(&on("w", 0), &Target::Wall("v".into())));
+    assert!(agrees(&on("w", 0), &Target::Wall("w".into(), 0)));
+    assert!(!agrees(&on("w", 0), &Target::Wall("v".into(), 0)));
+    assert!(!agrees(&on("w", 0), &Target::Wall("w".into(), 1)));
     assert!(agrees(&Place::Free { pose }, &Target::Free(pose)));
     let moved = Pose {
         position: [1.5, 1.5, -1.0],
         ..pose
     };
     assert!(!agrees(&Place::Free { pose: moved }, &Target::Free(pose)));
-    assert!(!agrees(&Place::Free { pose }, &Target::Wall("w".into())));
+    assert!(!agrees(&Place::Free { pose }, &Target::Wall("w".into(), 0)));
     assert!(!agrees(&Place::Unknown, &Target::Free(pose)));
 }
 
@@ -735,4 +796,400 @@ fn a_wall_added_stands_ahead_of_the_participant_facing_them() {
                 < 1e-4
         );
     }
+}
+
+/// The Tomori wall where the server stands it by default: below the swarm, curving about home.
+fn curved() -> Wall {
+    Wall::new(
+        TOMORI_WALL,
+        WallKind::Tomori,
+        Pose::upright_facing([0.0, 0.52, -2.3], [0.0, 0.52, 0.0]),
+    )
+    .with_shape(WallShape::Arc { radius: 2.3 })
+}
+
+/// The corners of a panel in a slot standing at `model`, in the scene.
+fn corners(model: Mat4) -> [Vec3; 4] {
+    let (width, height) = panel_size();
+    [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+        .map(|(x, y)| model.transform_point3(Vec3::new(x * width / 2.0, y * height / 2.0, 0.0)))
+}
+
+#[test]
+fn a_curved_wall_stands_its_slots_in_a_row_along_its_arc_each_facing_home() {
+    let wall = curved();
+    let frame = model(&wall.pose).unwrap();
+    let slots = slot_frames(&wall, frame);
+    assert_eq!(slots.len(), WALL_SLOTS as usize);
+    let (width, height) = panel_size();
+    for (index, slot) in slots.iter().enumerate() {
+        let centre = slot.w_axis.truncate();
+        // On the arc about home, at the wall's height, just in front of it.
+        let across = Vec2::new(centre.x, centre.z).length();
+        assert!((across - (2.3 - LIFT)).abs() < 1e-4, "{index}: {across}");
+        assert!((centre.y - 0.52).abs() < 1e-5);
+        // Upright, facing home, and smaller than a flat wall's.
+        let facing = slot.z_axis.truncate().normalize();
+        assert!(facing.y.abs() < 1e-5);
+        let towards = (Vec3::new(0.0, 0.52, 0.0) - centre).normalize();
+        assert!(facing.dot(towards) > 0.9999, "{index}");
+        assert!((slot.x_axis.truncate().length() - ARC_SCALE).abs() < 1e-5);
+        assert!(slot.y_axis.truncate().normalize().dot(Vec3::Y) > 0.9999);
+    }
+    // Read left to right as seen from home, symmetric about straight ahead, side by side without overlapping.
+    let xs: Vec<f32> = slots.iter().map(|slot| slot.w_axis.x).collect();
+    assert!(xs.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!((xs[0] + xs[5]).abs() < 1e-4 && (xs[2] + xs[3]).abs() < 1e-4);
+    for pair in slots.windows(2) {
+        let gap = pair[0]
+            .w_axis
+            .truncate()
+            .distance(pair[1].w_axis.truncate());
+        assert!(gap > width * ARC_SCALE, "{gap}");
+    }
+    // Below the swarm: its top edge lower than the swarm's flock ever comes, and every slot within the cone the workers
+    // leave clear in front of home, 40° either side.
+    for slot in &slots {
+        for corner in corners(*slot) {
+            assert!(corner.y < crate::swarm::CENTER.y - 0.6, "{corner}");
+            assert!(corner.y > 0.3, "{corner}");
+            let bearing = corner.x.atan2(-corner.z).to_degrees();
+            assert!(bearing.abs() < 34.0, "{bearing}");
+            // And below the status pill, which stands about 20° below the eyes from home.
+            let down = (HOME.y - corner.y)
+                .atan2(Vec2::new(corner.x, corner.z).length())
+                .to_degrees();
+            assert!(down > 22.0, "{down}");
+        }
+    }
+    assert!(height * ARC_SCALE < 0.3);
+    // A shape this client cannot draw curved, or a nonsense radius, is drawn flat.
+    for shape in [
+        WallShape::Unknown,
+        WallShape::Arc { radius: 0.2 },
+        WallShape::Arc { radius: f32::NAN },
+    ] {
+        let flat = curved().with_shape(shape);
+        assert_eq!(
+            slot_frames(&flat, frame)[0],
+            frame * Mat4::from_translation(slot_offset(0))
+        );
+    }
+}
+
+#[test]
+fn the_default_tomori_wall_hides_neither_the_workers_nor_the_swarm() {
+    let wall = curved();
+    let slots = slot_frames(&wall, model(&wall.pose).unwrap());
+    // Whether something seen from home at `point` is hidden by a slot, or `point` is inside one's panel.
+    let hidden = |point: Vec3| {
+        let ray = Ray::new(HOME, point - HOME).unwrap();
+        slots.iter().any(|slot| {
+            hit_within(*slot, panel_size(), 0.0, &ray)
+                .is_some_and(|distance| distance < point.distance(HOME))
+        })
+    };
+    // Every worker's station, anywhere it may stand, to the edge of what it draws, in every direction.
+    let around: Vec<Vec3> = [
+        Vec3::ZERO,
+        Vec3::X,
+        -Vec3::X,
+        Vec3::Y,
+        -Vec3::Y,
+        Vec3::Z,
+        -Vec3::Z,
+    ]
+    .map(|direction| direction * crate::delegation::POINTING_RADIUS)
+    .to_vec();
+    for station in 0..crate::delegation::SLOT_COUNT {
+        let anchor = crate::delegation::slot_position(station);
+        for offset in &around {
+            assert!(!hidden(anchor + *offset), "station {station} at {anchor}");
+        }
+        // And nowhere near a slot.
+        for slot in &slots {
+            assert!(
+                slot.w_axis.truncate().distance(anchor) > 0.6,
+                "station {station}"
+            );
+        }
+    }
+    // The swarm's flock, as far as it spreads in any of its states.
+    for x in [-1.35, -0.7, 0.0, 0.7, 1.35] {
+        for y in [-0.52, 0.0, 0.52] {
+            for z in [-0.42, 0.0, 0.42] {
+                let point = crate::swarm::CENTER + Vec3::new(x, y, z);
+                assert!(!hidden(point), "{point}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_curved_wall_draws_a_board_for_each_slot_its_label_and_its_panels_in_them() {
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![curved()])
+        .with_panels(vec![panel("a", on(TOMORI_WALL, 5))]);
+    let mut projector = Projector::default();
+    let output = projector.update(input(&shown, None, 0.0, Instant::now()));
+    // Six boards, the label, and the panel.
+    assert_eq!(output.sheets.len(), WALL_SLOTS as usize + 2);
+    let wall = curved();
+    let slots = slot_frames(&wall, model(&wall.pose).unwrap());
+    for (sheet, slot) in output.sheets.iter().zip(&slots) {
+        assert_eq!(sheet.model, Some(*slot));
+        assert_eq!(sheet.canvas.as_ref().unwrap().size(), panel_size());
+    }
+    let label = &output.sheets[WALL_SLOTS as usize];
+    assert_eq!(label.canvas.as_ref().unwrap().plain().trim(), "TOMORI");
+    let below = label.model.unwrap().w_axis.truncate();
+    assert!(below.x.abs() < 1e-5 && below.y < slots[2].w_axis.y - panel_size().1 * ARC_SCALE / 2.0);
+    let drawn = output.sheets.last().unwrap();
+    assert!(
+        drawn
+            .canvas
+            .as_ref()
+            .unwrap()
+            .plain()
+            .starts_with("Panel a")
+    );
+    assert_eq!(drawn.model, Some(slots[5]));
+    // Another kind of wall is labelled so.
+    let other = Wall::new("w", WallKind::Added, curved().pose).with_shape(curved().shape);
+    assert_eq!(arc_label(&other).plain().trim(), "WALL");
+}
+
+#[test]
+fn the_ray_aims_at_each_slot_of_a_curved_wall_in_its_own_plane() {
+    let wall = curved();
+    let frame = model(&wall.pose).unwrap();
+    let slots = slot_frames(&wall, frame);
+    let walls = [(&wall, frame)];
+    for (index, slot) in slots.iter().enumerate() {
+        // At its middle, and at its outer edge, where a flat plane through the wall's middle would miss it or name
+        // another.
+        let (width, _) = panel_size();
+        for local in [Vec3::ZERO, Vec3::X * width * 0.48, -Vec3::X * width * 0.48] {
+            let point = slot.transform_point3(local);
+            let aimed = aim(&walls, &Ray::new(HOME, point - HOME).unwrap()).unwrap();
+            assert_eq!(
+                (aimed.wall.as_str(), aimed.slot),
+                (TOMORI_WALL, index as u32)
+            );
+            assert!(aimed.point.unwrap().distance(point) < 1e-3);
+            assert_eq!(aimed.model, *slot);
+        }
+    }
+    // A panel pointed at in a curved wall's slot is hit in that slot's plane too.
+    let shown = Projection::new("s", "sky")
+        .with_walls(vec![wall.clone()])
+        .with_panels(vec![panel("a", on(TOMORI_WALL, 0))]);
+    let edge = slots[0].transform_point3(-Vec3::X * panel_size().0 * 0.45);
+    let output = Projector::default().update(input(&shown, at(edge), 0.0, Instant::now()));
+    assert_eq!(output.pointed.unwrap().0, "a");
+    // Above the row, beyond the reach, or from behind a nearer slot, nothing else is aimed at.
+    let above = slots[2].transform_point3(Vec3::Y * panel_size().1);
+    assert_eq!(aim(&walls, &Ray::new(HOME, above - HOME).unwrap()), None);
+    let far = Ray::new(Vec3::new(0.0, 0.52, 9.0), -Vec3::Z).unwrap();
+    assert_eq!(aim(&walls, &far), None);
+}
+
+#[test]
+fn carrying_a_panel_onto_a_wall_shows_where_it_will_go_and_puts_it_in_the_slot_under_the_ray() {
+    let shown = projection(vec![
+        panel("a", on(TOMORI_WALL, 0)),
+        panel("b", on("wall-1", 4)),
+    ]);
+    let now = Instant::now();
+    let mut projector = Projector::default();
+    let pick = at(slot_centre(&shown, 0));
+    projector.update(input(&shown, pick, 0.0, now));
+    projector.update(input(&shown, pick, 1.0, now));
+    // Away from every wall, nothing is shown.
+    let away = Ray::new(HOME, Vec3::new(-1.0, 0.2, 0.3));
+    let output = projector.update(input(&shown, away, 1.0, now));
+    assert_eq!(output.preview, None);
+    let ghosts = |output: &Output| {
+        output
+            .sheets
+            .iter()
+            .filter(|sheet| sheet.canvas.as_ref().unwrap().background == GHOST)
+            .map(|sheet| sheet.model.unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(ghosts(&output).is_empty());
+    // Pointed at the added wall's slot 4, which another panel holds, its outline is drawn there, over that panel, and
+    // the ray ends on the slot.
+    let added = &shown.wall("wall-1").unwrap();
+    let frame = model(&added.pose).unwrap();
+    let target = slot_frames(added, frame)[4];
+    let toward = target.w_axis.truncate();
+    let ray = at(toward);
+    let output = projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(output.preview, Some(("wall-1".to_owned(), 4)));
+    assert_eq!(
+        ghosts(&output),
+        [target * Mat4::from_translation(Vec3::Z * LIFT)]
+    );
+    let order: Vec<String> = output
+        .sheets
+        .iter()
+        .map(|sheet| {
+            let canvas = sheet.canvas.as_ref().unwrap();
+            if canvas.background == GHOST {
+                "ghost".to_owned()
+            } else {
+                canvas
+                    .plain()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            }
+        })
+        .collect();
+    let b = order.iter().position(|title| title == "Panel b").unwrap();
+    let ghost = order.iter().position(|title| title == "ghost").unwrap();
+    assert!(ghost > b, "{order:?}");
+    assert!(output.end.unwrap().distance(toward) < 1e-3);
+    // The panel carried still floats in the hand, fitting its text.
+    let carried = output
+        .sheets
+        .iter()
+        .find(|sheet| {
+            sheet
+                .canvas
+                .as_ref()
+                .unwrap()
+                .plain()
+                .starts_with("Panel a")
+        })
+        .unwrap();
+    assert_eq!(
+        carried.canvas.as_ref().unwrap().size(),
+        fitted_size(&shown.panels[0], Fit::Text)
+    );
+    // Turned and pushed, it still goes where the ray points: let go, it is put in that slot, and shown there at once,
+    // at the slot's size, until the server agrees.
+    projector.update(Input {
+        stick: Vec2::X,
+        ..input(&shown, ray, 1.0, now)
+    });
+    projector.update(input(&shown, ray, 1.0, now));
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    assert_eq!(
+        output.placed,
+        Some(("a".to_owned(), Target::Wall("wall-1".to_owned(), 4)))
+    );
+    assert_eq!(output.preview, None);
+    let placed = output
+        .sheets
+        .iter()
+        .find(|sheet| {
+            sheet
+                .canvas
+                .as_ref()
+                .unwrap()
+                .plain()
+                .starts_with("Panel a")
+        })
+        .unwrap();
+    assert_eq!(placed.model, Some(target));
+    assert_eq!(placed.canvas.as_ref().unwrap().size(), panel_size());
+    assert!(ghosts(&output).is_empty());
+    // The server swaps them: then it agrees, and what it says is drawn.
+    let swapped = projection(vec![
+        panel("a", on("wall-1", 4)),
+        panel("b", on(TOMORI_WALL, 0)),
+    ]);
+    projector.update(input(&swapped, None, 0.0, now));
+    assert!(projector.pending.is_none());
+}
+
+#[test]
+fn a_floating_panel_fits_its_text_within_bounds_and_takes_a_slot_s_size_on_a_wall() {
+    let floating = Place::Free {
+        pose: Pose::default(),
+    };
+    // Short text: as narrow and as short as a panel goes.
+    let short = Panel::new("s", "Hi", "Yes.", floating.clone());
+    assert_eq!(fit(&short, Fit::Text), (FIT_COLUMNS.0, FIT_ROWS.0));
+    let face_of = |panel: &Panel| face(panel, false, false, Fit::Text);
+    assert_eq!(face_of(&short).size(), fitted_size(&short, Fit::Text));
+    // A long line: as wide as it reads comfortably, wrapped there by the shared rule, with every word kept.
+    let words: Vec<String> = (0..60).map(|n| format!("word{n}")).collect();
+    let long_line = Panel::new("l", "Wide", words.join(" "), floating.clone());
+    let (columns, rows) = fit(&long_line, Fit::Text);
+    assert_eq!(columns, FIT_COLUMNS.1);
+    let wrapped = crate::transcript::parse_markdown(&long_line.body, columns);
+    assert_eq!(rows, wrapped.len());
+    let text = face_of(&long_line).plain();
+    for word in &words {
+        assert!(text.contains(word.as_str()), "{word}");
+    }
+    assert!(
+        text.lines()
+            .all(|line| crate::ui_text::width(line) <= columns)
+    );
+    assert!(!text.contains('…'));
+    // A middling body: as wide as its widest line, or its title, or its metadata.
+    let middling = Panel::new(
+        "m",
+        "A title that is thirty-three long",
+        "Short.\n\nA line of exactly forty characters long!",
+        floating.clone(),
+    );
+    let (columns, rows) = fit(&middling, Fit::Text);
+    assert_eq!(columns, 40);
+    assert_eq!(
+        rows,
+        crate::transcript::parse_markdown(&middling.body, 40)
+            .len()
+            .max(FIT_ROWS.0)
+    );
+    let titled = Panel::new(
+        "t",
+        "A title that is thirty-three long",
+        "x",
+        floating.clone(),
+    );
+    assert_eq!(fit(&titled, Fit::Text).0, 33);
+    // Very long: as tall as a panel goes, ending with "…".
+    let tall = Panel::new(
+        "t",
+        "",
+        (0..60)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        floating.clone(),
+    );
+    assert_eq!(fit(&tall, Fit::Text).1, FIT_ROWS.1);
+    let text = face_of(&tall).plain();
+    assert_eq!(text.lines().count(), FIT_ROWS.1 + 3);
+    assert!(text.lines().last().unwrap().trim_end().ends_with('…'));
+    // On a wall, any of them is a slot's size, cut as before.
+    for panel in [&short, &long_line, &tall] {
+        assert_eq!(fit(panel, Fit::Slot), (COLUMNS, BODY_ROWS));
+        assert_eq!(face(panel, false, false, Fit::Slot).size(), panel_size());
+    }
+    // Floating in the space, a panel is drawn and pointed at at its fitted size.
+    let shown = Projection::new("s", "sky").with_panels(vec![Panel::new(
+        "w",
+        "Wide",
+        words.join(" "),
+        Place::Free {
+            pose: Pose::upright_facing([0.0, 1.6, -2.0], HOME.to_array()),
+        },
+    )]);
+    let (width, _) = fitted_size(&shown.panels[0], Fit::Text);
+    assert!(width > panel_size().0);
+    let edge = Vec3::new(width / 2.0 - 0.02, 1.6, -2.0);
+    let output = Projector::default().update(input(&shown, at(edge), 0.0, Instant::now()));
+    assert_eq!(output.pointed.unwrap().0, "w");
+    assert_eq!(
+        output.sheets[0].canvas.as_ref().unwrap().size(),
+        fitted_size(&shown.panels[0], Fit::Text)
+    );
 }

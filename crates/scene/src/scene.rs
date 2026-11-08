@@ -1077,8 +1077,9 @@ pub mod fixtures {
         tomori_protocol::Wall::new(
             tomori_protocol::TOMORI_WALL,
             tomori_protocol::WallKind::Tomori,
-            tomori_protocol::Pose::upright_facing([1.9, 1.5, -2.1], [0.0, 1.5, 0.0]),
+            tomori_protocol::Pose::upright_facing([0.0, 0.52, -2.3], [0.0, 0.52, 0.0]),
         )
+        .with_shape(tomori_protocol::WallShape::Arc { radius: 2.3 })
     }
 
     /// Show `panels` on [`tomori_wall`] and `walls` in [`SPACE`], which projects, as the server sends them.
@@ -1840,6 +1841,72 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_carried_to_the_tomori_wall_shows_its_slot_and_is_put_in_it_for_everyone() {
+        use tomori_protocol::{ClientMessage, Panel, Place};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let ahead = arrival::HOME + Vec3::new(-1.0, 0.0, -1.5);
+        fixtures::show_projection(
+            &mut conversation,
+            Vec::new(),
+            vec![Panel::new(
+                "panel-1",
+                "Build status",
+                "Green.",
+                Place::Free {
+                    pose: tomori_protocol::Pose::upright_facing(
+                        ahead.to_array(),
+                        arrival::HOME.to_array(),
+                    ),
+                },
+            )],
+        );
+        let wall = tomori_wall();
+        let frame = crate::board::model(&wall.pose).unwrap();
+        let slot = crate::projection::slot_frames(&wall, frame)[3];
+        let mut step = Step::default();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ray: Ray::new(arrival::HOME, ahead - arrival::HOME),
+            grip: Some(0.0),
+            ..senses()
+        };
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        senses.grip = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        // Pointed at the wall's fourth slot, its outline shows there, and the ray ends on it.
+        let middle = slot.w_axis.truncate();
+        senses.ray = Ray::new(arrival::HOME, middle - arrival::HOME);
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        let outline = slot * Mat4::from_translation(Vec3::Z * 0.01);
+        assert!(
+            output
+                .projection
+                .iter()
+                .any(|sheet| sheet.model == Some(outline))
+        );
+        let beam = output
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(beam.end.distance(middle) < 1e-3);
+        // Let go, it is put in that slot, for everyone.
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(
+            conversation.take_actions(),
+            [Action::Send(ClientMessage::PlacePanel {
+                panel: "panel-1".into(),
+                wall: Some(tomori_protocol::TOMORI_WALL.into()),
+                slot: Some(3),
+                pose: None,
+            })]
+        );
+    }
+
+    #[test]
     fn the_ray_names_a_panel_and_the_grip_pulls_it_off_unless_a_card_is_nearer() {
         use tomori_protocol::{
             Card, CardKind, Cards, Checks, Panel, Place, Pose, Resource, ServerMessage,
@@ -1877,9 +1944,10 @@ mod tests {
             ..senses()
         };
         let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
-        // The Tomori wall, the panel, and the label on the ray naming it.
-        assert_eq!(output.projection.len(), 3);
-        let label = output.projection[2].canvas.as_ref().unwrap().plain();
+        // The Tomori wall's six slots and its label, the panel, and the label on the ray naming it.
+        let wall = tomori_protocol::WALL_SLOTS as usize + 1;
+        assert_eq!(output.projection.len(), wall + 2);
+        let label = output.projection[wall + 1].canvas.as_ref().unwrap().plain();
         assert!(label.starts_with("Build status"), "{label}");
         let beam = output
             .arrival
@@ -1913,12 +1981,16 @@ mod tests {
         assert_eq!(step.projector.held(), Some("panel-1"));
         senses.ray = Ray::new(arrival::HOME, Vec3::new(-0.5, 0.0, -1.0));
         let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
-        assert_eq!(output.projection.len(), 2, "no label on a panel carried");
+        assert_eq!(
+            output.projection.len(),
+            wall + 1,
+            "no label on a panel carried"
+        );
         senses.grip = Some(0.0);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert!(matches!(
             conversation.take_actions().as_slice(),
-            [Action::Send(tomori_protocol::ClientMessage::PlacePanel { panel, wall: None, pose: Some(_) })] if panel == "panel-1"
+            [Action::Send(tomori_protocol::ClientMessage::PlacePanel { panel, wall: None, slot: None, pose: Some(_) })] if panel == "panel-1"
         ));
         // A card nearer on the ray is pointed at and picked up instead.
         project(&mut conversation);

@@ -3220,7 +3220,10 @@ fn what_is_projected_is_sent_only_to_clients_that_read_it_visitors_included() {
             tomori_protocol::TOMORI_WALL,
             tomori_protocol::WallKind::Tomori,
             crate::stage::default_stage()
-        )]
+        )
+        .with_shape(tomori_protocol::WallShape::Arc {
+            radius: crate::stage::ARC_RADIUS
+        })]
     );
     assert_eq!(vic.projections().len(), 1);
     // A client from before projection is sent none, even were it asked to render one.
@@ -3277,6 +3280,7 @@ fn a_reply_s_code_blocks_are_code_panels_that_the_next_reply_s_replace_unless_pi
     ada.send(ClientMessage::PlacePanel {
         panel: pinned.clone(),
         wall: Some(tomori_protocol::TOMORI_WALL.into()),
+        slot: None,
         pose: None,
     });
     assert!(ada.projection().panel(&pinned).unwrap().pinned);
@@ -3366,6 +3370,7 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
     ada.send(ClientMessage::PlacePanel {
         panel: panel.clone(),
         wall: None,
+        slot: None,
         pose: Some(free),
     });
     for client in [&bob, &vic] {
@@ -3380,6 +3385,7 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         bob.send(ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
+            slot: None,
             pose: None,
         });
         assert_eq!(
@@ -3390,6 +3396,33 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
             }
         );
     }
+    // Put in the slot one chooses, it is there for everyone, arranged; a slot past the last is refused.
+    for client in [&ada, &bob, &vic] {
+        client.read();
+    }
+    bob.send(ClientMessage::PlacePanel {
+        panel: panel.clone(),
+        wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
+        slot: Some(4),
+        pose: None,
+    });
+    for client in [&ada, &vic] {
+        assert_eq!(
+            client.projections().last().unwrap().panels[0].place,
+            tomori_protocol::Place::Wall {
+                wall: tomori_protocol::TOMORI_WALL.to_owned(),
+                slot: 4
+            }
+        );
+    }
+    bob.read();
+    bob.send(ClientMessage::PlacePanel {
+        panel: panel.clone(),
+        wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
+        slot: Some(tomori_protocol::WALL_SLOTS),
+        pose: None,
+    });
+    assert_eq!(bob.errors(), ["That wall has no such slot."]);
     // A visitor moves and dismisses nothing.
     vic.send(ClientMessage::DismissPanel {
         panel: panel.clone(),
@@ -3397,6 +3430,7 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
     vic.send(ClientMessage::PlacePanel {
         panel: panel.clone(),
         wall: None,
+        slot: None,
         pose: Some(free),
     });
     assert_eq!(
@@ -3424,16 +3458,19 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: None,
+            slot: None,
             pose: None,
         },
         ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: Some("x".repeat(limits::IDENTIFIER_BYTES + 1)),
+            slot: None,
             pose: None,
         },
         ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: Some("wall-99".to_owned()),
+            slot: None,
             pose: None,
         },
     ] {
@@ -3468,6 +3505,7 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: None,
+            slot: None,
             pose: Some(free),
         },
         ClientMessage::DismissPanel { panel },
@@ -3562,6 +3600,7 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
     ada.send(ClientMessage::PlacePanel {
         panel: floating.clone(),
         wall: None,
+        slot: None,
         pose: Some(upright([0.5, 1.4, -1.0])),
     });
     let in_sky = ada.projection();
@@ -3660,6 +3699,7 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
         ada.send(ClientMessage::PlacePanel {
             panel,
             wall: None,
+            slot: None,
             pose: Some(upright([0.5, 1.4, -1.0])),
         });
         (space, ada.projection())
