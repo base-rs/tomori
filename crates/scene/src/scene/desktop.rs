@@ -20,6 +20,10 @@ pub const TITLE: &str = "Tomori";
 const LOOK_SPEED: f32 = 0.004;
 /// The longest step, in seconds, so that a window hidden for a while does not jump.
 const MAX_STEP: f32 = 0.1;
+/// How many rows of a panel a notch of the mouse's wheel scrolls.
+pub const WHEEL_ROWS: f32 = 3.0;
+/// How many pixels of a touchpad's scroll make a notch.
+pub const WHEEL_PIXELS: f32 = 40.0;
 /// How far along the mouse's ray the swarm is attracted to: about arm's length further than a controller would be.
 const ATTRACT_AT: f32 = 1.2;
 
@@ -99,6 +103,8 @@ struct Input {
     right: [bool; 4],
     /// The right grip, held.
     grip: bool,
+    /// Rows the wheel scrolled since the last frame, which it consumes.
+    scroll: f32,
 }
 
 impl Input {
@@ -128,6 +134,7 @@ impl Input {
             replay: std::mem::take(&mut self.replay),
             left_stick: Self::stick(self.left),
             right_stick: Self::stick(self.right),
+            scroll: std::mem::take(&mut self.scroll),
         }
     }
 }
@@ -297,6 +304,14 @@ impl Desktop {
             self.head.look(cursor - last);
         }
         self.input.cursor = Some(cursor);
+    }
+
+    /// The mouse's wheel turned `lines` notches, up where more than none, as winit counts them: it scrolls the panel the
+    /// mouse points at by [`WHEEL_ROWS`] rows a notch, down for a turn towards the participant. See `design/desktop.md`.
+    pub fn wheel(&mut self, lines: f32) {
+        if lines.is_finite() {
+            self.input.scroll -= lines * WHEEL_ROWS;
+        }
     }
 
     pub fn mouse(&mut self, button: Button, pressed: bool) {
@@ -539,6 +554,23 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_scrolls_by_rows_down_for_a_turn_towards_the_participant() {
+        let mut conversation = joined();
+        let mut desktop = desktop(&mut conversation);
+        // A notch away from the participant scrolls up three rows; a turn of two towards them, down six; together, once.
+        desktop.wheel(1.0);
+        assert_eq!(desktop.input.take().scroll, -WHEEL_ROWS);
+        desktop.wheel(-1.0);
+        desktop.wheel(-1.0);
+        assert_eq!(desktop.input.take().scroll, 2.0 * WHEEL_ROWS);
+        assert_eq!(desktop.input.take().scroll, 0.0);
+        // Nonsense from the platform scrolls nothing.
+        desktop.wheel(f32::NAN);
+        desktop.wheel(f32::INFINITY);
+        assert_eq!(desktop.input.take().scroll, 0.0);
+    }
+
+    #[test]
     fn keys_press_once_hold_while_down_and_ignore_repeats() {
         let mut conversation = joined();
         let mut desktop = desktop(&mut conversation);
@@ -568,6 +600,7 @@ mod tests {
             replay: true,
             left_stick: Vec2::new(1.0, 1.0),
             right_stick: Vec2::new(1.0, 1.0),
+            scroll: 0.0,
         };
         assert_eq!(desktop.input.take(), expected);
         assert!(desktop.input.grip);

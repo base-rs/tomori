@@ -1349,6 +1349,208 @@ mod tests {
         });
     }
 
+    /// Set `TOMORI_CODE_SCROLL_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: the
+    /// 17 lines of JavaScript the maintainer could not see all of on the Quest 3, on the Tomori wall from 0.6 m, at its
+    /// top, saying how many more lines are below, then scrolled to its end with the wheel, saying how many are above;
+    /// and then floating 1.2 m ahead, grown to show every line.
+    #[test]
+    fn a_code_panel_scrolls_on_a_wall_and_grows_to_show_every_line_floating() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 960;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("code scroll test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let javascript = [
+                "import { build, publish } from './release.js';",
+                "",
+                "export async function release(project, options = {}) {",
+                "  const version = await project.nextVersion(options.channel ?? 'stable');",
+                "  log(`Releasing ${project.name} ${version} to the ${options.channel} channel`);",
+                "  const artifacts = await build(project, { target: 'quest', release: true, version });",
+                "  for (const artifact of artifacts) {",
+                "    await artifact.sign(options.key);",
+                "  }",
+                "  if (options.dryRun) {",
+                "    return { version, artifacts, published: false };",
+                "  }",
+                "  await publish(artifacts, { channel: options.channel, notes: project.releaseNotes(version) });",
+                "  log('Published.');",
+                "  return { version, artifacts, published: true };",
+                "}",
+                "export default release;",
+            ];
+            let spans = |body: &str| {
+                let mut spans = Vec::new();
+                let mut from = 0;
+                for (text, kind) in [
+                    ("import", tomori_protocol::TokenKind::Keyword),
+                    ("'./release.js'", tomori_protocol::TokenKind::String),
+                    ("export", tomori_protocol::TokenKind::Keyword),
+                    ("async", tomori_protocol::TokenKind::Keyword),
+                    ("function", tomori_protocol::TokenKind::Keyword),
+                    ("release", tomori_protocol::TokenKind::Function),
+                    ("const", tomori_protocol::TokenKind::Keyword),
+                    ("await", tomori_protocol::TokenKind::Keyword),
+                    ("'stable'", tomori_protocol::TokenKind::String),
+                    ("log", tomori_protocol::TokenKind::Function),
+                    ("const", tomori_protocol::TokenKind::Keyword),
+                    ("await", tomori_protocol::TokenKind::Keyword),
+                    ("'quest'", tomori_protocol::TokenKind::String),
+                    ("true", tomori_protocol::TokenKind::Constant),
+                    ("for", tomori_protocol::TokenKind::Keyword),
+                    ("await", tomori_protocol::TokenKind::Keyword),
+                    ("if", tomori_protocol::TokenKind::Keyword),
+                    ("return", tomori_protocol::TokenKind::Keyword),
+                    ("false", tomori_protocol::TokenKind::Constant),
+                    ("await", tomori_protocol::TokenKind::Keyword),
+                    ("publish", tomori_protocol::TokenKind::Function),
+                    ("'Published.'", tomori_protocol::TokenKind::String),
+                    ("return", tomori_protocol::TokenKind::Keyword),
+                    ("true", tomori_protocol::TokenKind::Constant),
+                    ("export", tomori_protocol::TokenKind::Keyword),
+                    ("default", tomori_protocol::TokenKind::Keyword),
+                ] {
+                    let at = from
+                        + body[from..]
+                            .find(text)
+                            .expect("each text is there, in order");
+                    spans.push(tomori_protocol::Span::new(
+                        body[..at].chars().count() as u32,
+                        text.chars().count() as u32,
+                        kind,
+                    ));
+                    from = at + text.len();
+                }
+                assert!(tomori_protocol::valid_spans(body, &spans));
+                spans
+            };
+            let body = javascript.join("\n");
+            let panel = |place: tomori_protocol::Place| {
+                tomori_protocol::Panel::new("panel-1", "javascript", body.clone(), place)
+                    .with_code(
+                        tomori_protocol::Code::new("javascript", javascript.len() as u32)
+                            .with_spans(spans(&body)),
+                    )
+                    .with_age(5)
+            };
+            let wall = tomori_wall();
+            let wall_frame = Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            );
+            let slots = tomori_scene::projection::slot_frames(&wall, wall_frame);
+            let slot = slots[2].w_axis.truncate();
+            let facing = slots[2].transform_vector3(Vec3::Z).normalize();
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |at: Vec3| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, at - arrival::HOME),
+                ..Default::default()
+            };
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let close = lens * Mat4::look_at_rh(slot + facing * 0.6, slot, Vec3::Y);
+            let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -1.2);
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, ahead, Vec3::Y);
+            // What the participant sees of the panel at `place`, pointed at, after the wheel scrolls it `rows` rows.
+            let mut capture = |place: tomori_protocol::Place, at: Vec3, rows: f32, matrix: Mat4| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, Vec::new(), vec![panel(place)]);
+                let mut step = Step::default();
+                let now = Instant::now();
+                step.update(&senses(at), &mut conversation, &mut felt(), now, 0.01);
+                step.buttons(
+                    &tomori_scene::scene::Buttons {
+                        scroll: rows,
+                        ..Default::default()
+                    },
+                    true,
+                    &mut conversation,
+                    &mut felt(),
+                    now,
+                );
+                // Drawn pointing past it, so that the label on the ray does not cover it.
+                let frame = step.update(
+                    &senses(arrival::HOME + Vec3::Y),
+                    &mut conversation,
+                    &mut felt(),
+                    now,
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let on_wall = tomori_protocol::Place::Wall {
+                wall: tomori_protocol::TOMORI_WALL.into(),
+                slot: 2,
+            };
+            let top = capture(on_wall.clone(), slot, 0.0, close);
+            let end = capture(on_wall, slot, 100.0, close);
+            let floating = tomori_protocol::Place::Free {
+                pose: tomori_protocol::Pose::upright_facing(
+                    ahead.to_array(),
+                    arrival::HOME.to_array(),
+                ),
+            };
+            let grown = capture(floating, ahead, 0.0, from_home);
+            let mut sheet = image::RgbaImage::new(WIDTH * 3, HEIGHT);
+            image::imageops::replace(&mut sheet, &top, 0, 0);
+            image::imageops::replace(&mut sheet, &end, WIDTH.into(), 0);
+            image::imageops::replace(&mut sheet, &grown, (2 * WIDTH).into(), 0);
+            crate::test_support::preview("TOMORI_CODE_SCROLL_PREVIEW", &sheet);
+            assert_ne!(top, end, "scrolling shows other rows");
+            // Floating, it is taller than in its slot: lit rows reach further down the view.
+            let lowest = |image: &image::RgbaImage| {
+                (0..image.height())
+                    .rev()
+                    .find(|&y| {
+                        (0..image.width())
+                            .any(|x| image.get_pixel(x, y).0[..3].iter().any(|c| *c > 120))
+                    })
+                    .unwrap_or_default()
+            };
+            let highest = |image: &image::RgbaImage| {
+                (0..image.height())
+                    .find(|&y| {
+                        (0..image.width())
+                            .any(|x| image.get_pixel(x, y).0[..3].iter().any(|c| *c > 120))
+                    })
+                    .unwrap_or_default()
+            };
+            assert!(lowest(&grown) > highest(&grown) + HEIGHT / 3, "it grows");
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
     /// Set `TOMORI_DEPTH_ORDER_PREVIEW` to a PNG path to save what this renders, each eye side by side: the hand menu with
     /// a panel floating behind it, then in front of it, and the status pill with a panel behind it, then in front of it.
     #[test]

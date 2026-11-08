@@ -4,14 +4,15 @@
 //! Code blocks: the fenced code blocks of any language but `panel` in the agent's replies, which the server projects as
 //! code panels, titled with their info string and highlighted here, on the server, never on a headset. Everything in
 //! them is untrusted, so each is bounded and cleaned: only a block's first [`CODE_LINES`] lines are kept, cut where they
-//! reach [`CODE_CHARS`] characters together, with at most [`CODE_SPANS`] spans. See `design/projection.md`.
+//! reach [`CODE_CHARS`] characters together, with at most [`CODE_SPANS`] spans. A projection that would not fit in one
+//! frame sends some of them [`short`], as [`SHORT`] bounds them. See `design/projection.md`.
 //!
 //! A block of a single line, such as a command, is left in the transcript and not projected: it reads as well there,
 //! and a panel for each would crowd the walls and replace the code panels of the reply before.
 //!
 //! A block is read into a plain code panel and its [`Source`], which is highlighted later, outside the hub's lock, since
 //! highlighting takes far longer than reading; see `crate::highlighting`.
-use tomori_protocol::{CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Span};
+use tomori_protocol::{CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Panel, Span};
 
 use super::blocks::{META_KEY_CHARS, TITLE_CHARS};
 use super::{Content, Found};
@@ -21,8 +22,37 @@ pub const CODE_PER_REPLY: usize = 4;
 
 /// The most characters of a block's first lines highlighted, together: more than the [`CODE_CHARS`] shown, so that
 /// lines cut where they are shown are still highlighted as they continue, as a string that closes after the cut.
-const HIGHLIGHTED_CHARS: usize = 1_024;
+const HIGHLIGHTED_CHARS: usize = 8_080;
 const _: () = assert!(HIGHLIGHTED_CHARS > CODE_CHARS);
+// The highlighter takes them all, with the breaks between them, but for characters of more than two bytes, whose code
+// past its bound is plain.
+#[cfg(feature = "highlight")]
+const _: () = assert!(2 * HIGHLIGHTED_CHARS + CODE_LINES <= tomori_highlight::INPUT_BYTES);
+
+/// How much of a block's code a panel holds: its first `lines`, cut where they reach `chars` characters together, with
+/// at most `spans` spans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bound {
+    pub lines: usize,
+    pub chars: usize,
+    pub spans: usize,
+}
+
+/// What a code panel holds, and is sent where its projection fits in one frame.
+pub const FULL: Bound = Bound {
+    lines: CODE_LINES,
+    chars: CODE_CHARS,
+    spans: CODE_SPANS,
+};
+
+/// What a code panel is sent where its projection, with every code panel whole, would not fit in one frame: as much as
+/// a slot shows, its first 16 lines and 720 characters, with at most 256 spans, as code panels held before they
+/// scrolled, so that a projection of them all fits.
+pub const SHORT: Bound = Bound {
+    lines: 16,
+    chars: 720,
+    spans: 256,
+};
 
 /// The longest info string kept, in characters, more than a title shows.
 const INFO_CHARS: usize = 2 * TITLE_CHARS;
@@ -106,7 +136,7 @@ impl Lines {
                 tomori_protocol::text::one_line(language, META_KEY_CHARS).to_lowercase()
             })
             .unwrap_or_default();
-        let (body, _) = shown(&lines, Vec::new());
+        let (body, _) = shown(&lines, Vec::new(), FULL);
         let content = Content {
             title: if title.is_empty() {
                 UNTITLED.to_owned()
@@ -137,8 +167,24 @@ impl Source {
 
     /// Its spans over what its panel shows, from `found`, the spans a highlighter found over its text.
     pub fn shown(&self, found: Vec<Span>) -> Vec<Span> {
-        shown(&self.lines, found).1
+        shown(&self.lines, found, FULL).1
     }
+}
+
+/// `panel`, a code panel, as [`SHORT`] bounds it: its first lines and the spans over them. Its block's length is kept, so
+/// that a client says how many lines it was not sent. Returns whether it was made shorter.
+pub fn short(panel: &mut Panel) -> bool {
+    let Some(code) = panel.code.as_mut() else {
+        return false;
+    };
+    let lines: Vec<String> = panel.body.split('\n').map(str::to_owned).collect();
+    let found = std::mem::take(&mut code.spans);
+    let count = found.len();
+    let (body, spans) = shown(&lines, found, SHORT);
+    let shorter = body != panel.body || spans.len() < count;
+    panel.body = body;
+    code.spans = spans;
+    shorter
 }
 
 /// `line` as a code panel shows it: tabs expanded to the next stop, format characters removed, since they reorder or
@@ -168,17 +214,17 @@ fn clean(line: &str) -> String {
     cleaned
 }
 
-/// `lines` as a code panel shows them, cut with "…" where they reach [`CODE_CHARS`] together, without the lines after,
-/// and `found`, their spans over the lines joined, as spans over what is shown, at most [`CODE_SPANS`]: a span's part
-/// past the cut is dropped.
-fn shown(lines: &[String], found: Vec<Span>) -> (String, Vec<Span>) {
+/// `lines` as a code panel holds them, as `bound` bounds them: its first lines, cut with "…" where they reach its
+/// characters together, without the lines after, and `found`, their spans over the lines joined, as spans over what is
+/// held, at most its spans: a span's part past the cut is dropped.
+fn shown(lines: &[String], found: Vec<Span>, bound: Bound) -> (String, Vec<Span>) {
     let mut body = String::new();
     let mut spans = Vec::new();
     let mut found = found.into_iter().peekable();
     // Where the line starts in the lines joined, and in what is shown, and how many characters are left to show.
     let (mut from, mut at) = (0_u32, 0_u32);
-    let mut left = CODE_CHARS as u32;
-    for (index, line) in lines.iter().enumerate() {
+    let mut left = bound.chars as u32;
+    for (index, line) in lines.iter().take(bound.lines).enumerate() {
         // A line after those that took every character could not be shown either.
         if left == 0 {
             break;
@@ -198,7 +244,7 @@ fn shown(lines: &[String], found: Vec<Span>) -> (String, Vec<Span>) {
         while let Some(span) = found.next_if(|span| span.start < from + length) {
             let start = span.start.saturating_sub(from);
             let end = (start + span.length).min(kept);
-            if start < end && spans.len() < CODE_SPANS {
+            if start < end && spans.len() < bound.spans {
                 spans.push(Span::new(at + start, end - start, span.kind));
             }
         }

@@ -120,13 +120,32 @@ fn a_block_of_one_line_or_none_stays_in_the_transcript_without_its_blank_lines()
 
 #[test]
 fn a_long_block_keeps_its_first_lines_each_cut_and_says_how_long_it_is() {
-    let source: Vec<String> = (1..=40)
+    // The 17 lines of the block the maintainer could not scroll are all held, as are as many as a panel holds of a longer
+    // one.
+    let source: Vec<String> = (1..=17)
+        .map(|line| format!("const x{line} = {line};"))
+        .collect();
+    let content = block("javascript", &source.join("\n")).unwrap();
+    assert_eq!(content.body, source.join("\n"));
+    assert_eq!(content.code.as_ref().unwrap().lines, 17);
+    let source: Vec<String> = (1..=CODE_LINES + 40)
         .map(|line| format!("let x{line} = {line};"))
         .collect();
     let content = block("rust", &source.join("\n")).unwrap();
     assert_eq!(content.body.lines().count(), CODE_LINES);
-    assert_eq!(content.body.lines().last().unwrap(), "let x16 = 16;");
-    assert_eq!(content.code.as_ref().unwrap().lines, 40);
+    assert_eq!(
+        content.body.lines().last().unwrap(),
+        format!("let x{CODE_LINES} = {CODE_LINES};")
+    );
+    assert_eq!(content.code.as_ref().unwrap().lines, CODE_LINES as u32 + 40);
+    // Highlighted to its last line.
+    let found = tokens(&content);
+    assert!(
+        found
+            .iter()
+            .any(|(text, _)| *text == CODE_LINES.to_string()),
+        "{found:?}"
+    );
     // Blank lines inside it, and many at its end, still count as the block's own, but not those at its end.
     let gappy = format!("{}\n\n\n{}\n\n\n\n", "a", "b");
     assert_eq!(block("text", &gappy).unwrap().code.unwrap().lines, 4);
@@ -178,6 +197,63 @@ fn a_long_block_keeps_its_first_lines_each_cut_and_says_how_long_it_is() {
     let content = block("json", &format!("[{dense}]")).unwrap();
     assert_eq!(content.code.as_ref().unwrap().spans.len(), CODE_SPANS);
     tokens(&content);
+}
+
+/// `content` as a client is sent it.
+fn panel(content: &Content) -> Panel {
+    let mut panel = Panel::new(
+        "panel-1",
+        content.title.clone(),
+        content.body.clone(),
+        tomori_protocol::Place::Unknown,
+    );
+    panel.code = content.code.clone();
+    panel
+}
+
+#[test]
+fn a_code_panel_sent_short_keeps_its_first_lines_and_their_spans_and_its_length() {
+    // A long block, highlighted to its end, sent short: its first 16 lines, with their spans, and its length, so that a
+    // client says how many it was not sent.
+    let source: Vec<String> = (1..=40)
+        .map(|line| format!("let x{line} = {line};"))
+        .collect();
+    let content = block("rust", &source.join("\n")).unwrap();
+    let mut sent = panel(&content);
+    assert!(short(&mut sent));
+    assert_eq!(sent.body, source[..SHORT.lines].join("\n"));
+    let code = sent.code.as_ref().unwrap();
+    assert_eq!(code.lines, 40);
+    assert!(tomori_protocol::valid_spans(&sent.body, &code.spans));
+    assert!(!code.spans.is_empty());
+    assert!(code.spans.len() < content.code.as_ref().unwrap().spans.len());
+    // Cut with "…" where its lines reach 720 characters, a span across the cut shortened and those past it dropped.
+    let long = format!("let s = \"{}\";\nlet t = 1;", "a".repeat(SHORT.chars));
+    let content = block("rust", &long).unwrap();
+    let mut sent = panel(&content);
+    assert!(short(&mut sent));
+    assert_eq!(sent.body.chars().count(), SHORT.chars + 1);
+    assert!(sent.body.ends_with('…'));
+    let code = sent.code.as_ref().unwrap();
+    assert!(tomori_protocol::valid_spans(&sent.body, &code.spans));
+    assert!(
+        code.spans
+            .iter()
+            .all(|span| span.end() <= SHORT.chars as u64)
+    );
+    // At most so many spans, of lines full of them.
+    let dense = vec!["1,".repeat(20); SHORT.lines].join("\n");
+    let content = block("json", &format!("[{dense}]")).unwrap();
+    let mut sent = panel(&content);
+    assert!(short(&mut sent));
+    assert_eq!(sent.code.as_ref().unwrap().spans.len(), SHORT.spans);
+    // One as short already is unchanged, as is a text panel.
+    let content = block("rust", MAINTAINERS_BLOCK.trim_end()).unwrap();
+    let mut sent = panel(&content);
+    assert!(!short(&mut sent));
+    assert_eq!(sent, panel(&content));
+    let mut text = Panel::new("panel-2", "", "a\nb", tomori_protocol::Place::Unknown);
+    assert!(!short(&mut text));
 }
 
 #[test]

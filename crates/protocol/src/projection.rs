@@ -170,19 +170,18 @@ impl Meta {
     }
 }
 
-/// The most lines of code a code panel holds, all of which it shows: the first lines of its block, numbered from 1.
-/// There is no scrolling yet, so a longer block shows "…N more lines" after them.
-pub const CODE_LINES: usize = 16;
+/// The most lines of code a code panel holds: the first lines of its block, numbered from 1, which a participant
+/// scrolls through. A longer block says how many more lines it has, which are only in the transcript.
+pub const CODE_LINES: usize = 200;
 
 /// The most characters of a code panel's lines together, not counting the breaks between them, after which they are cut
-/// with "…" and the lines after left out: as many as a headset's code panel, 16 rows of 45 columns of code, can show of
-/// them, however they wrap, so that where they are cut is never shown. A line is never cut short of that, however long,
-/// and one cut is always too tall for what is left of the panel: it is counted in "…N more lines", or, the first line,
-/// shows what fits and ends with "…".
-pub const CODE_CHARS: usize = 720;
+/// with "…" and the lines after left out. A line is never cut short of that, however long. The server may send fewer,
+/// down to the first 16 lines and 720 characters, where a projection would otherwise not fit in one frame.
+pub const CODE_CHARS: usize = 8_000;
 
-/// The most spans of a code panel; text past the last is drawn plain.
-pub const CODE_SPANS: usize = 256;
+/// The most spans of a code panel; text past the last is drawn plain. An older client, which took at most 256, draws a
+/// code panel with more as plain text.
+pub const CODE_SPANS: usize = 2_048;
 
 /// What a span of code is, as a highlighter classifies it: a small set every highlighter maps onto, and every client
 /// maps onto one palette, so that code reads alike whichever highlighter classified it. `Plain` stands for text no
@@ -284,7 +283,8 @@ pub struct Code {
     /// In lower case, such as `rust`; empty when the block names none.
     #[serde(default)]
     pub language: String,
-    /// How many lines the block has, of which the panel holds the first, at most [`CODE_LINES`].
+    /// How many lines the block has, of which the panel holds the first, at most [`CODE_LINES`]: a client says how many
+    /// it does not hold.
     pub lines: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<Span>,
