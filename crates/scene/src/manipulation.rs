@@ -139,11 +139,7 @@ mod tests {
         for _ in 0..72 {
             assert!(!held.update(Vec2::Y, FRAME));
         }
-        assert!(
-            (held.distance() - RATE.exp()).abs() < 1e-3,
-            "{}",
-            held.distance()
-        );
+        assert!((held.distance() - RATE.exp()).abs() < 1e-3);
         let mut once = Manipulation::new(1.0);
         once.update(Vec2::Y, 1.0);
         assert!((once.distance() - held.distance()).abs() < 1e-3);

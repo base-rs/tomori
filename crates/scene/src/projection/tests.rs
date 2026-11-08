@@ -565,6 +565,10 @@ fn a_panel_carried_stays_in_the_hand_while_a_teleport_is_aimed() {
     assert_eq!(projector.held(), Some("a"));
     assert!((output.end.unwrap() - travelled.unwrap().at(distance)).length() < 1e-4);
     assert_eq!(output.pointed, None);
+    // Without the ray, as when the controller is not tracked, it stays where it was.
+    let output = projector.update(aiming(None, 1.0));
+    assert!((output.end.unwrap() - travelled.unwrap().at(distance)).length() < 1e-4);
+    assert_eq!(projector.held(), Some("a"));
     // Let go while aiming, it floats where it is.
     let output = projector.update(aiming(travelled, 0.0));
     assert!(matches!(output.placed, Some((ref panel, Target::Free(_))) if panel == "a"));

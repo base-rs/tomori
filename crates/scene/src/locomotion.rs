@@ -947,6 +947,14 @@ mod tests {
         }
         assert!((travel.rig().floor() - ASCENT_SPEED * HOLD / 3.0).abs() < 1e-5);
         assert!(!travel.update(tap(Vec2::ZERO)).stepped);
+        // Rolled sideways before the hold is up, it rises nothing once it is, and still steps nowhere.
+        let floor = travel.rig().floor();
+        travel.update(tap(Vec2::NEG_Y));
+        for _ in 0..3 {
+            assert!(!travel.update(tap(Vec2::new(0.5, -0.1))).turned);
+        }
+        assert_eq!(travel.rig().floor(), floor);
+        assert!(!travel.update(tap(Vec2::ZERO)).stepped);
     }
 
     /// Aim a teleport at the floor 4 m ahead, as the reviewer's cases start.
