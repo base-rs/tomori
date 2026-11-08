@@ -315,8 +315,8 @@ async fn exchange(
             environments: options.environments.clone(),
             // Every client built with this crate reads environments' state and events, which it hands on as any other message, for the client side of the environment, if it has one, to present.
             environment_state: true,
-            // Not yet: the scene does not draw what is projected. See `design/projection.md`.
-            projection: false,
+            // Every client built with this crate reads what is projected in its space, which it hands on as any other message. See `design/projection.md`.
+            projection: true,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {

@@ -26,6 +26,21 @@ cargo run -p tomori-server-app --bin tomori-server -- --backend opencode --githu
 
 Nothing is changed on GitHub, and only participants see the cards; see [design/github.md](design/github.md).
 
+### Projection walls
+
+When something is better read than heard, such as a list, steps or a summary, the agent projects it as a text panel, which everyone in the space sees, by writing a fenced block of language `panel` in its reply:
+
+````text
+```panel
+title: Build status
+source: CI
+---
+**3 crates** failed.
+```
+````
+
+The panel goes onto the wall nearest whoever asked, or else onto the **Tomori wall**, which every space has beside the swarm, and which keeps its panels when the space changes environment. The farmyard has a noticeboard of its own, and an owner can add a wall where they stand, or remove the nearest one they added, from the hand menu's **Space** section. Point at a panel to see its label; squeeze the right grip to pull it off and carry it, and let go to leave it floating, or near a wall to snap it back; point at it and press **B** to dismiss it, which holding B to leave never does; and point at it as you press **X** to ask the agent about it. Panels are not read aloud, and stay in the transcript; the server keeps walls and panels with the space across restarts, and those of an environment with that environment. See [design/projection.md](design/projection.md); to see a wall rendered, set `TOMORI_PROJECTION_PREVIEW` to a PNG path and run `cargo test --locked -p tomori-render a_projection_wall_and_its_panels_render_over_the_scene`.
+
 Switching does not reset agents, conversations or worker positions. Sky uses the same scene/recenter transform as the workspace; it does not move the camera. Clouds use a bounded low-resolution volumetric density pass with translucent edges and approximate moonlighting; lanterns have brighter emissive faces and cast warm, occluded illumination onto the nearby static scenery through a build-time lightmap, not runtime point-light shadow maps. The same lightmap adds local ambient occlusion at contacts. The shrine and platform cast/receive softly filtered moon shadows from a cached static shadow map. Agent/status visuals and labels are not shadowed. There is no day/night cycle, scenery collision or new locomotion system.
 
 The scene has been exercised on Quest 3 and tested offscreen in Vulkan; the on-device frame-time budget still needs measurement. The stereo/switch/recenter regression runs with the other tests (see [Tests](#tests--desktop-openxr)); to save a preview sheet:
@@ -82,7 +97,7 @@ Before you join a space, servers, spaces and the **New space** object stand in t
 - **Left stick click:** mute or unmute spoken replies for you only; the status line shows **Muted**. Other participants still play.
 - **Pending approval:** flick the right stick left/right to choose *allow once*, a standing option or *deny*, then press **A**. Nothing is decided without a press, and **B** never decides.
 - **Pending question:** hold **X** and say your answer, or its number; it goes to the question rather than the queue. A question Tomori can't present says to answer it on the PC.
-- **B:** close the list, deselect a queue entry, or dismiss the problem shown. It never denies, cancels or leaves. **Hold B** for a second to leave the space.
+- **B:** close the list, deselect a queue entry, or dismiss the problem shown; with nothing else to close, a press dismisses the projected panel you point at, while holding B to leave never does. It never denies, cancels or leaves. **Hold B** for a second to leave the space.
 - **Hold X:** talk to the agent; release to send. See [Voice](#voice).
 - **Travel:** only in a space whose environment allows it, which neither Sky nor the grid does: hold the left stick forward and point the right controller at the floor, where a ring shows where you will land, and let the stick back to the middle to go there, with a short blink; push it left or right to turn 30°; and, where the environment lets you fly, hold it back to rise. Each push does one thing, whichever way it went first, until the stick is back in the middle. There is no smooth movement, and the others and the spectator see you where you travelled. To stay room scale, turn **Travel** off in the hand menu's Space section (see [design/locomotion.md](design/locomotion.md)).
 

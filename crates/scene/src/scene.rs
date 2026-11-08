@@ -172,6 +172,9 @@ pub struct Frame<'a> {
     pub presence: Option<Presence>,
     /// The GitHub environment's inbox and cards, in the scene, while the space shows them.
     pub cards: Vec<controller_ui::Sheet>,
+    /// The space's projection walls and panels, farthest first, and the label naming the panel pointed at, in the scene.
+    /// See `design/projection.md`.
+    pub projection: Vec<controller_ui::Sheet>,
     /// Where a teleport being aimed would land, which is drawn as a ring on the surface; see `design/locomotion.md`.
     pub landing: Option<Vec3>,
     /// How dark the view is drawn, from 0 to 1, as it comes back after a teleport; see `design/locomotion.md`.
@@ -224,6 +227,10 @@ pub struct Step {
     panel: PanelAnchor,
     /// The GitHub environment's cards: the one carried and the one put down; see `design/github.md`.
     board: crate::board::Board,
+    /// The space's projected panels: the one carried and the one let go; see `design/projection.md`.
+    projector: crate::projection::Projector,
+    /// How far along the ray the card it met last frame was, which the grip picks up instead of a panel behind it.
+    card_reach: f32,
     /// Where the participant has travelled, in an environment that allows it, and the teleport being aimed; see `design/locomotion.md`.
     travel: Travel,
     /// The left stick, which travels in such a space, from the last buttons.
@@ -260,6 +267,8 @@ impl Default for Step {
             presentation_navigation: CardNavigation::default(),
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
+            projector: crate::projection::Projector::default(),
+            card_reach: f32::INFINITY,
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
             client: None,
@@ -603,11 +612,12 @@ impl Step {
             stick: self.travel_stick,
             ray: senses.ray,
             head: senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
-            // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card is carried, since aiming would put the card down.
+            // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card or panel is carried, since aiming would put it down.
             active: in_space
                 && scenery.reveal.is_none()
                 && scenery.environment == conversation.environment()
-                && self.board.held().is_none(),
+                && self.board.held().is_none()
+                && self.projector.held().is_none(),
             dt,
         });
         if travel.teleported {
@@ -615,15 +625,41 @@ impl Step {
         }
         // While a teleport is aimed, the ray serves only it.
         let in_space = in_space && !travel.aiming;
-        // The space's cards stand wherever it shows them; the ray and the right grip act on them only while nothing else takes them. See `design/github.md`.
+        // What is projected stands wherever the space shows it; the ray and the right grip act on it only while nothing else takes them, and not while a card is carried. A card the ray met nearer last frame takes the grip. See `design/projection.md`.
+        conversation.observe_head(senses.head_pose.map(Into::into));
+        let projected = self.projector.update(crate::projection::Input {
+            projection: conversation.projection().filter(|_| !in_arrival),
+            ray: senses.ray,
+            // Only a participant pulls panels off; a visitor only looks at them and points.
+            grip: senses
+                .grip
+                .filter(|_| self.board.held().is_none() && conversation.role().participates()),
+            viewer: senses.viewer,
+            active: in_space && self.board.held().is_none(),
+            nearer: self.card_reach,
+            now,
+        });
+        if projected.picked {
+            feedback.emit(feedback::Event::Choose, now);
+        }
+        if let Some((panel, target)) = projected.placed.clone() {
+            feedback.emit(feedback::Event::Hover, now);
+            conversation.place_panel(panel, target);
+        }
+        let carrying = self.projector.held().is_some();
+        // The space's cards stand wherever it shows them; the ray and the right grip act on them only while nothing else takes them, such as a panel carried. See `design/github.md`.
         let board = self.board.update(crate::board::Input {
             cards: conversation.cards().filter(|_| !in_arrival),
             ray: senses.ray,
-            grip: senses.grip,
+            grip: senses.grip.filter(|_| !carrying),
             viewer: senses.viewer,
-            active: in_space,
+            active: in_space && !carrying,
             now,
         });
+        self.card_reach = board
+            .pointed
+            .as_ref()
+            .map_or(f32::INFINITY, |(_, distance, _)| *distance);
         if board.picked {
             feedback.emit(feedback::Event::Choose, now);
         }
@@ -699,6 +735,20 @@ impl Step {
         } else {
             (card, worker)
         };
+        // A panel is pointed at where nothing else the ray meets is nearer; a panel carried is pointed at all along.
+        let nearest = object.as_ref().map_or(nearest, |picked| picked.distance);
+        let panel = self.projector.held().map(str::to_owned).or_else(|| {
+            projected
+                .pointed
+                .as_ref()
+                .filter(|(_, distance, _)| *distance < nearest && self.board.held().is_none())
+                .map(|(panel, _, _)| panel.clone())
+        });
+        let (card, worker, object) = if panel.is_some() {
+            (None, None, None)
+        } else {
+            (card, worker, object)
+        };
         // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
         let target = self
             .highlighted
@@ -707,16 +757,35 @@ impl Step {
             .or_else(|| card.as_ref().map(feedback::key))
             .or_else(|| worker.as_ref().map(feedback::key))
             .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
+            .or_else(|| panel.as_ref().map(feedback::key))
             .or_else(|| travel.landing.map(|_| feedback::key("landing")));
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
         }
         let card_end = card.as_ref().and(board.end);
+        let panel_end = panel.as_ref().and(projected.end);
         let object_end = object
             .as_ref()
             .zip(senses.ray)
             .map(|(picked, ray)| ray.at(picked.distance));
+        // The label on the ray names the panel pointed at, not one carried.
+        let mut projection = projected.sheets;
+        if let (Some(panel), Some((_, _, point)), None) =
+            (&panel, &projected.pointed, self.projector.held())
+            && let Some(shown) = conversation
+                .projection()
+                .and_then(|projection| projection.panel(panel))
+        {
+            projection.push(crate::projection::label(
+                shown,
+                *point,
+                senses.viewer.unwrap_or(arrival::HOME),
+            ));
+        }
         match (card, worker, &object) {
+            _ if panel.is_some() => {
+                conversation.point(panel.clone().map(tomori_protocol::Resource::panel))
+            }
             (Some(card), _, _) => conversation.point(Some(tomori_protocol::Resource::card(card))),
             (None, Some(worker), _) => {
                 conversation.point(Some(tomori_protocol::Resource::worker(worker)))
@@ -782,6 +851,7 @@ impl Step {
             })
         } else {
             let hit = card_end
+                .or(panel_end)
                 .or(object_end)
                 .or_else(|| self.delegation_scene.hit_point());
             ray.filter(|_| in_space).map(|ray| crate::pointing::Beam {
@@ -846,6 +916,7 @@ impl Step {
             agent,
             presence,
             cards: board.sheets,
+            projection,
             landing: travel.landing,
             blink: travel.blink,
             environment: drawn,
@@ -931,6 +1002,34 @@ pub mod fixtures {
                 cards,
                 status: None,
             }),
+        }));
+        conversation.take_actions();
+    }
+
+    /// The Tomori wall in [`SPACE`], where the server puts it in an environment that declares no stage.
+    pub fn tomori_wall() -> tomori_protocol::Wall {
+        tomori_protocol::Wall::new(
+            tomori_protocol::TOMORI_WALL,
+            tomori_protocol::WallKind::Tomori,
+            tomori_protocol::Pose::upright_facing([1.9, 1.5, -2.1], [0.0, 1.5, 0.0]),
+        )
+    }
+
+    /// Show `panels` on [`tomori_wall`] and `walls` in [`SPACE`], which projects, as the server sends them.
+    pub fn show_projection(
+        conversation: &mut Conversation,
+        walls: Vec<tomori_protocol::Wall>,
+        panels: Vec<tomori_protocol::Panel>,
+    ) {
+        conversation.apply(space(|state| state.projection = true));
+        let mut shown = vec![tomori_wall()];
+        shown.extend(walls);
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(shown)
+                    .with_panels(panels),
+            ),
         }));
         conversation.take_actions();
     }
@@ -1359,6 +1458,132 @@ mod tests {
             now,
         );
         assert_eq!(step.travel_stick, Vec2::ZERO);
+    }
+
+    #[test]
+    fn the_ray_names_a_panel_and_the_grip_pulls_it_off_unless_a_card_is_nearer() {
+        use tomori_protocol::{
+            Card, CardKind, Cards, Checks, Panel, Place, Pose, Resource, ServerMessage,
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| {
+            state.cards = true;
+            state.projection = true;
+        }));
+        let facing_home = |at: Vec3| Pose::upright_facing(at.to_array(), arrival::HOME.to_array());
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -3.0);
+        let project = |conversation: &mut Conversation| {
+            conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+                projection: Box::new(
+                    tomori_protocol::Projection::new(SPACE, "sky")
+                        .with_walls(vec![tomori_wall()])
+                        .with_panels(vec![Panel::new(
+                            "panel-1",
+                            "Build status",
+                            "Green.",
+                            Place::Free {
+                                pose: facing_home(ahead),
+                            },
+                        )]),
+                ),
+            }));
+            conversation.take_actions();
+        };
+        project(&mut conversation);
+        let mut step = Step::default();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ray: Ray::new(arrival::HOME, -Vec3::Z),
+            ..senses()
+        };
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        // The Tomori wall, the panel, and the label on the ray naming it.
+        assert_eq!(output.projection.len(), 3);
+        let label = output.projection[2].canvas.as_ref().unwrap().plain();
+        assert!(label.starts_with("Build status"), "{label}");
+        let beam = output
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(beam.hit && beam.end.distance(ahead) < 1e-3);
+        let attending = |conversation: &mut Conversation| {
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            utterance.attention.clone()
+        };
+        assert_eq!(attending(&mut conversation), [Resource::panel("panel-1")]);
+        // A visitor's squeeze pulls nothing off.
+        let role = |role| tomori_client::Event::Message(ServerMessage::Role { role });
+        conversation.apply(role(ConnectionRole::Visitor));
+        senses.grip = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.held(), None);
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        conversation.apply(role(ConnectionRole::Owner));
+        conversation.take_actions();
+        // Squeezed, it is pulled off and carried; let go, it floats where it was left, for everyone.
+        senses.grip = Some(1.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        senses.ray = Ray::new(arrival::HOME, Vec3::new(-0.5, 0.0, -1.0));
+        let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(output.projection.len(), 2, "no label on a panel carried");
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
+        assert!(matches!(
+            conversation.take_actions().as_slice(),
+            [Action::Send(tomori_protocol::ClientMessage::PlacePanel { panel, wall: None, pose: Some(_) })] if panel == "panel-1"
+        ));
+        // A card nearer on the ray is pointed at and picked up instead.
+        project(&mut conversation);
+        conversation.apply(tomori_client::Event::Message(ServerMessage::Cards {
+            cards: Box::new(Cards {
+                space: SPACE.into(),
+                source: "o/r".into(),
+                cards: vec![Card {
+                    id: "github://o/r/issues/1".into(),
+                    number: 1,
+                    kind: CardKind::Issue,
+                    title: "A card".into(),
+                    author: "ada".into(),
+                    labels: Vec::new(),
+                    checks: Checks::None,
+                    age: 0,
+                    placement: Some(facing_home(arrival::HOME - Vec3::Z * 1.5)),
+                }],
+                status: None,
+            }),
+        }));
+        let mut step = Step::default();
+        senses.ray = Ray::new(arrival::HOME, -Vec3::Z);
+        step.update(
+            &senses,
+            &mut conversation,
+            &mut felt(),
+            now + crate::projection::PENDING,
+            FRAME,
+        );
+        assert_eq!(
+            attending(&mut conversation),
+            [Resource::card("github://o/r/issues/1")]
+        );
+        senses.grip = Some(1.0);
+        step.update(
+            &senses,
+            &mut conversation,
+            &mut felt(),
+            now + crate::projection::PENDING,
+            FRAME,
+        );
+        assert_eq!(step.board.held(), Some("github://o/r/issues/1"));
+        assert_eq!(step.projector.held(), None);
     }
 
     #[test]

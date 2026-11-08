@@ -22,8 +22,8 @@ pub struct Panels {
     pill_model: Option<Mat4>,
     /// The card's, the badge's and the transcript's models in the scene, while they are drawn.
     models: [Option<Mat4>; 3],
-    /// The GitHub environment's inbox and cards, one panel each, kept as their number falls so that they need not be
-    /// made again, with the models of those drawn now.
+    /// The space's projection walls and panels, then the GitHub environment's inbox and cards, one panel each, kept as
+    /// their number falls so that they need not be made again, with the models of those drawn now.
     cards: Vec<Panel>,
     card_models: Vec<Mat4>,
 }
@@ -45,13 +45,14 @@ impl Panels {
         }
     }
 
-    /// Upload the inbox and cards, `sheets`, making panels for them as needed.
-    pub fn set_cards(
+    /// Upload the projection's walls and panels and the inbox and cards, `sheets`, in the order to draw them, making
+    /// panels for them as needed.
+    pub fn set_cards<'a>(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &Renderer,
-        sheets: &[Sheet],
+        sheets: impl IntoIterator<Item = &'a Sheet>,
     ) {
         self.card_models.clear();
         for sheet in sheets {
@@ -85,8 +86,8 @@ impl Panels {
     }
 
     /// The panels to draw, each with its model in the eyes' space, which `scene_to_space` takes the scene to: the
-    /// inbox and cards, in the order the frame step gave them, farthest first, so that a nearer card covers one behind
-    /// it, as panels do not write depth; then the pill, card, badge and transcript.
+    /// projection's walls and panels, then the inbox and cards, in the order the frame step gave them, farthest first, so
+    /// that a nearer card covers one behind it, as panels do not write depth; then the pill, card, badge and transcript.
     pub fn list(&self, scene_to_space: Mat4) -> Vec<(&Panel, Mat4)> {
         let cards = self
             .cards
@@ -135,7 +136,13 @@ pub fn draw(
         );
     }
     panels.set(queue, &frame.panels);
-    panels.set_cards(device, queue, renderer, &frame.cards);
+    // The walls stand farther away than the inbox, beside the swarm, so they go first.
+    panels.set_cards(
+        device,
+        queue,
+        renderer,
+        frame.projection.iter().chain(&frame.cards),
+    );
 }
 
 #[cfg(test)]
@@ -475,6 +482,179 @@ mod tests {
             image::imageops::replace(&mut sheet, &pointed, 0, 0);
             image::imageops::replace(&mut sheet, &moved, 0, HEIGHT.into());
             crate::test_support::preview("TOMORI_CARDS_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_PROJECTION_PREVIEW` to a PNG path to save what this renders: the Tomori wall with four panels, from
+    /// home, then with one pointed at and named on the ray, and one pulled off and carried.
+    #[test]
+    fn a_projection_wall_and_its_panels_render_over_the_scene() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("projection test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let place = |slot: u32| tomori_protocol::Place::Wall {
+                wall: tomori_protocol::TOMORI_WALL.into(),
+                slot,
+            };
+            let shown = vec![
+                tomori_protocol::Panel::new(
+                    "panel-1",
+                    "Build status",
+                    "**3 crates** failed:\n\n- `tomori-scene`: 2 tests\n- `tomori-render`: lavapipe\n- `tomori-server`: coverage",
+                    place(0),
+                )
+                .with_meta(vec![tomori_protocol::Meta::new("source", "CI")])
+                .with_age(300),
+                tomori_protocol::Panel::new(
+                    "panel-2",
+                    "Steps to release",
+                    "1. Bump the version.\n2. Run `cargo bake test:coverage`.\n3. Tag and push.\n4. Upload the APK.",
+                    place(1),
+                )
+                .with_age(120),
+                tomori_protocol::Panel::new(
+                    "panel-3",
+                    "Summary",
+                    "Projection walls hold **text panels** the agent writes in `panel` blocks. Anyone can pull one off, put it back, or point and press B to dismiss it.",
+                    place(3),
+                )
+                .with_meta(vec![tomori_protocol::Meta::new("issue", "#82")])
+                .with_age(30),
+                tomori_protocol::Panel::new(
+                    "panel-4",
+                    "日本語のパネル",
+                    "壁に投影されたテキスト。\n\n| crate | regions |\n|---|---|\n| scene | 100% |",
+                    place(4),
+                )
+                .with_age(10),
+            ];
+            let mut conversation = joined();
+            show_projection(&mut conversation, Vec::new(), shown);
+            let head = Mat4::from_translation(arrival::HOME);
+            let wall = tomori_protocol::Pose::upright_facing([1.9, 1.5, -2.1], [0.0, 1.5, 0.0]);
+            let wall_at = Vec3::from_array(wall.position);
+            let wall_frame =
+                Mat4::from_rotation_translation(glam::Quat::from_array(wall.orientation), wall_at);
+            let slot = |index: u32| {
+                wall_frame.transform_point3(tomori_scene::projection::slot_offset(index))
+            };
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, slot(0) - arrival::HOME),
+                ..Default::default()
+            };
+            let mut step = Step::default();
+            let now = Instant::now();
+            let capture = |renderer: &Renderer, panels: &Panels| {
+                // About the field of view the headset gives the wall, to judge its text at the headset's resolution.
+                let matrix = Mat4::perspective_rh(0.9, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+                    * Mat4::look_at_rh(arrival::HOME, wall_at, Vec3::Y);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("projection test readback"),
+                    size: (WIDTH * HEIGHT * 4) as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(WIDTH * 4),
+                            rows_per_image: Some(HEIGHT),
+                        },
+                    },
+                    texture.size(),
+                );
+                queue.submit([encoder.finish()]);
+                let (sender, receiver) = std::sync::mpsc::channel();
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        let _ = sender.send(result);
+                    });
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                receiver.recv().unwrap().unwrap();
+                let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+                buffer.unmap();
+                image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
+            };
+            let bare = capture(&renderer, &panels);
+            // Looking at the wall, pointing at nothing.
+            let away = Senses {
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..senses
+            };
+            let frame = step.update(&away, &mut conversation, &mut felt(), now, 0.01);
+            assert_eq!(frame.projection.len(), 1 + 4, "the wall and its panels");
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let wall_drawn = capture(&renderer, &panels);
+            assert_ne!(wall_drawn, bare, "the wall must draw over the bare scene");
+            // Pointing at the first panel names it on the ray.
+            let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+            assert_eq!(frame.projection.len(), 1 + 4 + 1, "with the label");
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let pointed = capture(&renderer, &panels);
+            assert_ne!(pointed, wall_drawn);
+            // Pulled off and carried towards home.
+            let squeezed = Senses {
+                grip: Some(1.0),
+                ..senses
+            };
+            step.update(&squeezed, &mut conversation, &mut felt(), now, 0.01);
+            let carried = Senses {
+                ray: tomori_scene::pointing::Ray::new(
+                    arrival::HOME,
+                    wall_at + Vec3::new(-1.2, -0.2, 0.6) - arrival::HOME,
+                ),
+                ..squeezed
+            };
+            let frame = step.update(&carried, &mut conversation, &mut felt(), now, 0.01);
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let moved = capture(&renderer, &panels);
+            assert_ne!(moved, pointed);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            image::imageops::replace(&mut sheet, &wall_drawn, 0, 0);
+            image::imageops::replace(&mut sheet, &pointed, 0, HEIGHT.into());
+            image::imageops::replace(&mut sheet, &moved, 0, (2 * HEIGHT).into());
+            crate::test_support::preview("TOMORI_PROJECTION_PREVIEW", &sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }

@@ -39,6 +39,10 @@ pub const MICROPHONE_REQUEST: &str = "Waiting for microphone permission...";
 /// How long B must be held to leave a space, so that a press meant for something else never leaves. See `design/interaction.md`.
 pub const LEAVE_HOLD: Duration = Duration::from_secs(1);
 
+/// How briefly B must be pressed, and let go, to dismiss the projected panel pointed at, so that a hold meant to leave
+/// the space never dismisses one. See `design/projection.md`.
+pub const DISMISS_PRESS: Duration = Duration::from_millis(400);
+
 /// How long a queued entry's cancellation can be undone before it is sent.
 pub const CANCEL_UNDO: Duration = Duration::from_secs(3);
 
@@ -284,6 +288,11 @@ pub struct Conversation {
     object_labels: std::collections::HashMap<String, String>,
     /// The cards of the space, in a space whose environment shows them. See `design/github.md`.
     cards: Option<tomori_protocol::Cards>,
+    /// What is projected in the joined space, as the server last sent it. See `design/projection.md`.
+    projection: Option<tomori_protocol::Projection>,
+    /// Where the participant's head is in the space's scene, as the frame step last said: where a wall is added, and
+    /// which wall is nearest.
+    head: Option<tomori_protocol::Pose>,
     /// The state and events of the joined space's environment, as its server side sent them, until its client side takes them. See `design/environments.md`.
     channel: crate::channel::Replica,
     /// The space whose cards this connection asked to watch, so that it asks once for each space and connection.
@@ -321,6 +330,8 @@ pub struct Conversation {
     cancelling: Option<(String, Instant)>,
     /// How long B has been held in a space, while it is, and whether that hold has already left.
     leave_hold: Option<(Duration, bool)>,
+    /// The projected panel pointed at as B was pressed, dismissed if B is let go within [`DISMISS_PRESS`].
+    dismissing: Option<String>,
     /// When the approval or question shown appeared, until [`REQUEST_GRACE`] has passed.
     request_at: Option<Instant>,
     capture_generation: u64,
@@ -416,6 +427,8 @@ impl Conversation {
             pointing_at: None,
             object_labels: std::collections::HashMap::new(),
             cards: None,
+            projection: None,
+            head: None,
             channel: crate::channel::Replica::default(),
             watching: None,
             live: false,
@@ -435,6 +448,7 @@ impl Conversation {
             queue_selected: None,
             cancelling: None,
             leave_hold: None,
+            dismissing: None,
             request_at: None,
             capture_generation: 0,
             utterance_limit: None,
@@ -803,6 +817,16 @@ impl Conversation {
             } => {
                 self.receive_environment(environment, version, crate::channel::Update::Event(event))
             }
+            // Only the joined space's projection is kept, as the cards are.
+            ServerMessage::Projection { projection } => {
+                if self
+                    .space
+                    .as_ref()
+                    .is_some_and(|space| space.id == projection.space)
+                {
+                    self.projection = Some(*projection);
+                }
+            }
             // Only the joined space's cards are kept; a late update from a space left is ignored.
             ServerMessage::Cards { cards } => {
                 if self
@@ -934,11 +958,9 @@ impl Conversation {
             ServerMessage::Speech { segment, text, .. } => {
                 log::info!("Agent speech {segment}: {text}");
             }
-            // Presence comes with the presence work, and the scene does not draw what is projected yet, which this
-            // client does not ask the server to send.
+            // Presence comes with the presence work.
             ServerMessage::Welcome { .. }
             | ServerMessage::Presence { .. }
-            | ServerMessage::Projection { .. }
             | ServerMessage::Ping { .. }
             | ServerMessage::Pong { .. } => {}
         }
@@ -1210,6 +1232,7 @@ impl Conversation {
         self.knock = None;
         self.space = None;
         self.cards = None;
+        self.projection = None;
         self.channel.clear();
         self.watching = None;
         self.joining = None;
@@ -1311,6 +1334,9 @@ impl Conversation {
                 environment: (!space.environment.is_empty()).then(|| self.shown_environment(space)),
                 environments: self.changeable_environments(space),
                 here: here(space),
+                walls: self
+                    .manages_walls()
+                    .then(|| self.nearest_added_wall().is_some()),
             }),
             people: space
                 .map(|space| {
@@ -1458,6 +1484,8 @@ impl Conversation {
             crate::hand_menu::Choice::Mute => self.toggle_mute(),
             crate::hand_menu::Choice::Pill => self.toggle_pill(),
             crate::hand_menu::Choice::Travel => self.toggle_travel(),
+            crate::hand_menu::Choice::AddWall => self.add_wall(),
+            crate::hand_menu::Choice::RemoveWall => self.remove_wall(),
             crate::hand_menu::Choice::Leave if self.mode == Mode::Space => self.leave(),
             crate::hand_menu::Choice::Leave => {}
             crate::hand_menu::Choice::Sounds => {
@@ -1630,6 +1658,10 @@ impl Conversation {
                 | ClientMessage::SetEnvironment { .. }
                 | ClientMessage::Replay { .. }
                 | ClientMessage::StopReplay
+                | ClientMessage::AddWall { .. }
+                | ClientMessage::RemoveWall { .. }
+                | ClientMessage::PlacePanel { .. }
+                | ClientMessage::DismissPanel { .. }
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());
@@ -2060,6 +2092,16 @@ impl Conversation {
 
     /// B held in a space for `held`, or released (`None`). Holding it for [`LEAVE_HOLD`] leaves the space, once per hold. Returns whether this call left.
     pub fn hold_back(&mut self, held: Option<Duration>) -> bool {
+        // Let go soon enough, B dismisses the panel pointed at as it was pressed; held longer, it does not.
+        match held {
+            None => {
+                if let Some(panel) = self.dismissing.take() {
+                    self.dismiss_panel(&panel);
+                }
+            }
+            Some(held) if held >= DISMISS_PRESS => self.dismissing = None,
+            Some(_) => {}
+        }
         let Some(held) = held.filter(|_| self.mode == Mode::Space) else {
             self.leave_hold = None;
             return false;
@@ -2633,6 +2675,18 @@ impl Conversation {
                     self.dismissed = Some(error);
                     return;
                 }
+                // With nothing else to back out of, B dismisses the panel pointed at, once it is let go soon enough to be
+                // a press rather than a hold to leave (see `Self::hold_back`). Only a participant does. See
+                // `design/projection.md`.
+                if let Some(tomori_protocol::Resource::Panel { panel, .. }) = &self.pointing_at
+                    && self.role.participates()
+                    && self
+                        .projection()
+                        .is_some_and(|projection| projection.panel(panel).is_some())
+                {
+                    self.dismissing = Some(panel.clone());
+                    return;
+                }
                 self.notice = Some("Hold B to leave the space.".into());
             }
         }
@@ -2816,7 +2870,88 @@ impl Conversation {
             Resource::Object { object, .. } => self
                 .joined_space()
                 .and_then(|_| self.object_labels.get(object).cloned()),
+            Resource::Panel { panel, .. } => self
+                .projection()
+                .and_then(|projection| projection.panel(panel))
+                .map(crate::projection::name),
             _ => None,
+        }
+    }
+
+    /// What is projected in the joined space, while the server projects there. See `design/projection.md`.
+    pub fn projection(&self) -> Option<&tomori_protocol::Projection> {
+        self.projection.as_ref().filter(|projection| {
+            self.joined_space()
+                .is_some_and(|(space, _)| space.id == projection.space && space.projection)
+        })
+    }
+
+    /// Where the participant's head is now, in the space's scene, as the frame step says each frame.
+    pub fn observe_head(&mut self, head: Option<tomori_protocol::Pose>) {
+        self.head = head;
+    }
+
+    /// Put the panel `panel` onto a wall's layout, or leave it floating, as `target` says, for everyone in the space.
+    /// Only a participant can.
+    pub fn place_panel(&mut self, panel: String, target: crate::projection::Target) {
+        if self.projection().is_none() {
+            return;
+        }
+        let (wall, pose) = match target {
+            crate::projection::Target::Wall(wall) => (Some(wall), None),
+            crate::projection::Target::Free(pose) => (None, Some(pose)),
+        };
+        self.send(ClientMessage::PlacePanel { panel, wall, pose });
+    }
+
+    /// Dismiss the panel `panel`, which the joined space shows, for everyone in it. Says whether it asked, as only a
+    /// participant does.
+    pub fn dismiss_panel(&mut self, panel: &str) -> bool {
+        if self
+            .projection()
+            .is_none_or(|projection| projection.panel(panel).is_none())
+        {
+            return false;
+        }
+        self.send(ClientMessage::DismissPanel {
+            panel: panel.to_owned(),
+        })
+    }
+
+    /// Whether this participant manages the joined space's walls: an owner, in a space the server projects in.
+    fn manages_walls(&self) -> bool {
+        self.role == ConnectionRole::Owner && self.projection().is_some()
+    }
+
+    /// The added wall nearest the participant's head, if there is one and they manage the walls.
+    fn nearest_added_wall(&self) -> Option<&tomori_protocol::Wall> {
+        let head = glam::Vec3::from_array(self.head?.position);
+        self.projection()
+            .filter(|_| self.manages_walls())?
+            .walls
+            .iter()
+            .filter(|wall| wall.kind == tomori_protocol::WallKind::Added)
+            .min_by(|a, b| {
+                let distance = |wall: &tomori_protocol::Wall| {
+                    glam::Vec3::from_array(wall.pose.position).distance(head)
+                };
+                distance(a).total_cmp(&distance(b))
+            })
+    }
+
+    /// Add a wall for everyone where the participant stands, as an owner: ahead of them at eye height, facing them.
+    fn add_wall(&mut self) {
+        let Some(head) = self.head.filter(|_| self.manages_walls()) else {
+            return;
+        };
+        let pose = crate::projection::added_wall(head);
+        self.send(ClientMessage::AddWall { pose });
+    }
+
+    /// Remove, for everyone, the added wall nearest the participant, as an owner.
+    fn remove_wall(&mut self) {
+        if let Some(wall) = self.nearest_added_wall().map(|wall| wall.id.clone()) {
+            self.send(ClientMessage::RemoveWall { wall });
         }
     }
 
@@ -10511,5 +10646,214 @@ mod tests {
             older.environment_updates("garden", 1),
             [crate::channel::Update::State(payload(6))]
         );
+    }
+
+    /// What `space` projects: the Tomori wall, an added wall, and a panel on each.
+    fn projected(space: &str) -> Event {
+        let wall = |id: &str, kind, x: f32| {
+            tomori_protocol::Wall::new(
+                id,
+                kind,
+                tomori_protocol::Pose::upright_facing([x, 1.5, -2.0], [0.0, 1.6, 0.0]),
+            )
+        };
+        let on = |wall: &str| tomori_protocol::Place::Wall {
+            wall: wall.into(),
+            slot: 0,
+        };
+        Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(space, "sky")
+                    .with_walls(vec![
+                        wall(
+                            tomori_protocol::TOMORI_WALL,
+                            tomori_protocol::WallKind::Tomori,
+                            2.0,
+                        ),
+                        wall("wall-1", tomori_protocol::WallKind::Added, -2.0),
+                        wall("wall-2", tomori_protocol::WallKind::Added, -6.0),
+                    ])
+                    .with_panels(vec![
+                        tomori_protocol::Panel::new(
+                            "panel-1",
+                            "Build status",
+                            "Green.",
+                            on(tomori_protocol::TOMORI_WALL),
+                        ),
+                        tomori_protocol::Panel::new("panel-2", "", "## Steps\nOne.", on("wall-1")),
+                    ]),
+            ),
+        })
+    }
+
+    #[test]
+    fn the_joined_space_s_projection_is_kept_and_its_panels_moved_and_dismissed() {
+        let mut conversation = joined(|space| space.projection = true);
+        // Nothing yet, and nothing to move.
+        assert!(conversation.projection().is_none());
+        conversation.place_panel(
+            "panel-1".into(),
+            crate::projection::Target::Wall(tomori_protocol::TOMORI_WALL.into()),
+        );
+        assert!(!conversation.dismiss_panel("panel-1"));
+        assert!(sent(&mut conversation).is_empty());
+        // Another space's is ignored; the joined space's is kept.
+        conversation.apply(projected("elsewhere"));
+        assert!(conversation.projection().is_none());
+        conversation.apply(projected(SPACE));
+        assert_eq!(conversation.projection().unwrap().panels.len(), 2);
+        let pose = tomori_protocol::Pose::default();
+        conversation.place_panel("panel-1".into(), crate::projection::Target::Free(pose));
+        conversation.place_panel(
+            "panel-1".into(),
+            crate::projection::Target::Wall("wall-1".into()),
+        );
+        assert!(conversation.dismiss_panel("panel-2"));
+        // One the space does not show is not dismissed.
+        assert!(!conversation.dismiss_panel("panel-9"));
+        assert_eq!(
+            sent(&mut conversation),
+            [
+                ClientMessage::PlacePanel {
+                    panel: "panel-1".into(),
+                    wall: None,
+                    pose: Some(pose),
+                },
+                ClientMessage::PlacePanel {
+                    panel: "panel-1".into(),
+                    wall: Some("wall-1".into()),
+                    pose: None,
+                },
+                ClientMessage::DismissPanel {
+                    panel: "panel-2".into()
+                },
+            ]
+        );
+        // A visitor moves and dismisses nothing, and is told so.
+        conversation.apply(role(ConnectionRole::Visitor));
+        assert!(!conversation.dismiss_panel("panel-1"));
+        assert!(sent(&mut conversation).is_empty());
+        conversation.apply(role(ConnectionRole::Owner));
+        // A space whose server stops projecting shows nothing, and leaving forgets it.
+        conversation.apply(space(|_| {}));
+        assert!(conversation.projection().is_none());
+        conversation.apply(space(|space| space.projection = true));
+        assert!(conversation.projection().is_some());
+        conversation.apply(Event::Message(ServerMessage::Left));
+        assert!(conversation.projection.is_none());
+    }
+
+    #[test]
+    fn b_dismisses_the_panel_pointed_at_once_nothing_else_is_open() {
+        let mut conversation = joined(|space| space.projection = true);
+        conversation.apply(projected(SPACE));
+        conversation.point(Some(tomori_protocol::Resource::panel("panel-1")));
+        // A problem shown is dismissed first.
+        conversation.error = Some("Something failed.".into());
+        conversation.back();
+        conversation.hold_back(None);
+        assert!(sent(&mut conversation).is_empty());
+        // Pressed, it dismisses the panel only once let go, and only if let go soon enough to be a press.
+        conversation.back();
+        conversation.hold_back(Some(Duration::ZERO));
+        assert!(sent(&mut conversation).is_empty());
+        conversation.hold_back(None);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::DismissPanel {
+                panel: "panel-1".into()
+            }]
+        );
+        assert!(conversation.notice.is_none());
+        // Held, as to leave the space, it dismisses nothing, whether it leaves or is let go first.
+        for held in [DISMISS_PRESS, LEAVE_HOLD] {
+            conversation.back();
+            conversation.hold_back(Some(Duration::ZERO));
+            conversation.hold_back(Some(held));
+            conversation.hold_back(None);
+            assert!(
+                !sent(&mut conversation)
+                    .iter()
+                    .any(|message| matches!(message, ClientMessage::DismissPanel { .. }))
+            );
+        }
+        // A visitor, who dismisses nothing, is told to hold B to leave, as with nothing pointed at.
+        let mut conversation = joined(|space| space.projection = true);
+        conversation.apply(projected(SPACE));
+        conversation.point(Some(tomori_protocol::Resource::panel("panel-1")));
+        conversation.apply(role(ConnectionRole::Visitor));
+        conversation.back();
+        conversation.hold_back(None);
+        assert!(sent(&mut conversation).is_empty());
+        assert_eq!(
+            conversation.notice.as_deref(),
+            Some("Hold B to leave the space.")
+        );
+    }
+
+    #[test]
+    fn a_panel_pointed_at_as_x_is_pressed_is_what_the_words_begin_attending_to() {
+        let mut conversation = joined(|space| space.projection = true);
+        conversation.apply(projected(SPACE));
+        for (panel, named) in [("panel-1", "Build status"), ("panel-2", "Steps")] {
+            conversation.point(Some(tomori_protocol::Resource::panel(panel)));
+            conversation.talk(true);
+            let actions = conversation.take_actions();
+            let [Action::BeginUtterance(utterance)] = actions.as_slice() else {
+                unreachable!("recording begins")
+            };
+            assert_eq!(
+                utterance.attention,
+                [tomori_protocol::Resource::panel(panel)]
+            );
+            assert!(
+                conversation
+                    .text()
+                    .contains(&format!("MIC AGENT about {named}"))
+            );
+            conversation.talk(false);
+            conversation.take_actions();
+        }
+    }
+
+    #[test]
+    fn an_owner_adds_a_wall_ahead_of_them_and_removes_the_nearest_added_one() {
+        let mut conversation = joined(|space| space.projection = true);
+        let model = |conversation: &Conversation| conversation.menu_model().space.unwrap().walls;
+        // Without a projection, nobody manages walls, and choosing changes nothing.
+        assert_eq!(model(&conversation), None);
+        conversation.choose_menu(crate::hand_menu::Choice::AddWall);
+        conversation.choose_menu(crate::hand_menu::Choice::RemoveWall);
+        assert!(sent(&mut conversation).is_empty());
+        conversation.apply(projected(SPACE));
+        // Nor without knowing where the participant stands.
+        conversation.choose_menu(crate::hand_menu::Choice::AddWall);
+        assert_eq!(model(&conversation), Some(false));
+        assert!(sent(&mut conversation).is_empty());
+        let head = tomori_protocol::Pose {
+            position: [-1.5, 1.7, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        conversation.observe_head(Some(head));
+        assert_eq!(model(&conversation), Some(true));
+        conversation.choose_menu(crate::hand_menu::Choice::AddWall);
+        conversation.choose_menu(crate::hand_menu::Choice::RemoveWall);
+        assert_eq!(
+            sent(&mut conversation),
+            [
+                ClientMessage::AddWall {
+                    pose: crate::projection::added_wall(head)
+                },
+                ClientMessage::RemoveWall {
+                    wall: "wall-1".into()
+                },
+            ]
+        );
+        // Anyone else does not manage them.
+        conversation.apply(role(ConnectionRole::Collaborator));
+        assert_eq!(model(&conversation), None);
+        conversation.choose_menu(crate::hand_menu::Choice::AddWall);
+        conversation.choose_menu(crate::hand_menu::Choice::RemoveWall);
+        assert!(sent(&mut conversation).is_empty());
     }
 }
