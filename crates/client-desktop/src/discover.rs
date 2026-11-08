@@ -303,7 +303,7 @@ mod tests {
         assert!(!connected);
         assert!(
             answer(
-                Event::Message(ServerMessage::Left),
+                Event::Message(ServerMessage::LEFT),
                 &mut connected,
                 "host:1"
             )

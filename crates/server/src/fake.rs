@@ -62,6 +62,12 @@ struct FakeShared {
     instruction_failure: Arc<AtomicBool>,
     /// The sessions whose instruction entries were forgotten, with the keys, in order.
     forgotten: Mutex<Vec<(String, Vec<String>)>>,
+    /// The backend cannot delete sessions; see [`FakeBackend::delete_nothing`].
+    no_delete: AtomicBool,
+    /// Deleting a session fails, as this; see [`FakeBackend::fail_deleting`].
+    delete_failure: Mutex<Option<Error>>,
+    /// The sessions the server deleted, in order.
+    deleted: Mutex<Vec<String>>,
     /// The backend takes no tools; see [`FakeBackend::take_no_tools`].
     no_tools: AtomicBool,
     /// Registering and unregistering tools fails; see [`FakeBackend::fail_tools`].
@@ -150,6 +156,21 @@ impl FakeBackend {
     /// The sessions whose instruction entries the server forgot, with the keys, in order.
     pub fn forgotten(&self) -> Vec<(String, Vec<String>)> {
         self.shared.forgotten.lock().unwrap().clone()
+    }
+
+    /// Delete no sessions, as a backend without [`Capabilities::delete`].
+    pub fn delete_nothing(&self) {
+        self.shared.no_delete.store(true, Ordering::SeqCst);
+    }
+
+    /// Make deleting sessions fail with `error`, as an agent that cannot be reached would, or succeed again.
+    pub fn fail_deleting(&self, error: Option<Error>) {
+        *self.shared.delete_failure.lock().unwrap() = error;
+    }
+
+    /// The sessions the server deleted, in order.
+    pub fn deleted(&self) -> Vec<String> {
+        self.shared.deleted.lock().unwrap().clone()
     }
 
     /// Make creating and attaching sessions wait until [`release_creation`](Self::release_creation), as a slow agent start would.
@@ -254,8 +275,39 @@ impl Backend for FakeBackend {
             questions: true,
             workers: true,
             instructions: !self.shared.no_instructions.load(Ordering::SeqCst),
+            delete: !self.shared.no_delete.load(Ordering::SeqCst),
             tools: !self.shared.no_tools.load(Ordering::SeqCst),
         }
+    }
+
+    /// Waits while commands are held, as an agent whose connection has dropped would; refuses a session bound again;
+    /// and forgets the session, so that it can no longer be attached. One that does not exist is not an error.
+    async fn delete_session(&self, id: &str) -> Result<()> {
+        if self.shared.no_delete.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Unsupported, "no deleting"));
+        }
+        loop {
+            let released = self.shared.commands_released.listen();
+            if !self.shared.commands_held.load(Ordering::SeqCst) {
+                break;
+            }
+            released.await;
+        }
+        if let Some(error) = self.shared.delete_failure.lock().unwrap().clone() {
+            return Err(error);
+        }
+        let mut sessions = self.shared.sessions.lock().unwrap();
+        if let Some(session) = sessions.iter().find(|session| session.id() == id)
+            && session.inner.bound.lock().unwrap().is_some()
+        {
+            return Err(Error::new(
+                ErrorKind::Invalid,
+                "the fake session is bound again",
+            ));
+        }
+        sessions.retain(|session| session.id() != id);
+        self.shared.deleted.lock().unwrap().push(id.to_owned());
+        Ok(())
     }
 
     async fn register_tools(&self, directory: &str, server: &ToolServer) -> Result<()> {

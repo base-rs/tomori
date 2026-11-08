@@ -105,7 +105,7 @@ fn attention_is_published_unless_the_operator_turns_it_off() {
         let space = ada.create_space("Counted").id;
         assert_eq!(until(&|counts| counts.spaces == 1), expected(1, 1, 0));
         ada.send(&ClientMessage::Leave);
-        ada.wait_for(|message| matches!(message, ServerMessage::Left).then_some(()));
+        ada.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
         // The agent reporting an error while nobody is in the space is a problem for anyone, published only when
         // attention is.
         server.backend.started()[0].emit(Event::Error {

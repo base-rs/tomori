@@ -19,7 +19,52 @@ macro_rules! say {
     };
 }
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), name NAME (change your display name, which the server keeps with your token, on every device using it), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, left stick click), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), q (quit).";
+
+/// `delete` says what deleting the joined space does, as the hand menu asks before deleting it; `delete space` deletes it for everyone in it, keeping its agent session, and `delete space and session` deletes its session too, the words themselves asking explicitly, as the menu's second question does. See `design/hand-menu.md`.
+fn delete(conversation: &mut Conversation, argument: &str, out: &mut Out) {
+    let model = conversation.menu_model();
+    let title = model
+        .space
+        .as_ref()
+        .map(|space| space.title.clone())
+        .unwrap_or_default();
+    let asked = match argument.split_whitespace().collect::<Vec<_>>()[..] {
+        ["space"] => conversation.delete_space(false),
+        ["space", "and", "session"] => conversation.delete_space(true),
+        _ => {
+            match model
+                .space
+                .and_then(|space| space.deletion)
+                .filter(|_| model.role == tomori_protocol::ConnectionRole::Owner)
+            {
+                None => say!(
+                    out,
+                    "(Only an owner in a space, on a server that deletes spaces, can delete one.)"
+                ),
+                Some(sessions) => {
+                    say!(
+                        out,
+                        "(Deleting {title} returns everyone in it to the lobby: delete space deletes it, keeping its agent session.)"
+                    );
+                    if sessions {
+                        say!(
+                            out,
+                            "(delete space and session deletes its agent session too: its conversation, and its workers' sessions, are lost for good. This cannot be undone.)"
+                        );
+                    }
+                }
+            }
+            return;
+        }
+    };
+    if asked {
+        say!(out, "(Deleting {title} for everyone in it.)");
+    } else {
+        let notice = conversation.menu_model().notice.unwrap_or_default();
+        say!(out, "({notice})");
+    }
+}
 
 /// `feedback` shows the Feedback setting, and `feedback sounds LEVEL` or `feedback vibration LEVEL` changes one half of it, as the hand menu's Sound section does. See `design/feedback.md`.
 fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
@@ -168,6 +213,14 @@ fn serve(
                     poll(conversation);
                     let notice = conversation.menu_model().notice.unwrap_or_default();
                     say!(out, "({notice})");
+                    continue;
+                }
+                // Deleting the space, as an owner; the rest of the line says whether, and whether its session too.
+                if let Some(rest) = line.trim_start().strip_prefix("delete")
+                    && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                {
+                    delete(conversation, rest, out);
+                    poll(conversation);
                     continue;
                 }
                 // The Feedback setting; the rest of the line says which half, and to what.
@@ -668,6 +721,70 @@ mod tests {
         assert!(out.contains(&space), "{out}");
         let (out, _) = session(&mut conversation, &["i"]);
         assert!(out.contains("  This agent takes no instructions from Tomori."));
+    }
+
+    #[test]
+    fn an_owner_deletes_the_space_by_saying_so_and_its_session_by_saying_so_again() {
+        // Whether the deletions sent asked for the session too, in order.
+        let deleting = |conversation: &mut Conversation| {
+            conversation
+                .take_actions()
+                .iter()
+                .map(|action| {
+                    matches!(
+                        action,
+                        tomori_client::connection::Action::Send(
+                            tomori_protocol::ClientMessage::DeleteSpace { session: true, .. },
+                        )
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // On a server that does not delete spaces, nothing is offered or asked.
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["delete", "delete space"]);
+        assert!(
+            out.contains(
+                "(Only an owner in a space, on a server that deletes spaces, can delete one.)"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("(This server does not delete spaces.)"),
+            "{out}"
+        );
+        assert!(deleting(&mut conversation).is_empty());
+
+        // `delete` alone says what it does, and asks nothing of the server.
+        conversation.apply(space(|state| {
+            state.deletes = true;
+            state.deletes_session = true;
+        }));
+        let (out, _) = session(&mut conversation, &["delete"]);
+        assert!(
+            out.contains("(Deleting Tomori returns everyone in it to the lobby: delete space deletes it, keeping its agent session.)"),
+            "{out}"
+        );
+        assert!(out.contains("This cannot be undone.)"), "{out}");
+        assert!(deleting(&mut conversation).is_empty());
+        let (out, _) = session(&mut conversation, &["delete space"]);
+        assert!(
+            out.contains("(Deleting Tomori for everyone in it.)"),
+            "{out}"
+        );
+        assert_eq!(deleting(&mut conversation), [false]);
+        let (_, _) = session(&mut conversation, &["delete space and session"]);
+        assert_eq!(deleting(&mut conversation), [true]);
+
+        // Without the session's deletion, only the space is offered.
+        conversation.apply(space(|state| state.deletes = true));
+        let (out, _) = session(&mut conversation, &["delete", "delete space and session"]);
+        assert!(!out.contains("This cannot be undone.)"), "{out}");
+        assert!(
+            out.contains("(This space's agent session cannot be deleted from here.)"),
+            "{out}"
+        );
+        assert!(deleting(&mut conversation).is_empty());
     }
 
     #[test]

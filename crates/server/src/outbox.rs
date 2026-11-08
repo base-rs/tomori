@@ -385,12 +385,14 @@ mod tests {
         outbox.audio(vec![1]);
         outbox.space();
         outbox.space();
-        outbox.message(ServerMessage::Left);
+        outbox.message(ServerMessage::LEFT);
         let Popped::Control(Outgoing::Space) = outbox.pop() else {
             unreachable!("expected Popped::Control(Outgoing::Space)");
         };
-        let Popped::Control(Outgoing::Message(ServerMessage::Left)) = outbox.pop() else {
-            unreachable!("expected Popped::Control(Outgoing::Message(ServerMessage::Left))");
+        let Popped::Control(Outgoing::Message(ServerMessage::Left { .. })) = outbox.pop() else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Left {{ .. }}))"
+            );
         };
         let Popped::Audio(_) = outbox.pop() else {
             unreachable!("expected Popped::Audio(_)");
@@ -441,7 +443,7 @@ mod tests {
             outbox.audio(vec![index as u8]);
         }
         outbox.agent_audio(vec![100]);
-        outbox.message(ServerMessage::Left);
+        outbox.message(ServerMessage::LEFT);
         outbox.pong(1);
         outbox.ping(2);
         let Popped::Control(Outgoing::Message(ServerMessage::Pong { nonce: 1 })) = outbox.pop()
@@ -456,8 +458,10 @@ mod tests {
                 "expected Popped::Control(Outgoing::Message(ServerMessage::Ping {{ nonce: 2 }}))"
             );
         };
-        let Popped::Control(Outgoing::Message(ServerMessage::Left)) = outbox.pop() else {
-            unreachable!("expected Popped::Control(Outgoing::Message(ServerMessage::Left))");
+        let Popped::Control(Outgoing::Message(ServerMessage::Left { .. })) = outbox.pop() else {
+            unreachable!(
+                "expected Popped::Control(Outgoing::Message(ServerMessage::Left {{ .. }}))"
+            );
         };
     }
 
@@ -527,10 +531,10 @@ mod tests {
                 space: None,
             });
         }
-        outbox.message(ServerMessage::Left);
+        outbox.message(ServerMessage::LEFT);
         let messages = drain(&outbox);
         assert_eq!(messages.len(), ERROR_LIMIT + 1);
-        assert_eq!(messages.last(), Some(&ServerMessage::Left));
+        assert_eq!(messages.last(), Some(&ServerMessage::LEFT));
         // Once sent, errors are reported again.
         outbox.message(ServerMessage::Error {
             error: "again".into(),
@@ -543,7 +547,7 @@ mod tests {
     fn an_unread_control_queue_closes_the_connection() {
         let outbox = Outbox::new();
         for _ in 0..CONTROL_LIMIT * 2 {
-            outbox.message(ServerMessage::Left);
+            outbox.message(ServerMessage::LEFT);
         }
         assert_eq!(drain(&outbox).len(), CONTROL_LIMIT);
         let Popped::Closed = outbox.pop() else {

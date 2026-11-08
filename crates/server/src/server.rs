@@ -1039,6 +1039,10 @@ impl Server {
                             as Pin<Box<dyn Future<Output = ()>>>,
                     );
                 }
+                Ok(Job::Delete(deleted)) => {
+                    spaces.push(Box::pin(finish_deletion(self.hub.clone(), deleted))
+                        as Pin<Box<dyn Future<Output = ()>>>);
+                }
                 Err(_) => break,
             }
         }
@@ -1111,6 +1115,45 @@ async fn forget_instructions(hub: Arc<Hub>, backend: String, session: String) {
             error.message
         );
     }
+}
+
+/// Finish deleting a space, whose own handle to its session is closed: delete the session, if its owner asked, and tell them what became of it, or else keep it, removing Tomori's instruction entries as for a forgotten space. A session another space is bound to by now is never deleted, and keeps its entries; and the session is deleted only once the record of spaces no longer lists the space, so that a server that stops meanwhile never lists a space whose session it deleted. See `design/spaces.md`.
+async fn finish_deletion(hub: Arc<Hub>, deleted: crate::hub::Deleted) {
+    let crate::hub::Deleted {
+        backend,
+        session,
+        asker,
+    } = deleted;
+    let bound = hub.binds(&backend, &session);
+    let Some(asker) = asker else {
+        if !bound && hub.takes_instructions(&backend) {
+            forget_instructions(hub, backend, session).await;
+        }
+        return;
+    };
+    let result = match hub.backends.get(&backend) {
+        _ if bound => Err("another space is bound to it now".to_owned()),
+        _ if !hub.keep() => Err("the record of spaces could not be written".to_owned()),
+        None => Err(format!(
+            "the {backend} backend is not enabled on this server"
+        )),
+        Some(found) => match found.delete_session(&session).await {
+            // Already gone, as for a session that had closed because it no longer existed.
+            Err(error) if error.kind != tomori_backend::ErrorKind::NotFound => Err(error.message),
+            _ => Ok(()),
+        },
+    };
+    match &result {
+        Ok(()) => log::info!("Deleted {backend} session {session}, as its space was deleted."),
+        Err(error) => {
+            log::warn!("Kept {backend} session {session}, whose space was deleted: {error}");
+            // Kept, it keeps none of Tomori's entries, as for a space deleted without its session.
+            if !bound && hub.takes_instructions(&backend) {
+                forget_instructions(hub.clone(), backend, session).await;
+            }
+        }
+    }
+    hub.session_deleted(&asker, result);
 }
 
 /// A connection's serial number and how it ended.
@@ -1443,10 +1486,12 @@ async fn run_session(
     cancellation: &Cancellation,
 ) {
     let voice = voices.start(hub, space);
+    // A deleted space's deletion, held until its session is closed below.
+    let mut deletion = None;
     // A command the session is performing, such as a decision waiting for the agent's connection to return, does not
     // hold up shutdown: the space stops as soon as shutdown begins, and its session is closed below.
     let error = match select(
-        pin!(drive(hub, space, &session, receiver, voice)),
+        pin!(drive(hub, space, &session, &receiver, voice, &mut deletion)),
         pin!(cancellation.cancelled()),
     )
     .await
@@ -1462,6 +1507,10 @@ async fn run_session(
     if let Err(error) = session.close().await {
         log::warn!("Closing the session of {space} failed: {error}");
     }
+    // Only now is the session deleted, or its entries removed, so that nothing still holds it: the deletion taken, or
+    // one still waiting in the commands, dropped with them.
+    drop(deletion);
+    drop(receiver);
 }
 
 /// List a backend's existing sessions in `directory` for `participant`, resolving the directory first so the backend sees it in canonical form. A directory that is not available, an unknown backend, or a backend failure is reported to `participant` as an error.
@@ -1541,13 +1590,14 @@ async fn checked<S: Timers>(
     }
 }
 
-/// Forward session events to the hub and the space's voice while performing the space's commands. Returns why the session stopped, if it failed.
+/// Forward session events to the hub and the space's voice while performing the space's commands. Returns why the session stopped, if it failed. A space deleted meanwhile stops, leaving its deletion in `deletion`.
 async fn drive(
     hub: &Hub,
     space: &str,
     session: &AnySession,
-    commands: async_channel::Receiver<SpaceCommand>,
+    commands: &async_channel::Receiver<SpaceCommand>,
     mut voice: Option<Voice>,
+    deletion: &mut Option<crate::hub::Deletion>,
 ) -> Option<String> {
     let events = async {
         let mut bound = session.id();
@@ -1618,6 +1668,10 @@ async fn drive(
                     hub.space_instructed(space, result, all);
                 }
                 SpaceCommand::Close => break,
+                SpaceCommand::Delete(deleted) => {
+                    *deletion = Some(deleted);
+                    break;
+                }
             }
         }
         None
@@ -2886,7 +2940,14 @@ mod tests {
             fake.emit(Event::Closed { reason: None });
         });
         assert_eq!(
-            block_on(drive(&supervision.hub, &space, &session, receiver, None)),
+            block_on(drive(
+                &supervision.hub,
+                &space,
+                &session,
+                &receiver,
+                None,
+                &mut None
+            )),
             None
         );
         renaming.join().unwrap();
@@ -2898,14 +2959,31 @@ mod tests {
             block_on(session.next_event()).unwrap(),
             Event::Closed { reason: None }
         );
-        assert!(block_on(drive(&supervision.hub, &space, &session, receiver, None)).is_some());
+        assert!(
+            block_on(drive(
+                &supervision.hub,
+                &space,
+                &session,
+                &receiver,
+                None,
+                &mut None
+            ))
+            .is_some()
+        );
         // Instructions are skipped once the space has closed, when none are due.
         let (session, space, _fake, commands, receiver) = start();
         supervision.hub.space_ended(&space, None);
         commands.try_send(SpaceCommand::Instructions).unwrap();
         commands.try_send(SpaceCommand::Close).unwrap();
         assert_eq!(
-            block_on(drive(&supervision.hub, &space, &session, receiver, None)),
+            block_on(drive(
+                &supervision.hub,
+                &space,
+                &session,
+                &receiver,
+                None,
+                &mut None
+            )),
             None
         );
     }
@@ -2939,6 +3017,62 @@ mod tests {
         let mut tracker = Tracker::default();
         tracker.record((7, Ok(1)));
         assert_eq!(tracker.statistics.requests, 1);
+    }
+
+    #[test]
+    fn a_deleted_spaces_session_is_deleted_only_once_nothing_else_holds_it_and_it_is_kept_no_more()
+    {
+        let supervision = Supervision::new(1);
+        let finish = |backend: &str, session: &str, asked: bool| {
+            block_on(finish_deletion(
+                supervision.hub.clone(),
+                crate::hub::Deleted {
+                    backend: backend.to_owned(),
+                    session: session.to_owned(),
+                    // Nobody is on this connection, so nobody is told.
+                    asker: asked.then(|| ("nobody".to_owned(), 7)),
+                },
+            ))
+        };
+        let left = supervision.left();
+        // A backend this server no longer has deletes nothing, and takes no instructions to remove.
+        finish("gone", &left, true);
+        finish("gone", &left, false);
+        assert!(supervision.backend.deleted().is_empty());
+        assert!(supervision.backend.forgotten().is_empty());
+        // Kept, it loses Tomori's instructions; asked, it is deleted.
+        finish("fake", &left, false);
+        assert_eq!(supervision.backend.forgotten()[0].0, left);
+        finish("fake", &left, true);
+        assert_eq!(supervision.backend.deleted(), [left]);
+        // One the backend has bound again is the backend's to refuse, and keeps its instructions.
+        let held = supervision.held();
+        finish("fake", &held, true);
+        assert_eq!(supervision.backend.deleted().len(), 1);
+        assert_eq!(supervision.backend.forgotten().len(), 1);
+        // One a listed space is bound to by now is neither deleted nor stripped of its instructions.
+        let bound = supervision.left();
+        let _restore = supervision.kept("deleting", "fake", "/tmp", &bound);
+        finish("fake", &bound, true);
+        finish("fake", &bound, false);
+        assert_eq!(supervision.backend.deleted().len(), 1);
+        assert_eq!(supervision.backend.forgotten().len(), 1);
+        // A backend that no longer deletes sessions keeps it, without its instructions.
+        supervision.backend.delete_nothing();
+        let undeleted = supervision.left();
+        finish("fake", &undeleted, true);
+        assert_eq!(supervision.backend.deleted().len(), 1);
+        assert_eq!(supervision.backend.forgotten()[1].0, undeleted);
+        // While the record of spaces cannot be written, which could list the deleted space again after a restart, no
+        // session is deleted: the kept space's state directory is gone, and its space closes, which changes the record.
+        supervision
+            .hub
+            .restore_failed("space-kept", "Gone.".to_owned(), true);
+        let unwritten = supervision.left();
+        finish("fake", &unwritten, true);
+        assert_eq!(supervision.backend.deleted().len(), 1);
+        // It is kept, so it loses Tomori's instructions.
+        assert_eq!(supervision.backend.forgotten()[2].0, unwritten);
     }
 
     #[test]

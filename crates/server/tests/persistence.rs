@@ -655,3 +655,49 @@ fn the_least_recently_closed_space_is_still_forgotten_first_after_a_restart() {
     assert!(spaces.iter().any(|space| space.id == first));
     assert!(!spaces.iter().any(|space| space.id == second));
 }
+
+#[test]
+fn a_deleted_space_is_kept_no_more_and_stays_deleted_after_a_restart() {
+    let state = State::new("deleted");
+    let backend = FakeBackend::new();
+    let (kept, deleted, gone) = {
+        let server = start(&backend, &state.0, None);
+        let mut ada = server.connect("ada", "Ada");
+        let kept = ada.create_space("Kept").id;
+        let deleted = ada.create_space("Deleted").id;
+        ada.send(&ClientMessage::DeleteSpace {
+            space: deleted.clone(),
+            session: false,
+        });
+        ada.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
+        // Kept no more once everyone in it has been told.
+        eventually(|| (state.kept().len() == 1).then_some(()));
+        // A space deleted with its session is not kept once the session is deleted.
+        let gone = ada.create_space("Gone").id;
+        ada.send(&ClientMessage::DeleteSpace {
+            space: gone.clone(),
+            session: true,
+        });
+        ada.wait_for(|message| {
+            matches!(message, ServerMessage::SessionDeleted { error: None }).then_some(())
+        });
+        assert_eq!(backend.deleted().len(), 1);
+        (kept, deleted, gone)
+    };
+    assert_eq!(
+        state
+            .kept()
+            .iter()
+            .map(|space| space.id.as_str())
+            .collect::<Vec<_>>(),
+        [kept.as_str()]
+    );
+    let server = start(&backend, &state.0, None);
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::ListSpaces);
+    assert_eq!(listed(&ada, &kept).id, kept);
+    for id in [deleted, gone] {
+        ada.send(&ClientMessage::Join { space: id });
+        assert_eq!(ada.error(), "That space does not exist.");
+    }
+}

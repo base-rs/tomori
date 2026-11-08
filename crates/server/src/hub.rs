@@ -178,6 +178,41 @@ pub enum SpaceCommand {
     /// Give the agent the space's instructions as they are when the driver performs this, from [`Hub::instructions_due`]. At most one is queued for each space at a time. See `design/spaces.md`.
     Instructions,
     Close,
+    /// The space was deleted: close its session, then drop the deletion, which does what is left to do with the session.
+    Delete(Deletion),
+}
+
+/// What is left to do with a deleted space's session once nothing holds it any more: delete it, as its owner chose, or
+/// else remove Tomori's instruction entries from it, as for a forgotten space. See `design/spaces.md`.
+#[derive(Debug)]
+pub struct Deleted {
+    pub backend: String,
+    pub session: String,
+    /// The owner who asked for the session to be deleted too, by hub key, and their connection, which is told what
+    /// became of it; `None` to keep the session.
+    pub asker: Option<(String, ConnectionId)>,
+}
+
+/// A deleted space's [`Deleted`], handed to the supervisor when this is dropped: by the space's driver once it has
+/// closed the session, or with the command that carried it once no driver is left to take it, as for a space whose
+/// session had already closed. So the session is deleted, or its entries removed, only once the space's own handle to
+/// it is closed, whatever the driver was doing when the space was deleted.
+#[derive(Debug)]
+pub struct Deletion {
+    jobs: async_channel::Sender<Job>,
+    deleted: Deleted,
+}
+
+impl Drop for Deletion {
+    fn drop(&mut self) {
+        let deleted = Deleted {
+            backend: std::mem::take(&mut self.deleted.backend),
+            session: std::mem::take(&mut self.deleted.session),
+            asker: self.deleted.asker.take(),
+        };
+        // Once shutting down, the jobs are closed, and the session is kept.
+        let _ = self.jobs.try_send(Job::Delete(deleted));
+    }
 }
 
 /// A request to start a space, handled by the supervisor because starting a session is asynchronous.
@@ -212,6 +247,8 @@ pub enum Job {
         backend: String,
         session: String,
     },
+    /// Finish deleting a space, as [`Deleted`] says.
+    Delete(Deleted),
 }
 
 /// A space listed again after a restart, for the supervisor to bind to its session. See `design/spaces.md`.
@@ -926,6 +963,15 @@ impl HubState {
             .retain(|space| !forgotten.contains(&space.model.id));
         self.unkept |= excess > 0;
         excess > 0
+    }
+
+    /// Whether a listed space other than `except` is bound to `session` of `backend`, open or closed.
+    fn is_bound(&self, backend: &str, session: &str, except: Option<&str>) -> bool {
+        self.spaces.iter().any(|space| {
+            Some(space.model.id.as_str()) != except
+                && space.model.backend == backend
+                && space.model.session == session
+        })
     }
 
     /// Tell every greeted participant outside a space that the listing changed.
@@ -1974,7 +2020,9 @@ impl Hub {
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
                 Deferred::Admit(knock) => self.admit(knock),
                 Deferred::Rename(rename) => self.keep_name(rename),
-                Deferred::Keep => self.keep(),
+                Deferred::Keep => {
+                    self.keep();
+                }
                 Deferred::PairingPrompt(event) => {
                     if let Some(prompt) = &*self.pairing_prompt.read().expect("never left poisoned")
                     {
@@ -2692,7 +2740,7 @@ impl Hub {
                 state.abandon_utterance(connection, deferred);
                 // Announce leaving before the lobby listing that leaving produces.
                 outbox.clear_audio();
-                outbox.message(ServerMessage::Left);
+                outbox.message(ServerMessage::LEFT);
                 state.leave(participant);
                 // A member is kept.
                 state
@@ -3329,6 +3377,49 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+            ClientMessage::DeleteSpace {
+                space: target,
+                session,
+            } => {
+                if let Err(error) =
+                    limits::check(&target, limits::IDENTIFIER_BYTES, "space identifier")
+                {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                // Only the space the owner is in, and named as the one they saw, so that a request meant for one space never deletes another. See `design/spaces.md`.
+                if target != space {
+                    state.error(participant, "Only the space you are in can be deleted.");
+                    return;
+                }
+                let record = state.space(&space).expect("checked above");
+                let (backend, bound) = (record.model.backend.clone(), record.model.session.clone());
+                if session {
+                    // Refused whole, deleting nothing, so that the owner can choose again.
+                    let refusal = if !self
+                        .backends
+                        .get(&backend)
+                        .is_some_and(|found| found.capabilities().delete)
+                    {
+                        Some(format!(
+                            "The {backend} backend cannot delete its sessions, so nothing was deleted."
+                        ))
+                    } else if state.is_bound(&backend, &bound, Some(&space)) {
+                        Some("Its agent session is bound to another space too, so nothing was deleted.".to_owned())
+                    } else {
+                        None
+                    };
+                    if let Some(refusal) = refusal {
+                        state.error(participant, refusal);
+                        return;
+                    }
+                }
+                let asker = session.then(|| (participant.to_owned(), connection));
+                self.delete(state, participant, &space, asker, deferred);
+            }
             ClientMessage::AddWall { pose } => {
                 let Some(space) = in_space(state) else {
                     return;
@@ -3506,6 +3597,109 @@ impl Hub {
                     Err(error) => state.error(participant, error),
                 }
             }
+        }
+    }
+
+    /// Delete `space`, which `participant`, an owner, is in, from the server: everyone in it is returned to the lobby, told who deleted it, and it is no longer listed, kept, projected or spoken in. Its session is closed, and then deleted if `asker` asked for that, or else kept with Tomori's instruction entries removed. See `design/spaces.md`.
+    fn delete(
+        &self,
+        state: &mut HubState,
+        participant: &str,
+        space: &str,
+        asker: Option<(String, ConnectionId)>,
+        deferred: &mut Vec<Deferred>,
+    ) {
+        let (by, source) = state
+            .participants
+            .get(participant)
+            .map(|record| (record.name.clone(), record.source))
+            .expect("the participant acting is listed");
+        let left = ServerMessage::Left {
+            deleted: Some(tomori_protocol::SpaceDeletion {
+                by,
+                session: asker.is_some(),
+            }),
+        };
+        let members: Vec<String> = state
+            .space(space)
+            .expect("the space acted on is listed")
+            .model
+            .members()
+            .cloned()
+            .collect();
+        // Everyone in it leaves it, as they would by leaving, and is told why before the listing that follows.
+        for member in &members {
+            let connection = state.participants[member]
+                .connection
+                .expect("members are connected, since disconnecting leaves the space");
+            state.abandon_utterance(connection, deferred);
+            let outbox = &state.connections[&connection].outbox;
+            outbox.clear_audio();
+            outbox.message(left.clone());
+            state.depart(member);
+            state.update_role(member);
+        }
+        // Nobody rejoins it on reconnecting.
+        for record in state.participants.values_mut() {
+            record.last_space = record.last_space.take().filter(|last| last != space);
+        }
+        let index = state
+            .spaces
+            .iter()
+            .position(|record| record.model.id == space)
+            .expect("departing forgets no space");
+        let record = state.spaces.remove(index);
+        let with = if asker.is_some() {
+            ", with its session"
+        } else {
+            ""
+        };
+        log::info!(
+            "Space {space} {:?} was deleted by participant {source}{with}.",
+            record.model.title
+        );
+        // Its environment's server side stops, and what it kept goes with the record, as do its walls, panels and speech.
+        self.reconcile_server_sides(state);
+        state.unkept = true;
+        // Everyone in the lobby, those it was deleted under among them, is sent the listing without it.
+        state.touch_lobby();
+        // Its driver closes its session, then drops the deletion; a space with no driver left drops it at once.
+        let deletion = Deletion {
+            jobs: self.jobs.clone(),
+            deleted: Deleted {
+                backend: record.model.backend.clone(),
+                session: record.model.session.clone(),
+                asker,
+            },
+        };
+        let _ = record.commands.try_send(SpaceCommand::Delete(deletion));
+    }
+
+    /// Whether a listed space is bound to `session` of `backend`.
+    pub(crate) fn binds(&self, backend: &str, session: &str) -> bool {
+        self.lock().is_bound(backend, session, None)
+    }
+
+    /// Tell the owner who asked to delete a space's session what became of it, if they are still on the connection that asked.
+    pub(crate) fn session_deleted(
+        &self,
+        (participant, connection): &(String, ConnectionId),
+        result: Result<(), String>,
+    ) {
+        let state = self.lock();
+        if state
+            .participants
+            .get(participant)
+            .is_some_and(|record| record.connection == Some(*connection))
+        {
+            state.send(
+                participant,
+                ServerMessage::SessionDeleted {
+                    error: result
+                        .err()
+                        .map(|error| limits::truncate(&error, limits::ERROR_BYTES)),
+                },
+            );
         }
     }
 
@@ -4069,18 +4263,19 @@ impl Hub {
         self.recount(&mut state);
     }
 
-    /// Write the kept spaces, if there is somewhere to keep them and they changed. Spaces closed once shutdown has begun are kept as open; see `stamp_closed`.
-    pub(crate) fn keep(&self) {
+    /// Write the kept spaces, if there is somewhere to keep them and they changed. Spaces closed once shutdown has begun are kept as open; see `stamp_closed`. Returns whether what is kept is as the spaces are now.
+    pub(crate) fn keep(&self) -> bool {
         let Some(store) = self.kept.read().expect("never left poisoned").clone() else {
-            return;
+            return true;
         };
         let written = store.keep(|| Some(self.lock().kept()));
-        if let Err(error) = written {
+        if let Err(error) = &written {
             log::error!(
                 "Could not keep the spaces in {}: {error}.",
                 store.path().display()
             );
         }
+        written.is_ok()
     }
 
     pub(crate) fn create_failed(&self, creator: &str, error: String) {
@@ -4420,7 +4615,7 @@ impl Hub {
     }
 
     /// Whether the backend named `backend` takes instruction entries.
-    fn takes_instructions(&self, backend: &str) -> bool {
+    pub(crate) fn takes_instructions(&self, backend: &str) -> bool {
         self.backends
             .get(backend)
             .is_some_and(|backend| backend.capabilities().instructions)
@@ -4583,6 +4778,12 @@ impl Hub {
                 state.environment_version = environments.version(&space.model.environment);
                 // Every space projects. See `design/projection.md`.
                 state.projection = true;
+                // An owner may delete any space, and its session too where its backend deletes sessions. See `design/spaces.md`.
+                state.deletes = true;
+                state.deletes_session = self
+                    .backends
+                    .get(&space.model.backend)
+                    .is_some_and(|backend| backend.capabilities().delete);
                 limits::fit_state(&mut state);
                 state.cards = cards;
                 Some(ServerMessage::Space {

@@ -121,6 +121,19 @@ fn a_backend_without_instructions_refuses_them_as_unsupported() {
 }
 
 #[test]
+fn a_backend_that_does_not_delete_sessions_refuses_as_unsupported() {
+    let backend = Minimal;
+    assert!(!backend.capabilities().delete);
+    assert_eq!(
+        now(backend.delete_session("session")),
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "the backend does not delete sessions"
+        ))
+    );
+}
+
+#[test]
 fn a_backend_without_tools_refuses_them_as_unsupported() {
     let backend = Minimal;
     assert!(!backend.capabilities().tools);

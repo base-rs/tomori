@@ -116,6 +116,7 @@ impl Backend for OpenCode {
             questions: true,
             workers: true,
             instructions: true,
+            delete: true,
             tools: true,
         }
     }
@@ -150,6 +151,14 @@ impl Backend for OpenCode {
         let id = id.to_owned();
         commands
             .reply_with(move |reply| connection::Command::ForgetInstructions { id, keys, reply })
+            .await
+    }
+
+    async fn delete_session(&self, id: &str) -> Result<()> {
+        let commands = self.connection()?;
+        let id = id.to_owned();
+        commands
+            .reply_with(move |reply| connection::Command::DeleteSession { id, reply })
             .await
     }
 

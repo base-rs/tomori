@@ -143,12 +143,12 @@ mod tests {
             events.push(presence(1, step as f32));
             events.push(presence(2, step as f32));
         }
-        events.push(Event::Message(ServerMessage::Left));
+        events.push(Event::Message(ServerMessage::LEFT));
         assert_eq!(events.len(), 4);
         assert_eq!(events.try_recv(), Ok(Event::State(ConnectionState::Closed)));
         assert_eq!(events.try_recv(), Ok(presence(1, 9_999.0)));
         assert_eq!(events.try_recv(), Ok(presence(2, 9_999.0)));
-        assert_eq!(events.try_recv(), Ok(Event::Message(ServerMessage::Left)));
+        assert_eq!(events.try_recv(), Ok(Event::Message(ServerMessage::LEFT)));
         assert_eq!(events.try_recv(), Err(TryRecvError::Empty));
     }
 
@@ -156,7 +156,7 @@ mod tests {
     fn other_events_are_never_dropped() {
         let events = Events::new();
         for _ in 0..1000 {
-            events.push(Event::Message(ServerMessage::Left));
+            events.push(Event::Message(ServerMessage::LEFT));
         }
         assert_eq!(events.len(), 1000);
     }
@@ -170,10 +170,10 @@ mod tests {
             move || {
                 // Long enough that the receiver is usually waiting already; the result is the same either way.
                 std::thread::sleep(Duration::from_millis(20));
-                events.push(Event::Message(ServerMessage::Left));
+                events.push(Event::Message(ServerMessage::LEFT));
             }
         });
-        assert_eq!(events.recv(), Ok(Event::Message(ServerMessage::Left)));
+        assert_eq!(events.recv(), Ok(Event::Message(ServerMessage::LEFT)));
         pushing.join().unwrap();
         assert!(events.is_empty());
     }

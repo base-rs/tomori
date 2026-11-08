@@ -221,7 +221,7 @@ fn reconnects_and_restores_the_joined_space_and_gate() {
     // Leaving, once the server confirms it, clears what is restored next time.
     client.send(ClientMessage::Leave).unwrap();
     wait_for(&client, |event| {
-        matches!(event, Event::Message(ServerMessage::Left))
+        matches!(event, Event::Message(ServerMessage::Left { .. }))
     });
     client.send(kick()).unwrap();
     assert_eq!(wait_connected(&client), 3);
@@ -471,10 +471,10 @@ fn requires_welcome_first_and_only_once() {
         Disconnect::Protocol("server refused the connection: full".into())
     );
 
-    let (reason, _) = raw_disconnect(Some(raw::message(&ServerMessage::Left)), TIMEOUT);
+    let (reason, _) = raw_disconnect(Some(raw::message(&ServerMessage::LEFT)), TIMEOUT);
     assert_eq!(
         reason,
-        Disconnect::Protocol("expected welcome, received Left".into())
+        Disconnect::Protocol("expected welcome, received Left { deleted: None }".into())
     );
 
     let (reason, _) = raw_disconnect(Some(raw::chunk(b"not a frame")), TIMEOUT);

@@ -26,6 +26,10 @@ pub struct Capabilities {
     /// space is bound to through [`Backend::forget_instructions`]. See `design/agent-backends.md`.
     #[serde(default)]
     pub instructions: bool,
+    /// A session can be deleted through [`Backend::delete_session`], with its history and its workers' sessions, as when
+    /// an owner deletes a space and its session with it. See `design/agent-backends.md`.
+    #[serde(default)]
+    pub delete: bool,
     /// Tomori's MCP server can be registered with the agent for a directory through [`Backend::register_tools`], so
     /// that its sessions there can use Tomori's tools. See `design/mcp.md`.
     #[serde(default)]
@@ -518,6 +522,19 @@ pub trait Backend: Send + Sync {
         std::future::ready(Err(unsupported_instructions()))
     }
 
+    /// Delete the session `id`, which no space is bound to any more, with its conversation and the sessions of its
+    /// workers, as the agent's own interface deletes one, stopping any turn it is running first. A session that no
+    /// longer exists is not an error. A session the backend has bound again by the time this is performed is not
+    /// deleted, and fails with [`ErrorKind::Invalid`], since it is then another space's. Fails with
+    /// [`ErrorKind::Unsupported`] unless the backend has [`Capabilities::delete`].
+    fn delete_session(&self, id: &str) -> impl Future<Output = Result<()>> + Send {
+        let _ = id;
+        std::future::ready(Err(Error::new(
+            ErrorKind::Unsupported,
+            "the backend does not delete sessions",
+        )))
+    }
+
     /// Register `server` with the agent for `directory`, so that its sessions there can use its tools, replacing any
     /// server registered there under the same name. Registering it again is harmless. The agent may forget it when it
     /// restarts, so the server registers it again whenever it binds a session there and after a resynchronization.
@@ -629,6 +646,7 @@ mod tests {
         }))
         .unwrap();
         assert!(!capabilities.instructions);
+        assert!(!capabilities.delete);
         assert!(!capabilities.tools);
     }
 

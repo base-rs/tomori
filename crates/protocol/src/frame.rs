@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn kind_mismatches_are_errors() {
-        let frame = Frame::server(&ServerMessage::Left);
+        let frame = Frame::server(&ServerMessage::LEFT);
         assert_eq!(
             frame.to_audio().unwrap_err().to_string(),
             "unexpected Control frame"

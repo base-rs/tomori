@@ -488,7 +488,7 @@ fn deliver(context: &Context<'_>, frame: Frame, source: u32) -> Result<(), Disco
                     ServerMessage::Space { state } => {
                         context.shared.outbox.joined(Some(state.id.clone()))
                     }
-                    ServerMessage::Left => context.shared.outbox.joined(None),
+                    ServerMessage::Left { .. } => context.shared.outbox.joined(None),
                     // Suggested from now on, as the server calls this participant.
                     ServerMessage::Name { name } => {
                         name.clone_into(

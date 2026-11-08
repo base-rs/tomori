@@ -149,6 +149,12 @@ pub enum Section {
     Space,
     /// Asking whether to leave the space, opened from [`Section::Space`].
     Leave,
+    /// Asking whether to delete the space, for an owner, opened from [`Section::Space`], with whether its agent session is to be deleted too, which starts off. See `design/hand-menu.md`.
+    Delete {
+        session: bool,
+    },
+    /// Asking again, before deleting the agent session with the space, since that cannot be undone; opened from [`Section::Delete`].
+    DeleteSession,
     PeopleAndSecurity,
     /// What Tomori tells the space's agent, in layers; shown inside a space.
     Agent,
@@ -219,6 +225,14 @@ pub enum MenuKey {
     Leave,
     /// Leave the space, once asked.
     ConfirmLeave,
+    /// Ask whether to delete the space, as an owner.
+    Delete,
+    /// Turn deleting the agent session with the space on or off, while asked whether to delete it.
+    DeleteSession,
+    /// Delete the space, once asked, or, with its session, ask again.
+    ConfirmDelete,
+    /// Delete the space and its session, once asked again.
+    ConfirmDeleteSession,
     /// Step the Feedback setting's sounds or vibration to the next level.
     Sounds,
     Vibration,
@@ -308,6 +322,9 @@ pub struct SpaceInfo {
     /// For an owner in a space the server projects in, whether an added wall can be removed; `None` for anyone else,
     /// who does not manage the walls. See `design/projection.md`.
     pub walls: Option<bool>,
+    /// For an owner on a server that deletes spaces, whether its agent session can be deleted with it; `None` for
+    /// anyone else, who cannot delete it. See `design/spaces.md`.
+    pub deletion: Option<bool>,
 }
 
 /// A participant, as People & security shows them.
@@ -355,6 +372,10 @@ pub enum Choice {
     RemoveWall,
     /// Leave the space.
     Leave,
+    /// Delete the space, for everyone in it, and its agent session too when `session` is set.
+    Delete {
+        session: bool,
+    },
     /// Step the sounds, or the vibration, to the next level.
     Sounds,
     Vibration,
@@ -411,6 +432,15 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
         model.in_space || matches!(section, Section::PeopleAndSecurity | Section::Sound)
     });
     let space = model.space.as_ref().filter(|_| model.in_space);
+    // Only an owner is asked whether to delete the space, and whether to delete its session only where it can be.
+    let deletion = space
+        .and_then(|space| space.deletion)
+        .filter(|_| model.role == ConnectionRole::Owner);
+    let section = section.filter(|section| match section {
+        Section::Delete { session } => deletion.is_some_and(|sessions| sessions || !session),
+        Section::DeleteSession => deletion == Some(true),
+        _ => true,
+    });
     let mut items = Vec::new();
     let text = |items: &mut Vec<Item>, kind: MenuKind, text: String| {
         let key = MenuKey::Text(items.len());
@@ -643,7 +673,77 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     );
                 }
                 button(&mut items, MenuKey::Leave, "Leave space".into());
+                // Apart from the rest, last, since it ends the space for everyone in it.
+                if deletion.is_some() {
+                    button(&mut items, MenuKey::Delete, "Delete this space".into());
+                }
             }
+        }
+        // As many rows whether or not the session is to be deleted, so that turning it on moves none of them; the
+        // choice that deletes is well above the last row, which keeps the space, where the ray was as the rows changed.
+        Some(Section::Delete { session }) => {
+            text(&mut items, MenuKind::Heading, "Delete this space?".into());
+            let title = space.map_or("", |space| space.title.as_str());
+            for line in lines(title, WIDTH, 2) {
+                text(&mut items, MenuKind::Text, line);
+            }
+            button(
+                &mut items,
+                MenuKey::ConfirmDelete,
+                "Delete it, for everyone".into(),
+            );
+            text(
+                &mut items,
+                MenuKind::Text,
+                "Everyone here returns to the lobby.".into(),
+            );
+            text(
+                &mut items,
+                MenuKind::Text,
+                if session {
+                    "Its agent session is deleted too."
+                } else {
+                    "Its agent session is kept."
+                }
+                .into(),
+            );
+            if deletion == Some(true) {
+                button(
+                    &mut items,
+                    MenuKey::DeleteSession,
+                    if session {
+                        "Also delete its agent session: yes".into()
+                    } else {
+                        "Also delete its agent session: no".into()
+                    },
+                );
+            }
+            button(&mut items, MenuKey::Back, "Keep this space".into());
+        }
+        Some(Section::DeleteSession) => {
+            text(
+                &mut items,
+                MenuKind::Heading,
+                "Delete its agent session too?".into(),
+            );
+            for line in lines(
+                "Its conversation, and its workers' sessions, are lost for good. This cannot be undone.",
+                WIDTH,
+                NOTICE_ROWS,
+            ) {
+                text(&mut items, MenuKind::Text, line);
+            }
+            button(
+                &mut items,
+                MenuKey::ConfirmDeleteSession,
+                "Delete the space and its session".into(),
+            );
+            text(&mut items, MenuKind::Text, String::new());
+            button(
+                &mut items,
+                MenuKey::Back,
+                "Back, keeping the session".into(),
+            );
         }
         Some(Section::Leave) => {
             text(&mut items, MenuKind::Heading, "Leave this space?".into());
@@ -878,6 +978,13 @@ impl HandMenu {
         }
     }
 
+    /// The space is to be deleted, with its session if `session`: the menu closes, as on leaving.
+    fn deleted(&mut self, session: bool) -> Option<Choice> {
+        self.section = None;
+        self.pinned = false;
+        Some(Choice::Delete { session })
+    }
+
     /// Let go of a pinned menu, as B does, or on leaving a space. Returns whether it was pinned.
     pub fn unpin(&mut self) -> bool {
         std::mem::take(&mut self.pinned)
@@ -898,7 +1005,9 @@ impl HandMenu {
                 // A layer steps back to the Agent section, asking to leave to the Space section, and a section to the top level.
                 self.section = match self.section {
                     Some(Section::Layer(_)) => Some(Section::Agent),
-                    Some(Section::Leave) => Some(Section::Space),
+                    Some(Section::Leave | Section::Delete { .. }) => Some(Section::Space),
+                    // Back to deleting the space alone, or keeping it, which is asked again.
+                    Some(Section::DeleteSession) => Some(Section::Delete { session: false }),
                     _ => None,
                 };
                 None
@@ -912,6 +1021,30 @@ impl HandMenu {
                 self.pinned = false;
                 Some(Choice::Leave)
             }
+            // Asked afresh each time, with the session kept unless the owner turns its deletion on.
+            MenuKey::Delete => {
+                self.section = Some(Section::Delete { session: false });
+                None
+            }
+            MenuKey::DeleteSession => {
+                if let Some(Section::Delete { session }) = &mut self.section {
+                    *session = !*session;
+                }
+                None
+            }
+            MenuKey::ConfirmDelete => match self.section {
+                // Deleting the session as well is asked again, since it cannot be undone.
+                Some(Section::Delete { session: true }) => {
+                    self.section = Some(Section::DeleteSession);
+                    None
+                }
+                Some(Section::Delete { session: false }) => self.deleted(false),
+                _ => None,
+            },
+            MenuKey::ConfirmDeleteSession => match self.section {
+                Some(Section::DeleteSession) => self.deleted(true),
+                _ => None,
+            },
             MenuKey::Mode(id) => Some(Choice::Mode(id.clone())),
             MenuKey::Speech => Some(Choice::Speech),
             MenuKey::Environment(id) => Some(Choice::Environment(id.clone())),
@@ -1550,6 +1683,7 @@ mod tests {
                 environments: Vec::new(),
                 here: "2 here".into(),
                 walls: None,
+                deletion: None,
             }),
             people: vec![
                 Person {
@@ -1772,6 +1906,167 @@ mod tests {
         menu.choose(&MenuKey::Leave);
         assert_eq!(menu.choose(&MenuKey::ConfirmLeave), Some(Choice::Leave));
         assert_eq!(menu.section, None);
+    }
+
+    /// An owner in a space on a server that deletes spaces, and its sessions when `sessions`.
+    fn deletable(sessions: bool) -> Model {
+        let mut model = in_space(ConnectionRole::Owner);
+        model.space.as_mut().unwrap().deletion = Some(sessions);
+        model
+    }
+
+    #[test]
+    fn deleting_from_the_menu_asks_first_and_again_for_the_session() {
+        let model = deletable(true);
+        let mut menu = HandMenu::default();
+        menu.toggle_pin();
+        let space = items(menu.section, &model);
+        // Last, apart from the rest of the space's rows.
+        assert_eq!(space.last().unwrap().key, MenuKey::Delete);
+        assert_eq!(space.last().unwrap().text, "Delete this space");
+        assert_eq!(menu.choose(&MenuKey::Delete), None);
+        assert_eq!(menu.section, Some(Section::Delete { session: false }));
+        let kept = items(menu.section, &model);
+        assert_eq!(
+            texts(&kept),
+            [
+                "Delete this space?",
+                "Fix the parser in the lexer before the",
+                "release goes out",
+                "Delete it, for everyone",
+                "Everyone here returns to the lobby.",
+                "Its agent session is kept.",
+                "Also delete its agent session: no",
+                "Keep this space",
+            ]
+        );
+        // The last row, where the ray was as the rows changed, keeps the space, and the one that deletes is well above it.
+        assert_eq!(kept.last().unwrap().key, MenuKey::Back);
+        assert_eq!(kept[3].key, MenuKey::ConfirmDelete);
+        // Turning the session's deletion on says so, and moves no row.
+        assert_eq!(menu.choose(&MenuKey::DeleteSession), None);
+        assert_eq!(menu.section, Some(Section::Delete { session: true }));
+        let both = items(menu.section, &model);
+        assert_eq!(both.len(), kept.len());
+        assert_eq!(both[5].text, "Its agent session is deleted too.");
+        assert_eq!(both[6].text, "Also delete its agent session: yes");
+        menu.choose(&MenuKey::DeleteSession);
+        assert_eq!(menu.section, Some(Section::Delete { session: false }));
+        // Keeping it steps back to the Space section, and asking again starts with the session kept.
+        menu.choose(&MenuKey::DeleteSession);
+        assert_eq!(menu.choose(&MenuKey::Back), None);
+        assert_eq!(menu.section, Some(Section::Space));
+        menu.choose(&MenuKey::Delete);
+        assert_eq!(menu.section, Some(Section::Delete { session: false }));
+
+        // With the session, deleting asks again, and stepping back from that keeps the session.
+        menu.choose(&MenuKey::DeleteSession);
+        assert_eq!(menu.choose(&MenuKey::ConfirmDelete), None);
+        assert_eq!(menu.section, Some(Section::DeleteSession));
+        let again = items(menu.section, &model);
+        assert_eq!(
+            texts(&again),
+            [
+                "Delete its agent session too?",
+                "Its conversation, and its workers'",
+                "sessions, are lost for good. This cannot",
+                "be undone.",
+                "Delete the space and its session",
+                "",
+                "Back, keeping the session",
+            ]
+        );
+        assert_eq!(again.last().unwrap().key, MenuKey::Back);
+        assert_eq!(menu.choose(&MenuKey::Back), None);
+        assert_eq!(menu.section, Some(Section::Delete { session: false }));
+        menu.choose(&MenuKey::DeleteSession);
+        menu.choose(&MenuKey::ConfirmDelete);
+        assert_eq!(
+            menu.choose(&MenuKey::ConfirmDeleteSession),
+            Some(Choice::Delete { session: true })
+        );
+        // The menu closes, and lets go, as on leaving.
+        assert_eq!(menu.section, None);
+        assert!(!menu.pinned());
+
+        // Without the session, deleting needs no second asking.
+        menu.choose(&MenuKey::Section(Section::Space));
+        menu.choose(&MenuKey::Delete);
+        assert_eq!(
+            menu.choose(&MenuKey::ConfirmDelete),
+            Some(Choice::Delete { session: false })
+        );
+        assert_eq!(menu.section, None);
+
+        // A choice left from rows no longer shown deletes nothing.
+        for section in [
+            None,
+            Some(Section::Space),
+            Some(Section::Delete { session: false }),
+        ] {
+            menu.section = section;
+            assert_eq!(menu.choose(&MenuKey::ConfirmDeleteSession), None);
+            assert_eq!(menu.section, section);
+        }
+        menu.section = Some(Section::Space);
+        assert_eq!(menu.choose(&MenuKey::ConfirmDelete), None);
+        assert_eq!(menu.choose(&MenuKey::DeleteSession), None);
+        assert_eq!(menu.section, Some(Section::Space));
+    }
+
+    #[test]
+    fn only_owners_are_asked_whether_to_delete_a_space() {
+        let sections = [
+            Some(Section::Delete { session: false }),
+            Some(Section::Delete { session: true }),
+            Some(Section::DeleteSession),
+        ];
+        // Anyone else, or an owner on an older server, is offered nothing, and the rows that ask show the top level instead.
+        for model in [
+            in_space(ConnectionRole::Owner),
+            {
+                let mut model = deletable(true);
+                model.role = ConnectionRole::Collaborator;
+                model
+            },
+            {
+                let mut model = deletable(true);
+                model.role = ConnectionRole::Visitor;
+                model
+            },
+            {
+                let mut model = deletable(true);
+                model.role = ConnectionRole::Unknown;
+                model
+            },
+        ] {
+            assert!(
+                !items(Some(Section::Space), &model)
+                    .iter()
+                    .any(|row| row.key == MenuKey::Delete),
+                "{:?}",
+                model.role
+            );
+            for section in sections {
+                assert_eq!(items(section, &model), items(None, &model));
+            }
+        }
+        // Where the session cannot be deleted, the space can, and the session is kept without asking.
+        let model = deletable(false);
+        let rows = items(Some(Section::Delete { session: false }), &model);
+        assert!(!rows.iter().any(|row| row.key == MenuKey::DeleteSession));
+        assert!(texts(&rows).contains(&"Its agent session is kept."));
+        assert_eq!(rows.last().unwrap().key, MenuKey::Back);
+        for section in &sections[1..] {
+            assert_eq!(items(*section, &model), items(None, &model));
+        }
+        // Outside a space, there is nothing to delete.
+        let mut lobby = deletable(true);
+        lobby.in_space = false;
+        assert_eq!(
+            items(Some(Section::Delete { session: false }), &lobby),
+            items(None, &lobby)
+        );
     }
 
     #[test]
@@ -2161,6 +2456,7 @@ mod tests {
         }];
         model.notice = Some("A security notice long enough to be cut. ".repeat(4));
         let space = model.space.as_mut().unwrap();
+        space.deletion = Some(true);
         space.title = format!("{} {}", "word".repeat(15), "Łódź ".repeat(20));
         space.activity = "running a very long tool call".into();
         space.here = "12 here, 3 away".into();
@@ -2181,6 +2477,9 @@ mod tests {
             None,
             Some(Section::Space),
             Some(Section::Leave),
+            Some(Section::Delete { session: false }),
+            Some(Section::Delete { session: true }),
+            Some(Section::DeleteSession),
             Some(Section::Agent),
             Some(Section::Layer(Layer::Tomori)),
             Some(Section::Layer(Layer::Space)),
