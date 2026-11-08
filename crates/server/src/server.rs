@@ -1713,6 +1713,8 @@ mod tests {
         failing_listener_close: bool,
         /// Called each time a timer's wait ends, before its result is returned.
         after_wait: Option<Box<dyn Fn() + Send + Sync>>,
+        /// Called each time accepting fails, before the failure is returned.
+        after_accept_failure: Option<Box<dyn Fn() + Send + Sync>>,
     }
 
     impl Faulty {
@@ -1731,6 +1733,7 @@ mod tests {
                 failing_timers: false,
                 failing_listener_close: false,
                 after_wait: None,
+                after_accept_failure: None,
             }
         }
     }
@@ -1756,10 +1759,16 @@ mod tests {
             if let Some(error) = error {
                 return Err(error.into());
             }
-            let (socket, peer) = self
+            let accepted = self
                 .inner
                 .socket_accept(&listener.socket, cancellation)
-                .await?;
+                .await;
+            if let (Err(OperationError::Io(_)), Some(after_accept_failure)) =
+                (&accepted, &self.after_accept_failure)
+            {
+                after_accept_failure();
+            }
+            let (socket, peer) = accepted?;
             let socket = Tagged {
                 socket,
                 accepted: true,
@@ -1784,6 +1793,12 @@ mod tests {
 
         async fn socket_close_submit(&self, socket: Tagged) -> io::Result<()> {
             self.inner.socket_close_submit(socket.socket).await
+        }
+    }
+
+    impl SocketLocalAddress for Faulty {
+        fn socket_local_address(&self, socket: &Tagged) -> io::Result<SocketAddress> {
+            self.inner.socket_local_address(&socket.socket)
         }
     }
 
@@ -2033,7 +2048,13 @@ mod tests {
     fn a_tools_endpoint_that_cannot_accept_leaves_the_server_serving() {
         // So that the warning and the error are written, whichever test runs first.
         log::set_max_level(log::LevelFilter::Trace);
-        let scheduler = NativeScheduler::new().unwrap();
+        let (failed, accept_failed) = channel();
+        let scheduler = Faulty {
+            after_accept_failure: Some(Box::new(move || {
+                let _ = failed.send(());
+            })),
+            ..Faulty::new()
+        };
         let cancellation = Cancellation::new();
         let (sender, address) = channel();
         let serving = std::thread::spawn({
@@ -2043,30 +2064,42 @@ mod tests {
                     .with_workspace_roots(WorkspaceRoots::none());
                 let result = block_on(async {
                     let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
-                    let listener = bind(&scheduler, address, &cancellation).await.unwrap();
+                    let listener = bind(&scheduler.inner, address, &cancellation)
+                        .await
+                        .unwrap();
                     sender
-                        .send(scheduler.socket_local_address(&listener).unwrap())
+                        .send(scheduler.inner.socket_local_address(&listener).unwrap())
                         .unwrap();
                     // Bound but never listening, so that accepting on it fails at once, and on every address, which is warned of.
                     let every: SocketAddr = "0.0.0.0:0".parse().unwrap();
                     let tools = scheduler
+                        .inner
                         .socket_open(every.into(), SocketType::Stream, None, &cancellation)
                         .await
                         .unwrap();
                     scheduler
+                        .inner
                         .socket_bind(&tools, every, &cancellation)
                         .await
                         .unwrap();
+                    let [listener, tools] = [listener, tools].map(|socket| Tagged {
+                        socket,
+                        accepted: false,
+                    });
                     server
                         .run_with_tools(&scheduler, listener, tools, &cancellation)
                         .await
                 });
-                block_on(scheduler.shutdown());
+                block_on(scheduler.inner.shutdown());
                 result
             }
         });
         let address = address.recv().unwrap();
         assert!(health(address).contains("\"status\":\"ok\""));
+        // Serving stops only once accepting on the tools' listener has failed, which ends their serving with that error rather than with the cancellation.
+        accept_failed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("accepting on the tools' listener fails");
         cancellation.cancel();
         assert!(serving.join().unwrap().is_ok());
     }
