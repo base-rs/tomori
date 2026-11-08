@@ -1575,6 +1575,31 @@ impl Hub {
         }
     }
 
+    /// Move the space `space` to `environment`, one the server offers, for everyone in it, as an owner or its agent asked: whether it changed, or why it cannot, as for a closed space. Keeping the change is the caller's. See `design/environments.md` and `design/mcp.md`.
+    fn move_space(
+        &self,
+        state: &mut HubState,
+        space: &str,
+        environment: String,
+    ) -> Result<bool, &'static str> {
+        let record = state.space_mut(space).expect("the caller found it");
+        let left = record.model.environment.clone();
+        if !record.model.set_environment(environment)? {
+            return Ok(false);
+        }
+        // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
+        record.stage.leave(&left);
+        // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
+        record.instruct(true);
+        // Its server side, if it has one, runs for the space, and the previous environment's stops.
+        self.reconcile_server_sides(state);
+        // Everyone in the space, and the lobby's listing, see the change.
+        state.touch_space(space);
+        // The Tomori wall moves to where the new environment puts it, and that environment's walls show.
+        state.touch_projection(space);
+        Ok(true)
+    }
+
     /// The server has begun serving: run the server sides of the spaces that were bound while it was being configured, and of those bound from now on. A kept space listed again waits until it is bound to its session again; see [`Hub::bound`].
     pub(crate) fn serving(&self) {
         let mut state = self.lock();
@@ -3287,24 +3312,17 @@ impl Hub {
                 let Some(space) = in_space(state) else {
                     return;
                 };
-                let record = state.space_mut(&space).expect("checked above");
-                let left = record.model.environment.clone();
-                match record.model.set_environment(environment) {
+                match self.move_space(state, &space, environment) {
                     Ok(true) => {
                         log::info!(
                             "Space {space} is now in the {} environment.",
-                            record.model.environment
+                            state
+                                .space(&space)
+                                .expect("checked above")
+                                .model
+                                .environment
                         );
-                        // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
-                        record.stage.leave(&left);
-                        // The environment's layer of the agent's instructions changes with it, so every layer is given again, as on binding.
-                        record.instruct(true);
-                        // Its server side, if it has one, runs for the space, and the previous environment's stops.
-                        self.reconcile_server_sides(state);
-                        // Everyone in the space, and the lobby's listing, see the change; it is kept across a restart.
-                        state.touch_space(&space);
-                        // The Tomori wall moves to where the new environment puts it, and that environment's walls show.
-                        state.touch_projection(&space);
+                        // It is kept across a restart.
                         deferred.push(Deferred::Keep);
                     }
                     Ok(false) => {}

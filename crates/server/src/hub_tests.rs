@@ -3556,6 +3556,42 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
 }
 
 #[test]
+fn the_agent_moving_its_space_moves_its_walls_as_an_owner_s_change_does() {
+    let (hub, _jobs) = hub_waiting();
+    let stage = upright([0.0, 1.5, -4.0]);
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("farmyard", "Farmyard").with_stage(stage),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    ada.read();
+    assert!(
+        hub.agent_set_environment("session", "farmyard")
+            .unwrap()
+            .changed
+    );
+    let moved = ada
+        .projections()
+        .pop()
+        .expect("sent as the environment changes");
+    assert_eq!(moved.environment, "farmyard");
+    assert_eq!(
+        moved
+            .walls
+            .iter()
+            .map(|wall| (wall.kind, wall.pose))
+            .collect::<Vec<_>>(),
+        [(tomori_protocol::WallKind::Tomori, stage)]
+    );
+}
+
+#[test]
 fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
     let directory = std::env::temp_dir().join(format!("tomori-hub-stage-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);

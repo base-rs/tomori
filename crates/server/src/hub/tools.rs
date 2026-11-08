@@ -267,10 +267,9 @@ impl Hub {
         let environment = self.environments().choose(Some(environment))?;
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
-        let record = state.space_mut(&space).expect("found above");
-        if !record
-            .model
-            .set_environment(environment)
+        // As for an owner's change: its walls, every layer again, the environment's server side, everyone told, and kept.
+        if !self
+            .move_space(&mut state, &space, environment)
             .expect("an open space can change its environment")
         {
             return Ok(Changed {
@@ -280,12 +279,8 @@ impl Hub {
         }
         log::info!(
             "The agent of space {space} changed its environment to {}.",
-            record.model.environment
+            state.space(&space).expect("found above").model.environment
         );
-        // As for an owner's change: every layer again, the environment's server side, everyone told, and kept.
-        record.instruct(true);
-        self.reconcile_server_sides(&mut state);
-        state.touch_space(&space);
         drop(state);
         self.keep();
         Ok(Changed {

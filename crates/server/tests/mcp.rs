@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tomori_backend::{Event, Snapshot, ToolServer};
+use tomori_backend::{Event, Snapshot, ToolServer, Worker, WorkerState};
 use tomori_protocol::{ClientMessage, SpeechSetting};
 use tomori_server::Server;
 use tomori_server::fake::{FAKE_BACKEND_NAME, FakeBackend, FakeSession};
@@ -366,6 +366,13 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     );
     assert_eq!((notified.status, notified.body.as_str()), (202, ""));
+    for response in [
+        json!({"jsonrpc": "2.0", "id": 9, "result": {}}),
+        json!({"jsonrpc": "2.0", "id": 9, "error": {"code": -1, "message": "no"}}),
+    ] {
+        let responded = post(&server, &token, &response);
+        assert_eq!((responded.status, responded.body.as_str()), (202, ""));
+    }
     assert_eq!(
         rpc(json!({"jsonrpc": "2.0", "id": "p", "method": "ping"}))["result"],
         json!({})
@@ -452,7 +459,16 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
     );
     assert_eq!(listed["spaces"].as_array().unwrap().len(), 2);
 
-    // A space tool acts for the session OpenCode names, and only for a session bound to a space.
+    // A space tool acts for the session OpenCode names, and only for a session bound to a space: not for a sub-agent of one.
+    sessions[0].emit(Event::WorkersChanged {
+        workers: vec![Worker {
+            id: "ses_child".into(),
+            parent: Some(one.clone()),
+            title: "Child".into(),
+            state: WorkerState::Running,
+        }],
+    });
+    ada.space(|state| state.workers.len() == 1);
     for tool in ["space", "set_speech", "set_environment"] {
         let arguments = json!({"speech": "brief", "environment": "minimal"});
         assert_eq!(
@@ -470,6 +486,17 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
                 &server,
                 &token,
                 Some("ses_other"),
+                tool,
+                arguments.clone()
+            ))
+            .starts_with("This session is not bound to a Tomori space"),
+            "{tool}"
+        );
+        assert!(
+            failure(&call(
+                &server,
+                &token,
+                Some("ses_child"),
                 tool,
                 arguments.clone()
             ))
@@ -802,6 +829,23 @@ fn no_token_is_logged_while_requests_and_their_sessions_are() {
         &[("Authorization", "Bearer tomori_wrong")],
         "{}",
     );
+
+    // A client's description is logged only in part, however long it is.
+    let long = "x".repeat(4096);
+    post(
+        &server,
+        &token,
+        &json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": long},
+        }}),
+    );
+    let initialised = eventually(|| {
+        logged()
+            .into_iter()
+            .find(|line| line.starts_with("MCP initialize") && line.contains("xxxx"))
+    });
+    assert!(!initialised.contains(&long[..600]), "{initialised}");
+    assert!(initialised.contains("xxx…"), "{initialised}");
 
     // What OpenCode sends is logged, at debug, with the calling session, without the token or the arguments.
     let deadline = Instant::now() + TIMEOUT;

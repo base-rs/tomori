@@ -36,6 +36,9 @@ const DRAIN_LIMIT: usize = 1024 * 1024;
 /// The most characters of a client's text, such as an unknown tool's name, repeated in an answer or a log.
 const ECHO_LIMIT: usize = 64;
 
+/// The most characters of a call's `clientInfo` or `_meta` written to the log.
+const LOGGED_LIMIT: usize = 512;
+
 /// Request fields whose values are secret, which the log names without their values.
 const SECRET_FIELDS: [&str; 3] = ["authorization", "cookie", "proxy-authorization"];
 
@@ -75,6 +78,11 @@ fn same(given: &[u8], expected: &[u8]) -> bool {
 /// At most [`ECHO_LIMIT`] characters of `text`, on one line.
 fn echo(text: &str) -> String {
     tomori_protocol::text::one_line(text, ECHO_LIMIT)
+}
+
+/// At most [`LOGGED_LIMIT`] characters of `value`, as JSON on one line.
+fn logged(value: &Value) -> String {
+    tomori_protocol::text::one_line(&value.to_string(), LOGGED_LIMIT)
 }
 
 /// The request's fields, as the log shows them: secret values left out.
@@ -209,10 +217,10 @@ impl Handler for Endpoint {
                         .map_or_else(|| "message".to_owned(), echo),
                     message
                         .pointer("/params/clientInfo")
-                        .map_or_else(|| "unnamed".to_owned(), Value::to_string),
+                        .map_or_else(|| "unnamed".to_owned(), logged),
                     message
                         .pointer("/params/_meta")
-                        .map_or_else(|| "none".to_owned(), Value::to_string),
+                        .map_or_else(|| "none".to_owned(), logged),
                 );
                 match handle(&self.hub, &message) {
                     Some(reply) => (200, reply),
@@ -241,6 +249,12 @@ pub(crate) fn handle(hub: &Hub, message: &Value) -> Option<Value> {
     };
     let id = object.get("id")?.clone();
     let Some(method) = object.get("method").and_then(Value::as_str) else {
+        // A response to a request of the server's needs no answer; the server makes none, so it is dropped.
+        if !object.contains_key("method")
+            && (object.contains_key("result") || object.contains_key("error"))
+        {
+            return None;
+        }
         return Some(error(id, -32600, "A request names its method."));
     };
     let params = object.get("params").cloned().unwrap_or(Value::Null);
