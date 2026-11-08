@@ -74,14 +74,21 @@ fn the_operator_types_the_code_to_pair_a_device_as_an_owner() {
     assert_eq!(pending.name, "Quest 3");
     assert_eq!(pending.code, Some(display(&code)));
 
-    // A wrong code confirms nothing.
+    // A wrong code confirms nothing and declines the pairing, telling the device, so that the right code is no use afterwards.
     let wrong = if code == "000000" { "000001" } else { "000000" };
     assert_eq!(
         pairing.confirm(wrong),
-        Err("That code does not match, so nothing was confirmed.")
+        Err("That code does not match, so the pairing was declined.")
     );
+    assert_eq!(
+        failed(&quest),
+        "The code given did not match, so the pairing was declined."
+    );
+    assert_eq!(pairing.pending(), None);
+    assert_eq!(pairing.confirm(&code), Err("No pairing is waiting."));
     assert!(server.tokens.as_ref().unwrap().entries().is_empty());
 
+    let code = pair(&mut quest);
     assert_eq!(pairing.confirm(&code), Ok("Quest 3".to_owned()));
     let token = paired(&quest);
     assert_eq!(pairing.pending(), None);

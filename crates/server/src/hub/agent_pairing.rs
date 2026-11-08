@@ -11,11 +11,21 @@ use serde_json::{Value, json};
 pub(crate) const NO_PAIRING: &str = "This server does not pair devices: in --auth open mode everyone who connects is already an owner, so there is no pairing to list, confirm or decline.";
 
 /// What the agent asked to do with the pairing waiting.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) enum Decision<'a> {
     /// Confirm it, if this is its code, as a participant read it aloud from the device.
     Confirm(&'a str),
     Decline,
+}
+
+/// Written without the code given, which may be the device's.
+impl std::fmt::Debug for Decision<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Confirm(_) => "Confirm([redacted])",
+            Self::Decline => "Decline",
+        })
+    }
 }
 
 impl Decision<'_> {

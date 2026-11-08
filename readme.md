@@ -60,7 +60,7 @@ opencode serve --service &
 cargo run -p tomori-server-app --bin tomori-server -- --backend opencode
 ```
 
-Anyone who can reach the server can watch its spaces as a visitor. Creating spaces, talking to the agent and approving its tools need a token (see [design/security.md](design/security.md)). The easiest way to get one is to pair: choose the gold key beside the connected server in the headset, and it shows a 6-digit code. If the server's console shows the same code, type it there to confirm, or confirm it on the status page; the headset then keeps an owner token for that server. A server started with `--no-visitors` still admits a device that asks to pair.
+Anyone who can reach the server can watch its spaces as a visitor. Creating spaces, talking to the agent and approving its tools need a token (see [design/security.md](design/security.md)). The easiest way to get one is to pair: choose the gold key beside the connected server in the headset, and it shows a 6-digit code. Type that code on the server's console to confirm, or compare it with the code on the status page and confirm there, and the headset then keeps an owner token for that server. The server never writes the code to its console or log, and a wrong code typed declines the pairing, so pair again. A server started with `--no-visitors` still admits a device that asks to pair.
 
 You can also make an owner token on the PC, and give it to the headset or the desktop client once; each keeps it for that server:
 

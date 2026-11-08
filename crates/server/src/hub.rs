@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base_scheduler::Cancellation;
 use event_listener::{Event as Notify, EventListener};
@@ -107,8 +107,8 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(600);
 /// The most of what spaces' agents did with pairings that the status page shows.
 pub const PAIRING_DECISIONS: usize = 8;
 
-/// A pairing as the console and status page show it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A pairing as the status page shows it. Only the status page, shown only to owners, shows its code; the console and the log never do. See `design/security.md`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PairingView {
     /// Names this pairing, so that the status page confirms the one it showed.
     pub serial: u64,
@@ -117,12 +117,44 @@ pub struct PairingView {
     pub code: Option<String>,
 }
 
-/// How a pairing is confirmed: by typing the code the device shows, on the console; by the pairing the status page showed, whose code an owner compared; or by the code a space's agent was given, read aloud from the device, which declines the pairing if it does not match. See `design/security.md`.
-#[derive(Clone, Copy, Debug)]
+/// Written without its code, so that no debugging output holds it.
+impl std::fmt::Debug for PairingView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairingView")
+            .field("serial", &self.serial)
+            .field("name", &self.name)
+            .field("code", &self.code.as_ref().map(|_| Redacted))
+            .finish()
+    }
+}
+
+/// Stands for a pairing code, or text that may be one, in debugging output.
+struct Redacted;
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[redacted]")
+    }
+}
+
+/// How a pairing is confirmed: by typing the code the device shows, on the console; by the pairing the status page showed, whose code an owner compared; or by the code a space's agent was given, read aloud from the device. A typed or given code that does not match declines the pairing. See `design/security.md`.
+#[derive(Clone, Copy)]
 pub enum Confirmation<'a> {
     Typed(&'a str),
     Shown(u64),
     Agent(&'a str),
+}
+
+/// Written without the code typed or given, which may be the device's.
+impl std::fmt::Debug for Confirmation<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Typed(_) => formatter.debug_tuple("Typed").field(&Redacted).finish(),
+            Self::Shown(serial) => formatter.debug_tuple("Shown").field(serial).finish(),
+            Self::Agent(_) => formatter.debug_tuple("Agent").field(&Redacted).finish(),
+        }
+    }
 }
 
 /// A device pairing: its commitment, the server's value, and the code once the device has revealed its own value.
@@ -148,17 +180,57 @@ pub struct PairingSetup {
     pub tokens: Arc<tomori_security::TokenStore>,
 }
 
-/// Something about pairing to show on the server's console. See `design/security.md`.
+/// Something about pairing to show on the server's console, as its [`Display`](std::fmt::Display) says it. It never holds the pairing's code, since the console's output may be kept where others can read it, such as in a log: the operator confirms by typing the code the device shows. See `design/security.md`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PairingEvent {
     /// A device began pairing.
     Began { name: String },
-    /// A pairing waits to be confirmed, with the code written as the device shows it.
-    Waiting { name: String, code: String },
+    /// A pairing waits to be confirmed: the device shows its code. It began at `began`, and is withdrawn at `expires` unless confirmed.
+    Waiting {
+        name: String,
+        began: SystemTime,
+        expires: SystemTime,
+    },
     /// Pairings are paused, since too many began recently.
     Paused,
     /// A space's agent confirmed or declined a pairing through Tomori's tools, or was refused, as `notice` says, naming the space and the calling session.
     Agent { notice: String },
+}
+
+/// What the console tells the operator.
+impl std::fmt::Display for PairingEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Began { name } => write!(formatter, "{name:?} began pairing."),
+            Self::Waiting {
+                name,
+                began,
+                expires,
+            } => write!(
+                formatter,
+                "Pairing request from {name:?}, begun at {}; it is withdrawn at {} unless confirmed. To confirm it, type here the 6-digit code the device shows, which declines it if it does not match, or type \"decline\"; owners can also confirm on the status page.",
+                clock(*began),
+                clock(*expires)
+            ),
+            Self::Paused => formatter.write_str(
+                "Pairing is paused, since too many pairings began recently. Type \"allow\" to allow pairing again.",
+            ),
+            Self::Agent { notice } => formatter.write_str(notice),
+        }
+    }
+}
+
+/// The time of day at `time`, in UTC, as the server's log gives it: `"03:12:05 UTC"`.
+fn clock(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        seconds / 3600 % 24,
+        seconds / 60 % 60,
+        seconds % 60
+    )
 }
 
 /// Shows [`PairingEvent`]s on the server's console.
@@ -1406,7 +1478,7 @@ impl HubState {
         true
     }
 
-    /// Take the pairing waiting, if `confirmation` confirms it, for its device to be issued a token. A code the agent was given that does not match declines the pairing, telling its device, so that each pairing gives a code from anywhere but the device one try; a code typed on the console that does not match confirms nothing and leaves it waiting. See `design/security.md`.
+    /// Take the pairing waiting, if `confirmation` confirms it, for its device to be issued a token. A code typed on the console, or given to the agent, that does not match declines the pairing, telling its device, so that each pairing gives a code from anywhere but the device one try: neither the console nor the agent is shown the code, and whatever can type on the console, such as through a pipe, must not search for it. See `design/security.md`.
     fn take_confirmed(
         &mut self,
         confirmation: Confirmation<'_>,
@@ -1422,8 +1494,13 @@ impl HubState {
         };
         if !confirmed {
             return Err(match confirmation {
-                Confirmation::Typed(_) => "That code does not match, so nothing was confirmed.",
-                Confirmation::Agent(_) => {
+                Confirmation::Typed(_) | Confirmation::Agent(_) => {
+                    if matches!(confirmation, Confirmation::Typed(_)) {
+                        log::info!(
+                            "Declined the pairing of {:?}, since the code typed did not match the one it shows.",
+                            pairing.name
+                        );
+                    }
                     self.end_pairing(
                         None,
                         "The code given did not match, so the pairing was declined.",
@@ -1926,7 +2003,13 @@ impl Hub {
 
     /// Decline the pairing waiting, telling its device: the one with `serial` if given, as the status page showed it, or whichever is waiting. Returns whether one was declined.
     pub fn decline_pairing(&self, serial: Option<u64>) -> bool {
-        self.lock().decline_pairing(serial)
+        let mut state = self.lock();
+        let name = state.pairing.as_ref().map(|pairing| pairing.name.clone());
+        let declined = state.decline_pairing(serial);
+        if declined && let Some(name) = name {
+            log::info!("Declined the pairing of {name:?}.");
+        }
+        declined
     }
 
     /// Change the most visitors connected at once; see [`Hub::connect`].
@@ -3167,13 +3250,22 @@ impl Hub {
                     pairing.server,
                 );
                 let name = pairing.name.clone();
-                pairing.code = Some(code.clone());
+                pairing.code = Some(code);
                 outbox.message(ServerMessage::PairWaiting);
-                let shown = tomori_security::pairing::display(&code);
-                log::info!("Pairing request from {name:?}: code {shown}.");
+                // Never the code: the log and the console may be read by others on the server's machine, such as its agents, and the operator confirms with the code the device shows. See `design/security.md`.
+                log::info!(
+                    "Pairing request from {name:?}: it waits to be confirmed with the code its device shows."
+                );
+                let timeout = *self.pairing_timeout.read().expect("never left poisoned");
+                let now = SystemTime::now();
+                let began = now
+                    .checked_sub(Instant::now().saturating_duration_since(pairing.started))
+                    .unwrap_or(now);
                 deferred.push(Deferred::PairingPrompt(PairingEvent::Waiting {
                     name,
-                    code: shown,
+                    began,
+                    // Only a library's timeout too long for any clock could not be added.
+                    expires: began.checked_add(timeout).unwrap_or(began),
                 }));
             }
             ClientMessage::Knock => {

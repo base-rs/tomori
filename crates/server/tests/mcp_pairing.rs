@@ -320,9 +320,18 @@ fn the_agent_confirms_a_pairing_with_the_code_read_from_the_device() {
     assert!(page.contains("<h3>By agents</h3>"), "{page}");
     let escaped = line.replace('"', "&quot;");
     assert!(page.contains(&format!("<li>{escaped}</li>")), "{page}");
-    // Neither the code nor the token is logged with it.
-    for logged in logged() {
-        assert!(!logged.contains(&token), "{logged}");
+    // Neither the code nor the token is logged with it, or shown on the console.
+    let console: Vec<String> = studio
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| format!("{event} {event:?}"))
+        .collect();
+    for line in logged().iter().chain(&console) {
+        for secret in [&token, &shown, &display(&shown)] {
+            assert!(!line.contains(secret.as_str()), "{line}");
+        }
     }
 }
 
