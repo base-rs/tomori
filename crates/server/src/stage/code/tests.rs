@@ -13,7 +13,16 @@ fn block(info: &str, source: &str) -> Option<Content> {
     for line in source.lines() {
         lines.push(line);
     }
-    lines.content()
+    lines.content().map(highlighted)
+}
+
+/// `found`, highlighted by the server's highlighters.
+fn highlighted(found: Found) -> Content {
+    let projecting = crate::stage::Projecting::new(vec![(vec![found], None)]);
+    let highlighter = crate::highlighting::highlighter();
+    let spans = crate::highlighting::highlight_all(&projecting.sources(), &highlighter);
+    let mut replies = projecting.highlighted(spans);
+    replies.remove(0).0.remove(0)
 }
 
 /// The text each of `content`'s spans covers, with its kind, checking that they are valid for its body.
@@ -162,7 +171,7 @@ fn hostile_blocks_are_bounded_and_highlighted_within_a_budget() {
             .all(|line| line.chars().count() <= HIGHLIGHTED_CHARS)
     );
     assert!(lines.info.chars().count() <= INFO_CHARS);
-    let content = lines.content().unwrap();
+    let content = highlighted(lines.content().unwrap());
     assert_eq!(content.code.as_ref().unwrap().lines, 100_001);
     assert!(content.body.chars().count() <= CODE_LINES * (CODE_LINE_CHARS + 2));
     tokens(&content);

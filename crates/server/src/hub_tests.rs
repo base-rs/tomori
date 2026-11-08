@@ -352,7 +352,9 @@ fn what_a_driver_reports_for_a_space_that_has_gone_is_dropped() {
     let (hub, _jobs) = hub();
     let error = || tomori_backend::Error::new(ErrorKind::Unavailable, "down");
     hub.session_changed("gone", "session".to_owned());
-    hub.space_event("gone", Event::Idle);
+    hub.drive_event("gone", Event::Idle);
+    // Panels highlighted for a space that went meanwhile.
+    hub.project("gone", vec![(Vec::new(), None)]);
     hub.space_sent("gone", "key", Ok(()));
     hub.space_decided("gone", "request", "ada", Ok(()));
     hub.space_decided("gone", "request", "ada", Err(error()));
@@ -488,7 +490,7 @@ fn modes_are_switched_only_while_the_agent_can_take_it() {
     // The driver has stopped.
     client.send(plan());
     assert_eq!(client.errors(), ["The agent session has stopped."]);
-    hub.space_event(
+    hub.drive_event(
         &id,
         Event::Reconnecting {
             reason: "lost".to_owned(),
@@ -3121,21 +3123,21 @@ fn upright(position: [f32; 3]) -> tomori_protocol::Pose {
 
 /// The agent replies `text`, as message `id`, in `space`.
 fn reply(hub: &Hub, space: &str, id: &str, text: &str) {
-    hub.space_event(
+    hub.drive_event(
         space,
         Event::MessageStarted {
             message: id.to_owned(),
             role: tomori_backend::Role::Assistant,
         },
     );
-    hub.space_event(
+    hub.drive_event(
         space,
         Event::TextDelta {
             message: id.to_owned(),
             text: text.to_owned(),
         },
     );
-    hub.space_event(
+    hub.drive_event(
         space,
         Event::MessageCompleted {
             message: id.to_owned(),
@@ -3320,7 +3322,7 @@ fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() 
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
     // Where they move after they began speaking changes nothing.
     ada.send(standing([1.9, 1.6, -2.0]));
-    hub.space_event(&space, Event::Delivered { key: prompt.key });
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
     reply(&hub, &space, "m1", PANEL_REPLY);
     ada.read();
     let projection = ada.projection();
@@ -3332,7 +3334,7 @@ fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() 
         .collect();
     assert_eq!(on_wall.len(), 1);
     // A reply completed again, or one without panels, projects nothing more.
-    hub.space_event(
+    hub.drive_event(
         &space,
         Event::MessageCompleted {
             message: "m1".to_owned(),
@@ -3630,7 +3632,7 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
     // Asked beside the farmyard's wall, the agent projects onto it.
     ada.send(standing([3.0, 1.6, -3.5]));
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
-    hub.space_event(&space, Event::Delivered { key: prompt.key });
+    hub.drive_event(&space, Event::Delivered { key: prompt.key });
     reply(&hub, &space, "m3", PANEL_REPLY);
     assert!(ada.projection().panels.iter().any(|panel| matches!(
         &panel.place,

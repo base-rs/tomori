@@ -393,6 +393,13 @@ impl Server {
         self
     }
 
+    /// Highlight the agent's code panels with `highlighter`, as a test does to see what happens while it is slow.
+    #[cfg(test)]
+    pub(crate) fn with_highlighter(self, highlighter: crate::highlighting::Highlighter) -> Self {
+        self.hub.set_highlighter(highlighter);
+        self
+    }
+
     /// Change how long a connection may go without a complete request head, or a `/connect` exchange without Hello, before it is closed. The default is 10 seconds. See `design/server.md`.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
@@ -1615,7 +1622,12 @@ async fn drive(
                     if let Some(voice) = voice.as_mut() {
                         voice.observe(&event);
                     }
-                    hub.space_event(space, event);
+                    // The panels of a reply it completed are highlighted outside the hub's lock, and projected before the next event, so that a later reply's are never projected before an earlier one's; if the space stops meanwhile, as the server shuts down, they are not projected. See `crate::highlighting`.
+                    if let Some(projecting) = hub.space_event(space, event) {
+                        let replies =
+                            crate::highlighting::highlight(projecting, hub.highlighter()).await;
+                        hub.project(space, replies);
+                    }
                     if closed {
                         return None;
                     }
@@ -2391,8 +2403,8 @@ mod tests {
             .register_space(&request, "session".to_owned(), Default::default(), commands)
             .unwrap();
         // The second event within the interval defers its snapshot.
-        server.hub.space_event(&id, tomori_backend::Event::Busy);
-        server.hub.space_event(&id, tomori_backend::Event::Idle);
+        server.hub.drive_event(&id, tomori_backend::Event::Busy);
+        server.hub.drive_event(&id, tomori_backend::Event::Idle);
         assert!(server.hub.snapshot_deadline().is_some());
         block_on(server.pace(&scheduler, &live));
         block_on(server.pace(&scheduler, &cancelled));
