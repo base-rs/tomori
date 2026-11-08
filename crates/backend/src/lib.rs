@@ -124,6 +124,10 @@ pub struct SessionSummary {
     /// Whether the agent is running a turn in the session, as far as the backend can tell.
     #[serde(default)]
     pub busy: bool,
+    /// When the session was last active, in milliseconds since the Unix epoch, as the backend records it, or `None` when
+    /// it cannot say.
+    #[serde(default)]
+    pub updated: Option<u64>,
 }
 
 /// Input delivered to the agent as one user turn.

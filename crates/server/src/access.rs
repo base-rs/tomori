@@ -171,6 +171,7 @@ mod tests {
             ClientMessage::ListSessions {
                 backend: "fake".into(),
                 directory: "/tmp".into(),
+                bound: false,
             },
             ClientMessage::Gate { gate: Gate::Live },
             ClientMessage::UtteranceBegin {

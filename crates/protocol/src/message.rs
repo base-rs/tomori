@@ -267,6 +267,10 @@ pub enum ClientMessage {
     ListSessions {
         backend: String,
         directory: String,
+        /// Also list the sessions already bound to a space that has not closed, each naming its space, rather than
+        /// leaving them out. Absent from older clients, which are sent only the sessions they can attach.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        bound: bool,
     },
     /// Create a space bound to a new session, or to an existing `session` where the backend supports binding.
     CreateSpace {
@@ -558,7 +562,8 @@ pub enum ServerMessage {
     Role {
         role: ConnectionRole,
     },
-    /// The answer to [`ClientMessage::ListSessions`], most recently active first, without those already bound to a space.
+    /// The answer to [`ClientMessage::ListSessions`], most recently active first, without those already bound to a space
+    /// unless it asked for them.
     Sessions {
         sessions: Vec<SessionSummary>,
     },

@@ -3853,6 +3853,12 @@ fn session_summaries(sessions: &[Value], active: Option<&HashSet<String>>) -> Ve
                         .unwrap_or_default()
                         .to_owned(),
                     busy,
+                    // OpenCode records times in milliseconds since the epoch; one before it, or not a time, is unknown.
+                    updated: updated
+                        .is_finite()
+                        .then_some(updated)
+                        .filter(|updated| *updated >= 0.0)
+                        .map(|updated| updated as u64),
                 },
             ))
         })
@@ -4656,6 +4662,31 @@ mod tests {
         assert_eq!(ids, ["root", "explicit"]);
         assert_eq!(summaries[0].title, "Support");
         assert_eq!(summaries[0].directory, "/tmp");
+    }
+
+    /// Each session says when it was last active, as OpenCode records it, and says nothing when its record has no
+    /// time, or one before the epoch, rather than making one up.
+    #[test]
+    fn sessions_say_when_they_were_last_active_only_when_recorded() {
+        let sessions = [
+            json!({"id":"recorded","time":{"updated":1_762_560_000_000_u64}}),
+            json!({"id":"timeless"}),
+            json!({"id":"before","time":{"updated":-5}}),
+            json!({"id":"text","time":{"updated":"yesterday"}}),
+        ];
+        let updated: Vec<_> = session_summaries(&sessions, None)
+            .into_iter()
+            .map(|session| (session.id, session.updated))
+            .collect();
+        assert_eq!(
+            updated,
+            [
+                ("recorded".to_owned(), Some(1_762_560_000_000)),
+                ("before".to_owned(), None),
+                ("timeless".to_owned(), None),
+                ("text".to_owned(), None),
+            ]
+        );
     }
 
     /// Sessions are listed most recently active first, keeping OpenCode's order among those active at once, and a
@@ -7568,6 +7599,7 @@ mod tests {
                 title: "Beneath".into(),
                 directory: "/tmp/project".into(),
                 busy: true,
+                updated: Some(1),
             }]
         );
         // A listing OpenCode refuses fails, with its reason.

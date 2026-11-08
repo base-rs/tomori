@@ -66,6 +66,15 @@ pub struct SessionSummary {
     /// The agent is running a turn in the session. Absent from older servers, which listed no busy sessions apart.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy: bool,
+    /// How long ago the session was last active, in seconds, when the server listed it. Absent when the backend cannot
+    /// say, and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age: Option<u64>,
+    /// The space the session is already bound to, which has not closed, listed only when the client asked for bound
+    /// sessions with [`crate::ClientMessage::ListSessions`]'s `bound`. Binding it again is refused, so a client offers to
+    /// join that space instead. See `design/arrival.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
 }
 
 /// A backend the server can bind spaces to, as offered to a client so it can show only working actions.
@@ -554,11 +563,17 @@ mod tests {
             serde_json::to_value(&older).unwrap(),
             serde_json::json!({"id": "s", "title": "T", "directory": "/work"})
         );
+        assert_eq!((older.age, older.space.as_deref()), (None, None));
         let busy = SessionSummary {
             busy: true,
+            age: Some(90),
+            space: Some("space-1".into()),
             ..older
         };
-        assert_eq!(serde_json::to_value(&busy).unwrap()["busy"], true);
+        let json = serde_json::to_value(&busy).unwrap();
+        assert_eq!(json["busy"], true);
+        assert_eq!(json["age"], 90);
+        assert_eq!(json["space"], "space-1");
     }
 
     #[test]

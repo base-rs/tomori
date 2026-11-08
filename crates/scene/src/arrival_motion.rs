@@ -5,7 +5,7 @@
 //!
 //! This is free of rendering code and of the clock: every value is a function of the time passed in, in seconds, so the transitions are tested by stepping time. [`Motion::update`] takes the scene arrival should end up showing, [`Motion::scene`] gives the scene to draw and point at now, and [`Motion::scenery`] the environment to draw. A change that arrives mid-transition continues each object from where it is, and one that undoes the transition in progress plays it backwards from there.
 use crate::{
-    arrival::{APPROACH, CENTRE, CREATE, HOME, Key, Kind, Label, Object, Scene, Stage},
+    arrival::{APPROACH, BROWSER, CENTRE, CREATE, HOME, Key, Kind, Label, Object, Scene, Stage},
     environment::Environment,
 };
 use glam::Vec3;
@@ -446,11 +446,25 @@ impl Motion {
     }
 }
 
-/// An object at `pose`: moved, with its size and label scaled by how far it has appeared.
+/// Whether `kind` is one of the session browser's, which grows out of its centre and folds back into it.
+fn browsing(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Session { .. } | Kind::Folder { .. } | Kind::Line { .. }
+    )
+}
+
+/// An object at `pose`: moved, with its size and label scaled by how far it has appeared, and the panel it is a row of
+/// moved with it.
 fn place(entry: &Entry, pose: Pose) -> Object {
     let object = &entry.object;
     let offset = object.label.anchor - object.position;
+    let moved = pose.position - object.position;
     Object {
+        panel: object.panel.map(|mut area| {
+            area.plane.origin += moved;
+            area
+        }),
         position: pose.position,
         size: object.size * pose.presence,
         label: Label {
@@ -517,6 +531,12 @@ fn arriving(
         (Some(Stage::Joining(_)), _) => {
             Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
         }
+        // The session browser grows out of its centre, as a ring does out of the create object.
+        _ if browsing(object.kind)
+            || object.key == Key::Session(None) && object.panel.is_some() =>
+        {
+            Plan::new(Pose::hidden(BROWSER, dim), RING * 0.3, RING)
+        }
         // A creation ring grows out of the create object.
         _ if object.kind == Kind::Choice => Plan::new(
             Pose::hidden(CREATE, dim),
@@ -560,7 +580,12 @@ fn leaving(
         (_, Stage::Joining(_) | Stage::Entered { .. }) => {
             Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
         }
-        // A creation ring folds back into the create object.
+        // The session browser folds back into its centre, and a creation ring into the create object.
+        _ if browsing(entry.object.kind)
+            || entry.object.panel.is_some() && entry.identity == Key::Session(None) =>
+        {
+            Plan::new(Pose::hidden(BROWSER, dim), 0.0, RING)
+        }
         _ if entry.object.kind == Kind::Choice => Plan::new(Pose::hidden(CREATE, dim), 0.0, RING),
         _ => Plan::new(Pose::hidden(position, dim), 0.0, SETTLE),
     }
@@ -1016,6 +1041,97 @@ mod tests {
             now += FRAME;
             motion.update(&lobby(), now);
         }
+    }
+
+    /// The lobby with the session browser open: "New session", a folder's title, a session and its border.
+    fn browser() -> Scene {
+        let chip = |key: Key, kind: Kind, at: glam::Vec2, title: bool| crate::arrival::Chip {
+            item: Item {
+                key,
+                kind,
+                label: "chip".into(),
+                detail: None,
+                selected: false,
+            },
+            rect: crate::panel::Rect {
+                min: at,
+                max: at + glam::Vec2::new(8.0, 1.3),
+            },
+            lines: vec!["chip".into()],
+            title,
+        };
+        Scene::layout(&View {
+            browser: Some(crate::arrival::Browser {
+                chips: vec![
+                    chip(
+                        Key::Session(None),
+                        Kind::Choice,
+                        glam::Vec2::new(-4.0, 1.2),
+                        false,
+                    ),
+                    chip(
+                        Key::Folders(vec!["/work/a".into()]),
+                        Kind::Folder { hue: 0.3 },
+                        glam::Vec2::new(10.0, 15.0),
+                        true,
+                    ),
+                    chip(
+                        Key::Session(Some("s".into())),
+                        Kind::Session {
+                            hue: 0.3,
+                            busy: false,
+                            space: None,
+                        },
+                        glam::Vec2::new(12.0, 2.0),
+                        false,
+                    ),
+                ],
+                lines: vec![vec![glam::Vec2::new(0.0, 4.0), glam::Vec2::new(0.0, 20.0)]],
+                notes: vec![(glam::Vec2::new(-20.0, 10.0), "today".into())],
+            }),
+            ..lobby_view(None)
+        })
+    }
+
+    #[test]
+    fn the_session_browser_grows_out_of_its_centre_and_folds_back_into_it() {
+        let mut motion = Motion::default();
+        let now = settle(&mut motion, &backends(), 0.0);
+        let target = browser();
+        motion.update(&target, now);
+        for key in [
+            Key::Session(Some("s".into())),
+            Key::Session(None),
+            Key::Guide(0),
+        ] {
+            let early = motion.scene(now + RING * 0.35);
+            let object = early.object(&key).unwrap();
+            assert!(object.position.distance(BROWSER) < 0.05, "{key:?}");
+            assert!(object.presence < 0.1);
+        }
+        // A chip's rectangle, which points at it, moves with it.
+        let moving = motion.scene(now + RING * 0.8);
+        let chip = moving.object(&Key::Session(Some("s".into()))).unwrap();
+        let settled = target.object(&Key::Session(Some("s".into()))).unwrap();
+        let moved = chip.panel.unwrap().plane.origin - settled.panel.unwrap().plane.origin;
+        assert!((moved - (chip.position - settled.position)).length() < 1e-5);
+        assert!(moved.length() > 0.01);
+        let now = settle(&mut motion, &target, now);
+        assert_matches(&motion.scene(now), &target);
+        // Stepping back folds it into its centre.
+        motion.update(&backends(), now);
+        let late = motion.scene(now + RING * 0.9);
+        let chip = late.object(&Key::Session(Some("s".into()))).unwrap();
+        assert!(chip.position.distance(BROWSER) < 0.05);
+        assert!(!chip.choosable);
+        let new = late.object(&Key::Session(None)).unwrap();
+        assert!(new.position.distance(BROWSER) < 0.05);
+        assert!(
+            motion
+                .scene(now + RING + FRAME)
+                .object(&Key::Guide(0))
+                .is_none()
+        );
     }
 
     #[test]

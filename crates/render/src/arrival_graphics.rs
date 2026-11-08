@@ -31,6 +31,13 @@ const TEXT: [f32; 3] = [0.92, 0.95, 1.0];
 const MUTED: [f32; 3] = [0.48, 0.72, 0.85];
 const BACKGROUND: [f32; 3] = [0.012, 0.024, 0.045];
 const HOVER_BACKGROUND: [f32; 3] = [0.03, 0.11, 0.15];
+/// How far from the viewer a session pointed at in the browser shows in full, nearer than the browser, and how wide.
+const CARD_DISTANCE: f32 = 1.0;
+const CARD_COLUMNS: usize = 32;
+/// The points that circle a session the agent is busy in.
+const BUSY: [f32; 3] = [0.55, 0.9, 1.0];
+/// The session browser's borders and rings of age.
+const GUIDE: [f32; 3] = [0.22, 0.3, 0.38];
 
 /// What to draw this frame.
 pub struct Frame<'a> {
@@ -247,6 +254,59 @@ fn form(object: &Object, time: f32, viewer: Option<Vec3>, out: &mut Vec<Cube>) {
             let turn = face * Quat::from_rotation_z(FRAC_PI_4);
             out.push(cube(p, Vec3::splat(s * 1.2), [0.7, 0.85, 1.0], turn));
         }
+        Kind::Session { hue, busy, space } => {
+            // A diamond in its folder's colour, turning quickly while the agent is busy in it, as a running space does.
+            let spin = if busy { time * 2.4 } else { 0.0 };
+            let turn = face * Quat::from_rotation_z(FRAC_PI_4 + spin);
+            out.push(cube(p, Vec3::splat(s * 1.2), hsv(hue, 0.6, 0.95), turn));
+            if busy {
+                for n in 0..3 {
+                    let angle = n as f32 * TAU / 3.0 + time * 3.0;
+                    let offset = face * Vec3::new(angle.cos(), angle.sin(), 0.0) * s * 1.9;
+                    out.push(cube(p + offset, Vec3::splat(s * 0.28), BUSY, face));
+                }
+            }
+            // Already in a space: a ring of points in that space's colour, as the spaces' orbit is drawn.
+            if let Some(space) = space {
+                for n in 0..6 {
+                    let angle = n as f32 * TAU / 6.0;
+                    let offset = face * Vec3::new(angle.cos(), angle.sin(), 0.0) * s * 2.3;
+                    out.push(cube(
+                        p + offset,
+                        Vec3::splat(s * 0.3),
+                        hsv(space, 0.6, 0.95),
+                        face,
+                    ));
+                }
+            }
+        }
+        Kind::Folder { hue } => {
+            let color = hsv(hue, 0.55, 0.9);
+            match object.label.align {
+                // A sector's title is underlined in its folder's colour, as wide as its text.
+                Align::Centre => {
+                    let width = label_width(&object.label);
+                    let right = face * Vec3::X;
+                    out.extend(bar(
+                        p - right * width / 2.0,
+                        p + right * width / 2.0,
+                        s * 0.5,
+                        color,
+                    ));
+                }
+                // Its chip of sessions that do not fit is three dots, leading further out.
+                _ => {
+                    for n in 0..3 {
+                        let offset = face * Vec3::new((n as f32 - 1.0) * s * 1.1, 0.0, 0.0);
+                        out.push(cube(p + offset, Vec3::splat(s * 0.35), color, face));
+                    }
+                }
+            }
+        }
+        // A sector's border or a ring of age, faint behind the labels.
+        Kind::Line { offset } => {
+            out.extend(bar(p, p + offset, 0.0028, GUIDE));
+        }
         Kind::Menu(kind) => {
             let pulse = 0.6 + 0.4 * (time * 6.0).sin().abs();
             match kind {
@@ -449,7 +509,7 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
             }
         };
     let (background, opacity) = if styled.hovered {
-        (HOVER_BACKGROUND, 0.9)
+        (HOVER_BACKGROUND, 0.97)
     } else {
         (BACKGROUND, 0.72)
     };
@@ -487,6 +547,17 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
             );
         }
     }
+}
+
+/// How wide `label` is drawn, in metres.
+fn label_width(label: &Label) -> f32 {
+    let columns = label
+        .lines
+        .iter()
+        .map(|line| crate::ui_text::width(line))
+        .max()
+        .unwrap_or(0);
+    columns as f32 * 9.0 * label.pixel
 }
 
 /// The heading, with the full text of the object pointed at beneath it. A description of several lines, such as a
@@ -531,6 +602,31 @@ pub fn label_mesh(scene: &Scene, hovered: Option<&Key>) -> Vec<Vertex> {
     let mut mesh = Vec::new();
     for styled in &labels {
         label_into(styled, &mut mesh);
+    }
+    // A session pointed at in the browser shows its title and detail in full over its neighbours, where it is looked
+    // at: drawn nearer, at the same size as seen, so that the browser, which curves away from it, stays behind it.
+    if let Some(object) = hovered.and_then(|key| scene.object(key))
+        && matches!(object.kind, Kind::Session { .. })
+        && object.choosable
+    {
+        let distance = object.label.anchor.distance(viewer).max(f32::EPSILON);
+        let nearer = (CARD_DISTANCE / distance).min(1.0);
+        let full = Label {
+            anchor: viewer + (object.label.anchor - viewer) * nearer,
+            lines: crate::ui_text::lines(&object.description, CARD_COLUMNS, 4),
+            pixel: object.label.pixel * nearer,
+            ..object.label.clone()
+        };
+        label_into(
+            &Styled {
+                label: &full,
+                viewer: scene.viewer,
+                plane: None,
+                hovered: true,
+                alpha: full.alpha,
+            },
+            &mut mesh,
+        );
     }
     mesh
 }
@@ -980,6 +1076,84 @@ mod tests {
                 .all(|value| value.is_finite())
         }));
         cubes
+    }
+
+    #[test]
+    fn the_session_browser_marks_busy_and_bound_sessions_and_draws_its_titles_and_lines() {
+        let session = |busy, space| Kind::Session {
+            hue: 0.3,
+            busy,
+            space,
+        };
+        assert_eq!(drawn(session(false, None), 0.0).len(), 1);
+        // Busy: three points circling it; already in a space: a ring of six in that space's colour.
+        assert_eq!(drawn(session(true, None), 0.0).len(), 4);
+        let bound = drawn(session(false, Some(0.7)), 0.0);
+        assert_eq!(bound.len(), 7);
+        assert_eq!(bound[1].color, hsv(0.7, 0.6, 0.95));
+        // A busy session's marker turns.
+        assert_ne!(
+            drawn(session(true, None), 0.0)[0].orientation,
+            drawn(session(true, None), 0.5)[0].orientation
+        );
+        // A title is underlined as wide as its text; a chip of older sessions is three dots.
+        let mut title = object(Kind::Folder { hue: 0.3 });
+        title.label.align = Align::Centre;
+        let mut cubes = Vec::new();
+        form(&title, 0.0, Some(HOME), &mut cubes);
+        assert_eq!(cubes.len(), 1);
+        assert!((cubes[0].scale[2] - label_width(&title.label)).abs() < 1e-5);
+        assert_eq!(drawn(Kind::Folder { hue: 0.3 }, 0.0).len(), 3);
+        // A line from its place to its offset, and a note's place, which has none, draws nothing.
+        let line = drawn(
+            Kind::Line {
+                offset: Vec3::new(0.1, 0.0, 0.0),
+            },
+            0.0,
+        );
+        assert_eq!(line.len(), 1);
+        assert!((line[0].scale[2] - 0.1).abs() < 1e-5);
+        assert!(drawn(Kind::Line { offset: Vec3::ZERO }, 0.0).is_empty());
+    }
+
+    #[test]
+    fn a_session_pointed_at_shows_its_title_and_detail_in_full_nearer_than_the_browser() {
+        let mut chip = object(Kind::Session {
+            hue: 0.3,
+            busy: false,
+            space: None,
+        });
+        chip.key = Key::Session(Some("s".into()));
+        chip.label.lines = vec!["Investigate".into(), "memory growth…".into()];
+        chip.description = "Investigate memory growth under load\nacme/api · busy · 3 h ago".into();
+        let scene = Scene {
+            objects: vec![chip.clone()],
+            heading: None,
+            stage: Default::default(),
+            viewer: Some(HOME),
+        };
+        let plain = label_mesh(&scene, None);
+        let pointed = label_mesh(&scene, Some(&chip.key));
+        // Its own label, then the card: a background and every character of the title and the detail.
+        let glyphs = |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).count();
+        let card = 6
+            * (1 + glyphs("Investigate memory growth under load")
+                + glyphs("acme/api · busy · 3 h ago"));
+        assert_eq!(pointed.len() - plain.len(), card);
+        // Nearer the viewer than the label it expands, by as much as it is drawn smaller.
+        let nearest = pointed[plain.len()..]
+            .iter()
+            .map(|vertex| Vec3::from_array(vertex.position).distance(HOME))
+            .fold(f32::INFINITY, f32::min);
+        assert!(nearest < CARD_DISTANCE + 0.05);
+        // A session on its way out, which cannot be chosen, shows no card.
+        let mut leaving = chip.clone();
+        leaving.choosable = false;
+        let scene = Scene {
+            objects: vec![leaving],
+            ..scene
+        };
+        assert_eq!(label_mesh(&scene, Some(&chip.key)).len(), plain.len());
     }
 
     #[test]

@@ -6,9 +6,11 @@
 //! This is free of rendering code. [`crate::conversation::Conversation::arrival`] describes what to show as a [`View`], [`Scene::layout`] places it in scene coordinates, and its [`Scene::targets`] are what the [`crate::pointing::Pointer`] points at. How each object looks is decided only by the renderer, from its [`Kind`], so the placeholder shapes can be replaced without touching this.
 use crate::{
     environment::Environment,
+    panel::{Area, Plane, Rect},
     pointing::{Shape, Target},
+    radial::{GAP, PIXEL},
 };
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, TAU};
 use tomori_client::server_choice::Source;
 use tomori_protocol::{Activity, Attention, SpaceSummary};
@@ -53,6 +55,15 @@ pub const LABEL_ANGLE: f32 = 0.47;
 const LABEL_PIXEL: f32 = 0.0026;
 /// How far above its server a jump object stands: clear of the server and of a row above it.
 const JUMP_ABOVE: f32 = 0.18;
+/// How far the session browser stands from [`HOME`], and how far below eye level its centre is, in degrees, where the
+/// swarm is seen through its middle.
+pub const BROWSER_DISTANCE: f32 = 1.4;
+pub const BROWSER_PITCH: f32 = -5.0;
+/// The centre of the session browser, where the create object stands while it is open.
+pub const BROWSER: Vec3 = Vec3::new(0.0, 1.477_982, -1.394_673);
+/// The create object's half-size at the browser's centre, smaller than on the orbit, so that the nearest sessions stand
+/// close around it.
+const BROWSER_BACK: f32 = 0.022;
 
 /// What an arrival object stands for, and so what choosing it does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -73,12 +84,18 @@ pub enum Key {
     Directory(String),
     /// A choice on the session ring: an existing session to attach, or `None` for a new one.
     Session(Option<String>),
-    /// The choice on the session ring that shows the next existing sessions, when they do not fit on it at once.
-    MoreSessions,
     /// A choice on the environment ring, by identifier.
     Environment(String),
     /// The object that pairs this device as an owner, on the connected server's orbit. See `design/security.md`.
     Pair,
+    /// A sector's title in the session browser, by the folders it holds, one unless it is "Other": choosing it shows
+    /// only those, or, shown alone, every folder again.
+    Folders(Vec<String>),
+    /// The chip at a sector's outer edge saying how many of its sessions do not fit, by the folders it holds: choosing
+    /// it shows only those, or, shown alone, their next sessions.
+    Older(Vec<String>),
+    /// A line drawn in the session browser, such as a sector's border, which cannot be chosen.
+    Guide(usize),
     /// An item of the hand menu. See `design/hand-menu.md`.
     Menu(crate::hand_menu::MenuKey),
 }
@@ -111,6 +128,18 @@ pub enum Kind {
     Choice,
     /// The pairing object, `pending` while its code waits to be confirmed.
     Pair { pending: bool },
+    /// An existing session in the session browser: the hue of its folder, whether the agent is busy in it, and the hue
+    /// of the space it is already bound to, if any.
+    Session {
+        hue: f32,
+        busy: bool,
+        space: Option<f32>,
+    },
+    /// A sector's title in the session browser, or its chip of sessions that do not fit, in its folder's hue.
+    Folder { hue: f32 },
+    /// A line in the session browser from its object's place to `offset` from it, such as a sector's border or a ring
+    /// of age.
+    Line { offset: Vec3 },
     /// An item of the hand menu, or the cue on the wrist.
     Menu(crate::hand_menu::MenuKind),
 }
@@ -169,6 +198,30 @@ pub struct View {
     pub ring: Option<Ring>,
     /// The space being joined, which comes towards the participant while everything else recedes.
     pub joining: Option<Key>,
+    /// The session browser, in place of the session ring and the spaces while it is open.
+    pub browser: Option<Browser>,
+}
+
+/// The session browser, laid out by [`crate::session_browser`] in degrees across and up from its centre as seen from
+/// [`HOME`], which [`Scene::layout`] places in the world around [`BROWSER`]. See `design/arrival.md`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Browser {
+    /// Sessions, "New session", sectors' titles and chips of sessions that do not fit, each in its rectangle.
+    pub chips: Vec<Chip>,
+    /// Sectors' borders and rings of age, each a line through these points.
+    pub lines: Vec<Vec<Vec2>>,
+    /// Words that name the rings of age, such as "today", each at the left of its line.
+    pub notes: Vec<(Vec2, String)>,
+}
+
+/// One of the session browser's objects: its item, the rectangle it stands in, in degrees, and its label's rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chip {
+    pub item: Item,
+    pub rect: Rect,
+    pub lines: Vec<String>,
+    /// Whether it is a title, centred in its rectangle without a marker, rather than a marker followed by its label.
+    pub title: bool,
 }
 
 /// How a label's lines line up with its anchor.
@@ -254,7 +307,23 @@ impl Scene {
             _ if view.connected.is_some() => Stage::Lobby,
             _ => Stage::Servers,
         };
-        let heading = if let Some(item) = &view.connected {
+        let heading = if let Some(browser) = &view.browser {
+            // Only the create object stays, at the browser's centre, to step back; the spaces give way to the browser.
+            if let Some(item) = view.items.iter().find(|item| item.key == Key::Create) {
+                let mut object = row_object(item, BROWSER, false);
+                object.size = BROWSER_BACK;
+                object.label.anchor = BROWSER - Vec3::Y * (BROWSER_BACK * 1.6 + 0.012);
+                object.label.pixel = degrees_to_metres(PIXEL);
+                objects.push(object);
+            }
+            objects.extend(browser_objects(browser));
+            let top = browser
+                .chips
+                .iter()
+                .map(|chip| chip.rect.max.y)
+                .fold(0.0, f32::max);
+            browser_point(Vec2::new(0.0, top + 6.0))
+        } else if let Some(item) = &view.connected {
             objects.push(row_object(item, CENTRE, false));
             let ring_open = view.ring.is_some();
             // The create object first, so that it keeps its place at the bottom however many spaces there are, then the spaces in their order, clockwise.
@@ -306,7 +375,9 @@ impl Scene {
             }
             HEADING + Vec3::Y * (rows - 1) as f32 * ROW_RISE
         };
-        fit_labels(&mut objects);
+        if view.browser.is_none() {
+            fit_labels(&mut objects);
+        }
         if let Some(ring) = &view.ring
             && view.items.iter().any(|item| item.key == Key::Create)
         {
@@ -371,6 +442,125 @@ impl Scene {
     pub fn object(&self, key: &Key) -> Option<&Object> {
         self.objects.iter().find(|object| &object.key == key)
     }
+}
+
+/// `degrees` as seen from [`HOME`], in metres at the session browser's distance.
+pub fn degrees_to_metres(degrees: f32) -> f32 {
+    degrees.to_radians() * BROWSER_DISTANCE
+}
+
+/// Where a point of the session browser `at` degrees across and up from its centre stands in the world: on a sphere
+/// around [`HOME`], each degree across a degree as seen at every height, so that the layout's sizes and room hold.
+pub fn browser_point(at: Vec2) -> Vec3 {
+    let pitch = (BROWSER_PITCH + at.y).to_radians();
+    let yaw = at.x.to_radians() / pitch.cos();
+    HOME + Vec3::new(
+        yaw.sin() * pitch.cos(),
+        pitch.sin(),
+        -yaw.cos() * pitch.cos(),
+    ) * BROWSER_DISTANCE
+}
+
+/// The session browser's objects in the world: each chip in a plane facing [`HOME`], drawn within and pointed at by its
+/// rectangle, grown to meet its neighbours' halfway, and its lines and notes. See [`Browser`].
+fn browser_objects(browser: &Browser) -> Vec<Object> {
+    let pixel = degrees_to_metres(PIXEL);
+    let mut objects = Vec::new();
+    for chip in &browser.chips {
+        let centre = browser_point(chip.rect.centre());
+        let plane = Plane::facing(centre, facing_from(centre, None, true));
+        let half = (chip.rect.max - chip.rect.min) * degrees_to_metres(1.0) / 2.0;
+        let reach = half + Vec2::splat(degrees_to_metres(GAP / 2.0));
+        let (position, anchor, align, size) = if chip.title {
+            (
+                plane.at(Vec2::new(0.0, -half.y)),
+                plane.at(Vec2::new(0.0, half.y - 3.0 * pixel)),
+                Align::Centre,
+                pixel * 2.0,
+            )
+        } else {
+            (
+                plane.at(Vec2::new(-half.x + 8.0 * pixel, half.y - 7.5 * pixel)),
+                plane.at(Vec2::new(-half.x + 16.0 * pixel, half.y - 3.0 * pixel)),
+                Align::Left,
+                pixel * 3.5,
+            )
+        };
+        objects.push(Object {
+            key: chip.item.key.clone(),
+            kind: chip.item.kind,
+            position,
+            size,
+            label: Label {
+                anchor,
+                lines: chip.lines.clone(),
+                align,
+                pixel,
+                alpha: 1.0,
+                tilt: true,
+            },
+            // Its title and detail apart, each in full where it is shown while pointed at.
+            description: match &chip.item.detail {
+                Some(detail) => format!("{}\n{detail}", chip.item.label),
+                None => chip.item.label.clone(),
+            },
+            selected: chip.item.selected,
+            dim: 0.0,
+            presence: 1.0,
+            choosable: true,
+            panel: Some(Area {
+                plane,
+                rect: Rect {
+                    min: -reach,
+                    max: reach,
+                },
+            }),
+        });
+    }
+    let mut guide = 0;
+    let mut push = |objects: &mut Vec<Object>, position: Vec3, kind: Kind, lines: Vec<String>| {
+        objects.push(Object {
+            key: Key::Guide(guide),
+            kind,
+            position,
+            size: pixel,
+            label: Label {
+                anchor: position,
+                lines,
+                align: Align::Left,
+                pixel,
+                alpha: 0.8,
+                tilt: true,
+            },
+            description: String::new(),
+            selected: false,
+            dim: 0.0,
+            presence: 1.0,
+            choosable: false,
+            panel: None,
+        });
+        guide += 1;
+    };
+    for line in &browser.lines {
+        for pair in line.windows(2) {
+            let (from, to) = (browser_point(pair[0]), browser_point(pair[1]));
+            push(
+                &mut objects,
+                from,
+                Kind::Line { offset: to - from },
+                Vec::new(),
+            );
+        }
+    }
+    for (at, note) in &browser.notes {
+        push(
+            &mut objects,
+            browser_point(*at),
+            Kind::Line { offset: Vec3::ZERO },
+            vec![note.clone()],
+        );
+    }
+    objects
 }
 
 /// A point `distance` from [`HOME`] at `height`, `angle` radians to the right of straight ahead.
@@ -456,6 +646,7 @@ fn size(kind: Kind) -> f32 {
         Kind::Choice => 0.05,
         Kind::Pair { .. } => 0.06,
         Kind::Menu(_) => 0.009,
+        Kind::Session { .. } | Kind::Folder { .. } | Kind::Line { .. } => 0.01,
     }
 }
 
@@ -683,6 +874,7 @@ mod tests {
     fn every_kind_of_object_has_a_size_and_every_need_a_label() {
         assert_eq!(size(Kind::Pair { pending: false }), 0.06);
         assert_eq!(size(Kind::Menu(crate::hand_menu::MenuKind::Button)), 0.009);
+        assert_eq!(size(Kind::Line { offset: Vec3::ZERO }), 0.01);
         assert_eq!(attention_label(Attention::Unknown), "needs attention");
     }
     use crate::pointing::{Pointer, Ray};
@@ -728,6 +920,7 @@ mod tests {
             items,
             ring,
             joining: None,
+            browser: None,
         }
     }
 
@@ -1275,5 +1468,125 @@ mod tests {
             "Jump",
         ));
         assert_eq!(Scene::layout(&orphan).objects.len(), 1);
+    }
+
+    /// The lobby with the session browser open on `count` sessions across `folders` folders, an hour apart.
+    fn browsing(count: usize, folders: usize) -> View {
+        let sessions: Vec<tomori_protocol::SessionSummary> = (0..count)
+            .map(|n| tomori_protocol::SessionSummary {
+                id: format!("ses_{n}"),
+                title: format!("A session about thing number {n}"),
+                directory: format!("/work/p{}", n % folders),
+                busy: n == 1,
+                age: Some(n as u64 * 3_600),
+                space: (n == 2).then(|| "space-1".into()),
+            })
+            .collect();
+        let shown = crate::session_browser::SessionBrowser::default().show(
+            "/work",
+            "work",
+            &sessions,
+            &[],
+            0,
+            &crate::radial::Options::default(),
+        );
+        View {
+            browser: Some(shown.browser),
+            ..lobby(3, None)
+        }
+    }
+
+    #[test]
+    fn the_browser_stands_on_a_sphere_around_home_a_degree_a_degree() {
+        assert!(browser_point(Vec2::ZERO).distance(BROWSER) < 1e-5);
+        for at in [
+            Vec2::new(30.0, 0.0),
+            Vec2::new(-20.0, -25.0),
+            Vec2::new(10.0, 20.0),
+        ] {
+            let point = browser_point(at);
+            assert!((point.distance(HOME) - BROWSER_DISTANCE).abs() < 1e-5);
+            let towards = (point - HOME).normalize();
+            let pitch = towards.y.asin().to_degrees();
+            assert!((pitch - BROWSER_PITCH - at.y).abs() < 1e-3, "{at}");
+            // A degree across is a degree as seen, at any height.
+            let across = (browser_point(at + Vec2::X) - HOME)
+                .normalize()
+                .angle_between(towards)
+                .to_degrees();
+            assert!((across - 1.0).abs() < 0.01, "{at}: {across}");
+        }
+        assert!((degrees_to_metres(1.0) - BROWSER_DISTANCE * 1f32.to_radians()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_browser_replaces_the_orbit_around_the_create_object() {
+        let scene = Scene::layout(&browsing(40, 3));
+        // The spaces and the connected server give way; the create object steps back from the browser's centre.
+        assert!(
+            scene
+                .objects
+                .iter()
+                .all(|object| !matches!(object.key, Key::Space(_) | Key::Connected(_)))
+        );
+        let back = scene.object(&Key::Create).unwrap();
+        assert_eq!(back.position, BROWSER);
+        assert_eq!(back.size, BROWSER_BACK);
+        // The heading stands above every chip.
+        let top = scene
+            .objects
+            .iter()
+            .filter_map(|object| object.panel)
+            .map(|area| area.plane.at(area.rect.max).y)
+            .fold(0.0, f32::max);
+        assert!(scene.heading.as_ref().unwrap().anchor.y > top);
+        // Lines and notes are drawn but cannot be pointed at.
+        let guides: Vec<_> = scene
+            .objects
+            .iter()
+            .filter(|object| matches!(object.key, Key::Guide(_)))
+            .collect();
+        assert!(guides.iter().any(|guide| guide.label.lines.is_empty()));
+        assert!(guides.iter().any(|guide| !guide.label.lines.is_empty()));
+        assert!(guides.iter().all(|guide| !guide.choosable));
+        let targets = scene.targets();
+        // Without the create object, as for one who cannot create, there is nothing at the centre to step back with.
+        let mut view = browsing(10, 2);
+        view.items.retain(|item| item.key != Key::Create);
+        assert!(Scene::layout(&view).object(&Key::Create).is_none());
+        assert!(
+            targets
+                .iter()
+                .all(|target| !matches!(target.key, Key::Guide(_)))
+        );
+    }
+
+    #[test]
+    fn every_chip_faces_home_and_is_pointed_at_by_its_middle_from_the_eye_or_the_hand() {
+        for (count, folders) in [(10, 2), (30, 3), (80, 6), (200, 15)] {
+            let scene = Scene::layout(&browsing(count, folders));
+            let chips: Vec<&Object> = scene
+                .objects
+                .iter()
+                .filter(|object| object.panel.is_some())
+                .collect();
+            assert!(chips.len() > 2);
+            let hand = HOME + Vec3::new(0.18, -0.35, -0.25);
+            for chip in &chips {
+                let area = chip.panel.unwrap();
+                let towards = (HOME - area.centre()).normalize();
+                assert!(area.plane.normal().dot(towards) > 0.999, "{:?}", chip.key);
+                assert!(area.plane.right.y.abs() < 1e-5, "level");
+                // Its marker and label stand within it.
+                assert!(area.rect.contains(area.local(chip.position)));
+                assert!(area.rect.contains(area.local(chip.label.anchor)));
+                for origin in [HOME, hand] {
+                    let ray = Ray::new(origin, area.centre() - origin).unwrap();
+                    let mut pointer = Pointer::default();
+                    let hit = pointer.update(Some(ray), Some(0.0), &scene.targets()).hit;
+                    assert_eq!(hit.map(|hit| hit.key), Some(chip.key.clone()), "{count}");
+                }
+            }
+        }
     }
 }
