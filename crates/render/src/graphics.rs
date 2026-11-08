@@ -1965,6 +1965,7 @@ mod tests {
                     connected,
                     items: spaces.into_iter().chain([create(true)]).collect(),
                     ring: Some(Ring {
+                        index: Vec::new(),
                         step: Step::Backend,
                         items: ["opencode", "codex", "echo"].map(backend).into(),
                     }),

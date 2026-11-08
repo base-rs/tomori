@@ -23,6 +23,8 @@ pub const APPROACH_TIME: f32 = 0.6;
 pub const REVEAL: f32 = 1.0;
 /// Anything else, such as a space appearing in the list or moving round the orbit as others come and go.
 pub const SETTLE: f32 = 0.5;
+/// A row of the session browser moving, appearing or going as its column scrolls, quickly enough to follow the stick.
+pub const SCROLL: f32 = 0.25;
 
 /// The environment's sphere grows from about an object's size until it is beyond Sky's farthest scenery and clouds, when it is drawn whole.
 const REVEAL_START: f32 = 0.08;
@@ -302,6 +304,24 @@ impl Motion {
                     .iter()
                     .any(|object| identity(&object.key) == entry.identity)
         });
+        // The session browser's rows grow out of the create object as it opens, wherever that stands, and fold back into
+        // it as it closes; while it is open they move, appear and go where they are, as its columns scroll.
+        let create = target
+            .objects
+            .iter()
+            .find(|object| object.key == Key::Create)
+            .map_or(CREATE, |object| object.position);
+        // What folds goes where the create object stood while it was open.
+        let created = self
+            .entries
+            .iter()
+            .find(|entry| entry.identity == Key::Create)
+            .map_or(CREATE, |entry| entry.track.target().position);
+        let browsing = self
+            .entries
+            .iter()
+            .any(|entry| !entry.leaving && row(&entry.object));
+        let still_browsing = target.objects.iter().any(row);
         let mut previous = std::mem::take(&mut self.entries);
         let mut entries = Vec::with_capacity(target.objects.len() + previous.len());
         for object in &target.objects {
@@ -319,7 +339,11 @@ impl Motion {
                 entered.as_ref(),
                 self.centre,
                 wait,
-                ring_replaced,
+                Rings {
+                    replaced: ring_replaced,
+                    create,
+                    browsing,
+                },
             );
             let mut track = match &existing {
                 Some(entry) => entry.track,
@@ -337,7 +361,18 @@ impl Motion {
         for mut entry in previous {
             if !entry.leaving {
                 let current = entry.track.value(now);
-                let plan = leaving(before.as_ref(), after, &entry, current, reveal_start);
+                let plan = leaving(
+                    before.as_ref(),
+                    after,
+                    &entry,
+                    current,
+                    reveal_start,
+                    Rings {
+                        replaced: ring_replaced,
+                        create: created,
+                        browsing: still_browsing,
+                    },
+                );
                 entry
                     .track
                     .retarget(now, plan.pose, None, plan.delay, plan.duration);
@@ -466,6 +501,22 @@ fn place(entry: &Entry, pose: Pose) -> Object {
     }
 }
 
+/// Whether `object` is a row of the session browser, which is a panel of rows other than the hand menu.
+fn row(object: &Object) -> bool {
+    object.panel.is_some() && !matches!(object.kind, Kind::Menu(_))
+}
+
+/// What the creation rings are doing, for how their choices move.
+#[derive(Clone, Copy, Debug)]
+struct Rings {
+    /// A ring is replacing another.
+    replaced: bool,
+    /// Where the create object stands, which rings and the session browser grow out of and fold into.
+    create: Vec3,
+    /// The session browser was open, for an object arriving, or stays open, for one leaving.
+    browsing: bool,
+}
+
 /// How `object` comes into its place on going from `before` to `after`: where it starts if it wasn't shown, and when it moves.
 #[allow(clippy::too_many_arguments)]
 fn arriving(
@@ -476,7 +527,7 @@ fn arriving(
     entered: Option<&Key>,
     centre: Vec3,
     wait: f32,
-    ring_replaced: bool,
+    rings: Rings,
 ) -> Plan {
     let position = object.position;
     let dim = object.dim;
@@ -517,10 +568,12 @@ fn arriving(
         (Some(Stage::Joining(_)), _) => {
             Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
         }
-        // A creation ring grows out of the create object.
-        _ if object.kind == Kind::Choice => Plan::new(
-            Pose::hidden(CREATE, dim),
-            if ring_replaced { RING * 0.3 } else { 0.0 },
+        // The rows of a session browser already open appear, or move, where they are, as its columns scroll.
+        _ if rings.browsing && row(object) => Plan::new(Pose::hidden(position, dim), 0.0, SCROLL),
+        // A creation ring, or the session browser, grows out of the create object.
+        _ if object.kind == Kind::Choice || row(object) => Plan::new(
+            Pose::hidden(rings.create, dim),
+            if rings.replaced { RING * 0.3 } else { 0.0 },
             RING,
         ),
         // Anything else appears in place, or moves, as lists change.
@@ -535,6 +588,7 @@ fn leaving(
     entry: &Entry,
     current: Pose,
     reveal_start: f32,
+    rings: Rings,
 ) -> Plan {
     let position = current.position;
     let dim = current.dim;
@@ -560,8 +614,14 @@ fn leaving(
         (_, Stage::Joining(_) | Stage::Entered { .. }) => {
             Plan::new(Pose::hidden(recede(position), dim), 0.0, APPROACH_TIME)
         }
-        // A creation ring folds back into the create object.
-        _ if entry.object.kind == Kind::Choice => Plan::new(Pose::hidden(CREATE, dim), 0.0, RING),
+        // A row scrolled out of the session browser goes where it is.
+        _ if rings.browsing && row(&entry.object) => {
+            Plan::new(Pose::hidden(position, dim), 0.0, SCROLL)
+        }
+        // A creation ring, or the session browser, folds back into the create object.
+        _ if entry.object.kind == Kind::Choice || row(&entry.object) => {
+            Plan::new(Pose::hidden(rings.create, dim), 0.0, RING)
+        }
         _ => Plan::new(Pose::hidden(position, dim), 0.0, SETTLE),
     }
 }
@@ -709,6 +769,7 @@ mod tests {
 
     fn ring(step: Step, keys: &[Key]) -> Ring {
         Ring {
+            index: Vec::new(),
             step,
             items: keys
                 .iter()
@@ -722,6 +783,85 @@ mod tests {
             Step::Backend,
             &[Key::Backend("opencode".into()), Key::Backend("echo".into())],
         ))))
+    }
+
+    /// The session browser, its list showing "New session" and sessions from `first`, beside an index of two folders.
+    fn browser(first: usize) -> Scene {
+        let items = std::iter::once(item(Key::Session(None), Kind::Choice))
+            .chain((first..first + 6).map(|n| {
+                item(
+                    Key::Session(Some(format!("s{n}"))),
+                    Kind::Session {
+                        hue: 0.3,
+                        busy: false,
+                        bound: false,
+                    },
+                )
+            }))
+            .collect();
+        let index = [None, Some("/work/a".to_owned())]
+            .into_iter()
+            .map(|folder| {
+                item(
+                    Key::Folder(folder),
+                    Kind::Folder {
+                        hue: None,
+                        busy: false,
+                        chosen: false,
+                    },
+                )
+            })
+            .collect();
+        Scene::layout(&lobby_view(Some(Ring {
+            step: Step::Session,
+            items,
+            index,
+        })))
+    }
+
+    /// The session browser grows out of the create object beside it, from the ring before it; as its list scrolls, its
+    /// rows move up, the one scrolled out goes where it is and the one scrolled in appears where it is, quickly and
+    /// without a jump; and it folds back into the create object as it closes.
+    #[test]
+    fn the_session_browser_grows_out_of_the_create_object_and_scrolls_in_place() {
+        let mut motion = Motion::default();
+        let now = settle(&mut motion, &backends(), 0.0);
+        let opened = browser(0);
+        let create = opened.object(&Key::Create).unwrap().position;
+        motion.update(&opened, now);
+        let key = Key::Session(Some("s2".into()));
+        let early = motion.scene(now + RING * 0.35);
+        let row = early.object(&key).unwrap();
+        assert!(row.position.distance(create) < 0.05, "{}", row.position);
+        assert!(row.presence < 0.1);
+        let now = run(&mut motion, &opened, now, now + RING * 1.3);
+        assert_matches(&motion.scene(now), &opened);
+
+        let scrolled = browser(1);
+        motion.update(&scrolled, now);
+        let soon = motion.scene(now + FRAME);
+        let entering = soon.object(&Key::Session(Some("s6".into()))).unwrap();
+        let target = scrolled.object(&Key::Session(Some("s6".into()))).unwrap();
+        assert!(entering.position.distance(target.position) < 1e-4);
+        assert!(entering.presence < 0.2);
+        let leaving = soon.object(&Key::Session(Some("s0".into()))).unwrap();
+        assert!(
+            leaving.position.distance(
+                opened
+                    .object(&Key::Session(Some("s0".into())))
+                    .unwrap()
+                    .position
+            ) < 1e-4
+        );
+        assert!(!leaving.choosable);
+        let now = run(&mut motion, &scrolled, now, now + SCROLL);
+        assert_matches(&motion.scene(now + FRAME), &scrolled);
+
+        motion.update(&lobby(), now);
+        let late = motion.scene(now + RING * 0.95);
+        let row = late.object(&key).unwrap();
+        assert!(row.position.distance(create) < 0.05);
+        assert!(motion.scene(now + RING + FRAME).object(&key).is_none());
     }
 
     fn joining(id: &str) -> Scene {

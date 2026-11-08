@@ -253,6 +253,8 @@ pub struct Step {
     workers: delegation::Workers,
     coordinator_samples: Vec<[f32; 3]>,
     presentation_navigation: CardNavigation,
+    /// The right stick scrolling the session browser. See `design/arrival.md`.
+    browser_scroll: crate::session_browser::Scroll,
     /// In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
     panel: PanelAnchor,
     /// The GitHub environment's cards: the one carried and the one put down; see `design/github.md`.
@@ -306,6 +308,7 @@ impl Default for Step {
             workers: delegation::Workers::default(),
             coordinator_samples: Vec::with_capacity(crate::swarm::AGENT_COUNT),
             presentation_navigation: CardNavigation::default(),
+            browser_scroll: Default::default(),
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
             projector: crate::projection::Projector::default(),
@@ -529,12 +532,33 @@ impl Step {
         } else if buttons.replay {
             conversation.replay();
         }
+        // In the session browser, the right stick scrolls the column pointed at: the index of folders when it points at
+        // one, and otherwise the list. See `design/arrival.md`.
+        let browsing = focused && conversation.browsing();
+        let folders = matches!(
+            self.highlighted,
+            Some(arrival::Key::Folder(_) | arrival::Key::Page { folders: true, .. })
+        );
+        let scrolled = self
+            .browser_scroll
+            .update(if browsing { right.y } else { 0.0 }, now);
+        match scrolled {
+            crate::session_browser::Scrolled::Still => {}
+            crate::session_browser::Scrolled::Rows(rows) => {
+                conversation.scroll_sessions(rows, folders)
+            }
+            crate::session_browser::Scrolled::Page { later } => {
+                feedback.emit(feedback::Event::Hover, now);
+                conversation.page_sessions(folders, later);
+            }
+        }
         // Otherwise the right stick pages result cards.
+        let cards = !wrist_active && !browsing;
         self.presentation_navigation.update(
             None,
             &delegation::Workspace::default(),
-            if wrist_active { 0.0 } else { right.x },
-            if wrist_active { 0.0 } else { right.y },
+            if cards { right.x } else { 0.0 },
+            if cards { right.y } else { 0.0 },
         );
     }
 
@@ -1054,6 +1078,52 @@ pub mod fixtures {
             }],
             utterance_limit: None,
             name: None,
+        }));
+        conversation.take_actions();
+        conversation
+    }
+
+    /// At the session browser of an attaching backend in `/work`, listing `count` sessions taking turns in `folders`
+    /// folders beneath it.
+    pub fn browsing(count: usize, folders: usize) -> Conversation {
+        let mut conversation = crate::test_support::conversation("Ada");
+        conversation.connect(Choice::new("Studio", "10.0.0.1:8765", Source::Discovered));
+        conversation.apply(Event::State(ConnectionState::Connected {
+            source: 1,
+            server: "studio".into(),
+            role: ConnectionRole::Owner,
+            certificate: None,
+            backends: vec![tomori_protocol::BackendInfo {
+                name: "opencode".into(),
+                attach: true,
+            }],
+            roots: vec![tomori_protocol::WorkspaceRoot {
+                path: "/work".into(),
+                label: "work".into(),
+            }],
+            environments: vec![EnvironmentInfo {
+                id: "sky".into(),
+                label: "Sky".into(),
+                version: 1,
+            }],
+            utterance_limit: None,
+            name: None,
+        }));
+        conversation.apply(Event::Message(ServerMessage::Spaces { spaces: vec![] }));
+        conversation.choose_object(&crate::arrival::Key::Create);
+        conversation.choose_object(&crate::arrival::Key::Backend("opencode".into()));
+        conversation.choose_object(&crate::arrival::Key::Directory("/work".into()));
+        conversation.apply(Event::Message(ServerMessage::Sessions {
+            sessions: (0..count)
+                .map(|n| tomori_protocol::SessionSummary {
+                    id: format!("s{n}"),
+                    title: format!("Session {n}"),
+                    directory: format!("/work/f{}", n % folders.max(1)),
+                    busy: false,
+                    age: None,
+                    space: None,
+                })
+                .collect(),
         }));
         conversation.take_actions();
         conversation
@@ -3223,6 +3293,82 @@ mod tests {
             .unwrap()
             .transform_point3(Vec3::ZERO);
         assert!(placed.z > arrival::HOME.z + 1.0, "{placed}");
+    }
+
+    /// In the session browser, the right stick scrolls the list, or the index while the ray points at one of its rows, a
+    /// row a push and a page more a flick, which ticks; unfocused, or outside the browser, it scrolls nothing.
+    #[test]
+    fn the_right_stick_scrolls_the_session_browser() {
+        let mut conversation = fixtures::browsing(40, 12);
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let start = Instant::now();
+        let ring = |conversation: &Conversation| conversation.arrival().unwrap().ring.unwrap();
+        let first = |items: &[arrival::Item]| {
+            items
+                .iter()
+                .find(|item| {
+                    matches!(
+                        item.key,
+                        arrival::Key::Session(Some(_)) | arrival::Key::Folder(Some(_))
+                    )
+                })
+                .map(|item| item.key.clone())
+        };
+        let mut push =
+            |step: &mut Step, conversation: &mut Conversation, y: f32, at: u64, focused| {
+                let buttons = press(|buttons| buttons.right_stick = Vec2::new(0.0, y));
+                step.buttons(
+                    &buttons,
+                    focused,
+                    conversation,
+                    &mut feedback,
+                    start + Duration::from_millis(at),
+                );
+            };
+        // Unfocused, nothing scrolls.
+        push(&mut step, &mut conversation, -0.7, 0, false);
+        push(&mut step, &mut conversation, 0.0, 100, false);
+        assert_eq!(
+            first(&ring(&conversation).items),
+            Some(arrival::Key::Session(Some("s0".into())))
+        );
+        // A push back scrolls the list a row towards its older end.
+        push(&mut step, &mut conversation, -0.7, 1000, true);
+        push(&mut step, &mut conversation, 0.0, 1100, true);
+        assert_eq!(
+            first(&ring(&conversation).items),
+            Some(arrival::Key::Session(Some("s1".into())))
+        );
+        // A flick scrolls a page more.
+        push(&mut step, &mut conversation, -1.0, 2000, true);
+        push(&mut step, &mut conversation, 0.0, 2100, true);
+        assert_eq!(
+            first(&ring(&conversation).items),
+            Some(arrival::Key::Session(Some("s8".into())))
+        );
+        assert_eq!(step.presentation_navigation.card, 0);
+        // Pointing at the index, the stick scrolls it instead.
+        step.highlighted = Some(arrival::Key::Folder(None));
+        assert_eq!(ring(&conversation).index[0].key, arrival::Key::Folder(None));
+        push(&mut step, &mut conversation, -0.7, 3000, true);
+        push(&mut step, &mut conversation, 0.0, 3100, true);
+        assert_eq!(
+            ring(&conversation).index[0].key,
+            arrival::Key::Page {
+                folders: true,
+                later: false
+            }
+        );
+        assert_eq!(
+            first(&ring(&conversation).items),
+            Some(arrival::Key::Session(Some("s8".into())))
+        );
+        // Outside the browser, nothing scrolls.
+        conversation.back();
+        assert!(!conversation.browsing());
+        push(&mut step, &mut conversation, -1.0, 4000, true);
+        push(&mut step, &mut conversation, 0.0, 4050, true);
     }
 
     #[test]

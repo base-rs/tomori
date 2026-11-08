@@ -49,6 +49,29 @@ pub const LABEL_COLUMNS: usize = 22;
 /// How far above its server a jump object stands: clear of the server and of a row above it.
 const JUMP_ABOVE: f32 = 0.18;
 
+/// The session browser stands below the connected server, as the Tomori wall stands below the swarm: its columns of rows
+/// on planes each facing the eyes at [`HOME`] from this far away, the top of their first rows this many radians below
+/// the eye line, clear of the connected server's label. See `design/arrival.md`.
+const BROWSER_DISTANCE: f32 = 1.2;
+const BROWSER_TOP: f32 = -17.0 * std::f32::consts::PI / 180.0;
+/// How many rows each of the browser's columns shows, pagers included, and how tall each is, in metres: about 2.7°,
+/// which a ray tells apart with room to spare.
+pub const BROWSER_ROWS: usize = 9;
+const BROWSER_ROW: f32 = 0.056;
+/// The size of a font pixel of the browser's rows, in metres: 0.0015 radians from [`HOME`], an x-height of about 0.48°,
+/// above the 0.45° text reads comfortably at (see `text.md`).
+const BROWSER_PIXEL: f32 = 0.0018;
+/// The characters a row of the list and of the index holds, and the room before them for the row's marker, in metres.
+pub const LIST_COLUMNS: usize = 34;
+pub const INDEX_COLUMNS: usize = 20;
+const BROWSER_MARKER: f32 = 0.02;
+const BROWSER_TEXT: f32 = 0.046;
+/// The room between the index and the list, and between the index and the create object to its left, in metres.
+const BROWSER_GAP: f32 = 0.035;
+const BROWSER_BACK: f32 = 0.15;
+/// The half-size of a browser row's marker, in metres.
+const BROWSER_MARKER_SIZE: f32 = 0.01;
+
 /// What an arrival object stands for, and so what choosing it does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -66,10 +89,13 @@ pub enum Key {
     Backend(String),
     /// A choice on the directory ring, by path.
     Directory(String),
-    /// A choice on the session ring: an existing session to attach, or `None` for a new one.
+    /// A row of the session browser: an existing session to attach, or join the space of, or `None` for a new one.
     Session(Option<String>),
-    /// The choice on the session ring that shows the next existing sessions, when they do not fit on it at once.
-    MoreSessions,
+    /// A folder in the session browser's index, by the directory its sessions are in, or `None` for every folder.
+    Folder(Option<String>),
+    /// The row at one end of a column of the session browser that scrolls it a page: the index of folders, or the list of
+    /// sessions, towards its `later` end or its start.
+    Page { folders: bool, later: bool },
     /// A choice on the environment ring, by identifier.
     Environment(String),
     /// The object that pairs this device as an owner, on the connected server's orbit. See `design/security.md`.
@@ -104,6 +130,18 @@ pub enum Kind {
     Create { open: bool },
     /// A choice on one of the creation rings.
     Choice,
+    /// A folder in the session browser's index: its hue, from its directory, or `None` for every folder; whether a session
+    /// in it is busy; and whether it is the folder the list shows.
+    Folder {
+        hue: Option<f32>,
+        busy: bool,
+        chosen: bool,
+    },
+    /// A session in the session browser's list: the hue of its folder, whether the agent is busy in it, and whether it is
+    /// already bound to a space, which choosing it joins.
+    Session { hue: f32, busy: bool, bound: bool },
+    /// A row that scrolls a column of the session browser a page, towards its `later` end or its start.
+    Pager { later: bool },
     /// The pairing object, `pending` while its code waits to be confirmed.
     Pair { pending: bool },
     /// An item of the hand menu, or the cue on the wrist.
@@ -143,11 +181,16 @@ impl Step {
     }
 }
 
-/// The choices of one creation ring, around the create object.
+/// The choices of one creation ring, around the create object. At [`Step::Session`] it is the session browser instead:
+/// `items` is its list, "New session" first, and `index` the folders beside it, both as much as they show of what they
+/// hold, with a pager at either end that has more beyond it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ring {
     pub step: Step,
     pub items: Vec<Item>,
+    /// The folders the session browser's list can be narrowed to, every folder first; empty for the other rings, and when
+    /// the sessions are all in one folder.
+    pub index: Vec<Item>,
 }
 
 /// What arrival shows, before it is placed in the world.
@@ -257,9 +300,14 @@ impl Scene {
                 view.items.iter().partition(|item| item.key == Key::Create);
             let orbiting: Vec<_> = create.iter().chain(&spaces).collect();
             let places = orbit(orbiting.len());
+            // The session browser is too wide to open around the create object, which stands beside it instead.
+            let opened = match &view.ring {
+                Some(ring) if ring.step == Step::Session => Browser::new(ring).back(),
+                _ => CREATE,
+            };
             for (item, &position) in orbiting.iter().zip(&places) {
                 let creating = ring_open && item.key == Key::Create;
-                let position = if creating { CREATE } else { position };
+                let position = if creating { opened } else { position };
                 objects.push(row_object(item, position, ring_open && !creating));
             }
             let top = places.iter().map(|place| place.y).fold(CENTRE.y, f32::max);
@@ -305,7 +353,11 @@ impl Scene {
         if let Some(ring) = &view.ring
             && view.items.iter().any(|item| item.key == Key::Create)
         {
-            objects.extend(ring_objects(ring, CREATE));
+            if ring.step == Step::Session {
+                objects.extend(Browser::new(ring).objects(ring));
+            } else {
+                objects.extend(ring_objects(ring, CREATE));
+            }
         }
         // While a space is joined, only it remains, near the participant; the rest recede.
         if let Stage::Joining(key) = &stage
@@ -449,6 +501,7 @@ fn size(kind: Kind) -> f32 {
         Kind::Space { .. } => 0.08,
         Kind::Create { .. } => 0.08,
         Kind::Choice => 0.05,
+        Kind::Folder { .. } | Kind::Session { .. } | Kind::Pager { .. } => BROWSER_MARKER_SIZE,
         Kind::Pair { .. } => 0.06,
         Kind::Menu(_) => 0.009,
     }
@@ -565,6 +618,236 @@ fn ring_objects(ring: &Ring, centre: Vec3) -> Vec<Object> {
         .collect()
 }
 
+/// What a column of the session browser shows of the `total` entries it holds, scrolled to `scroll`, in `slots` rows:
+/// the entries from `start` to before `end`, after a pager to the `earlier` ones when there are any and before a pager to
+/// the `later` ones when there are any. A column that holds no more than its rows shows them all, without pagers;
+/// otherwise its scroll goes no further than shows its last entry in the last row. See `design/arrival.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub start: usize,
+    pub end: usize,
+    pub earlier: bool,
+    pub later: bool,
+}
+
+impl Window {
+    /// At least three rows, so that there is always room for both pagers and an entry between them.
+    pub fn new(total: usize, scroll: usize, slots: usize) -> Self {
+        let slots = slots.max(3);
+        if total <= slots {
+            return Self {
+                start: 0,
+                end: total,
+                earlier: false,
+                later: false,
+            };
+        }
+        let start = scroll.min(Self::last(total, slots));
+        let earlier = start > 0;
+        let room = slots - usize::from(earlier);
+        let later = total - start > room;
+        Self {
+            start,
+            end: start + room - usize::from(later),
+            earlier,
+            later,
+        }
+    }
+
+    /// The furthest a column of `slots` rows holding `total` entries scrolls: to a pager and its last entries.
+    pub fn last(total: usize, slots: usize) -> usize {
+        let slots = slots.max(3);
+        total.saturating_sub(slots - 1)
+    }
+
+    /// The scroll a page on from this, towards the `later` end or the start: the later one shows the first entry this
+    /// does not, and the earlier one the last entry before this, in its last row.
+    pub fn page(&self, slots: usize, later: bool) -> usize {
+        let slots = slots.max(3);
+        if later {
+            if self.later { self.end } else { self.start }
+        } else if self.start < slots {
+            0
+        } else {
+            self.start + 2 - slots
+        }
+    }
+
+    /// The scroll nearest to `scroll` that shows entry `index`, of `total` in `slots` rows.
+    pub fn reveal(total: usize, scroll: usize, slots: usize, index: usize) -> usize {
+        let index = index.min(total.saturating_sub(1));
+        let shown = |scroll: usize| {
+            let window = Self::new(total, scroll, slots);
+            (window.start..window.end).contains(&index)
+        };
+        let current = Self::new(total, scroll, slots).start;
+        if shown(current) {
+            current
+        } else if index < current {
+            // Scrolling back, the first scroll that shows it: at the top, after the pager.
+            (0..=index).rev().find(|&scroll| shown(scroll)).unwrap_or(0)
+        } else {
+            // Scrolling on, the least that shows it: in the last row.
+            (current..=Self::last(total, slots))
+                .find(|&scroll| shown(scroll))
+                .unwrap_or(current)
+        }
+    }
+}
+
+/// Where the session browser's columns stand: the index of folders on the left, when there is one, and the list of
+/// sessions on its right, together centred straight ahead, below the connected server, each a flat panel of rows
+/// leaning back to face the eyes at [`HOME`]. Two columns are hinged on a shared edge between them, as a folding screen
+/// is, each turned towards the eyes about it, so that however they lean they never overlap as seen from home; one
+/// column faces the eyes from its middle. A row is drawn within, and pointed at by, its rectangle in its column's
+/// plane, as the hand menu's rows are, so that what is pointed at is what is drawn. See `design/arrival.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Browser {
+    pub index: Option<crate::panel::Plane>,
+    pub list: crate::panel::Plane,
+}
+
+impl Browser {
+    /// The width of the list's column, and of the index's, in metres: room for their characters and a marker.
+    pub const LIST_WIDTH: f32 = BROWSER_TEXT + (LIST_COLUMNS as f32 * 9.0 + 6.0) * BROWSER_PIXEL;
+    pub const INDEX_WIDTH: f32 = BROWSER_TEXT + (INDEX_COLUMNS as f32 * 9.0 + 6.0) * BROWSER_PIXEL;
+    /// The height of a column, in metres.
+    pub const HEIGHT: f32 = BROWSER_ROW * BROWSER_ROWS as f32;
+
+    pub fn new(ring: &Ring) -> Self {
+        let index = !ring.index.is_empty();
+        let total = if index {
+            Self::INDEX_WIDTH + BROWSER_GAP + Self::LIST_WIDTH
+        } else {
+            Self::LIST_WIDTH
+        };
+        if !index {
+            return Self {
+                index: None,
+                list: Self::column(0.0, Self::LIST_WIDTH),
+            };
+        }
+        // Angles to the right of straight ahead, as lengths along the browser subtend them at its distance.
+        let angle = |metres: f32| metres / BROWSER_DISTANCE;
+        let at = |azimuth: f32, elevation: f32| {
+            let (sin, cos) = elevation.sin_cos();
+            HOME + on_arc(azimuth, BROWSER_DISTANCE * cos, 0.0) + Vec3::Y * sin * BROWSER_DISTANCE
+        };
+        // The hinge runs down the middle of the gap, a column's height long, leaning back as the columns do.
+        let hinge = angle(-total / 2.0 + Self::INDEX_WIDTH + BROWSER_GAP / 2.0);
+        let drop = 2.0 * (Self::HEIGHT / 2.0 / BROWSER_DISTANCE).asin();
+        let top = at(hinge, BROWSER_TOP);
+        let up = (top - at(hinge, BROWSER_TOP - drop)).normalize();
+        // Each column turns about the hinge towards the middle of its outer edge, at the browser's distance.
+        let middle = BROWSER_TOP - drop / 2.0;
+        let towards = |azimuth: f32| {
+            let outward = at(azimuth, middle) - top;
+            (outward - up * outward.dot(up)).normalize()
+        };
+        let right = towards(angle(total / 2.0));
+        let left = -towards(angle(-total / 2.0));
+        let index = crate::panel::Plane {
+            origin: top - left * (BROWSER_GAP / 2.0 + Self::INDEX_WIDTH),
+            right: left,
+            up,
+        };
+        let list = crate::panel::Plane {
+            origin: top + right * BROWSER_GAP / 2.0,
+            right,
+            up,
+        };
+        Self {
+            index: Some(index),
+            list,
+        }
+    }
+
+    /// A column `width` wide whose middle is `azimuth` radians to the right of straight ahead: its plane faces the eyes
+    /// from its middle, and its origin is its top left corner.
+    fn column(azimuth: f32, width: f32) -> crate::panel::Plane {
+        let elevation = BROWSER_TOP - Self::HEIGHT / 2.0 / BROWSER_DISTANCE;
+        let (sin, cos) = elevation.sin_cos();
+        let middle =
+            HOME + on_arc(azimuth, BROWSER_DISTANCE * cos, 0.0) + Vec3::Y * sin * BROWSER_DISTANCE;
+        let plane = crate::panel::Plane::facing(middle, facing_from(middle, Some(HOME), true));
+        crate::panel::Plane {
+            origin: middle - plane.right * width / 2.0 + plane.up * Self::HEIGHT / 2.0,
+            ..plane
+        }
+    }
+
+    /// Where the create object stands while the browser is open: to the left of its first column's first row.
+    pub fn back(&self) -> Vec3 {
+        let first = self.index.unwrap_or(self.list);
+        first.at(glam::Vec2::new(-BROWSER_BACK, -BROWSER_ROW / 2.0))
+    }
+
+    /// The rectangle of row `index` of a column `width` wide, in its plane: rows tile the column from its top, sharing
+    /// their edges.
+    pub fn row(index: usize, width: f32) -> crate::panel::Rect {
+        let edge = |row: usize| -BROWSER_ROW * row as f32;
+        crate::panel::Rect {
+            min: glam::Vec2::new(0.0, edge(index + 1)),
+            max: glam::Vec2::new(width, edge(index)),
+        }
+    }
+
+    /// The browser's rows: the index's items down its column, and the list's down its own.
+    pub fn objects(&self, ring: &Ring) -> Vec<Object> {
+        let column = |plane: crate::panel::Plane, width: f32, columns: usize, items: &[Item]| {
+            items
+                .iter()
+                .take(BROWSER_ROWS)
+                .enumerate()
+                .map(|(row, item)| {
+                    let rect = Self::row(row, width);
+                    let middle = rect.centre().y;
+                    let lines: Vec<String> = std::iter::once(&item.label)
+                        .chain(&item.detail)
+                        .map(|line| clip(line, columns))
+                        .collect();
+                    let height = lines.len() as f32 * 11.0 * BROWSER_PIXEL;
+                    Object {
+                        key: item.key.clone(),
+                        kind: item.kind,
+                        position: plane.at(glam::Vec2::new(BROWSER_MARKER, middle)),
+                        // A row's marker is small whatever it is, "New session" included.
+                        size: BROWSER_MARKER_SIZE,
+                        label: Label {
+                            anchor: plane.at(glam::Vec2::new(
+                                BROWSER_TEXT,
+                                middle + height / 2.0 - BROWSER_PIXEL,
+                            )),
+                            lines,
+                            align: Align::Left,
+                            pixel: BROWSER_PIXEL,
+                            alpha: 1.0,
+                            tilt: true,
+                        },
+                        description: description(item),
+                        selected: item.selected,
+                        dim: 0.0,
+                        presence: 1.0,
+                        choosable: true,
+                        panel: Some(crate::panel::Area { plane, rect }),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut objects = Vec::new();
+        if let Some(index) = self.index {
+            objects.extend(column(index, Self::INDEX_WIDTH, INDEX_COLUMNS, &ring.index));
+        }
+        objects.extend(column(
+            self.list,
+            Self::LIST_WIDTH,
+            LIST_COLUMNS,
+            &ring.items,
+        ));
+        objects
+    }
+}
+
 /// The horizontal direction from `point` towards [`HOME`], which labels face.
 pub fn facing(point: Vec3) -> Vec3 {
     facing_from(point, None, false)
@@ -646,6 +929,7 @@ mod tests {
     fn every_kind_of_object_has_a_size_and_every_need_a_label() {
         assert_eq!(size(Kind::Pair { pending: false }), 0.06);
         assert_eq!(size(Kind::Menu(crate::hand_menu::MenuKind::Button)), 0.009);
+        assert_eq!(size(Kind::Pager { later: true }), BROWSER_MARKER_SIZE);
         assert_eq!(attention_label(Attention::Unknown), "needs attention");
     }
     use crate::pointing::{Pointer, Ray};
@@ -696,6 +980,7 @@ mod tests {
 
     fn ring(count: usize) -> Ring {
         Ring {
+            index: Vec::new(),
             step: Step::Backend,
             items: (0..count)
                 .map(|n| {
@@ -1181,5 +1466,309 @@ mod tests {
             "Jump",
         ));
         assert_eq!(Scene::layout(&orphan).objects.len(), 1);
+    }
+
+    /// A session browser with `sessions` rows in its list, after "New session", and `folders` in its index, with none
+    /// for one folder, each column ending with a pager where they do not fit, as the conversation gives them.
+    fn browser(sessions: usize, folders: usize) -> View {
+        let row = |key: Key, kind: Kind, label: String| Item {
+            key,
+            kind,
+            label,
+            detail: Some("busy · in a space with a long title · apps/web · 3 h ago".into()),
+            selected: false,
+        };
+        let pager = |folders: bool| {
+            row(
+                Key::Page {
+                    folders,
+                    later: true,
+                },
+                Kind::Pager { later: true },
+                "More".into(),
+            )
+        };
+        let mut items: Vec<_> =
+            std::iter::once(row(Key::Session(None), Kind::Choice, "New session".into()))
+                .chain((0..sessions).map(|n| {
+                    row(
+                        Key::Session(Some(format!("s{n}"))),
+                        Kind::Session {
+                            hue: 0.5,
+                            busy: n % 2 == 0,
+                            bound: n % 3 == 0,
+                        },
+                        format!("A session with a long title that goes on {n}"),
+                    )
+                }))
+                .collect();
+        if items.len() > BROWSER_ROWS {
+            items.truncate(BROWSER_ROWS - 1);
+            items.push(pager(false));
+        }
+        let mut index: Vec<_> = (0..folders)
+            .map(|n| {
+                row(
+                    Key::Folder(Some(format!("/work/f{n}"))),
+                    Kind::Folder {
+                        hue: Some(0.2),
+                        busy: false,
+                        chosen: n == 0,
+                    },
+                    format!("folder-with-a-long-name-{n}"),
+                )
+            })
+            .collect();
+        if index.len() > BROWSER_ROWS {
+            index.truncate(BROWSER_ROWS - 1);
+            index.push(pager(true));
+        }
+        lobby(
+            3,
+            Some(Ring {
+                step: Step::Session,
+                items,
+                index,
+            }),
+        )
+    }
+
+    /// Where `point` is from the eyes at [`HOME`]: degrees to the right of straight ahead, and above the eye line.
+    fn angles(point: Vec3) -> (f32, f32) {
+        let offset = point - HOME;
+        (
+            offset.x.atan2(-offset.z).to_degrees(),
+            offset.y.atan2(offset.with_y(0.0).length()).to_degrees(),
+        )
+    }
+
+    fn rows(scene: &Scene) -> Vec<&Object> {
+        scene
+            .objects
+            .iter()
+            .filter(|object| object.panel.is_some())
+            .collect()
+    }
+
+    /// The session browser stands below the connected server and its label, within a comfortable turn of the head,
+    /// its rows tall enough to point at apart and their text large enough to read, each label within its row.
+    #[test]
+    fn the_session_browser_is_within_reach_and_legible() {
+        for (sessions, folders) in [(0, 0), (1, 0), (8, 0), (8, 9), (3, 2), (20, 20)] {
+            let scene = Scene::layout(&browser(sessions, folders));
+            let rows = rows(&scene);
+            let shown = (sessions + 1).min(BROWSER_ROWS) + folders.min(BROWSER_ROWS);
+            assert_eq!(rows.len(), shown, "{sessions} sessions, {folders} folders");
+            // The connected server's label, as drawn: its bottom, and how far it reaches to either side.
+            let connected = &scene
+                .object(&Key::Connected("studio:8765".into()))
+                .unwrap()
+                .label;
+            let half = half_width(connected);
+            let bottom =
+                connected.anchor.y - (connected.lines.len() as f32 * 11.0 + 1.0) * connected.pixel;
+            let (left, below) = angles(connected.anchor.with_y(bottom) - Vec3::X * half);
+            let (right_edge, _) = angles(connected.anchor + Vec3::X * half);
+            let mut passing = 0;
+            for row in &rows {
+                let area = row.panel.unwrap();
+                for corner in [
+                    area.rect.min,
+                    area.rect.max,
+                    glam::Vec2::new(area.rect.min.x, area.rect.max.y),
+                    glam::Vec2::new(area.rect.max.x, area.rect.min.y),
+                ] {
+                    let (right, up) = angles(area.plane.at(corner));
+                    assert!(right.abs() < 32.0, "{:?} is {right}° to the side", row.key);
+                    assert!((-42.0..=-13.0).contains(&up), "{:?} is {up}° up", row.key);
+                    // Its text reads comfortably everywhere on it.
+                    let pixel = row.label.pixel / area.plane.at(corner).distance(HOME);
+                    assert!(pixel >= 0.0014, "{:?}: {pixel} radians a pixel", row.key);
+                }
+                // Its top edge, where it passes beneath the connected server's label, is below it.
+                let mut beneath = 0;
+                for step in 0..=16 {
+                    let x =
+                        area.rect.min.x + (area.rect.max.x - area.rect.min.x) * step as f32 / 16.0;
+                    let (right, up) = angles(area.plane.at(glam::Vec2::new(x, area.rect.max.y)));
+                    if (left - 1.0..=right_edge + 1.0).contains(&right) {
+                        assert!(
+                            up < below - 0.5,
+                            "{:?} is beside the connected server",
+                            row.key
+                        );
+                        beneath += 1;
+                    }
+                }
+                passing += beneath;
+                // About 2.6° tall, which a ray tells apart.
+                let top = area.plane.at(glam::Vec2::new(0.0, area.rect.max.y));
+                let bottom = area.plane.at(glam::Vec2::new(0.0, area.rect.min.y));
+                let tall = (top - HOME).angle_between(bottom - HOME).to_degrees();
+                assert!(tall > 2.4, "{:?} is {tall}° tall", row.key);
+                // Its label, as it is drawn with its background, and its marker are within it.
+                let local = area.local(row.label.anchor);
+                let pixel = row.label.pixel;
+                let width = half_width(&row.label) * 2.0;
+                let height = (row.label.lines.len() as f32 * 11.0 + 1.0) * pixel;
+                assert!(area.rect.contains(local));
+                assert!(local.x - 3.0 * pixel >= area.rect.min.x);
+                assert!(local.x + width <= area.rect.max.x + 1e-4, "{:?}", row.key);
+                assert!(local.y + 3.0 * pixel <= area.rect.max.y);
+                assert!(local.y - height >= area.rect.min.y, "{:?}", row.key);
+                assert!(area.rect.contains(area.local(row.position)));
+                assert!(area.local(row.position).x - row.size >= area.rect.min.x);
+            }
+            assert!(
+                passing > 0,
+                "the first row passes beneath the connected server"
+            );
+            // The columns do not overlap: the index's rows are all left of the list's.
+            let right_of_index = rows
+                .iter()
+                .filter(|row| matches!(row.key, Key::Folder(_) | Key::Page { folders: true, .. }))
+                .map(|row| {
+                    angles(
+                        row.panel
+                            .unwrap()
+                            .plane
+                            .at(glam::Vec2::new(row.panel.unwrap().rect.max.x, 0.0)),
+                    )
+                    .0
+                })
+                .fold(f32::NEG_INFINITY, f32::max);
+            let left_of_list = rows
+                .iter()
+                .filter(|row| matches!(row.key, Key::Session(_) | Key::Page { folders: false, .. }))
+                .map(|row| angles(row.panel.unwrap().plane.origin).0)
+                .fold(f32::INFINITY, f32::min);
+            assert!(right_of_index < left_of_list);
+            // The create object stands to the left of the browser, clear of its rows, within reach.
+            let create = scene.object(&Key::Create).unwrap();
+            let (right, _) = angles(create.position);
+            assert!(right > -35.0 && right < angles(rows[0].panel.unwrap().plane.origin).0 - 3.0);
+            assert_eq!(create.dim, 0.0);
+        }
+        // With one folder, the list stands straight ahead.
+        let scene = Scene::layout(&browser(4, 0));
+        let list = scene.object(&Key::Session(None)).unwrap().panel.unwrap();
+        let middle = list
+            .plane
+            .at(glam::Vec2::new(Browser::LIST_WIDTH / 2.0, 0.0));
+        assert!(angles(middle).0.abs() < 0.5);
+    }
+
+    /// A ray from the eyes picks the row it meets, at its middle and near each of its edges, and nothing past the
+    /// columns' ends.
+    #[test]
+    fn every_row_of_the_browser_is_picked_where_it_is_drawn() {
+        let scene = Scene::layout(&browser(12, 12));
+        let targets = scene.targets();
+        let pick = |point: Vec3| {
+            Pointer::default()
+                .update(
+                    Some(Ray::new(HOME, point - HOME).unwrap()),
+                    Some(1.0),
+                    &targets,
+                )
+                .chosen
+        };
+        for row in rows(&scene) {
+            let area = row.panel.unwrap();
+            let rect = area.rect;
+            let inset = (rect.max - rect.min) * 0.08;
+            for at in [
+                rect.centre(),
+                rect.min + inset,
+                rect.max - inset,
+                glam::Vec2::new(rect.min.x + inset.x, rect.max.y - inset.y),
+                glam::Vec2::new(rect.max.x - inset.x, rect.min.y + inset.y),
+            ] {
+                assert_eq!(pick(area.plane.at(at)).as_ref(), Some(&row.key), "{at}");
+            }
+        }
+        // Below each column's last row is no row.
+        for folders in [true, false] {
+            let last = scene
+                .object(&Key::Page {
+                    folders,
+                    later: true,
+                })
+                .unwrap()
+                .panel
+                .unwrap();
+            let past = last.plane.at(glam::Vec2::new(
+                last.rect.centre().x,
+                last.rect.min.y - 0.03,
+            ));
+            assert!(!matches!(
+                pick(past),
+                Some(Key::Session(_) | Key::Folder(_) | Key::Page { .. })
+            ));
+        }
+    }
+
+    /// A column shows as many entries as fit between its pagers, each pager only where there is more beyond it, never
+    /// scrolls past its last entry in its last row, and its pagers and reveal reach every entry.
+    #[test]
+    fn a_column_shows_every_entry_once_between_its_pagers() {
+        for slots in 3..=10 {
+            for total in 0..=40 {
+                for scroll in 0..=total + 3 {
+                    let window = Window::new(total, scroll, slots);
+                    let used = window.end - window.start
+                        + usize::from(window.earlier)
+                        + usize::from(window.later);
+                    if total <= slots {
+                        assert_eq!((window.start, window.end, used), (0, total, total));
+                    } else {
+                        assert_eq!(used, slots, "{total} in {slots} at {scroll}");
+                        assert!(window.start <= Window::last(total, slots));
+                        assert!(window.end > window.start);
+                    }
+                    assert_eq!(window.earlier, window.start > 0);
+                    assert_eq!(window.later, window.end < total);
+                }
+                // Paging on from the start shows every entry, in order, without a gap: each page the first entry the last
+                // did not show, or, at the end, the last entries in full.
+                let mut scroll = 0;
+                let mut seen = std::collections::BTreeSet::new();
+                loop {
+                    let window = Window::new(total, scroll, slots);
+                    seen.extend(window.start..window.end);
+                    if !window.later {
+                        break;
+                    }
+                    let next = Window::new(total, window.page(slots, true), slots);
+                    assert!(next.start > window.start && next.start <= window.end);
+                    assert!(next.end > window.end);
+                    scroll = next.start;
+                }
+                assert_eq!(seen, (0..total).collect());
+                loop {
+                    let window = Window::new(total, scroll, slots);
+                    if !window.earlier {
+                        break;
+                    }
+                    let back = Window::new(total, window.page(slots, false), slots);
+                    assert!(back.end >= window.start && back.start < window.start);
+                    scroll = back.start;
+                }
+                assert_eq!(scroll, 0);
+                for index in 0..total {
+                    for from in [0, total / 2, total] {
+                        let shown =
+                            Window::new(total, Window::reveal(total, from, slots, index), slots);
+                        assert!(
+                            (shown.start..shown.end).contains(&index),
+                            "{index} of {total}"
+                        );
+                    }
+                }
+            }
+        }
+        // Too few rows are taken as three, enough for both pagers and an entry.
+        let window = Window::new(10, 4, 1);
+        assert_eq!((window.start, window.end), (4, 5));
     }
 }

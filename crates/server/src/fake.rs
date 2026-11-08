@@ -356,6 +356,8 @@ impl Backend for FakeBackend {
                 title: session.inner.title.clone(),
                 directory: session.inner.directory.clone(),
                 busy: session.is_busy(),
+                // The fake does not keep when its sessions were last active.
+                updated: None,
             })
             .collect())
     }

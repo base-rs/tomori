@@ -595,6 +595,8 @@ mod tests {
             title: "t".repeat(TITLE_BYTES * 2),
             directory: directory.into(),
             busy: false,
+            age: None,
+            space: None,
         }
     }
 
