@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Travel beyond the room: the locomotion profile an environment declares, its walkable surfaces and where a ray lands on them, the participant's [`Rig`], and [`Travel`], which turns the left stick and the ray into teleports, snap turns and rising. Pure, so that it is tested without a device; the frame step applies the rig to every pose. See `design/locomotion.md`.
+//! Travel beyond the room: the locomotion profile an environment declares, its walkable surfaces and where a ray lands on them, the participant's [`Rig`], and [`Travel`], which turns the left stick and the ray into teleports, snap turns, backsteps and rising. Pure, so that it is tested without a device; the frame step applies the rig to every pose. See `design/locomotion.md`.
 use glam::{Mat4, Quat, Vec2, Vec3};
 
 use crate::{environment::Environment, pointing::Ray};
@@ -14,7 +14,17 @@ pub const ASCENT_SPEED: f32 = 0.6;
 pub const REACH: f32 = 15.0;
 /// The nearest a landing can be along the ray, in metres.
 pub const NEAREST: f32 = 0.25;
-/// How far forward the stick goes before it aims a teleport, and how far back before it rises.
+/// How far a backstep steps, horizontally, opposite to where the head faces, in metres.
+pub const BACKSTEP: f32 = 0.6;
+/// The shortest backstep worth taking where the floor ends behind the participant, in metres: less than this, it steps nowhere.
+pub const SHORTEST_BACKSTEP: f32 = 0.2;
+/// How finely a backstep's path is checked for floor, in metres.
+const BACKSTEP_STRIDE: f32 = 0.05;
+/// How near a surface's height the room's floor must be for the participant to stand on it, in metres.
+const STANDING: f32 = 0.01;
+/// How long the stick is held back, where the environment flies, before it rises rather than stepping back, in seconds.
+pub const HOLD: f32 = 0.3;
+/// How far forward the stick goes before it aims a teleport, and how far back before it steps back or rises.
 const PUSH: f32 = 0.7;
 /// How far sideways the stick goes before it turns.
 const TURN: f32 = 0.6;
@@ -142,6 +152,30 @@ impl Locomotion {
         }
     }
 
+    /// Where a backstep from `head` goes, facing `facing`, horizontal, with the room's floor at `floor`: [`BACKSTEP`] straight back, horizontally. Where the profile teleports, it steps only along the surface it stands on, at the floor's height, as far as that goes without a gap, checked every 5 cm, or nowhere when that is less than [`SHORTEST_BACKSTEP`]; where it flies, the participant may hover, so it goes the whole way. `None` for a profile of none, or where it steps nowhere.
+    pub fn backstep(&self, head: Vec3, facing: Vec3, floor: f32) -> Option<Vec3> {
+        let back = -Vec3::new(facing.x, 0.0, facing.z).try_normalize()?;
+        let distance = match self {
+            Self::None => return None,
+            Self::Fly { .. } => BACKSTEP,
+            Self::Teleport { surfaces } => {
+                let walkable = |distance: f32| {
+                    let point = head + back * distance;
+                    surfaces.iter().any(|surface| {
+                        (surface.height() - floor).abs() <= STANDING && surface.contains(point)
+                    })
+                };
+                let strides = (BACKSTEP / BACKSTEP_STRIDE).round() as u32;
+                (1..=strides)
+                    .map(|stride| stride as f32 * BACKSTEP_STRIDE)
+                    .take_while(|distance| walkable(*distance))
+                    .last()
+                    .filter(|distance| *distance >= SHORTEST_BACKSTEP - f32::EPSILON)?
+            }
+        };
+        Some(back * distance)
+    }
+
     /// Where `ray` lands: on the first surface it meets from above, if that is at least [`NEAREST`] along it and at most [`REACH`] from its origin horizontally, or `None`. A surface nearer than that still hides those beneath it.
     pub fn landing(&self, ray: &Ray) -> Option<Vec3> {
         if ray.direction.y > -DOWNWARDS {
@@ -194,10 +228,31 @@ impl Rig {
         self.translation = head - Quat::from_rotation_y(self.yaw) * room;
     }
 
+    /// Move the room by `offset`, horizontally, keeping its floor's height.
+    pub fn step(&mut self, offset: Vec3) {
+        self.translation += Vec3::new(offset.x, 0.0, offset.z);
+    }
+
     /// Raise the room by `distance`, never above `ceiling`, nor lower than it is.
     pub fn ascend(&mut self, distance: f32, ceiling: f32) {
         self.translation.y = (self.translation.y + distance).min(ceiling.max(self.translation.y));
     }
+}
+
+/// Which way a head turned by `orientation` faces, horizontally: its forward, levelled, or, looking nearly straight up or down, the way the top of the head leans. `None` for an orientation that is nonsense.
+pub fn facing(orientation: Quat) -> Option<Vec3> {
+    if !orientation.is_finite() || orientation.length() < 0.5 {
+        return None;
+    }
+    let orientation = orientation.normalize();
+    let level = |direction: Vec3| {
+        let level = Vec3::new(direction.x, 0.0, direction.z);
+        (level.length() > 0.1).then(|| level.normalize())
+    };
+    let forward = orientation * Vec3::NEG_Z;
+    let up = orientation * Vec3::Y;
+    // Looking down, the top of the head leans forward; looking up, back.
+    level(forward).or_else(|| level(up * -forward.y.signum()))
 }
 
 /// Where travel applies: the space the participant is in, by its identifier, and its environment.
@@ -215,7 +270,9 @@ pub(crate) struct Input<'a> {
     pub ray: Option<Ray>,
     /// The head, in the scene.
     pub head: Option<Vec3>,
-    /// Nothing else takes the stick and the ray: in a space, focused, neither the hand menu nor the transcript showing, and no card carried.
+    /// Which way the head faces, in the scene, from which a backstep steps straight back.
+    pub facing: Option<Vec3>,
+    /// Nothing else takes the stick and the ray: in a space, focused, neither the hand menu nor the transcript showing, and no card carried. A panel carried does not stop travel, which carries it along.
     pub active: bool,
     /// Seconds since the last frame.
     pub dt: f32,
@@ -232,7 +289,9 @@ pub(crate) struct Outcome {
     pub teleported: bool,
     /// The rig turned this frame.
     pub turned: bool,
-    /// How dark the view is, from 1, as a teleport lands, back to 0 over [`BLINK`] seconds.
+    /// It stepped back this frame.
+    pub stepped: bool,
+    /// How dark the view is, from 1, as a teleport lands or a backstep steps, back to 0 over [`BLINK`] seconds.
     pub blink: f32,
 }
 
@@ -244,7 +303,9 @@ enum Gesture {
     Ready,
     /// Forward came first: a teleport is aimed, and lands when the stick returns to the middle.
     Aiming,
-    /// Back came first, where the environment flies: it rises while the stick is held back.
+    /// Back came first: it steps back when the stick returns to the middle, unless, where the environment flies, it has been held for [`HOLD`] seconds, as long as it has been held.
+    Back(f32),
+    /// Back was held, where the environment flies: it rises while the stick is held back.
     Rising,
     /// The push has done what it does, as a turn does, or was cancelled: nothing more until the middle.
     Spent,
@@ -258,7 +319,7 @@ pub(crate) struct Travel {
     place: Option<(String, Environment)>,
     gesture: Gesture,
     landing: Option<Vec3>,
-    /// How dark the view is after a teleport.
+    /// How dark the view is after a teleport or a backstep.
     blink: f32,
 }
 
@@ -323,6 +384,15 @@ impl Travel {
                 self.blink = 1.0;
                 outcome.teleported = true;
             }
+            // A push back steps back, where there is floor to step onto.
+            if let (Gesture::Back(_), Some(head), Some(facing)) =
+                (self.gesture, input.head, input.facing)
+                && let Some(offset) = input.locomotion.backstep(head, facing, self.rig.floor())
+            {
+                self.rig.step(offset);
+                self.blink = 1.0;
+                outcome.stepped = true;
+            }
             self.gesture = Gesture::Ready;
             self.landing = None;
         } else if self.gesture == Gesture::Ready {
@@ -336,8 +406,8 @@ impl Travel {
                     self.rig.turn(-stick.x.signum() * SNAP_TURN, head);
                     outcome.turned = true;
                 }
-            } else if input.locomotion.ceiling().is_some() && -along > PUSH && -along >= across {
-                self.gesture = Gesture::Rising;
+            } else if -along > PUSH && -along >= across {
+                self.gesture = Gesture::Back(0.0);
             }
         }
         match self.gesture {
@@ -346,6 +416,19 @@ impl Travel {
                 Some(ray) => self.landing = input.locomotion.landing(&ray),
                 None => self.cancel(),
             },
+            // Held back long enough, where the environment flies, it rises instead of stepping back, from the moment it has been held that long.
+            Gesture::Back(held) => {
+                let now = held + dt;
+                self.gesture = Gesture::Back(now);
+                if let Some(ceiling) = input.locomotion.ceiling()
+                    && now > HOLD
+                {
+                    self.gesture = Gesture::Rising;
+                    if stick.y < -CENTRE {
+                        self.rig.ascend(ASCENT_SPEED * (now - HOLD), ceiling);
+                    }
+                }
+            }
             // Rising, while the stick is still held back, never above the ceiling.
             Gesture::Rising => {
                 if let Some(ceiling) = input.locomotion.ceiling()
@@ -522,6 +605,7 @@ mod tests {
             stick,
             ray,
             head: Some(HEAD),
+            facing: Some(Vec3::NEG_Z),
             active: true,
             dt: 0.5,
         }
@@ -654,32 +738,223 @@ mod tests {
     }
 
     #[test]
-    fn back_rises_only_where_the_environment_flies() {
+    fn back_rises_only_where_the_environment_flies_and_once_held() {
         let floors = floors();
         let mut travel = Travel::default();
         travel.update(input(&floors, Vec2::NEG_Y, None));
+        travel.update(input(&floors, Vec2::NEG_Y, None));
         assert_eq!(travel.rig().floor(), 0.0);
+        travel.update(input(&floors, Vec2::ZERO, None));
         let fly = Locomotion::fly(Vec::new(), 1.0);
+        let mut travel = Travel::default();
+        // Held past the hold, it rises from then on: 0.2 s of the first half second.
         travel.update(input(&fly, Vec2::NEG_Y, None));
-        assert!((travel.rig().floor() - 0.3).abs() < 1e-5);
+        assert!((travel.rig().floor() - 0.12).abs() < 1e-5);
+        travel.update(input(&fly, Vec2::NEG_Y, None));
+        assert!((travel.rig().floor() - 0.42).abs() < 1e-5);
         // A frame without a sensible length, or a push more sideways, rises nothing.
         let nonsense = Input {
             dt: f32::NAN,
             ..input(&fly, Vec2::NEG_Y, None)
         };
         travel.update(nonsense);
+        assert!((travel.rig().floor() - 0.42).abs() < 1e-5);
         travel.update(input(&fly, Vec2::ZERO, None));
         assert!(
             travel
                 .update(input(&fly, Vec2::new(0.9, -0.7), None))
                 .turned
         );
-        assert!((travel.rig().floor() - 0.3).abs() < 1e-5);
+        assert!((travel.rig().floor() - 0.42).abs() < 1e-5);
         travel.update(input(&fly, Vec2::ZERO, None));
         for _ in 0..10 {
             travel.update(input(&fly, Vec2::NEG_Y, None));
         }
         assert_eq!(travel.rig().floor(), 1.0);
+        // Released after rising, it steps nowhere.
+        let before = travel.rig();
+        assert!(!travel.update(input(&fly, Vec2::ZERO, None)).stepped);
+        assert_eq!(travel.rig(), before);
+    }
+
+    #[test]
+    fn heads_face_the_way_they_look_levelled() {
+        assert!(close(facing(Quat::IDENTITY).unwrap(), Vec3::NEG_Z));
+        let left = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        assert!(close(facing(left).unwrap(), Vec3::NEG_X));
+        // Looking down, or up, a little, it is still forward.
+        let down = Quat::from_rotation_x(-1.2);
+        assert!(close(facing(down).unwrap(), Vec3::NEG_Z));
+        // Straight down or up, the top of the head says which way is forward.
+        let floor = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        assert!(close(facing(floor).unwrap(), Vec3::NEG_Z));
+        let sky = left * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        assert!(close(facing(sky).unwrap(), Vec3::NEG_X));
+        // Nonsense faces nowhere.
+        assert_eq!(facing(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)), None);
+        assert_eq!(facing(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0)), None);
+    }
+
+    #[test]
+    fn a_backstep_goes_straight_back_as_far_as_the_floor_goes() {
+        let head = Vec3::new(0.0, 1.7, 0.0);
+        // A small floor, its back edge 0.42 m behind the head: it steps as far as the floor goes, in 5 cm strides.
+        let small = Locomotion::teleport(vec![Surface::rectangle(
+            Vec3::new(0.0, 0.0, -0.79),
+            Vec2::new(2.0, 2.42),
+        )]);
+        let step = small.backstep(head, Vec3::NEG_Z, 0.0).unwrap();
+        assert!(close(step, Vec3::new(0.0, 0.0, 0.4)), "{step}");
+        // Facing anywhere, it steps away from it, horizontally, however the face tilts.
+        let wide = Locomotion::teleport(vec![Surface::disc(Vec3::ZERO, 5.0)]);
+        let step = wide.backstep(head, Vec3::new(1.0, -3.0, 0.0), 0.0).unwrap();
+        assert!(close(step, Vec3::new(-BACKSTEP, 0.0, 0.0)), "{step}");
+        // Only along the surface stood on: a ledge above the floor does not stop a step on the floor, as nothing
+        // collides yet, and from the ledge, the floor below is not stepped down onto.
+        let ledged = Locomotion::teleport(vec![
+            Surface::disc(Vec3::ZERO, 5.0),
+            Surface::rectangle(Vec3::new(0.0, 0.5, 0.6), Vec2::new(2.0, 0.4)),
+        ]);
+        let step = ledged.backstep(head, Vec3::NEG_Z, 0.0).unwrap();
+        assert!(close(step, Vec3::new(0.0, 0.0, BACKSTEP)), "{step}");
+        let on_ledge = Vec3::new(0.0, 2.2, 0.45);
+        assert_eq!(ledged.backstep(on_ledge, Vec3::Z, 0.5), None);
+        // Too close to the edge, it steps nowhere: 0.15 m is less than is worth a step.
+        let near = Locomotion::teleport(vec![Surface::rectangle(
+            Vec3::new(0.0, 0.0, -0.84),
+            Vec2::new(2.0, 2.0),
+        )]);
+        assert_eq!(near.backstep(head, Vec3::NEG_Z, 0.0), None);
+        // Not over a gap: the floor beyond one is not reached.
+        let gap = Locomotion::teleport(vec![
+            Surface::rectangle(Vec3::new(0.0, 0.0, -1.0), Vec2::new(2.0, 2.64)),
+            Surface::rectangle(Vec3::new(0.0, 0.0, 1.5), Vec2::new(2.0, 2.0)),
+        ]);
+        let step = gap.backstep(head, Vec3::NEG_Z, 0.0).unwrap();
+        assert!(close(step, Vec3::new(0.0, 0.0, 0.3)), "{step}");
+        // Flying, the whole way, floor or not; with no travel, or no way it faces, nowhere.
+        let fly = Locomotion::fly(Vec::new(), 10.0);
+        let step = fly.backstep(head, Vec3::NEG_Z, 3.0).unwrap();
+        assert!(close(step, Vec3::new(0.0, 0.0, BACKSTEP)));
+        assert_eq!(Locomotion::None.backstep(head, Vec3::NEG_Z, 0.0), None);
+        assert_eq!(wide.backstep(head, Vec3::Y, 0.0), None);
+    }
+
+    #[test]
+    fn back_steps_back_once_as_the_stick_returns_to_the_middle() {
+        let floors = floors();
+        let mut travel = Travel::default();
+        // Pushed back, nothing moves until the stick returns, however long it is held.
+        for _ in 0..4 {
+            let outcome = travel.update(input(&floors, Vec2::new(0.1, -0.9), None));
+            assert!(!outcome.stepped && !outcome.turned && !outcome.aiming);
+        }
+        // Eased off, or rolled to the side or forward, it still steps back, and only on the middle.
+        for rolled in [
+            Vec2::new(0.0, -0.3),
+            Vec2::new(0.9, 0.0),
+            Vec2::new(0.0, 0.9),
+        ] {
+            let outcome = travel.update(input(&floors, rolled, None));
+            assert!(
+                !outcome.stepped && !outcome.turned && !outcome.aiming,
+                "{rolled}"
+            );
+        }
+        assert_eq!(travel.rig(), Rig::default());
+        let outcome = travel.update(input(&floors, Vec2::ZERO, None));
+        assert!(outcome.stepped && !outcome.teleported);
+        assert_eq!(outcome.blink, 1.0, "it blinks as a teleport does");
+        assert!(close(
+            travel.rig().matrix().transform_point3(HEAD),
+            HEAD + Vec3::Z * BACKSTEP
+        ));
+        assert_eq!(travel.rig().floor(), 0.0);
+        assert!(!travel.update(input(&floors, Vec2::ZERO, None)).stepped);
+        // Short of the threshold, or sideways first, it steps nowhere.
+        travel.update(input(&floors, Vec2::new(0.0, -0.65), None));
+        assert!(!travel.update(input(&floors, Vec2::ZERO, None)).stepped);
+        travel.update(input(&floors, Vec2::new(0.9, -0.5), None));
+        travel.update(input(&floors, Vec2::new(0.0, -0.9), None));
+        assert!(!travel.update(input(&floors, Vec2::ZERO, None)).stepped);
+        // Facing left, after the turn, it steps to the right; without a head or a way it faces, nowhere.
+        let before = travel.rig().matrix().transform_point3(HEAD);
+        let left = Input {
+            facing: Some(Vec3::NEG_X),
+            ..input(&floors, Vec2::NEG_Y, None)
+        };
+        travel.update(left);
+        travel.update(Input {
+            stick: Vec2::ZERO,
+            ..left
+        });
+        assert!(close(
+            travel.rig().matrix().transform_point3(HEAD),
+            before + Vec3::X * BACKSTEP
+        ));
+        for lacking in [
+            Input {
+                head: None,
+                ..input(&floors, Vec2::ZERO, None)
+            },
+            Input {
+                facing: None,
+                ..input(&floors, Vec2::ZERO, None)
+            },
+        ] {
+            travel.update(input(&floors, Vec2::NEG_Y, None));
+            assert!(!travel.update(lacking).stepped);
+        }
+        // Cancelled, as when the hand menu shows, or where the floor ends right behind, it steps nowhere.
+        travel.update(input(&floors, Vec2::NEG_Y, None));
+        travel.cancel();
+        assert!(!travel.update(input(&floors, Vec2::ZERO, None)).stepped);
+        let edge = Locomotion::teleport(vec![Surface::disc(Vec3::new(0.3, 0.0, -0.3), 0.15)]);
+        let mut travel = Travel::default();
+        travel.update(input(&edge, Vec2::NEG_Y, None));
+        let outcome = travel.update(input(&edge, Vec2::ZERO, None));
+        assert!(!outcome.stepped);
+        assert_eq!(outcome.blink, 0.0, "nowhere to step, it does not blink");
+        // With no travel, nowhere.
+        let none = Locomotion::None;
+        travel.update(input(&none, Vec2::NEG_Y, None));
+        assert_eq!(
+            travel.update(input(&none, Vec2::ZERO, None)),
+            Outcome::default()
+        );
+    }
+
+    #[test]
+    fn where_the_environment_flies_a_tap_back_steps_back_and_a_hold_rises() {
+        let fly = Locomotion::fly(Vec::new(), 10.0);
+        let mut travel = Travel::default();
+        let tap = |stick: Vec2| Input {
+            dt: HOLD / 3.0,
+            ..input(&fly, stick, None)
+        };
+        travel.update(tap(Vec2::NEG_Y));
+        travel.update(tap(Vec2::NEG_Y));
+        let outcome = travel.update(tap(Vec2::ZERO));
+        assert!(outcome.stepped);
+        assert_eq!(travel.rig().floor(), 0.0);
+        assert!(close(
+            travel.rig().matrix().transform_point3(HEAD),
+            HEAD + Vec3::Z * BACKSTEP
+        ));
+        // Held past the hold, it rises rather than stepping back.
+        for _ in 0..4 {
+            assert!(!travel.update(tap(Vec2::NEG_Y)).stepped);
+        }
+        assert!((travel.rig().floor() - ASCENT_SPEED * HOLD / 3.0).abs() < 1e-5);
+        assert!(!travel.update(tap(Vec2::ZERO)).stepped);
+        // Rolled sideways before the hold is up, it rises nothing once it is, and still steps nowhere.
+        let floor = travel.rig().floor();
+        travel.update(tap(Vec2::NEG_Y));
+        for _ in 0..3 {
+            assert!(!travel.update(tap(Vec2::new(0.5, -0.1))).turned);
+        }
+        assert_eq!(travel.rig().floor(), floor);
+        assert!(!travel.update(tap(Vec2::ZERO)).stepped);
     }
 
     /// Aim a teleport at the floor 4 m ahead, as the reviewer's cases start.
@@ -804,22 +1079,23 @@ mod tests {
         let fly = Locomotion::fly(vec![Surface::disc(Vec3::ZERO, 20.0)], 10.0);
         let mut travel = Travel::default();
         let aim = Some(ray(HEAD, Vec3::new(0.0, 0.0, -3.0)));
-        // Back, short of its threshold, rises nothing; past it, it rises.
+        // Back, short of its threshold, rises nothing; past it, held, it rises.
         travel.update(input(&fly, Vec2::new(0.0, -0.65), aim));
         assert_eq!(travel.rig().floor(), 0.0);
         travel.update(input(&fly, Vec2::ZERO, aim));
         travel.update(input(&fly, Vec2::NEG_Y, aim));
-        assert!((travel.rig().floor() - 0.3).abs() < 1e-5);
+        assert!((travel.rig().floor() - 0.12).abs() < 1e-5);
         // Eased off, still held back, it keeps rising.
         travel.update(input(&fly, Vec2::new(0.0, -0.4), aim));
-        assert!((travel.rig().floor() - 0.6).abs() < 1e-5);
+        assert!((travel.rig().floor() - 0.42).abs() < 1e-5);
         // Rolled to the side or forward, it neither turns, aims nor rises.
         for rolled in [Vec2::new(0.9, -0.1), Vec2::new(0.1, 0.9)] {
             let outcome = travel.update(input(&fly, rolled, aim));
             assert!(!outcome.turned && !outcome.aiming, "{rolled}");
         }
-        assert!((travel.rig().floor() - 0.6).abs() < 1e-5);
-        assert!(!travel.update(input(&fly, Vec2::ZERO, aim)).teleported);
+        assert!((travel.rig().floor() - 0.42).abs() < 1e-5);
+        let outcome = travel.update(input(&fly, Vec2::ZERO, aim));
+        assert!(!outcome.teleported && !outcome.stepped);
     }
 
     #[test]
