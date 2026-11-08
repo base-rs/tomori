@@ -344,6 +344,8 @@ pub struct Conversation {
     locomotion: Vec<(Environment, Locomotion)>,
     /// The client sides this build registers, by environment. See `design/environments.md`.
     client_sides: Vec<(Environment, crate::client_side::Factory)>,
+    /// The worker placements this build registers, by environment. See `design/environments.md`.
+    worker_placements: Vec<(Environment, crate::anchors::Placement)>,
     /// The backend chosen on the backend ring, kept until the space is created.
     menu_backend: Option<String>,
     /// The directory chosen on the directory ring, kept until the space is created.
@@ -496,6 +498,7 @@ impl Conversation {
             over_grid: Vec::new(),
             locomotion: Vec::new(),
             client_sides: Vec::new(),
+            worker_placements: Vec::new(),
             sessions: Vec::new(),
             session_page: 0,
             menu_backend: None,
@@ -2164,6 +2167,48 @@ impl Conversation {
             .iter()
             .find(|(registered, _)| registered.id() == environment.id())
             .map(|(_, factory)| (environment, factory.clone()))
+    }
+
+    /// Place the workers of each environment `placements` names by its placement, in a space bound to it whose scenery
+    /// this build draws. See `design/environments.md`.
+    pub fn set_worker_placements(
+        &mut self,
+        placements: Vec<(Environment, crate::anchors::Placement)>,
+    ) {
+        self.worker_placements = placements;
+    }
+
+    /// The worker placements this build registers, as [`Self::set_worker_placements`] gave them.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn worker_placements(&self) -> &[(Environment, crate::anchors::Placement)] {
+        &self.worker_placements
+    }
+
+    /// Where the coordinator and the workers stand now: in a space, at the anchors its state gives, each that is valid,
+    /// and the workers by the placement registered for its environment where this build draws it at the space's
+    /// version; and otherwise, as outside a space, the default layout. See `design/environments.md`.
+    pub fn arrangement(&self) -> crate::anchors::Arrangement {
+        let mut arrangement = crate::anchors::Arrangement::default();
+        let Some((space, _)) = self.joined_space() else {
+            return arrangement;
+        };
+        let anchor = |pose: Option<tomori_protocol::Pose>| {
+            pose.as_ref().and_then(crate::anchors::Anchor::from_pose)
+        };
+        if let Some(agent) = anchor(space.anchors.agent) {
+            arrangement.agent = agent;
+        }
+        if let Some(workers) = anchor(space.anchors.workers) {
+            arrangement.workers = workers;
+        }
+        // The environment drawn: one this build cannot draw at the space's version is the grid.
+        let environment = self.environment_of(space);
+        arrangement.placement = self
+            .worker_placements
+            .iter()
+            .find(|(registered, _)| *registered == environment)
+            .map(|(_, placement)| placement.clone());
+        arrangement
     }
 
     /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
@@ -7224,6 +7269,76 @@ mod tests {
         assert_eq!(conversation.locomotion(), &teleport);
         hold_b(&mut conversation);
         assert_eq!(conversation.locomotion(), &Locomotion::None);
+    }
+
+    #[test]
+    fn the_arrangement_follows_the_joined_space_s_anchors_and_its_drawn_environment_s_placement() {
+        use crate::anchors::{Anchor, Placement, Placing, WorkerPlacement};
+        use tomori_protocol::{Anchors, Pose};
+        const OBSERVE: Environment = Environment::new("observe");
+        struct AtOrigin;
+        impl WorkerPlacement for AtOrigin {
+            fn place(&self, origin: Anchor, _worker: &Placing<'_>) -> glam::Vec3 {
+                origin.position
+            }
+        }
+        let placement: Placement = std::sync::Arc::new(AtOrigin);
+        let agent = Pose {
+            position: [2.0, 1.5, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let far = Pose {
+            position: [0.0, 0.0, -25.0],
+            ..agent
+        };
+        let observe = |state: &mut SpaceState| {
+            state.environment = "observe".into();
+            state.anchors = Anchors::new().with_agent(agent).with_workers(far);
+        };
+        // Outside a space, the default layout.
+        let lobby = in_lobby(Vec::new(), Vec::new());
+        let arrangement = lobby.arrangement();
+        assert_eq!(
+            (arrangement.agent, arrangement.workers),
+            (Anchor::AGENT, Anchor::HOME)
+        );
+        assert!(arrangement.placement.is_none());
+        // In a space, its anchors, each that is valid, whether or not this build draws its environment.
+        let mut conversation = joined(observe);
+        conversation.set_worker_placements(vec![(OBSERVE, placement.clone())]);
+        assert_eq!(conversation.worker_placements().len(), 1);
+        let arrangement = conversation.arrangement();
+        assert_eq!(arrangement.agent, Anchor::from_pose(&agent).unwrap());
+        assert_eq!(arrangement.workers, Anchor::HOME);
+        // Shown as the grid, the default arc.
+        assert!(arrangement.placement.is_none());
+        conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
+        // Drawn, from the moment the space is joined: the conversation does not wait for the scenery to grow in.
+        let drawn = conversation.arrangement().placement.expect("drawn");
+        assert!(std::sync::Arc::ptr_eq(&drawn, &placement));
+        assert_eq!(
+            drawn.place(Anchor::AGENT, &Placing::new("ses_1", 0)),
+            Anchor::AGENT.position
+        );
+        // At a version this build does not have, the grid again; and in another environment, none.
+        conversation.apply(space(|state| {
+            observe(state);
+            state.environment_version = Some(2);
+        }));
+        assert!(conversation.arrangement().placement.is_none());
+        conversation.apply(space(|state| {
+            state.environment = "sky".into();
+            state.anchors = Anchors::new().with_workers(agent);
+        }));
+        let sky = conversation.arrangement();
+        assert!(sky.placement.is_none());
+        assert_eq!(sky.agent, Anchor::AGENT);
+        assert_eq!(sky.workers, Anchor::from_pose(&agent).unwrap());
+        // Leaving, the default layout.
+        conversation.apply(space(observe));
+        hold_b(&mut conversation);
+        assert!(conversation.arrangement().placement.is_none());
+        assert_eq!(conversation.arrangement().agent, Anchor::AGENT);
     }
 
     #[test]

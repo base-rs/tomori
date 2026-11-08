@@ -260,6 +260,11 @@ pub struct SpaceState {
     /// titling the space. False from older servers; a client offers renaming the space only when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub renames: bool,
+    /// Where the space's environment puts the coordinator and the workers' arrangement, each only when its
+    /// registration says. None from older servers, and when the server no longer offers the environment, which a
+    /// client reads as the default layout. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Anchors::is_empty")]
+    pub anchors: Anchors,
 }
 
 /// Who gave a space its title, in place of its agent session's. See `design/spaces.md`.
@@ -273,6 +278,54 @@ pub enum Renamer {
     /// Someone a newer server names that this build does not know.
     #[serde(other)]
     Unknown,
+}
+
+/// Where a space's environment puts Tomori's coordinator and its delegated workers, in the space's coordinates, each
+/// upright, turned only about the vertical. A client uses the default layout for each that is absent. See
+/// `design/environments.md`.
+///
+/// ```
+/// use tomori_protocol::{Anchors, Pose};
+///
+/// let pod = Pose { position: [2.0, 1.2, -4.0], orientation: [0.0, 0.0, 0.0, 1.0] };
+/// let anchors = Anchors::new().with_agent(pod);
+/// assert_eq!(anchors.agent, Some(pod));
+/// assert!(anchors.workers.is_none());
+/// assert!(Anchors::new().is_empty());
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Anchors {
+    /// Where the swarm's middle stands, its eye facing along the pose's +Z.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::Pose>,
+    /// The origin of the workers' arrangement: where home is in it, its front along the pose's −Z.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<crate::Pose>,
+}
+
+impl Anchors {
+    /// None: the default layout.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// These anchors, with the coordinator at `agent`.
+    pub fn with_agent(mut self, agent: crate::Pose) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    /// These anchors, with the workers' arrangement at `workers`.
+    pub fn with_workers(mut self, workers: crate::Pose) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
+    /// Whether it says nothing, so that the default layout stands.
+    pub fn is_empty(&self) -> bool {
+        self.agent.is_none() && self.workers.is_none()
+    }
 }
 
 /// The instructions Tomori gives a space's agent, in layers, each its own instruction entry of the agent's session and
@@ -846,6 +899,31 @@ mod tests {
         // An environment a client presents, at its version.
         let presented = EnvironmentVersion::new("observe", 2);
         assert_eq!((presented.id.as_str(), presented.version), ("observe", 2));
+    }
+
+    #[test]
+    fn anchors_are_sent_only_when_given_and_absent_from_older_servers() {
+        let pose = crate::Pose {
+            position: [1.0, 1.5, -3.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let state = SpaceState {
+            anchors: Anchors::new().with_agent(pose).with_workers(pose),
+            ..SpaceState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["anchors"]["agent"]["position"][0], 1.0);
+        assert_eq!(json["anchors"]["workers"]["position"][2], -3.0);
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
+        // Only those given are sent.
+        let agent = serde_json::to_value(Anchors::new().with_agent(pose)).unwrap();
+        assert!(agent.get("workers").is_none());
+        // None at all sends no field, and an older server's state, without it, reads as none.
+        let plain = serde_json::to_value(SpaceState::default()).unwrap();
+        assert!(plain.get("anchors").is_none());
+        let read = serde_json::from_value::<SpaceState>(plain).unwrap();
+        assert!(read.anchors.is_empty());
+        assert!(!state.anchors.is_empty());
     }
 
     #[test]

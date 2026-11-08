@@ -4207,6 +4207,56 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
 }
 
 #[test]
+fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_stands_below_the_agent()
+ {
+    let (hub, _jobs) = hub_waiting();
+    let agent = upright([4.0, 1.6, -5.0]);
+    let workers = upright([0.0, 0.0, -6.0]);
+    hub.set_environments(Environments::new([
+        crate::Environment::new("sky", "Sky"),
+        crate::Environment::new("observe", "Observe")
+            .with_agent(agent)
+            .with_workers(workers),
+    ]));
+    let (space, _commands) = idle(&hub);
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&space);
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    let anchors = |client: &Client| {
+        client
+            .read()
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::Space { state } => Some(state.anchors),
+                _ => None,
+            })
+            .next_back()
+    };
+    // In Sky, which declares none, the space's state carries none.
+    assert_eq!(anchors(&vic), Some(tomori_protocol::Anchors::new()));
+    // An owner's change carries the new environment's anchors to everyone, visitors included.
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "observe".to_owned(),
+    });
+    let expected = tomori_protocol::Anchors::new()
+        .with_agent(agent)
+        .with_workers(workers);
+    assert_eq!(anchors(&vic), Some(expected));
+    let moved = ada
+        .projections()
+        .pop()
+        .expect("sent as the environment changes");
+    assert_eq!(moved.walls[0].pose, crate::stage::stage_below(agent));
+    ada.send(ClientMessage::SetEnvironment {
+        environment: "sky".to_owned(),
+    });
+    assert_eq!(anchors(&vic), Some(tomori_protocol::Anchors::new()));
+}
+
+#[test]
 fn the_agent_moving_its_space_moves_its_walls_as_an_owner_s_change_does() {
     let (hub, _jobs) = hub_waiting();
     let stage = upright([0.0, 1.5, -4.0]);

@@ -2036,6 +2036,8 @@ impl SpaceModel {
             deletes_session: false,
             renamed_by: self.renamed_by.clone(),
             renames: true,
+            // Set by the hub, which knows the environments.
+            anchors: tomori_protocol::Anchors::default(),
             error: {
                 let problems: Vec<&str> =
                     [&self.error, &self.worker_error, &self.environment_error]

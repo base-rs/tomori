@@ -46,6 +46,29 @@ let server = tomori_server::Server::builder().environment(
 let headset = tomori::Builder::default().register(observe_client::register);
 ```
 
+## Where the agent and its workers stand
+
+An environment's registration may say where Tomori's coordinator stands in it, with `Environment::with_agent`, and where the arrangement of its delegated workers stands, with `Environment::with_workers`, each a pose in the space's coordinates, as `with_stage` says where the Tomori wall stands; the Tomori wall stands below the agent unless `with_stage` places it. Its client crate may place the workers about that anchor by an algorithm of its own, an implementation of [`tomori-scene`](https://crates.io/crates/tomori-scene)'s `anchors::WorkerPlacement`, registered beside its scenery:
+
+```rust
+// NAME-client: ring the workers about the workers anchor, one per slot.
+struct Ring;
+
+impl tomori_scene::anchors::WorkerPlacement for Ring {
+    fn place(&self, origin: tomori_scene::anchors::Anchor, worker: &tomori_scene::anchors::Placing<'_>) -> glam::Vec3 {
+        let angle = worker.slot as f32 * 0.5;
+        origin.place(glam::Vec3::new(angle.sin() * 2.0, 1.4, -angle.cos() * 2.0))
+    }
+}
+
+pub fn register(sceneries: &mut tomori_render::scenery::Sceneries) {
+    sceneries.register_versioned(observe::ID, observe::VERSION, my_scenery);
+    sceneries.set_worker_placement(observe::ID, Ring);
+}
+```
+
+A placement is asked only as a worker arrives, or when the arrangement changes, told of the workers already standing in the order of their slots, so live workers never move as others come and go; without one, the workers stand on Tomori's default arc about the anchor. It runs on the frame step's thread, so keep it quick; one that panics, or answers a place that is not finite or beyond 90 m, leaves its worker on the arc. It may stand workers together: their signs then stand beside or above one another. See [`design/environments.md`](https://github.com/ioquatix/tomori/blob/main/design/environments.md).
+
 The server offers a client only the environments it presents at the same version, and a client in a space whose environment it lacks shows the grid and names it. Tomori's own server program, `tomori-server-app`, registers Sky, the grid and the farmyard, and Tomori's own app, `tomori-client-quest`'s `app` feature, registers Sky's and the farmyard's client halves, in the same way.
 
 ## The dependency rule

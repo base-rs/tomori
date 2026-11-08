@@ -30,6 +30,10 @@ pub struct Environment {
     side: Option<Arc<dyn ServerSide>>,
     /// Where Tomori's own wall stands in it, its `stage` anchor, if it says. See `design/projection.md`.
     stage: Option<tomori_protocol::Pose>,
+    /// Where Tomori's coordinator stands in it, its `agent` anchor, if it says. See `design/environments.md`.
+    agent: Option<tomori_protocol::Pose>,
+    /// Where the arrangement of its workers stands, its `workers` anchor, if it says.
+    workers: Option<tomori_protocol::Pose>,
     /// The projection walls of its own.
     walls: Vec<tomori_protocol::Pose>,
 }
@@ -44,12 +48,14 @@ impl fmt::Debug for Environment {
             .field("instructions", &self.instructions)
             .field("server_side", &self.side.is_some())
             .field("stage", &self.stage)
+            .field("agent", &self.agent)
+            .field("workers", &self.workers)
             .field("walls", &self.walls)
             .finish()
     }
 }
 
-/// Equal when they offer the same identifier, label, version, instructions, stage and walls, and the same server side, which is the same one rather than one like it.
+/// Equal when they offer the same identifier, label, version, instructions, anchors and walls, and the same server side, which is the same one rather than one like it.
 impl PartialEq for Environment {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -57,6 +63,8 @@ impl PartialEq for Environment {
             && self.version == other.version
             && self.instructions == other.instructions
             && self.stage == other.stage
+            && self.agent == other.agent
+            && self.workers == other.workers
             && self.walls == other.walls
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
@@ -78,6 +86,8 @@ impl Environment {
             instructions: String::new(),
             side: None,
             stage: None,
+            agent: None,
+            workers: None,
             walls: Vec::new(),
         }
     }
@@ -154,8 +164,8 @@ impl Environment {
     }
 
     /// The environment, with Tomori's own projection wall standing at `stage`, its `stage` anchor, in the space's
-    /// coordinates, upright and facing along the pose's +Z. Without one, the wall stands front right of home, beside the
-    /// swarm. The wall and what is on it belong to the space, so they move here with the space. See
+    /// coordinates, upright and facing along the pose's +Z. The server uses it if it is finite, within 20 m of the space's
+    /// middle and has an orientation, made upright, as walls are. Without one, the wall stands below the swarm. The wall and what is on it belong to the space, so they move here with the space. See
     /// `design/projection.md`.
     ///
     /// ```
@@ -196,6 +206,54 @@ impl Environment {
     /// Its own projection walls.
     pub fn walls(&self) -> &[tomori_protocol::Pose] {
         &self.walls
+    }
+
+    /// The environment, with Tomori's coordinator standing at `agent`, its `agent` anchor, in the space's coordinates:
+    /// the swarm's middle there, its eye facing along the pose's +Z, for everyone in a space in it, and, unless it gives
+    /// a `stage` too, the Tomori wall below it. Without one, the swarm stands 1.4 m up and 2.3 m straight ahead of home,
+    /// facing home. The server sends it in the space's state if it is finite, within 20 m of the space's middle and has
+    /// an orientation, made upright, and leaves it out otherwise. See `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_server::Environment;
+    ///
+    /// let pod = Pose { position: [2.0, 1.4, -4.0], orientation: [0.0, 0.0, 0.0, 1.0] };
+    /// assert_eq!(Environment::new("observe", "Observe").with_agent(pod).agent(), Some(pod));
+    /// assert_eq!(Environment::new("observe", "Observe").agent(), None);
+    /// ```
+    pub fn with_agent(mut self, agent: tomori_protocol::Pose) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    /// Where Tomori's coordinator stands in it, if it says.
+    pub fn agent(&self) -> Option<tomori_protocol::Pose> {
+        self.agent
+    }
+
+    /// The environment, with the arrangement of a space's delegated workers standing at `workers`, its `workers`
+    /// anchor, in the space's coordinates: where home is in the arrangement, its front along the pose's −Z. Without
+    /// one, workers stand on their arc about home. A client places them about it, by the placement its build registers
+    /// for the environment or the default arc. Sent and bounded as [`Self::with_agent`] is. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_server::Environment;
+    ///
+    /// let region = Pose { position: [0.0, 0.0, -6.0], orientation: [0.0, 0.0, 0.0, 1.0] };
+    /// assert_eq!(Environment::new("observe", "Observe").with_workers(region).workers(), Some(region));
+    /// assert_eq!(Environment::new("observe", "Observe").workers(), None);
+    /// ```
+    pub fn with_workers(mut self, workers: tomori_protocol::Pose) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
+    /// Where the arrangement of its workers stands, if it says.
+    pub fn workers(&self) -> Option<tomori_protocol::Pose> {
+        self.workers
     }
 }
 
@@ -255,17 +313,32 @@ impl Environments {
     }
 
     /// Where the projection walls stand in a space in the environment `id`: the Tomori wall at the environment's
-    /// `stage` anchor, or else at [`crate::stage::default_stage`], and the environment's own walls, none when it is not
-    /// offered. See `design/projection.md`.
+    /// `stage` anchor, if it is finite, within [`crate::stage::REACH`] and has an orientation, made upright, or else
+    /// below its `agent` anchor, or else at [`crate::stage::default_stage`], and the environment's own walls, none when
+    /// it is not offered. See `design/projection.md`.
     pub(crate) fn walls<'a>(&'a self, id: &'a str) -> crate::stage::Walls<'a> {
         let environment = self.get(id);
         crate::stage::Walls {
             environment: id,
             tomori: environment
-                .and_then(Environment::stage)
+                .and_then(|environment| environment.stage.as_ref())
+                .and_then(crate::stage::valid)
+                .or_else(|| self.anchors(id).agent.map(crate::stage::stage_below))
                 .unwrap_or_else(crate::stage::default_stage),
             declared: environment.map_or(&[], Environment::walls),
         }
+    }
+
+    /// Where the environment `id` puts the coordinator and the workers' arrangement, as a space's state carries them:
+    /// those it says that are finite, within [`crate::stage::REACH`] of the space's middle and have an orientation,
+    /// each made upright, and none when it is not offered. See `design/environments.md`.
+    pub fn anchors(&self, id: &str) -> tomori_protocol::Anchors {
+        let mut anchors = tomori_protocol::Anchors::new();
+        if let Some(environment) = self.get(id) {
+            anchors.agent = environment.agent.as_ref().and_then(crate::stage::valid);
+            anchors.workers = environment.workers.as_ref().and_then(crate::stage::valid);
+        }
+        anchors
     }
 
     /// The environments offered to a client that `presents` these, in order: those it lists with the same identifier and version, or every one for a client that lists none, as one from before versions. See `design/environments.md`.
@@ -403,10 +476,103 @@ mod tests {
     }
 
     #[test]
+    fn anchors_are_sent_upright_and_within_reach_and_move_the_tomori_wall() {
+        use tomori_protocol::{Anchors, Pose};
+        let pod = Pose {
+            position: [2.0, 1.6, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        // Tilted, it is made upright, as walls are.
+        let tilted = Pose {
+            position: [0.0, 0.0, -6.0],
+            orientation: [0.0, 0.0, 0.38268343, 0.9238795],
+        };
+        let far = Pose {
+            position: [0.0, 0.0, -21.0],
+            ..pod
+        };
+        let offered = tomoris()
+            .with(
+                Environment::new("observe", "Observe")
+                    .with_agent(pod)
+                    .with_workers(tilted),
+            )
+            .with(
+                Environment::new("far", "Far")
+                    .with_agent(far)
+                    .with_workers(Pose::default()),
+            )
+            .with(
+                Environment::new("staged", "Staged")
+                    .with_agent(pod)
+                    .with_stage(tilted),
+            )
+            .with(
+                Environment::new("unseen", "Unseen")
+                    .with_agent(Pose {
+                        position: [f32::NAN, 1.0, -3.0],
+                        ..pod
+                    })
+                    .with_workers(Pose {
+                        position: [0.0, f32::INFINITY, -3.0],
+                        ..pod
+                    })
+                    .with_stage(far),
+            );
+        let observe = offered.get("observe").unwrap();
+        assert_eq!(
+            (observe.agent(), observe.workers()),
+            (Some(pod), Some(tilted))
+        );
+        assert!(format!("{observe:?}").contains("agent: Some"));
+        let anchors = offered.anchors("observe");
+        assert_eq!(anchors.agent, Some(pod));
+        let workers = anchors.workers.unwrap();
+        assert_eq!(workers.position, tilted.position);
+        assert_eq!((workers.orientation[0], workers.orientation[2]), (0.0, 0.0));
+        // Beyond reach, or without an orientation, left out; and none for an environment without them or not offered.
+        assert_eq!(offered.anchors("far"), Anchors::new());
+        assert_eq!(offered.anchors(SKY), Anchors::new());
+        assert_eq!(offered.anchors("unknown"), Anchors::new());
+        // The Tomori wall stands below the agent, unless the environment gives a stage, and by default otherwise.
+        assert_eq!(
+            offered.walls("observe").tomori,
+            crate::stage::stage_below(pod)
+        );
+        // A stage is made upright too, and one beyond reach is left out, as an anchor not finite is.
+        let staged = offered.walls("staged").tomori;
+        assert_eq!(staged.position, tilted.position);
+        assert_eq!((staged.orientation[0], staged.orientation[2]), (0.0, 0.0));
+        assert_eq!(offered.anchors("unseen"), Anchors::new());
+        assert_eq!(
+            offered.walls("unseen").tomori,
+            crate::stage::default_stage()
+        );
+        assert_eq!(offered.walls("far").tomori, crate::stage::default_stage());
+        assert_eq!(offered.walls(SKY).tomori, crate::stage::default_stage());
+        // Anchors tell environments apart.
+        let plain = Environment::new("observe", "Observe");
+        assert_ne!(plain, plain.clone().with_agent(pod));
+        assert_ne!(plain, plain.clone().with_workers(pod));
+    }
+
+    #[test]
     fn a_server_side_is_run_with_the_space() {
         let environment = Environment::new("observe", "Observe").with_server_side(Idle);
         let side = environment.server_side().expect("it has one");
         assert_eq!(side.run(&Space::new("space-1", "Fleet", "/")), Ok(()));
+    }
+
+    #[test]
+    fn an_environment_says_where_the_tomori_wall_stands_only_when_it_does() {
+        let stage = tomori_protocol::Pose::default();
+        assert_eq!(Environment::new("observe", "Observe").stage(), None);
+        assert_eq!(
+            Environment::new("observe", "Observe")
+                .with_stage(stage)
+                .stage(),
+            Some(stage)
+        );
     }
 
     #[test]

@@ -95,6 +95,18 @@ impl Builder {
         self
     }
 
+    /// Place the delegated workers of a space bound to the environment `id`, while this build draws its scenery, by
+    /// `placement`, about the workers anchor its server gives, in place of any registered before for it, rather than on
+    /// the default arc. Tomori's own environments register none. See `design/environments.md`.
+    pub fn worker_placement(
+        mut self,
+        id: &'static str,
+        placement: impl tomori_scene::anchors::WorkerPlacement + 'static,
+    ) -> Self {
+        self.sceneries.set_worker_placement(id, placement);
+        self
+    }
+
     /// The sceneries registered so far, to register more.
     pub fn sceneries(&mut self) -> &mut Sceneries {
         &mut self.sceneries
@@ -119,6 +131,7 @@ impl Builder {
         conversation.set_over_grid(self.over_grid());
         conversation.set_locomotion(self.sceneries.locomotion());
         conversation.set_client_sides(self.sceneries.client_sides());
+        conversation.set_worker_placements(self.sceneries.worker_placements());
         (conversation, connection)
     }
 
@@ -298,6 +311,42 @@ mod tests {
         assert_eq!(
             conversation.environments(),
             Some(vec![EnvironmentVersion::new("minimal", 1)])
+        );
+    }
+
+    struct AtOrigin;
+
+    impl tomori_scene::anchors::WorkerPlacement for AtOrigin {
+        fn place(
+            &self,
+            origin: tomori_scene::anchors::Anchor,
+            _worker: &tomori_scene::anchors::Placing<'_>,
+        ) -> glam::Vec3 {
+            origin.position
+        }
+    }
+
+    #[test]
+    fn a_build_places_its_environments_workers_and_its_participant_does_too() {
+        assert!(
+            Builder::default()
+                .sceneries()
+                .worker_placements()
+                .is_empty()
+        );
+        let builder = Builder::empty()
+            .scenery("floor", blank)
+            .worker_placement("floor", AtOrigin);
+        let (conversation, _connection) = builder.participant(crate::Overrides::default());
+        let placements = conversation.worker_placements();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].0, Environment::new("floor"));
+        let origin = tomori_scene::anchors::Anchor::AGENT;
+        assert_eq!(
+            placements[0]
+                .1
+                .place(origin, &tomori_scene::anchors::Placing::new("ses_1", 0)),
+            origin.position
         );
     }
 

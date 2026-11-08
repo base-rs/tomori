@@ -12,7 +12,7 @@ The spectator plays stereo and hears as the participant it follows does, from th
 
 The spectator follows the participant's head from their presence, which carries where they travelled in an environment that allows it (see `locomotion.md`), so it sees from where they are; it draws none of their teleport preview.
 
-The spectator shows the environment of the space it watches, as everyone in it does, and follows it when an owner changes it (see `environments.md`).
+The spectator shows the environment of the space it watches, as everyone in it does, and follows it when an owner changes it (see `environments.md`). It stands the swarm at the space's agent anchor and the workers' arrangement at its workers anchor, and places workers with the placement registered with the sceneries it is given, or the default arc, by the same rule as the headset, so that both draw the coordinator and workers in the same places. Two things stay at the swarm's default place, an accepted limit: the neutral view it shows with nobody to follow, which looks at the default place from home, and the place its audience hears the agent from when the swarm has no agents to take the middle of, which it always has.
 
 The spectator reports no engagement, so the server keeps it at the live edge of agent speech: its audience hears replies as they are spoken, never a catch-up of what was said before it joined. See `speech.md`.
 

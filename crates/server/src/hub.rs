@@ -5504,6 +5504,8 @@ impl Hub {
                 );
                 // Named before the state is fitted to its budget, which counts them.
                 state.environment_version = environments.version(&space.model.environment);
+                // Where the environment puts the coordinator and the workers, for everyone in it. See `design/environments.md`.
+                state.anchors = environments.anchors(&space.model.environment);
                 // Every space projects. See `design/projection.md`.
                 state.projection = true;
                 // Participants adjust walls, and an owner's removal leaves a wall's panels floating.

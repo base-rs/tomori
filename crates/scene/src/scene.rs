@@ -937,6 +937,9 @@ impl Step {
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
         let attracting = pointing.attracting && !menu_shown && !wrist_active && !selecting;
         let attractor = senses.attractor.filter(|_| attracting);
+        // The swarm and the workers stand where the joined space's environment puts them, and by default otherwise. See `design/environments.md`.
+        let arrangement = conversation.arrangement();
+        self.swarm.set_anchor(arrangement.agent);
         self.swarm.step(dt, attractor);
         let marker = match senses.marker {
             Marker::Always => senses.attractor,
@@ -1292,6 +1295,8 @@ impl Step {
         );
         self.delegation_scene
             .set_coordinator_samples(&self.coordinator_samples);
+        self.delegation_scene
+            .arrange(arrangement.workers, arrangement.placement);
         self.delegation_scene.update(root, workspace, dt);
         // The ray is drawn wherever it points at something: at arrival's objects or the hand menu, and in a space at the workers, where it ends among the worker it meets or else stops short of them. See `design/interaction.md`.
         let ray = senses.ray.filter(|_| senses.beam);
@@ -4775,6 +4780,62 @@ mod tests {
                 .presence
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_swarm_and_workers_stand_where_the_space_s_environment_puts_them() {
+        use crate::anchors::{Anchor, Placing, WorkerPlacement};
+        struct Ahead;
+        impl WorkerPlacement for Ahead {
+            fn place(&self, origin: Anchor, worker: &Placing<'_>) -> Vec3 {
+                origin.place(Vec3::new(worker.slot as f32, 1.5, -2.0))
+            }
+        }
+        let agent = tomori_protocol::Pose {
+            position: [3.0, 1.6, -5.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let workers = tomori_protocol::Pose {
+            position: [0.0, 0.0, -4.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation
+            .set_worker_placements(vec![(crate::test_support::SKY, std::sync::Arc::new(Ahead))]);
+        conversation.apply(space(|state| {
+            state.anchors = tomori_protocol::Anchors::new()
+                .with_agent(agent)
+                .with_workers(workers);
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        let mut step = Step::default();
+        let now = Instant::now();
+        // From the first frame in the space, while its scenery still grows in, the placement places the worker.
+        let first = step
+            .update(&senses(), &mut conversation, &mut felt(), now, FRAME)
+            .stations[0]
+            .position;
+        let scenery = step.motion.scenery(step.arrival_time);
+        assert!(
+            scenery.reveal.is_some()
+                || scenery.environment == crate::environment::Environment::MINIMAL,
+            "still growing in"
+        );
+        assert_eq!(first, [0.0, 1.5, -6.0]);
+        for _ in 0..1000 {
+            step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        }
+        let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+        assert_eq!(frame.swarm.anchor(), Anchor::from_pose(&agent).unwrap());
+        // The agent is heard from the swarm, where it has glided.
+        assert!(Vec3::from_array(frame.agent).distance(Vec3::from_array(agent.position)) < 1.0);
+        // The worker stands where the placement put it about the workers anchor.
+        assert_eq!(frame.stations[0].position, [0.0, 1.5, -6.0]);
     }
 
     #[test]

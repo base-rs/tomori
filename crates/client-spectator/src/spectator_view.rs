@@ -35,6 +35,8 @@ impl SpectatorView {
             agent.position = Vec3::from_array(*position);
         }
         input.swarm.visual = frame.interaction;
+        // Its rings stand about the swarm wherever the space's environment puts it.
+        input.swarm.set_anchor(self.feed.swarm_anchor());
         let right_marker = if frame.controllers[crate::controller::RIGHT].is_some()
             || frame.hands[crate::controller::RIGHT].is_some()
         {
