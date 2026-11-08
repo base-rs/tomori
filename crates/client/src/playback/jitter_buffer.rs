@@ -93,6 +93,11 @@ impl JitterBuffer {
         self.idle_samples
     }
 
+    /// Whether the source has audio still to play: it is playing, or frames wait for it to start. When resampling, a stream that runs dry keeps its last sample to interpolate into the next frame, should one come; that sample alone is not audio to play, so a stream that has ended does not count.
+    pub fn has_audio(&self) -> bool {
+        self.state == State::Playing || !self.frames.is_empty()
+    }
+
     /// Source-rate samples buffered and not yet played.
     pub fn buffered_samples(&self) -> usize {
         let pending = self.pending.len().saturating_sub(self.position as usize);
