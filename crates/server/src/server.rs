@@ -1477,19 +1477,23 @@ async fn list_sessions<S: Timers>(
     let directory = match resolve(scheduler, &places, &directory, cancellation).await {
         Some(directory) => directory,
         None => {
-            hub.sessions(&participant, Err(DIRECTORY_UNAVAILABLE.to_owned()));
+            hub.sessions(
+                &participant,
+                &backend,
+                Err(DIRECTORY_UNAVAILABLE.to_owned()),
+            );
             return;
         }
     };
     let Some(found) = hub.backends.get(&backend) else {
-        hub.sessions(&participant, Err("Unknown backend.".to_owned()));
+        hub.sessions(&participant, &backend, Err("Unknown backend.".to_owned()));
         return;
     };
     let sessions = found
         .sessions(&directory)
         .await
         .map_err(|error| error.message);
-    hub.sessions(&participant, sessions);
+    hub.sessions(&participant, &backend, sessions);
 }
 
 /// The canonical form of a client's directory, checked on its own thread for at most [`RESOLVE_TIMEOUT`] so that a slow file system cannot stall the server, or `None` if it is refused.

@@ -68,6 +68,8 @@ pub enum Key {
     Directory(String),
     /// A choice on the session ring: an existing session to attach, or `None` for a new one.
     Session(Option<String>),
+    /// The choice on the session ring that shows the next existing sessions, when they do not fit on it at once.
+    MoreSessions,
     /// A choice on the environment ring, by identifier.
     Environment(String),
     /// The object that pairs this device as an owner, on the connected server's orbit. See `design/security.md`.

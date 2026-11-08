@@ -3789,31 +3789,50 @@ fn owns_registration(
     }
 }
 
-/// The sessions a participant can attach to. The listing asks for top-level,
-/// unarchived sessions; a child session (a subagent's worker) or an archived
-/// one that a server returns anyway is left out.
-fn session_summaries(sessions: &[Value]) -> Vec<SessionSummary> {
-    sessions
+/// The sessions a participant can attach to, most recently active first. The
+/// listing asks for top-level, unarchived sessions; a child session (a
+/// subagent's worker) or an archived one that a server returns anyway is left
+/// out. A session is busy when `active`, OpenCode's list of the sessions its
+/// process runs, has it, or, when that list could not be read, when its record
+/// says so, as for a space's own session (see `design/agent-backends.md`).
+fn session_summaries(sessions: &[Value], active: Option<&HashSet<String>>) -> Vec<SessionSummary> {
+    let mut listed: Vec<(f64, SessionSummary)> = sessions
         .iter()
         .filter(|info| info.get("parentID").is_none_or(Value::is_null))
         .filter(|info| info.pointer("/time/archived").is_none_or(Value::is_null))
         .filter_map(|info| {
-            Some(SessionSummary {
-                id: info.get("id")?.as_str()?.to_owned(),
-                title: info
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                directory: info
-                    .get("location")
-                    .and_then(|location| location.get("directory"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
+            let id = info.get("id")?.as_str()?.to_owned();
+            let busy = match active {
+                Some(active) => active.contains(&id),
+                None => api::running_from_record(info).unwrap_or(false),
+            };
+            let updated = info
+                .pointer("/time/updated")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::NEG_INFINITY);
+            Some((
+                updated,
+                SessionSummary {
+                    id,
+                    title: info
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    directory: info
+                        .get("location")
+                        .and_then(|location| location.get("directory"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    busy,
+                },
+            ))
         })
-        .collect()
+        .collect();
+    // Stable, so sessions OpenCode lists with one time keep its order.
+    listed.sort_by(|(left, _), (right, _)| right.total_cmp(left));
+    listed.into_iter().map(|(_, summary)| summary).collect()
 }
 
 /// The rest of a command whose network part has finished, applied to the
@@ -3915,10 +3934,21 @@ fn prepare_command<'a, S: Timers>(
             None
         }),
         Command::Sessions { directory, reply } => Box::pin(async move {
-            let result = api::list_sessions(client, resolved, &directory, cancellation)
-                .await
-                .map(|sessions| session_summaries(&sessions))
-                .map_err(map_failure);
+            let result = match api::list_sessions(client, resolved, &directory, cancellation).await
+            {
+                Ok(sessions) => {
+                    let active = api::active_sessions_with_timeout(
+                        client,
+                        resolved,
+                        cancellation,
+                        timers,
+                        api::ACTIVE_LOOKUP_TIMEOUT,
+                    )
+                    .await;
+                    Ok(session_summaries(&sessions, active.as_ref()))
+                }
+                Err(failure) => Err(map_failure(failure)),
+            };
             let _ = reply.try_send(result);
             None
         }),
@@ -4371,7 +4401,7 @@ mod tests {
             json!({"id":"archived","title":"Old","time":{"created":1,"archived":2}}),
             json!({"title":"No identifier"}),
         ];
-        let summaries = session_summaries(&sessions);
+        let summaries = session_summaries(&sessions, None);
         let ids: Vec<_> = summaries
             .iter()
             .map(|session| session.id.as_str())
@@ -4379,6 +4409,44 @@ mod tests {
         assert_eq!(ids, ["root", "explicit"]);
         assert_eq!(summaries[0].title, "Support");
         assert_eq!(summaries[0].directory, "/tmp");
+    }
+
+    /// Sessions are listed most recently active first, keeping OpenCode's order among those active at once, and a
+    /// busy session is marked busy rather than left out: by OpenCode's list of the sessions it runs, or by its record
+    /// when that list could not be read.
+    #[test]
+    fn sessions_are_listed_newest_first_with_busy_ones_marked() {
+        let sessions = [
+            json!({"id":"old","time":{"updated":1,"busy":5,"idle":3}}),
+            json!({"id":"new","time":{"updated":30,"busy":20,"idle":25}}),
+            json!({"id":"timeless"}),
+            json!({"id":"middle","time":{"updated":10}}),
+            json!({"id":"also-middle","time":{"updated":10}}),
+        ];
+        let listed = |active: Option<&std::collections::HashSet<String>>| {
+            session_summaries(&sessions, active)
+                .into_iter()
+                .map(|session| (session.id, session.busy))
+                .collect::<Vec<_>>()
+        };
+        let by_record = listed(None);
+        assert_eq!(
+            by_record,
+            [
+                ("new".to_owned(), false),
+                ("middle".to_owned(), false),
+                ("also-middle".to_owned(), false),
+                ("old".to_owned(), true),
+                ("timeless".to_owned(), false),
+            ]
+        );
+        let running = std::collections::HashSet::from(["middle".to_owned()]);
+        let by_process: Vec<_> = listed(Some(&running))
+            .into_iter()
+            .filter(|(_, busy)| *busy)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(by_process, ["middle"]);
     }
 
     /// The first of `events` of `kind`, sent once it arrives.
@@ -6646,8 +6714,6 @@ mod tests {
                     json!({"data": children, "cursor": {"next": null}}).to_string(),
                 ),
             }
-        } else if path.starts_with("/api/session?directory=") {
-            ("200 OK", r#"{"data":[]}"#.to_owned())
         } else if path.starts_with("/api/experimental/mcp/") {
             let mut state = shared.state.lock().unwrap();
             state.mcp_requests.push((method.clone(), path.clone()));
@@ -7202,10 +7268,36 @@ mod tests {
                 {"id": "plan", "mode": "primary"}
             ]));
             state.sessions.insert("existing".into(), Vec::new());
+            // The top-level listing is the children of `null`: one session beneath `/tmp`, busy, one outside it, and
+            // a worker that a server returns anyway.
+            let mut beneath = fake_record("beneath");
+            beneath["title"] = json!("Beneath");
+            beneath["location"]["directory"] = json!("/tmp/project");
+            let mut outside = fake_record("outside");
+            outside["location"]["directory"] = json!("/tmpfiles");
+            let mut worker = fake_record("worker");
+            worker["parentID"] = json!("beneath");
+            state
+                .children
+                .insert("null".into(), vec![beneath, outside, worker]);
+            state.active.insert("beneath".into());
         });
         let service = FakeService::start(shared.clone(), "");
         let backend = crate::OpenCode::new(crate::Config {
             url: Some(format!("http://{}", service.address)),
+        });
+        assert_eq!(
+            block_on(backend.sessions("/tmp")).unwrap(),
+            [SessionSummary {
+                id: "beneath".into(),
+                title: "Beneath".into(),
+                directory: "/tmp/project".into(),
+                busy: true,
+            }]
+        );
+        shared.update(|state| {
+            state.children.remove("null");
+            state.active.clear();
         });
         assert_eq!(backend.name(), crate::NAME);
         assert_eq!(
@@ -11485,7 +11577,7 @@ mod tests {
         };
         end_registration(&mut registrations, "unknown", None);
         assert!(registrations.contains_key("s"));
-        assert!(session_summaries(&[json!({"id": 1})]).is_empty());
+        assert!(session_summaries(&[json!({"id": 1})], None).is_empty());
     }
 
     #[test]

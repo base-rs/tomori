@@ -4,7 +4,7 @@
 //! Size limits that keep every server frame within [`tomori_protocol::MAX_FRAME_BYTES`]. See `design/server.md`.
 //!
 //! Strings supplied by clients are bounded when they arrive, and rejected with an error that does not repeat them. Space snapshots and the lobby listing are then trimmed to a byte budget when they are rendered, because they also carry text produced by the agent.
-use tomori_protocol::{SpaceState, SpaceSummary};
+use tomori_protocol::{SessionSummary, SpaceState, SpaceSummary};
 
 /// Longest participant identity in `Hello`, in bytes.
 pub const PARTICIPANT_BYTES: usize = 128;
@@ -240,6 +240,28 @@ pub fn fit_spaces(spaces: &mut Vec<SpaceSummary>) {
         let space = spaces.remove(index);
         size -= removed(&space, spaces.len());
     }
+}
+
+/// Fit a backend's session list, most recently active first, to what a client can bind and to [`SNAPSHOT_BUDGET`]. A
+/// session whose identifier is longer than [`SESSION_BYTES`] or whose directory is longer than [`DIRECTORY_BYTES`]
+/// is left out, since a request to bind it would be refused; a title is cut to [`TITLE_BYTES`], since a client names
+/// the space after it; and then the least recently active are left out until the rest fit.
+pub fn sessions(sessions: Vec<SessionSummary>) -> Vec<SessionSummary> {
+    let mut size = 2;
+    sessions
+        .into_iter()
+        .filter(|session| {
+            session.id.len() <= SESSION_BYTES && session.directory.len() <= DIRECTORY_BYTES
+        })
+        .map(|mut session| {
+            session.title = truncate(&session.title, TITLE_BYTES);
+            session
+        })
+        .take_while(|session| {
+            size += json_len(session) + 1;
+            size <= SNAPSHOT_BUDGET
+        })
+        .collect()
 }
 
 /// The index of the space that least needs attention: the lowest level, then the one that has needed it for the least time.
@@ -565,5 +587,43 @@ mod tests {
         spaces[0].attention = Some(tomori_protocol::Attention::Unknown);
         spaces[1].attention = Some(tomori_protocol::Attention::Reply);
         assert_eq!(least_urgent(&spaces), 0);
+    }
+
+    fn session(id: &str, directory: &str) -> SessionSummary {
+        SessionSummary {
+            id: id.into(),
+            title: "t".repeat(TITLE_BYTES * 2),
+            directory: directory.into(),
+            busy: false,
+        }
+    }
+
+    /// Sessions that could not be bound are left out, titles are cut, and the least recently active are left out to fit.
+    #[test]
+    fn session_lists_keep_what_can_be_bound_and_the_newest_that_fit() {
+        let fitted = sessions(vec![
+            session("newest", "/work"),
+            session(&"s".repeat(SESSION_BYTES + 1), "/work"),
+            session("deep", &format!("/{}", "d".repeat(DIRECTORY_BYTES))),
+            session("older", "/work/older"),
+        ]);
+        let ids: Vec<_> = fitted.iter().map(|session| session.id.as_str()).collect();
+        assert_eq!(ids, ["newest", "older"]);
+        assert!(
+            fitted
+                .iter()
+                .all(|session| session.title.len() <= TITLE_BYTES)
+        );
+        assert!(fitted[0].title.ends_with(TRUNCATED));
+
+        let long = format!("/{}", "d".repeat(DIRECTORY_BYTES - 1));
+        let many: Vec<_> = (0..200)
+            .map(|index| session(&format!("s{index}"), &long))
+            .collect();
+        let fitted = sessions(many);
+        assert!(!fitted.is_empty() && fitted.len() < 200);
+        assert_eq!(fitted[0].id, "s0");
+        assert_eq!(fitted.last().unwrap().id, format!("s{}", fitted.len() - 1));
+        assert!(json_len(&fitted) <= SNAPSHOT_BUDGET);
     }
 }

@@ -891,7 +891,7 @@ fn what_cannot_be_said_to_someone_who_has_gone_is_not_said() {
     hub.create_failed("nobody", "failed".to_owned());
     let client = Client::greeted(&hub, Access::open(), "ada");
     hub.disconnect(client.connection);
-    hub.sessions("/ada", Ok(Vec::new()));
+    hub.sessions("/ada", "fake", Ok(Vec::new()));
     hub.handle(client.connection, ClientMessage::Ping { nonce: 1 });
     hub.handle(client.connection, ClientMessage::ListSpaces);
     hub.receive(client.connection, Frame::audio(&frame(1)));
@@ -902,7 +902,7 @@ fn what_cannot_be_said_to_someone_who_has_gone_is_not_said() {
 fn a_session_list_that_failed_is_said_as_an_error() {
     let (hub, _jobs) = hub();
     let client = Client::greeted(&hub, Access::open(), "ada");
-    hub.sessions("/ada", Err("unreachable agent".to_owned()));
+    hub.sessions("/ada", "fake", Err("unreachable agent".to_owned()));
     assert_eq!(client.errors(), ["unreachable agent"]);
 }
 

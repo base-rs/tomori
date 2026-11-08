@@ -4087,29 +4087,45 @@ impl Hub {
         self.lock().error(creator, error);
     }
 
-    /// Report a backend's session list to `participant`, its failures as an error.
+    /// Report `backend`'s session list to `participant`, its failures as an error. A session already bound to a space
+    /// that has not closed is left out, since binding it again would be refused, as is one whose identifier or
+    /// directory is too long to be sent back to bind it; the list is then fitted to [`limits::SNAPSHOT_BUDGET`]. See
+    /// `design/arrival.md`.
     pub(crate) fn sessions(
         &self,
         participant: &str,
+        backend: &str,
         result: Result<Vec<tomori_backend::SessionSummary>, String>,
     ) {
+        let state = self.lock();
         let message = match result {
-            Ok(sessions) => ServerMessage::Sessions {
-                sessions: sessions
+            Ok(sessions) => {
+                let bound: HashSet<&str> = state
+                    .spaces
+                    .iter()
+                    .filter(|space| space.model.backend == backend && !space.model.is_closed())
+                    .map(|space| space.model.session.as_str())
+                    .collect();
+                let sessions = sessions
                     .into_iter()
+                    .filter(|session| !bound.contains(session.id.as_str()))
                     .map(|session| tomori_protocol::SessionSummary {
                         id: session.id,
                         title: session.title,
                         directory: session.directory,
+                        busy: session.busy,
                     })
-                    .collect(),
-            },
+                    .collect();
+                ServerMessage::Sessions {
+                    sessions: limits::sessions(sessions),
+                }
+            }
             Err(error) => ServerMessage::Error {
                 error: limits::truncate(&error, limits::ERROR_BYTES),
                 space: None,
             },
         };
-        self.lock().send(participant, message);
+        state.send(participant, message);
     }
 
     pub(crate) fn space_event(&self, space: &str, event: Event) {

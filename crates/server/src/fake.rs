@@ -296,11 +296,14 @@ impl Backend for FakeBackend {
         Ok(self
             .started()
             .iter()
-            .filter(|session| session.inner.directory == directory)
+            // The most recently started first, as the most recently active.
+            .rev()
+            .filter(|session| std::path::Path::new(&session.inner.directory).starts_with(directory))
             .map(|session| SessionSummary {
                 id: session.id(),
                 title: session.inner.title.clone(),
                 directory: session.inner.directory.clone(),
+                busy: session.is_busy(),
             })
             .collect())
     }
