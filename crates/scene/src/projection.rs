@@ -3,15 +3,15 @@
 
 //! What is projected in a space: its walls and the text and code panels on them or floating, as the server sends them; where
 //! each stands; which panel the ray points at, and the label that names it; and pulling a panel off with the grip,
-//! carrying it along the ray and letting it go, where it floats, or, near a wall, snaps back into that wall's layout.
-//! See `design/projection.md`.
+//! carrying it along the ray, pushed further or pulled closer and turned in snaps with the right stick, and letting it
+//! go, where it floats, or, near a wall, snaps back into that wall's layout. See `design/projection.md`.
 //!
 //! Where panels are is the space's, shared by everyone in it, so a panel let go is sent to the server, and shown where
 //! it was let go until the server's projection says where it is. The server lays walls out: this only draws each panel
 //! in the slot the server gives it.
 use std::time::{Duration, Instant};
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use tomori_protocol::{
     CODE_LINES, Code, Panel, Place, Pose, Projection, TokenKind, WALL_SLOTS, Wall, WallKind,
 };
@@ -21,6 +21,7 @@ use crate::{
     board::{Grip, model, pose},
     canvas::{Canvas, Rect},
     controller_ui::Sheet,
+    manipulation::Manipulation,
     pointing::Ray,
     recording::facing,
     transcript::{BRIGHT, DIM, TEXT},
@@ -63,10 +64,6 @@ const LIFT: f32 = 0.01;
 /// How far from a wall's plane, and beyond its edges, a panel let go snaps back into its layout, in metres.
 const SNAP_DEPTH: f32 = 0.4;
 const SNAP_MARGIN: f32 = 0.25;
-
-/// How near and far a panel can be carried along the ray, in metres.
-const NEAREST: f32 = 0.3;
-const FARTHEST: f32 = 6.0;
 
 /// How long a panel let go is shown where it was let go, while the server's projection does not yet say so.
 pub const PENDING: Duration = Duration::from_secs(3);
@@ -447,8 +444,8 @@ pub fn added_wall(head: Pose) -> Pose {
 #[derive(Clone, Debug, PartialEq)]
 struct Held {
     panel: String,
-    /// How far along the ray it is carried.
-    distance: f32,
+    /// How far along the ray it is carried, and how far it is turned from facing the participant.
+    manipulation: Manipulation,
     /// Where it was last drawn, which it stays at while the ray is not tracked.
     model: Mat4,
 }
@@ -476,10 +473,20 @@ pub struct Input<'a> {
     /// Whether the ray and grip act on the panels: in a space, with nothing else taking them, such as the hand menu, the
     /// right wrist's transcript or a card carried. Otherwise a panel carried is let go where it is.
     pub active: bool,
+    /// Whether the ray points at panels: not while a teleport is aimed, when a panel carried stays in the hand, and
+    /// nothing is pointed at or pulled off. See `design/locomotion.md`.
+    pub pointing: bool,
     /// How far along the ray something else it meets is, such as a card, which the grip picks up instead of a panel
     /// behind it.
     pub nearer: f32,
+    /// The right stick, while a panel carried takes it: forward and back push it further or pull it closer, and a flick
+    /// sideways turns it a snap.
+    pub stick: Vec2,
+    /// The right stick was clicked while a panel was carried: it turns back to face the participant square.
+    pub straighten: bool,
     pub now: Instant,
+    /// Seconds since the last frame.
+    pub dt: f32,
 }
 
 /// What the projector did this frame.
@@ -491,6 +498,8 @@ pub struct Output {
     pub pointed: Option<(String, f32, Vec3)>,
     /// A panel was pulled off.
     pub picked: bool,
+    /// The panel carried turned a snap, or back to square.
+    pub turned: bool,
     /// A panel was let go, to send to the server: onto a wall, or floating.
     pub placed: Option<(String, Target)>,
     /// Where the ray ends on a panel: where it meets the panel pointed at, or the middle of the one carried.
@@ -537,13 +546,21 @@ impl Projector {
             .filter_map(|wall| model(&wall.pose).map(|frame| (wall, frame)))
             .collect();
         let mut output = Output::default();
-        // The panel carried follows the ray, facing the viewer.
+        // The panel carried follows the ray, facing the viewer, as far along it and as turned as the right stick puts it.
         if let Some(held) = &mut self.held
-            && let Some(ray) = input.ray.filter(|_| input.active)
+            && input.active
         {
-            // Upright, as it floats: facing the viewer turned only about the vertical.
-            let at = ray.at(held.distance);
-            held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0);
+            output.turned = held.manipulation.update(input.stick, input.dt);
+            if input.straighten && !held.manipulation.square() {
+                held.manipulation.straighten();
+                output.turned = true;
+            }
+            if let Some(ray) = input.ray {
+                // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
+                let at = ray.at(held.manipulation.distance());
+                held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0)
+                    * Mat4::from_rotation_y(held.manipulation.yaw());
+            }
         }
         // Let go, or taken by something else, it snaps onto a wall near it, or floats where it is.
         if (released || !input.active)
@@ -566,15 +583,19 @@ impl Projector {
             .collect();
         // The nearest panel the ray meets, other than one carried, is pointed at.
         let carried = self.held();
-        output.pointed = input.ray.filter(|_| input.active).and_then(|ray| {
-            models
-                .iter()
-                .filter(|(panel, _)| Some(panel.id.as_str()) != carried)
-                .filter_map(|(panel, model)| {
-                    hit(*model, &ray).map(|distance| (panel.id.clone(), distance, ray.at(distance)))
-                })
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-        });
+        output.pointed = input
+            .ray
+            .filter(|_| input.active && input.pointing)
+            .and_then(|ray| {
+                models
+                    .iter()
+                    .filter(|(panel, _)| Some(panel.id.as_str()) != carried)
+                    .filter_map(|(panel, model)| {
+                        hit(*model, &ray)
+                            .map(|distance| (panel.id.clone(), distance, ray.at(distance)))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+            });
         // A squeeze pulls off the panel pointed at, unless something nearer takes it.
         if pressed
             && carried.is_none()
@@ -589,7 +610,7 @@ impl Projector {
                 .expect("pointed at a panel shown");
             self.held = Some(Held {
                 panel,
-                distance: distance.clamp(NEAREST, FARTHEST),
+                manipulation: Manipulation::new(distance),
                 model,
             });
             self.pending = None;

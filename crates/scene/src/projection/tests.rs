@@ -47,8 +47,12 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         grip: Some(grip),
         viewer: Some(HOME),
         active: true,
+        pointing: true,
         nearer: f32::INFINITY,
+        stick: Vec2::ZERO,
+        straighten: false,
         now,
+        dt: 1.0 / 72.0,
     }
 }
 
@@ -529,6 +533,123 @@ fn the_grip_pulls_off_nothing_behind_something_nearer_or_while_the_panels_do_not
             .pointed
             .is_none()
     );
+}
+
+#[test]
+fn a_panel_carried_stays_in_the_hand_while_a_teleport_is_aimed() {
+    let shown = projection(vec![
+        panel("a", on(TOMORI_WALL, 0)),
+        panel("b", on(TOMORI_WALL, 1)),
+    ]);
+    let now = Instant::now();
+    let aiming = |ray: Option<Ray>, grip: f32| Input {
+        pointing: false,
+        ..input(&shown, ray, grip, now)
+    };
+    // Aiming, the ray points at no panel and the grip pulls none off.
+    let mut projector = Projector::default();
+    let ray = at(slot_centre(&shown, 0));
+    let output = projector.update(aiming(ray, 0.0));
+    assert_eq!(output.pointed, None);
+    let output = projector.update(aiming(ray, 1.0));
+    assert!(!output.picked && projector.held().is_none());
+    // A panel carried as aiming starts stays carried, following the ray at its distance, wherever the rig takes the ray.
+    let mut projector = Projector::default();
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    assert_eq!(projector.held(), Some("a"));
+    let distance = HOME.distance(slot_centre(&shown, 0));
+    let travelled = Ray::new(HOME + Vec3::new(3.0, 0.0, -4.0), Vec3::new(0.3, -0.5, -1.0));
+    let output = projector.update(aiming(travelled, 1.0));
+    assert_eq!(output.placed, None);
+    assert_eq!(projector.held(), Some("a"));
+    assert!((output.end.unwrap() - travelled.unwrap().at(distance)).length() < 1e-4);
+    assert_eq!(output.pointed, None);
+    // Let go while aiming, it floats where it is.
+    let output = projector.update(aiming(travelled, 0.0));
+    assert!(matches!(output.placed, Some((ref panel, Target::Free(_))) if panel == "a"));
+}
+
+#[test]
+fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let_go_so() {
+    use crate::manipulation::{FARTHEST, NEAREST, RATE, YAW_STEP};
+    let shown = projection(vec![panel("a", on(TOMORI_WALL, 0))]);
+    let now = Instant::now();
+    let ray = at(slot_centre(&shown, 0));
+    let distance = HOME.distance(slot_centre(&shown, 0));
+    let stick = |stick: Vec2, dt: f32| Input {
+        stick,
+        dt,
+        ..input(&shown, ray, 1.0, now)
+    };
+    let mut projector = Projector::default();
+    projector.update(input(&shown, ray, 0.0, now));
+    projector.update(input(&shown, ray, 1.0, now));
+    // Forward for a fifth of a second pushes it further along the ray.
+    let output = projector.update(stick(Vec2::Y, 0.2));
+    let pushed = distance * (RATE * 0.2).exp();
+    assert!((output.end.unwrap() - ray.unwrap().at(pushed)).length() < 1e-3);
+    // Back, long enough, pulls it to the nearest it goes; forward, to the farthest.
+    projector.update(stick(Vec2::NEG_Y, 10.0));
+    let output = projector.update(stick(Vec2::ZERO, 0.0));
+    assert!((output.end.unwrap() - ray.unwrap().at(NEAREST)).length() < 1e-3);
+    let output = projector.update(stick(Vec2::Y, 10.0));
+    assert!((output.end.unwrap() - ray.unwrap().at(FARTHEST)).length() < 1e-3);
+    projector.update(stick(Vec2::ZERO, 0.0));
+    // A flick right turns it a snap clockwise, seen from above, once, and says so.
+    let facing_of = |output: &Output| {
+        let model = output
+            .sheets
+            .iter()
+            .find(|sheet| {
+                sheet
+                    .canvas
+                    .as_ref()
+                    .unwrap()
+                    .plain()
+                    .starts_with("Panel a")
+            })
+            .unwrap()
+            .model
+            .unwrap();
+        model.z_axis.truncate()
+    };
+    let square = facing_of(&projector.update(stick(Vec2::ZERO, 0.0)));
+    let output = projector.update(stick(Vec2::X, 0.1));
+    assert!(output.turned);
+    let turned = facing_of(&output);
+    assert!((square.angle_between(turned) - YAW_STEP).abs() < 1e-4);
+    assert!(square.cross(turned).y < 0.0, "clockwise");
+    assert!(turned.y.abs() < 1e-5, "upright");
+    assert!(!projector.update(stick(Vec2::X, 0.1)).turned);
+    projector.update(stick(Vec2::ZERO, 0.0));
+    assert!(projector.update(stick(Vec2::X, 0.1)).turned);
+    projector.update(stick(Vec2::ZERO, 0.0));
+    // A click turns it back square, once; square already, it says nothing.
+    let click = Input {
+        straighten: true,
+        ..stick(Vec2::ZERO, 0.0)
+    };
+    let output = projector.update(click);
+    assert!(output.turned);
+    assert!(facing_of(&output).distance(square) < 1e-4);
+    assert!(!projector.update(click).turned);
+    // Turned and let go away from any wall, it floats turned, upright, as the server is told.
+    projector.update(stick(Vec2::NEG_X, 0.1));
+    projector.update(stick(Vec2::ZERO, 0.0));
+    let output = projector.update(input(&shown, ray, 0.0, now));
+    let Some((_, Target::Free(left))) = output.placed else {
+        unreachable!("floating, not {:?}", output.placed);
+    };
+    let facing = Quat::from_array(left.orientation) * Vec3::Z;
+    assert!((square.angle_between(facing) - YAW_STEP).abs() < 1e-4);
+    assert!(square.cross(facing).y > 0.0, "anticlockwise");
+    // Without a panel carried, the stick does nothing here.
+    let output = projector.update(Input {
+        grip: Some(0.0),
+        ..stick(Vec2::X, 0.1)
+    });
+    assert!(!output.turned && projector.held().is_none());
 }
 
 #[test]

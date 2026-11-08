@@ -183,6 +183,36 @@ pub struct Frame<'a> {
     pub environment: Option<crate::client_side::Drawn>,
 }
 
+/// Whose a push of the right stick is: each push belongs to what took it as it left the middle, until it returns there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RightStick {
+    /// At the middle.
+    #[default]
+    Free,
+    /// A panel was carried as it left the middle: the push moves and turns it.
+    Carried,
+    /// Nothing was carried: the push moves the transcript's focus or pages cards, as ever.
+    Other,
+}
+
+impl RightStick {
+    /// Whose the push is with the stick at `stick`, `carrying` a panel or not.
+    fn update(self, stick: Vec2, carrying: bool) -> Self {
+        // A stick that reads nonsense is at the middle.
+        if !stick.is_finite() || stick.length() < STICK_CENTRE {
+            return Self::Free;
+        }
+        match self {
+            Self::Free if carrying => Self::Carried,
+            Self::Free => Self::Other,
+            owner => owner,
+        }
+    }
+}
+
+/// How near the middle the right stick returns to end a push.
+const STICK_CENTRE: f32 = 0.2;
+
 /// Where travel applies: the joined space, by its identifier, and its environment as drawn.
 fn place(conversation: &Conversation) -> locomotion::Place<'_> {
     conversation
@@ -235,6 +265,12 @@ pub struct Step {
     travel: Travel,
     /// The left stick, which travels in such a space, from the last buttons.
     travel_stick: Vec2,
+    /// Whose the right stick's push is, from when it left the middle until it returns.
+    right_stick: RightStick,
+    /// The right stick, while a panel carried takes it, from the last buttons, and whether it was clicked since the last
+    /// frame, which turns the panel back to square.
+    carry_stick: Vec2,
+    straighten: bool,
     /// The client side of the joined space's environment, for that space and environment. See `design/environments.md`.
     client: Option<(
         String,
@@ -271,6 +307,9 @@ impl Default for Step {
             card_reach: f32::INFINITY,
             travel: Travel::default(),
             travel_stick: Vec2::ZERO,
+            right_stick: RightStick::Free,
+            carry_stick: Vec2::ZERO,
+            straighten: false,
             client: None,
         }
     }
@@ -290,6 +329,9 @@ impl Step {
         self.highlighted = None;
         self.presentation_navigation.release();
         self.cancel_travel();
+        self.right_stick = RightStick::Free;
+        self.carry_stick = Vec2::ZERO;
+        self.straighten = false;
     }
 
     /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
@@ -351,7 +393,14 @@ impl Step {
         }
         // While the right wrist's transcript shows, the right stick, A and B act on it, and B backs out of it before the space. See `design/wrist-transcript.md`.
         let wrist_active = self.wrist.state().active();
-        let right = buttons.right_stick;
+        // A push of the right stick is the panel carried's, if one is carried as it leaves the middle, until it returns there, and then nothing else's, so that the transcript, which does not show while a panel is carried, or the cards, never take a push that moved the panel, nor the panel one that moved them. See `design/projection.md`.
+        let carrying = self.projector.held().is_some();
+        self.right_stick = self.right_stick.update(buttons.right_stick, carrying);
+        let (carry_stick, right) = match self.right_stick {
+            RightStick::Carried => (buttons.right_stick, Vec2::ZERO),
+            _ => (Vec2::ZERO, buttons.right_stick),
+        };
+        self.carry_stick = if focused { carry_stick } else { Vec2::ZERO };
         // B lets go of a menu pinned with Y first.
         let unpinned = buttons.back && self.hand_menu.unpin();
         let wrist_input = self.wrist.input(
@@ -447,7 +496,10 @@ impl Step {
         if buttons.mute {
             conversation.toggle_mute();
         }
-        if buttons.replay {
+        // While a panel is carried, the click is its: it turns back to face the participant square.
+        if buttons.replay && carrying {
+            self.straighten = true;
+        } else if buttons.replay {
             conversation.replay();
         }
         // Otherwise the right stick pages result cards.
@@ -522,7 +574,8 @@ impl Step {
                 in_space,
                 menu_shown,
                 menu_pinned: self.hand_menu.pinned(),
-                pointing: senses.pointing,
+                // A panel carried keeps the transcript away, as pointing does, so that turning the wrist does not let it go.
+                pointing: senses.pointing || self.projector.held().is_some(),
                 grip: senses.grip,
             },
             moment,
@@ -605,25 +658,28 @@ impl Step {
             && !menu_shown
             && !wrist_active
             && conversation.joined_space().is_some();
-        // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
+        // In an environment that allows it, the left stick travels: aiming a teleport with the ray, landing as it returns to the middle, turning, stepping back and rising, each push owned by the direction it went first. The rig it moves applies from the next frame, as the platform places this frame's poses with it. See `design/locomotion.md`.
         let travel = self.travel.update(locomotion::Input {
             place: place(conversation),
             locomotion: conversation.locomotion(),
             stick: self.travel_stick,
             ray: senses.ray,
             head: senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
-            // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card or panel is carried, since aiming would put it down.
+            facing: senses
+                .head_pose
+                .and_then(|pose| locomotion::facing(glam::Quat::from_array(pose.orientation))),
+            // Only once the environment's scenery has grown in, so that its surfaces are seen; and not while a card is carried, since aiming would put it down. A panel carried travels along, in the hand, as the rig carries the ray it follows.
             active: in_space
                 && scenery.reveal.is_none()
                 && scenery.environment == conversation.environment()
-                && self.board.held().is_none()
-                && self.projector.held().is_none(),
+                && self.board.held().is_none(),
             dt,
         });
         if travel.teleported {
             feedback.emit(feedback::Event::Choose, now);
         }
-        // While a teleport is aimed, the ray serves only it.
+        // While a teleport is aimed, the ray serves only it, though a panel carried stays in the hand.
+        let carrying_through = in_space;
         let in_space = in_space && !travel.aiming;
         // What is projected stands wherever the space shows it; the ray and the right grip act on it only while nothing else takes them, and not while a card is carried. A card the ray met nearer last frame takes the grip. See `design/projection.md`.
         conversation.observe_head(senses.head_pose.map(Into::into));
@@ -635,10 +691,17 @@ impl Step {
                 .grip
                 .filter(|_| self.board.held().is_none() && conversation.role().participates()),
             viewer: senses.viewer,
-            active: in_space && self.board.held().is_none(),
+            active: carrying_through && self.board.held().is_none(),
+            pointing: !travel.aiming,
             nearer: self.card_reach,
+            stick: self.carry_stick,
+            straighten: std::mem::take(&mut self.straighten),
             now,
+            dt,
         });
+        if projected.turned {
+            feedback.emit(feedback::Event::Hover, now);
+        }
         if projected.picked {
             feedback.emit(feedback::Event::Choose, now);
         }
@@ -750,15 +813,18 @@ impl Step {
             (card, worker, object)
         };
         // Entering a new target, an arrival object, a hand menu row, a card or a worker, ticks very lightly, but not while the trigger pulls the swarm.
-        let target = self
-            .highlighted
-            .as_ref()
-            .map(feedback::key)
-            .or_else(|| card.as_ref().map(feedback::key))
-            .or_else(|| worker.as_ref().map(feedback::key))
-            .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
-            .or_else(|| panel.as_ref().map(feedback::key))
-            .or_else(|| travel.landing.map(|_| feedback::key("landing")));
+        // While a teleport is aimed, only finding a landing ticks, even with a panel carried.
+        let target = if travel.aiming {
+            travel.landing.map(|_| feedback::key("landing"))
+        } else {
+            self.highlighted
+                .as_ref()
+                .map(feedback::key)
+                .or_else(|| card.as_ref().map(feedback::key))
+                .or_else(|| worker.as_ref().map(feedback::key))
+                .or_else(|| object.as_ref().map(|picked| feedback::key(&picked.object)))
+                .or_else(|| panel.as_ref().map(feedback::key))
+        };
         if self.hover.update(target, attracting) {
             feedback.emit(feedback::Event::Hover, now);
         }
@@ -1458,6 +1524,319 @@ mod tests {
             now,
         );
         assert_eq!(step.travel_stick, Vec2::ZERO);
+    }
+
+    #[test]
+    fn a_panel_carried_travels_in_the_hand_through_a_teleport_a_turn_and_a_backstep() {
+        use crate::locomotion::{Locomotion, Surface};
+        use tomori_protocol::{ClientMessage, Panel, Place};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.set_locomotion(vec![(
+            crate::test_support::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+        )]);
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        fixtures::show_projection(
+            &mut conversation,
+            Vec::new(),
+            vec![Panel::new(
+                "panel-1",
+                "Build status",
+                "Green.",
+                Place::Free {
+                    pose: tomori_protocol::Pose::upright_facing(
+                        ahead.to_array(),
+                        arrival::HOME.to_array(),
+                    ),
+                },
+            )],
+        );
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        // The platform places the frame's poses with the rig, as it was settled before the frame.
+        let placed = |step: &mut Step, conversation: &Conversation, ray: Vec3, grip: f32| {
+            let rig = step.rig(conversation).matrix();
+            let head = rig * Mat4::from_translation(arrival::HOME);
+            Senses {
+                beam: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(head.w_axis.truncate()),
+                ray: Ray::new(
+                    rig.transform_point3(arrival::HOME),
+                    rig.transform_vector3(ray),
+                ),
+                grip: Some(grip),
+                ..senses()
+            }
+        };
+        let stick = |step: &mut Step, conversation: &mut Conversation, stick: Vec2| {
+            step.buttons(
+                &press(|buttons| buttons.left_stick = stick),
+                true,
+                conversation,
+                &mut felt(),
+                now,
+            );
+        };
+        let carried = |frame: &Frame<'_>| {
+            frame
+                .projection
+                .iter()
+                .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("Build"))
+                .map(|sheet| sheet.model.unwrap().w_axis.truncate())
+                .unwrap()
+        };
+        // Once the scenery has grown in, the panel is pulled off.
+        for _ in 0..400 {
+            let senses = placed(&mut step, &conversation, -Vec3::Z, 0.0);
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        }
+        let senses = placed(&mut step, &conversation, -Vec3::Z, 1.0);
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        // Aimed at the floor, the teleport aims, and the panel stays in the hand.
+        stick(&mut step, &mut conversation, Vec2::Y);
+        let down = Vec3::new(0.0, -0.5, -1.0);
+        let senses = placed(&mut step, &conversation, down, 1.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(frame.landing.is_some());
+        let beam = frame
+            .arrival
+            .as_ref()
+            .and_then(|arrival| arrival.ray)
+            .unwrap();
+        assert!(beam.hit && beam.end.distance(frame.landing.unwrap()) < 1e-4);
+        assert!(carried(&frame).distance(senses.ray.unwrap().at(2.0)) < 1e-3);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        // Released, it lands, and the panel comes along: next frame it is at the same place in the hand.
+        stick(&mut step, &mut conversation, Vec2::ZERO);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(frame.blink, 1.0);
+        assert_ne!(step.rig(&conversation), Rig::default());
+        let senses = placed(&mut step, &conversation, -Vec3::Z, 1.0);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert!(carried(&frame).distance(senses.ray.unwrap().at(2.0)) < 1e-3);
+        assert!(carried(&frame).distance(ahead) > 1.0, "carried along");
+        // Turned and stepped back, it stays in the hand too.
+        for push in [Vec2::X, Vec2::NEG_Y] {
+            let before = step.rig(&conversation);
+            stick(&mut step, &mut conversation, push);
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            stick(&mut step, &mut conversation, Vec2::ZERO);
+            let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            // A backstep darkens the view as a teleport does; a turn leaves it coming back.
+            assert_eq!(frame.blink == 1.0, push == Vec2::NEG_Y, "{push}");
+            assert_ne!(step.rig(&conversation), before, "{push}");
+            let senses = placed(&mut step, &conversation, -Vec3::Z, 1.0);
+            let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+            assert!(carried(&frame).distance(senses.ray.unwrap().at(2.0)) < 1e-3);
+            assert_eq!(step.projector.held(), Some("panel-1"));
+        }
+        assert!(conversation.take_actions().is_empty(), "nothing put down");
+        // Let go, it floats where the participant carried it to, for everyone.
+        let senses = placed(&mut step, &conversation, -Vec3::Z, 0.0);
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let actions = conversation.take_actions();
+        let [
+            Action::Send(ClientMessage::PlacePanel {
+                pose: Some(pose), ..
+            }),
+        ] = actions.as_slice()
+        else {
+            unreachable!("the panel is placed, not {actions:?}")
+        };
+        let left = Vec3::from_array(pose.position);
+        assert!(left.distance(senses.ray.unwrap().at(2.0)) < 1e-3);
+        assert!(left.distance(ahead) > 1.0);
+    }
+
+    #[test]
+    fn a_panel_carried_takes_the_right_stick_and_its_click_from_the_transcript_and_replays() {
+        use crate::locomotion::{Locomotion, Surface};
+        use tomori_protocol::{ClientMessage, Panel, Place, ServerMessage};
+        let mut conversation = conversed();
+        conversation.set_locomotion(vec![(
+            crate::test_support::SKY,
+            Locomotion::teleport(vec![Surface::rectangle(Vec3::ZERO, Vec2::splat(40.0))]),
+        )]);
+        let messages = conversation.joined_space().unwrap().0.messages.clone();
+        conversation.apply(space(|state| {
+            state.messages = messages;
+            state.projection = true;
+            state.speech = tomori_protocol::SpeechSetting::Full;
+        }));
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![Panel::new(
+                        "panel-1",
+                        "Build status",
+                        "Green.",
+                        Place::Free {
+                            pose: tomori_protocol::Pose::upright_facing(
+                                ahead.to_array(),
+                                arrival::HOME.to_array(),
+                            ),
+                        },
+                    )]),
+            ),
+        }));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let start = Instant::now();
+        let mut senses = Senses {
+            ray: Ray::new(arrival::HOME, -Vec3::Z),
+            right_palm: Some(palm_up(0.0)),
+            grip: Some(0.0),
+            ..senses()
+        };
+        // The transcript shows on the upturned palm, then goes as the palm turns away, and the panel is pulled off.
+        assert!(
+            wrist_after(&mut step, &mut conversation, &senses, start)
+                .model
+                .is_some()
+        );
+        senses.right_palm = None;
+        for _ in 0..400 {
+            step.update(
+                &senses,
+                &mut conversation,
+                &mut feedback,
+                start + HOLD,
+                FRAME,
+            );
+        }
+        senses.grip = Some(1.0);
+        step.update(
+            &senses,
+            &mut conversation,
+            &mut feedback,
+            start + HOLD,
+            FRAME,
+        );
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        // Carried, the upturned palm shows no transcript, which would let the panel go.
+        senses.right_palm = Some(palm_up(0.0));
+        let wrist = wrist_after(&mut step, &mut conversation, &senses, start + HOLD * 2);
+        assert!(wrist.model.is_none());
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        let now = start + HOLD * 3;
+        let carried = |frame: &Frame<'_>| {
+            frame
+                .projection
+                .iter()
+                .find(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("Build"))
+                .map(|sheet| sheet.model.unwrap())
+                .unwrap()
+        };
+        let buttons = |step: &mut Step, conversation: &mut Conversation, buttons: Buttons| {
+            step.buttons(&buttons, true, conversation, &mut felt(), now);
+        };
+        // A flick of the right stick turns the panel a snap, with a tick, and moves neither the transcript's focus nor the
+        // cards; the left stick turns the participant in the same frame.
+        let focus = conversation.wrist_focus().cloned();
+        let square = carried(&step.update(&senses, &mut conversation, &mut feedback, now, FRAME));
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| {
+                buttons.right_stick = Vec2::X;
+                buttons.left_stick = Vec2::NEG_X;
+            }),
+        );
+        felt_on(&mut feedback, Side::Right, now);
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let turned = carried(&frame);
+        assert!(
+            (square
+                .z_axis
+                .truncate()
+                .angle_between(turned.z_axis.truncate())
+                - crate::manipulation::YAW_STEP)
+                .abs()
+                < 1e-3
+        );
+        assert!(!felt_on(&mut feedback, Side::Right, now).is_empty());
+        assert_eq!(conversation.wrist_focus().cloned(), focus);
+        assert_eq!(step.presentation_navigation.card, 0);
+        assert!(
+            step.rig(&conversation)
+                .matrix()
+                .transform_vector3(-Vec3::Z)
+                .x
+                < -0.4
+        );
+        // Its click turns it back square, and plays nothing again.
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.replay = true),
+        );
+        let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let straightened = carried(&frame);
+        assert!(
+            straightened
+                .z_axis
+                .truncate()
+                .angle_between(square.z_axis.truncate())
+                < 1e-3
+        );
+        assert!(conversation.take_actions().is_empty(), "no replay");
+        // A push begun while carrying stays the panel's after it is let go, so the transcript then showing takes none of it.
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::NEG_Y),
+        );
+        senses.grip = Some(0.0);
+        step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(step.projector.held(), None);
+        conversation.take_actions();
+        assert!(
+            wrist_after(&mut step, &mut conversation, &senses, now)
+                .model
+                .is_some()
+        );
+        for _ in 0..3 {
+            buttons(
+                &mut step,
+                &mut conversation,
+                press(|buttons| buttons.right_stick = Vec2::NEG_Y),
+            );
+        }
+        assert_eq!(conversation.wrist_focus().cloned(), focus);
+        // Back at the middle, the next push is the transcript's, and the click replays again.
+        buttons(&mut step, &mut conversation, Buttons::default());
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::NEG_X),
+        );
+        assert_ne!(conversation.wrist_focus().cloned(), focus);
+        buttons(&mut step, &mut conversation, Buttons::default());
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.replay = true),
+        );
+        assert!(matches!(
+            conversation.take_actions().as_slice(),
+            [Action::Send(ClientMessage::Replay { message: None })]
+        ));
+        // Losing focus forgets whose the push was.
+        buttons(
+            &mut step,
+            &mut conversation,
+            press(|buttons| buttons.right_stick = Vec2::X),
+        );
+        step.blur(&mut conversation);
+        assert_eq!(step.right_stick, RightStick::Free);
+        assert_eq!(RightStick::Other.update(Vec2::NAN, true), RightStick::Free);
     }
 
     #[test]

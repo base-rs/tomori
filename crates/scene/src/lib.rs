@@ -28,6 +28,7 @@ pub mod haptics;
 pub mod interaction;
 pub mod locomotion;
 pub mod log_cadence;
+pub mod manipulation;
 mod markdown_lite;
 pub mod microphone_request;
 pub mod panel;
