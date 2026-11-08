@@ -138,8 +138,142 @@ impl Meta {
     }
 }
 
-/// A text panel: a title, a body of Markdown-lite text, which is drawn as text and never as HTML, and a little
-/// metadata, all bounded and cleaned by the server.
+/// The most lines of code a code panel holds, all of which it shows: the first lines of its block, numbered from 1.
+/// There is no scrolling yet, so a longer block shows "…N more lines" after them.
+pub const CODE_LINES: usize = 16;
+
+/// The longest line of a code panel, in characters, after which it is cut with "…".
+pub const CODE_LINE_CHARS: usize = 64;
+
+/// The most spans of a code panel; text past the last is drawn plain.
+pub const CODE_SPANS: usize = 256;
+
+/// What a span of code is, as a highlighter classifies it: a small set every highlighter maps onto, and every client
+/// maps onto one palette, so that code reads alike whichever highlighter classified it. `Plain` stands for text no
+/// span covers, and for a kind a newer server sends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TokenKind {
+    Keyword,
+    String,
+    Comment,
+    Number,
+    Function,
+    Type,
+    Variable,
+    Operator,
+    Punctuation,
+    Constant,
+    Attribute,
+    #[default]
+    #[serde(other)]
+    Plain,
+}
+
+impl TokenKind {
+    /// Every kind, `Plain` last.
+    pub const ALL: [TokenKind; 12] = [
+        TokenKind::Keyword,
+        TokenKind::String,
+        TokenKind::Comment,
+        TokenKind::Number,
+        TokenKind::Function,
+        TokenKind::Type,
+        TokenKind::Variable,
+        TokenKind::Operator,
+        TokenKind::Punctuation,
+        TokenKind::Constant,
+        TokenKind::Attribute,
+        TokenKind::Plain,
+    ];
+}
+
+/// A run of text of one [`TokenKind`]: from its `start`, in characters (Unicode scalar values) from the start of the
+/// text, for `length` characters. Sent as `[start, length, kind]`, to keep a code panel small.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(u32, u32, TokenKind)", into = "(u32, u32, TokenKind)")]
+#[non_exhaustive]
+pub struct Span {
+    pub start: u32,
+    pub length: u32,
+    pub kind: TokenKind,
+}
+
+impl Span {
+    pub fn new(start: u32, length: u32, kind: TokenKind) -> Self {
+        Self {
+            start,
+            length,
+            kind,
+        }
+    }
+
+    /// Where it ends, in characters, one past its last.
+    pub fn end(&self) -> u64 {
+        u64::from(self.start) + u64::from(self.length)
+    }
+}
+
+impl From<(u32, u32, TokenKind)> for Span {
+    fn from((start, length, kind): (u32, u32, TokenKind)) -> Self {
+        Self::new(start, length, kind)
+    }
+}
+
+impl From<Span> for (u32, u32, TokenKind) {
+    fn from(span: Span) -> Self {
+        (span.start, span.length, span.kind)
+    }
+}
+
+/// Whether `spans` are valid for `text`: at most [`CODE_SPANS`], each of at least one character and inside the text, in
+/// order and none overlapping another. A client draws code whose spans are not valid as plain text.
+pub fn valid_spans(text: &str, spans: &[Span]) -> bool {
+    let length = text.chars().count() as u64;
+    let mut end = 0;
+    spans.len() <= CODE_SPANS
+        && spans.iter().all(|span| {
+            let valid = span.length > 0 && u64::from(span.start) >= end && span.end() <= length;
+            end = span.end();
+            valid
+        })
+}
+
+/// What makes a panel a code panel, its body the first lines of a block of code: its language, as the block's info
+/// string names it, how many lines the block has in all, and its spans, over the body, by kind, without colours.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Code {
+    /// In lower case, such as `rust`; empty when the block names none.
+    #[serde(default)]
+    pub language: String,
+    /// How many lines the block has, of which the panel holds the first, at most [`CODE_LINES`].
+    pub lines: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<Span>,
+}
+
+impl Code {
+    /// The code of `language`, a block of `lines` lines.
+    pub fn new(language: impl Into<String>, lines: u32) -> Self {
+        Self {
+            language: language.into(),
+            lines,
+            spans: Vec::new(),
+        }
+    }
+
+    /// The code with `spans`.
+    pub fn with_spans(mut self, spans: Vec<Span>) -> Self {
+        self.spans = spans;
+        self
+    }
+}
+
+/// A panel: a title, a body, and a little metadata, all bounded and cleaned by the server. A text panel's body is
+/// Markdown-lite text, which is drawn as text and never as HTML; a code panel's, with [`Panel::code`], the first lines
+/// of a block of code, drawn as they are, coloured by its spans.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Panel {
@@ -155,6 +289,13 @@ pub struct Panel {
     #[serde(default)]
     pub age: u64,
     pub place: Place,
+    /// What makes it a code panel, if it is one. An older client draws one as a text panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<Code>,
+    /// Whether a participant has put it where it is, so that it stays when the agent's next code panels replace its
+    /// last ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 impl Panel {
@@ -172,7 +313,21 @@ impl Panel {
             meta: Vec::new(),
             age: 0,
             place,
+            code: None,
+            pinned: false,
         }
+    }
+
+    /// The panel, a code panel of `code`.
+    pub fn with_code(mut self, code: Code) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    /// The panel, pinned where it is by a participant.
+    pub fn with_pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
     }
 
     /// The panel with `meta`.
@@ -247,6 +402,72 @@ mod tests {
         assert_eq!(newer.walls[0].kind, WallKind::Unknown);
         assert_eq!(newer.panels[0].place, Place::Unknown);
         assert_eq!((newer.panels[0].age, newer.panels[0].meta.len()), (0, 0));
+    }
+
+    #[test]
+    fn a_code_panel_sends_its_spans_by_kind_compactly_and_tolerates_newer_kinds() {
+        let place = Place::Wall {
+            wall: TOMORI_WALL.into(),
+            slot: 1,
+        };
+        let panel = Panel::new("panel-2", "rust", "fn main() {}", place)
+            .with_code(Code::new("rust", 40).with_spans(vec![
+                Span::new(0, 2, TokenKind::Keyword),
+                Span::new(3, 4, TokenKind::Function),
+            ]))
+            .with_pinned(true);
+        let json = serde_json::json!({
+            "id": "panel-2", "title": "rust", "body": "fn main() {}", "age": 0,
+            "place": {"kind": "wall", "wall": "tomori", "slot": 1},
+            "code": {"language": "rust", "lines": 40, "spans": [[0, 2, "keyword"], [3, 4, "function"]]},
+            "pinned": true
+        });
+        assert_eq!(serde_json::to_value(&panel).unwrap(), json);
+        assert_eq!(serde_json::from_value::<Panel>(json).unwrap(), panel);
+        // A text panel says nothing of code or pinning; code without spans or a language, and a kind a newer server
+        // sends, are read, the newer kind as plain.
+        let text = Panel::new("panel-1", "t", "b", Place::Unknown);
+        let json = serde_json::to_value(&text).unwrap();
+        assert!(json.get("code").is_none() && json.get("pinned").is_none());
+        let newer: Code = serde_json::from_value(serde_json::json!({
+            "lines": 3, "spans": [[0, 1, "macro"]], "colour": "red"
+        }))
+        .unwrap();
+        assert_eq!(newer.language, "");
+        assert_eq!(newer.spans, [Span::new(0, 1, TokenKind::Plain)]);
+        assert_eq!(TokenKind::default(), TokenKind::Plain);
+        assert_eq!(TokenKind::ALL.len(), 12);
+        for kind in TokenKind::ALL {
+            let json = serde_json::to_value(kind).unwrap();
+            assert_eq!(serde_json::from_value::<TokenKind>(json).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn spans_are_valid_only_inside_the_text_in_order_without_overlapping_and_bounded() {
+        let text = "let é = 1;";
+        let span = |start, length| Span::new(start, length, TokenKind::Keyword);
+        assert!(valid_spans(text, &[]));
+        assert!(valid_spans(text, &[span(0, 3), span(4, 1), span(9, 1)]));
+        // Counted in characters, not bytes: "é" is one.
+        assert!(valid_spans(text, &[span(0, 10)]));
+        assert!(!valid_spans(text, &[span(0, 11)]));
+        assert!(!valid_spans(text, &[span(10, 1)]));
+        // Empty, overlapping or out of order.
+        assert!(!valid_spans(text, &[span(0, 0)]));
+        assert!(!valid_spans(text, &[span(0, 3), span(2, 1)]));
+        assert!(!valid_spans(text, &[span(4, 1), span(0, 1)]));
+        // Overflowing past the largest start.
+        assert!(!valid_spans(text, &[span(u32::MAX, u32::MAX)]));
+        // At most so many.
+        let long = "x".repeat(CODE_SPANS + 1);
+        let many: Vec<Span> = (0..CODE_SPANS as u32).map(|start| span(start, 1)).collect();
+        assert!(valid_spans(&long, &many));
+        let more: Vec<Span> = (0..=CODE_SPANS as u32)
+            .map(|start| span(start, 1))
+            .collect();
+        assert!(!valid_spans(&long, &more));
+        assert_eq!(span(u32::MAX, u32::MAX).end(), 2 * u64::from(u32::MAX));
     }
 
     #[test]

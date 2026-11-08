@@ -90,8 +90,8 @@ pub struct SpaceModel {
     /// Where the speaker of the input delivered last stood as they began speaking, if the space knows: what the agent
     /// projects in its turn goes onto the wall nearest there.
     origin: Option<[f32; 3]>,
-    /// The panels of replies completed since the hub last took them, each with where its asker stood.
-    projected: Vec<(crate::stage::Content, Option<[f32; 3]>)>,
+    /// The panels of each reply completed since the hub last took them, with where its asker stood.
+    projected: Vec<(Vec<crate::stage::Content>, Option<[f32; 3]>)>,
     /// The latest replies whose panels were taken, so that none is projected twice.
     projected_replies: VecDeque<String>,
 }
@@ -1224,9 +1224,9 @@ impl SpaceModel {
         }
     }
 
-    /// The panels of the replies completed since this was last called, each with where whoever asked for it stood, if
-    /// the space knows. See `design/projection.md`.
-    pub fn take_projected(&mut self) -> Vec<(crate::stage::Content, Option<[f32; 3]>)> {
+    /// The panels of each reply completed since this was last called, with where whoever asked for it stood, if the
+    /// space knows, for the replies that have any. See `design/projection.md`.
+    pub fn take_projected(&mut self) -> Vec<(Vec<crate::stage::Content>, Option<[f32; 3]>)> {
         std::mem::take(&mut self.projected)
     }
 
@@ -1240,10 +1240,10 @@ impl SpaceModel {
             self.projected_replies.pop_front();
         }
         self.projected_replies.push_back(message.id.clone());
-        let origin = self.origin;
         let panels = crate::stage::panels(&message.text);
-        self.projected
-            .extend(panels.into_iter().map(|content| (content, origin)));
+        if !panels.is_empty() {
+            self.projected.push((panels, self.origin));
+        }
     }
 
     /// The next prompt to deliver, if the agent is idle, nothing is pending and input is queued. Marks the entry as sending.
@@ -3338,7 +3338,11 @@ mod tests {
         space
             .take_projected()
             .into_iter()
-            .map(|(content, origin)| (content.title, origin))
+            .flat_map(|(contents, origin)| {
+                contents
+                    .into_iter()
+                    .map(move |content| (content.title, origin))
+            })
             .collect()
     }
 

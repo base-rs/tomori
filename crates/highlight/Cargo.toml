@@ -1,0 +1,28 @@
+[package]
+name = "tomori-highlight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Syntax highlighting for Tomori's code panels, on the server: tree-sitter for the languages it knows deeply, syntect for the rest, as spans of a small set of shared token kinds"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "syntax-highlighting", "tree-sitter", "syntect", "code"]
+categories = ["text-processing", "parser-implementations"]
+
+[dependencies]
+tomori-protocol = { version = "0.2.0", path = "../protocol" }
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
+tree-sitter-language = "0.1"
+tree-sitter-rust = "0.24"
+tree-sitter-ruby = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+tree-sitter-md = "0.5"
+tree-sitter-bash = "0.25"
+tree-sitter-toml-ng = "0.7"
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }

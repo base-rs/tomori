@@ -131,6 +131,23 @@ fn a_panel_block_is_never_spoken_and_kept_whole_for_the_transcript() {
 }
 
 #[test]
+fn a_code_block_projected_as_a_code_panel_is_never_spoken_and_kept_whole() {
+    // The server projects a reply's other code blocks as code panels; speech still says only what is around them.
+    let reply = "This adds them.\n\n```rust\nfn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n```\n\nThen run it.";
+    assert_eq!(speak(reply), ["This adds them.", "Then run it."]);
+    let blocks = one_shot_blocks(reply, &SpeakableOptions::default());
+    let code = blocks
+        .iter()
+        .find(|block| block.kind == BlockKind::Code)
+        .expect("a code block");
+    assert!(
+        code.source(reply)
+            .contains("fn add(a: u32, b: u32) -> u32 {")
+    );
+    assert!(code.sentences.is_empty());
+}
+
+#[test]
 fn speaks_only_speakable_text() {
     assert_eq!(
         speak(DOCUMENT),

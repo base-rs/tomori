@@ -453,6 +453,10 @@ impl Server {
     {
         // Environments' server sides may run now, for the spaces bound while the server was configured.
         self.hub.serving();
+        // The highlighters' grammars are made aside, so that the first code panel does not make them while it holds the
+        // hub. See `design/projection.md`.
+        #[cfg(feature = "highlight")]
+        std::thread::spawn(tomori_highlight::prepare);
         // The counts when serving starts, taken before any connection is accepted: the publisher is polled after serving begins, and a client served before then would otherwise be counted as the starting point, so its arrival would never be published.
         let counts = self.counts();
         // Ends the spaces, the sweep and the pacing once serving has ended for any reason.

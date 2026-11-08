@@ -26,6 +26,7 @@ These crates are published to crates.io, and every one of them can be packaged a
 | `tomori-server` | The library that downstream servers build on through its builder, and that `tomori-server-app` builds Tomori's own server on; see `builders.md`. |
 | `tomori-server-app` | `cargo install tomori-server-app`, for the `tomori-server` executable, which registers Tomori's own environments; see `builders.md`. |
 | `tomori-text` | The bundled fonts and the glyph atlas, which `tomori-scene` lays text out with and `tomori-render` draws. |
+| `tomori-highlight` | Needed by the server's default `highlight` feature: syntax highlighting of the agent's code panels, with tree-sitter and syntect, into spans of shared token kinds; see `projection.md`. |
 | `tomori-environment-farmyard` | The farmyard's common crate: its identifier, version and label, its layout and its models, built in code as `tomori-assets` models without the GPU, the chicken's asset, behaviours, controller and animator graph, the flock, and its server side, which needs no server crate, as it holds nothing server-only; `tomori-server-app` registers it, and its client crate draws it; see `farmyard.md`. |
 | `tomori-environment-farmyard-client` | The farmyard's client half, its scenery, the chickens' client side and its teleport profile, which Tomori's own app and spectator register. |
 | `tomori-environment-github` | The GitHub prototype's common crate, its identifier and version. |

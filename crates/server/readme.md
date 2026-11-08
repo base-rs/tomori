@@ -21,6 +21,7 @@ The library is the server itself, and the executable is Tomori's own build of it
 - `opencode` (default): the OpenCode backend, from [`tomori-backend-opencode`](https://crates.io/crates/tomori-backend-opencode).
 - `speech` (default): speech recognition and synthesis, from [`tomori-speech`](https://crates.io/crates/tomori-speech).
 - `fake` (default): a scripted in-memory backend, for tests and for trying the server without an agent.
+- `highlight` (default): syntax highlighting of the agent's code panels, from [`tomori-highlight`](https://crates.io/crates/tomori-highlight), with tree-sitter and syntect; without it, code panels are plain.
 - `speech-shared`: link the speech engines from shared sherpa-onnx libraries, such as its CUDA build.
 
 ## See Also

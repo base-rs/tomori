@@ -15,9 +15,10 @@ name = "tomori-server"
 path = "src/main.rs"
 
 [features]
-default = ["fake", "opencode", "speech"]
+default = ["fake", "highlight", "opencode", "speech"]
 # The library's features, which the executable is built with; see crates/server/readme.md.
 fake = ["tomori-server/fake"]
+highlight = ["tomori-server/highlight"]
 opencode = ["tomori-server/opencode"]
 speech = ["tomori-server/speech"]
 speech-shared = ["tomori-server/speech-shared"]

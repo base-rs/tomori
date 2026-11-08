@@ -61,25 +61,43 @@ fn closes(line: &str, marker: char, run: usize) -> bool {
     line.len() - rest.len() <= 3 && rest.len() - after.len() >= run && after.trim().is_empty()
 }
 
+/// What an open block gathers.
+enum Source {
+    /// A panel block's text so far.
+    Panel(String),
+    /// Another language's block, projected as a code panel: its first lines so far.
+    Code(super::code::Lines),
+    /// A panel block too large to be projected.
+    Skipped,
+}
+
 /// The panels of `text`, a reply's Markdown, in order: each fenced code block whose language is `panel` and that is
-/// small enough and holds something, at most [`PANELS_PER_REPLY`]. Blocks of any other language are skipped whole,
-/// so that a panel block quoted inside another is not projected. A block left open runs to the end of the reply, as
+/// small enough and holds something, at most [`PANELS_PER_REPLY`], as a text panel; and each other fenced code block of
+/// more than one line, at most [`super::code::CODE_PER_REPLY`], as a code panel. A block is taken whole, so that a
+/// panel block quoted inside another is part of that block. A block left open runs to the end of the reply, as
 /// CommonMark reads it.
 pub fn panels(text: &str) -> Vec<Content> {
     struct Open {
         marker: char,
         run: usize,
-        /// The panel's source so far, or `None` for a block of another language or one that grew too large.
-        source: Option<String>,
+        source: Source,
     }
     let mut found = Vec::new();
+    let (mut texts, mut codes) = (0, 0);
     let mut open: Option<Open> = None;
-    let mut finish = |source: Option<String>| {
-        if let Some(content) = source.as_deref().and_then(Content::parse)
-            && found.len() < PANELS_PER_REPLY
-        {
-            found.push(content);
-        }
+    // Each block is made into a panel only while the reply has room for one of its kind, so that a reply of many
+    // blocks costs no more than one of a few.
+    let mut finish = |source: Source| {
+        let content = match source {
+            Source::Panel(source) if texts < PANELS_PER_REPLY => {
+                Content::parse(&source).inspect(|_| texts += 1)
+            }
+            Source::Code(lines) if codes < super::code::CODE_PER_REPLY => {
+                lines.content().inspect(|_| codes += 1)
+            }
+            _ => None,
+        };
+        found.extend(content);
     };
     for line in text.lines() {
         match &mut open {
@@ -87,28 +105,36 @@ pub fn panels(text: &str) -> Vec<Content> {
                 open = fence(line).map(|(marker, run, info)| Open {
                     marker,
                     run,
-                    source: info
+                    source: if info
                         .split_whitespace()
                         .next()
                         .is_some_and(|language| language.eq_ignore_ascii_case(LANGUAGE))
-                        .then(String::new),
+                    {
+                        Source::Panel(String::new())
+                    } else {
+                        Source::Code(super::code::Lines::new(info))
+                    },
                 });
             }
             Some(block) if closes(line, block.marker, block.run) => {
-                finish(open.take().and_then(|block| block.source));
+                finish(open.take().expect("a block is open").source);
             }
-            Some(block) => {
-                if let Some(source) = &mut block.source {
+            Some(block) => match &mut block.source {
+                Source::Panel(source) => {
                     source.push_str(line);
                     source.push('\n');
                     if source.len() > BLOCK_BYTES {
-                        block.source = None;
+                        block.source = Source::Skipped;
                     }
                 }
-            }
+                Source::Code(lines) => lines.push(line),
+                Source::Skipped => {}
+            },
         }
     }
-    finish(open.and_then(|block| block.source));
+    if let Some(block) = open {
+        finish(block.source);
+    }
     found
 }
 
@@ -195,7 +221,12 @@ impl Content {
             }
         }
         let body = body(rest.iter().copied());
-        (!title.is_empty() || !body.is_empty()).then_some(Self { title, body, meta })
+        (!title.is_empty() || !body.is_empty()).then_some(Self {
+            title,
+            body,
+            meta,
+            code: None,
+        })
     }
 }
 
@@ -211,6 +242,7 @@ mod tests {
                 .iter()
                 .map(|(key, value)| ((*key).into(), (*value).into()))
                 .collect(),
+            code: None,
         }
     }
 
@@ -236,12 +268,16 @@ mod tests {
                 content("", "Unclosed.", &[]),
             ]
         );
-        // Other languages, indented code and blocks that only look like fences are not panels.
+        // A block of another language of one line, indented code and blocks that only look like fences are not panels.
         let reply = "```rust\nfn main() {}\n```\n    ```panel\n    indented\n    ```\n``` panel `x`\nnot a fence\n";
         assert!(panels(reply).is_empty());
-        // A panel block quoted inside another block is part of that block.
+        // A panel block quoted inside another block is part of that block, which is a code panel.
         let reply = "````markdown\n```panel\nquoted\n```\n````\n";
-        assert!(panels(reply).is_empty());
+        let found = panels(reply);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "markdown");
+        assert_eq!(found[0].body, "```panel\nquoted\n```");
+        assert!(found[0].code.is_some());
         // A closing fence must be as long as the opening one and hold nothing else.
         let reply = "````panel\nA\n```\n```` trailing\nB\n````\n";
         assert_eq!(
@@ -317,9 +353,47 @@ mod tests {
         let full = format!("{}\nmore", "a".repeat(BODY_CHARS));
         assert!(Content::parse(&full).unwrap().body.ends_with("a\n…"));
         // A block larger than the limit is not projected, and neither is a panel beyond the limit for one reply.
-        let huge = format!("```panel\n{}\n```\n", "x".repeat(BLOCK_BYTES + 1));
+        let huge = format!("```panel\n{}\nmore\n```\n", "x".repeat(BLOCK_BYTES + 1));
         assert!(panels(&huge).is_empty());
         let many = "```panel\nx\n```\n".repeat(PANELS_PER_REPLY + 3);
         assert_eq!(panels(&many).len(), PANELS_PER_REPLY);
+    }
+
+    #[test]
+    fn code_blocks_are_code_panels_in_order_with_the_text_panels_each_bounded_by_kind() {
+        let reply = "Here:\n\n```rust\nfn a() {}\nfn b() {}\n```\n\n```panel\ntitle: Notes\n---\nTwo functions.\n```\n\n~~~\nplain\ntext\n~~~\n\nRun `cargo test`:\n\n```sh\ncargo test\n```\n";
+        let found = panels(reply);
+        let titles: Vec<(&str, bool)> = found
+            .iter()
+            .map(|content| (content.title.as_str(), content.code.is_some()))
+            .collect();
+        // The command, of one line, stays only in the transcript.
+        assert_eq!(titles, [("rust", true), ("Notes", false), ("code", true)]);
+        // At most so many of each kind in one reply, a block of one line not counted, nor one too large or empty.
+        let reply = [
+            "```sh\nls\n```\n".repeat(3),
+            "```rust\nfn a() {}\nfn b() {}\n```\n".repeat(super::super::code::CODE_PER_REPLY + 2),
+            format!("```panel\n{}\n```\n", "x".repeat(BLOCK_BYTES + 1)),
+            "```panel\nshown\n```\n".repeat(PANELS_PER_REPLY + 1),
+        ]
+        .concat();
+        let found = panels(&reply);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|content| content.code.is_some())
+                .count(),
+            super::super::code::CODE_PER_REPLY
+        );
+        assert_eq!(
+            found
+                .iter()
+                .filter(|content| content.code.is_none())
+                .count(),
+            PANELS_PER_REPLY
+        );
+        // A block left open runs to the end of the reply.
+        let open = panels("```python\ndef f():\n    pass");
+        assert_eq!(open[0].body, "def f():\n    pass");
     }
 }

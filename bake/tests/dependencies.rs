@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate or on an app, in any kind of dependency, development dependencies included, or builds an environment's crate with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them.
+//! The dependency rule between Tomori's core crates, its environments' crates and its apps, as `design/environments.md` requires: an environment's common and server crates build no renderer or GPU stack, its common and client crates build no server crate, and no core crate depends on an environment's crate or on an app, in any kind of dependency, development dependencies included, or builds an environment's crate with every feature but its `app`, so that environments register themselves with the apps rather than the core knowing them; and, as `design/projection.md` requires, no client builds the server's code highlighting.
 use std::path::Path;
 use std::process::Command;
 
@@ -299,6 +299,61 @@ fn without_their_app_no_core_crate_builds_an_environment() {
         );
     }
     assert!(checked > 0, "no core crate was found");
+}
+
+/// Whether `name` highlights code, which only a server does, as `design/projection.md` requires: Tomori's highlighter, tree-sitter, its grammars and highlighter, and syntect.
+fn highlights(name: &str) -> bool {
+    name == "tomori-highlight"
+        || name == "syntect"
+        || name == "tree-sitter"
+        || name.starts_with("tree-sitter-")
+}
+
+/// Whether the workspace package `name` is built into a client: the client core, the scene, the renderer, the text, every client's own crate, an environment's common and client halves, and the example headset.
+fn client(name: &str) -> bool {
+    matches!(
+        name,
+        "tomori-client"
+            | "tomori-scene"
+            | "tomori-render"
+            | "tomori-text"
+            | "tomori-example-headset"
+    ) || name.starts_with("tomori-client-")
+        || matches!(role(name), Role::Environment(Half::Common | Half::Client))
+}
+
+#[test]
+fn highlighting_is_built_by_the_server_and_never_by_a_client() {
+    assert!(highlights("tree-sitter-rust") && highlights("syntect") && !highlights("tomori-scene"));
+    assert!(
+        client("tomori-client-quest")
+            && client("tomori-environment-sky-client")
+            && !client("tomori-server")
+    );
+    // The server highlights by default, so that the rule below checks something.
+    assert!(
+        tree("tomori-server", "normal,build", &[])
+            .iter()
+            .any(|name| highlights(name))
+    );
+    let mut checked = 0;
+    for package in packages() {
+        let name = package["name"].as_str().unwrap();
+        if !client(name) {
+            continue;
+        }
+        checked += 1;
+        // Every feature, on every target, the headset's included, so that neither the APK nor any client grows with a grammar.
+        let highlighting: Vec<String> = tree(name, "normal,build", &["--all-features"])
+            .into_iter()
+            .filter(|dependency| highlights(dependency))
+            .collect();
+        assert!(
+            highlighting.is_empty(),
+            "{name} builds {highlighting:?}; code is highlighted on the server, and a client is sent its spans"
+        );
+    }
+    assert!(checked >= 10, "only {checked} client crates were found");
 }
 
 #[test]
