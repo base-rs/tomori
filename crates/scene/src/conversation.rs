@@ -4479,7 +4479,6 @@ fn tail(text: &str, width: usize) -> String {
     std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
-/// `text` on one row of the panel, as [`crate::ui_text::clip`] cuts it.
 /// What tells an existing session apart beneath its title on the session ring: whether the agent is busy in it, and
 /// its directory relative to the folder chosen, unless it is that folder.
 fn session_detail(session: &SessionSummary, folder: &str) -> Option<String> {
@@ -4496,6 +4495,7 @@ fn session_detail(session: &SessionSummary, folder: &str) -> Option<String> {
     }
 }
 
+/// `text` on one row of the panel, as [`crate::ui_text::clip`] cuts it.
 fn short(text: &str) -> String {
     crate::ui_text::clip(text, COLUMNS)
 }
