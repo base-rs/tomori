@@ -22,7 +22,7 @@ pub const CONTROLS: &str = "Mouse: point (as the right controller's ray); left b
 Enter: A. Backspace: B (hold for a second to leave the space). Space (hold): X, push-to-talk. Tab: Y, which in a space pins the hand menu open at its Space section.\n\
 Arrow keys: left stick, which in a space that allows travel teleports (hold Up, point at the floor, release), turns (Left and Right) and rises (hold Down). [ and ]: right stick left and right. Page Up and Page Down: right stick up and down.\n\
 V: mute spoken replies (left stick click). R: play the latest reply again, or stop it (right stick click).\n\
-M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
+M: open or close the hand menu. T: show or hide the transcript on the right wrist; G: detach it into the world, or reattach it (the right grip). In a space, hold G to carry the panel pointed at: Page Up and Page Down push it further or pull it closer, [ and ] turn it, R squares it up, Backspace throws it away for everyone, and letting go of G puts it down. K: knock on the space you watch. + and -: admit or decline the first knock. P: pair this device as an owner, or cancel.\n\
 Esc: close the hand menu, or quit.";
 
 /// The key that `code` stands for, as `CONTROLS` describes.

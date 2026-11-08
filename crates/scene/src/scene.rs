@@ -172,8 +172,8 @@ pub struct Frame<'a> {
     pub presence: Option<Presence>,
     /// The GitHub environment's inbox and cards, in the scene, while the space shows them.
     pub cards: Vec<controller_ui::Sheet>,
-    /// The space's projection walls and panels, farthest first, and the label naming the panel pointed at, in the scene.
-    /// See `design/projection.md`.
+    /// The space's projection walls and panels, farthest first, the label naming the panel pointed at, and the hint
+    /// beside a panel carried, in the scene. See `design/projection.md`.
     pub projection: Vec<controller_ui::Sheet>,
     /// Where a teleport being aimed would land, which is drawn as a ring on the surface; see `design/locomotion.md`.
     pub landing: Option<Vec3>,
@@ -271,6 +271,11 @@ pub struct Step {
     /// frame, which turns the panel back to square.
     carry_stick: Vec2,
     straighten: bool,
+    /// The panel carried as B was pressed, and when: thrown away for everyone if B is let go within
+    /// [`crate::conversation::DISMISS_PRESS`] while it is still carried. See `design/projection.md`.
+    throwing: Option<(String, Instant)>,
+    /// The controls the hint beside a panel carried names.
+    controls: crate::projection::Controls,
     /// The client side of the joined space's environment, for that space and environment. See `design/environments.md`.
     client: Option<(
         String,
@@ -310,6 +315,8 @@ impl Default for Step {
             right_stick: RightStick::Free,
             carry_stick: Vec2::ZERO,
             straighten: false,
+            throwing: None,
+            controls: crate::projection::Controls::default(),
             client: None,
         }
     }
@@ -332,6 +339,7 @@ impl Step {
         self.right_stick = RightStick::Free;
         self.carry_stick = Vec2::ZERO;
         self.straighten = false;
+        self.throwing = None;
     }
 
     /// Drop a teleport being aimed, as when the left stick is lost, without travelling.
@@ -401,13 +409,31 @@ impl Step {
             _ => (Vec2::ZERO, buttons.right_stick),
         };
         self.carry_stick = if focused { carry_stick } else { Vec2::ZERO };
+        // B pressed while a panel is carried is the panel's, and nothing else's until it is let go: let go soon enough,
+        // while the panel is still carried, it throws the panel away for everyone; held longer, it does nothing, and
+        // never leaves the space. B on its own never dismisses a panel. See `design/projection.md`.
+        let thrown = buttons.back && carrying;
+        if thrown {
+            self.throwing = self.projector.held().map(|panel| (panel.to_owned(), now));
+        }
+        if let Some((panel, since)) = self.throwing.take_if(|_| !buttons.back_held) {
+            let quick = now.saturating_duration_since(since) < crate::conversation::DISMISS_PRESS;
+            if quick
+                && self.projector.held() == Some(panel.as_str())
+                && conversation.dismiss_panel(&panel)
+            {
+                self.projector.throw(now);
+                feedback.emit(feedback::Event::Choose, now);
+            }
+        }
+        let back = buttons.back && !thrown;
         // B lets go of a menu pinned with Y first.
-        let unpinned = buttons.back && self.hand_menu.unpin();
+        let unpinned = back && self.hand_menu.unpin();
         let wrist_input = self.wrist.input(
             conversation,
             right,
             buttons.a && !self.menu_was_shown,
-            buttons.back && !unpinned,
+            back && !unpinned,
             now,
         );
         // Moving the transcript's focus onto a turn, a request's button or a queued entry ticks as hover does, and A choosing taps; see `design/feedback.md`.
@@ -421,11 +447,12 @@ impl Step {
             feedback.emit(feedback::Event::Choose, now);
         }
         let back_taken = wrist_input.back || unpinned;
-        if buttons.back && !back_taken {
+        if back && !back_taken {
             conversation.back();
         }
-        // Only a hold whose press is in a space can leave it, so B held while joining does not.
-        if buttons.back && conversation.joined_space().is_some() {
+        // Only a hold whose press is in a space, and not on a panel carried, can leave it, so B held while joining does
+        // not.
+        if back && conversation.joined_space().is_some() {
             self.back_since = Some(now);
         }
         match self.back_since {
@@ -696,6 +723,7 @@ impl Step {
             nearer: self.card_reach,
             stick: self.carry_stick,
             straighten: std::mem::take(&mut self.straighten),
+            controls: self.controls,
             now,
             dt,
         });
@@ -848,6 +876,8 @@ impl Step {
                 senses.viewer.unwrap_or(arrival::HOME),
             ));
         }
+        // The hint beside a panel carried, over everything else.
+        projection.extend(projected.hint);
         match (card, worker, &object) {
             _ if panel.is_some() => {
                 conversation.point(panel.clone().map(tomori_protocol::Resource::panel))
@@ -1654,6 +1684,169 @@ mod tests {
     }
 
     #[test]
+    fn b_throws_a_panel_away_only_while_it_is_carried_and_a_hold_then_neither_throws_nor_leaves() {
+        use tomori_protocol::{ClientMessage, Panel, Place};
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let ahead = arrival::HOME + Vec3::new(0.0, 0.0, -2.0);
+        fixtures::show_projection(
+            &mut conversation,
+            Vec::new(),
+            vec![Panel::new(
+                "panel-1",
+                "Build status",
+                "Green.",
+                Place::Free {
+                    pose: tomori_protocol::Pose::upright_facing(
+                        ahead.to_array(),
+                        arrival::HOME.to_array(),
+                    ),
+                },
+            )],
+        );
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let start = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ray: Ray::new(arrival::HOME, -Vec3::Z),
+            grip: Some(0.0),
+            ..senses()
+        };
+        for _ in 0..400 {
+            step.update(&senses, &mut conversation, &mut feedback, start, FRAME);
+        }
+        let hint = |frame: &Frame<'_>| {
+            frame
+                .projection
+                .iter()
+                .map(|sheet| sheet.canvas.as_ref().unwrap().plain())
+                .find(|text| text.contains("throw away"))
+        };
+        let frame = |step: &mut Step, conversation: &mut Conversation, senses: &Senses, at| {
+            let frame = step.update(senses, conversation, &mut felt(), at, FRAME);
+            (
+                hint(&frame),
+                frame
+                    .projection
+                    .iter()
+                    .any(|sheet| sheet.canvas.as_ref().unwrap().plain().starts_with("Build")),
+            )
+        };
+        let b = |step: &mut Step, conversation: &mut Conversation, back: bool, held: bool, at| {
+            step.buttons(
+                &press(|buttons| {
+                    buttons.back = back;
+                    buttons.back_held = held;
+                }),
+                true,
+                conversation,
+                &mut felt(),
+                at,
+            );
+        };
+        // Pointed at, not carried, a press of B dismisses nothing, and no hint shows.
+        let (shown, _) = frame(&mut step, &mut conversation, &senses, start);
+        assert_eq!(shown, None);
+        b(&mut step, &mut conversation, true, true, start);
+        b(
+            &mut step,
+            &mut conversation,
+            false,
+            false,
+            start + Duration::from_millis(100),
+        );
+        assert!(conversation.take_actions().is_empty());
+        assert_eq!(conversation.notice(), Some(crate::conversation::THROW_HOW));
+        // Carried with the grip, the hint shows beside it.
+        senses.grip = Some(1.0);
+        frame(&mut step, &mut conversation, &senses, start);
+        let (shown, _) = frame(&mut step, &mut conversation, &senses, start);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        let shown = shown.expect("the hint shows while carrying");
+        assert!(shown.contains("throw away, for all"), "{shown}");
+        assert!(shown.contains("leave it floating"), "{shown}");
+        // Held while carrying, B neither throws the panel away nor leaves, however long, and letting it go then does
+        // nothing.
+        let now = start + Duration::from_secs(1);
+        b(&mut step, &mut conversation, true, true, now);
+        for held in [LEAVE_HOLD / 2, LEAVE_HOLD, LEAVE_HOLD * 2] {
+            b(&mut step, &mut conversation, false, true, now + held);
+            frame(&mut step, &mut conversation, &senses, now + held);
+        }
+        b(
+            &mut step,
+            &mut conversation,
+            false,
+            false,
+            now + LEAVE_HOLD * 2,
+        );
+        assert!(conversation.take_actions().is_empty());
+        assert!(conversation.joined_space().is_some(), "still in the space");
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        // Let go of the grip before B, the panel is put down, not thrown away.
+        let now = now + LEAVE_HOLD * 3;
+        b(&mut step, &mut conversation, true, true, now);
+        senses.grip = Some(0.0);
+        frame(&mut step, &mut conversation, &senses, now);
+        b(
+            &mut step,
+            &mut conversation,
+            false,
+            false,
+            now + Duration::from_millis(50),
+        );
+        let actions = conversation.take_actions();
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [Action::Send(ClientMessage::PlacePanel { .. })]
+            ),
+            "{actions:?}"
+        );
+        // Picked up again, a press of B, let go soon enough, throws it away for everyone at once.
+        let now = now + Duration::from_secs(1);
+        senses.grip = Some(1.0);
+        frame(&mut step, &mut conversation, &senses, now + PENDING_OVER);
+        assert_eq!(step.projector.held(), Some("panel-1"));
+        let now = now + PENDING_OVER;
+        b(&mut step, &mut conversation, true, true, now);
+        assert!(
+            conversation.take_actions().is_empty(),
+            "only once B is let go"
+        );
+        b(
+            &mut step,
+            &mut conversation,
+            false,
+            false,
+            now + Duration::from_millis(200),
+        );
+        let actions = conversation.take_actions();
+        assert_eq!(
+            actions,
+            [Action::Send(ClientMessage::DismissPanel {
+                panel: "panel-1".into()
+            })]
+        );
+        assert_eq!(step.projector.held(), None);
+        // It is neither drawn nor hinted at, nor put down as the grip is let go, while the server agrees.
+        let (shown, drawn) = frame(&mut step, &mut conversation, &senses, now);
+        assert_eq!((shown, drawn), (None, false));
+        senses.grip = Some(0.0);
+        frame(&mut step, &mut conversation, &senses, now);
+        assert!(conversation.take_actions().is_empty());
+        // Holding B, with nothing carried, leaves the space as ever.
+        let now = now + Duration::from_secs(1);
+        b(&mut step, &mut conversation, true, true, now);
+        b(&mut step, &mut conversation, false, true, now + LEAVE_HOLD);
+        assert!(conversation.joined_space().is_none(), "left");
+    }
+
+    /// Longer than a panel let go is shown where it was let go, so that the server's projection, which these tests do
+    /// not change, stands it again.
+    const PENDING_OVER: Duration = Duration::from_secs(4);
+
+    #[test]
     fn a_panel_carried_takes_the_right_stick_and_its_click_from_the_transcript_and_replays() {
         use crate::locomotion::{Locomotion, Surface};
         use tomori_protocol::{ClientMessage, Panel, Place, ServerMessage};
@@ -1981,11 +2174,10 @@ mod tests {
         assert_eq!(step.projector.held(), Some("panel-1"));
         senses.ray = Ray::new(arrival::HOME, Vec3::new(-0.5, 0.0, -1.0));
         let output = step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
-        assert_eq!(
-            output.projection.len(),
-            wall + 1,
-            "no label on a panel carried"
-        );
+        // No label on a panel carried, but the hint beside it, last, over everything else.
+        assert_eq!(output.projection.len(), wall + 2);
+        let hint = output.projection[wall + 1].canvas.as_ref().unwrap().plain();
+        assert!(hint.contains("throw away, for all"), "{hint}");
         senses.grip = Some(0.0);
         step.update(&senses, &mut conversation, &mut felt(), now, FRAME);
         assert!(matches!(

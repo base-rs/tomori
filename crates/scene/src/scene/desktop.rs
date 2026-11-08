@@ -228,7 +228,11 @@ impl Desktop {
         let engagement = Tracker::new();
         conversation.set_engagement(engagement.engagement());
         Self {
-            step: Step::default(),
+            // The hint beside a panel carried names the keys that stand for the controls.
+            step: Step {
+                controls: crate::projection::Controls::Keyboard,
+                ..Step::default()
+            },
             input: Input::default(),
             head: Head::default(),
             focused: false,
