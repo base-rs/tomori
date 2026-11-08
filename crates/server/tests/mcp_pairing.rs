@@ -448,6 +448,46 @@ fn only_a_session_bound_to_a_space_may_decide_though_nobody_need_be_in_it() {
 }
 
 #[test]
+fn a_deleted_space_s_agent_can_no_longer_decide_and_another_space_s_decides_the_one_pairing() {
+    let mut studio = Studio::new();
+    let workshop = studio.ada.create_space("Workshop").id;
+    let other = tomori_backend::Session::id(&studio.server.backend.started()[1]);
+    let mut quest = studio.server.connect("quest", "Quest 3");
+    let shown = pair(&mut quest);
+    // The studio is deleted while the pairing waits: its session decides nothing, and the pairing is left waiting.
+    studio.ada.send(&ClientMessage::Join {
+        space: studio.space.clone(),
+    });
+    studio.ada.space(|state| state.id == studio.space);
+    studio.ada.send(&ClientMessage::DeleteSpace {
+        space: studio.space.clone(),
+        session: false,
+    });
+    studio.ada.wait_for(|message| {
+        matches!(message, ServerMessage::Left { deleted: Some(_) }).then_some(())
+    });
+    for tool in ["pairing", "confirm_pairing", "decline_pairing"] {
+        let result = studio.call(tool, json!({ "code": display(&shown) }));
+        assert_eq!(result["isError"], true, "{tool}: {result}");
+    }
+    assert!(studio.pairing.pending().is_some());
+    // The workshop's agent confirms the server's one pairing, and then there is none for either space to decide.
+    let confirmed = studio.call_as(Some(&other), "confirm_pairing", json!({ "code": shown }));
+    assert_eq!(
+        confirmed["structuredContent"]["confirmed"], true,
+        "{confirmed}"
+    );
+    assert!(
+        failure(&studio.call_as(Some(&other), "confirm_pairing", json!({ "code": shown })))
+            .starts_with("No pairing is waiting.")
+    );
+    let line = format!(
+        "The agent of space {workshop} (\"Workshop\"), session {other}, confirmed pairing for \"Quest 3\" with nobody in the space; it is now an owner."
+    );
+    eventually(|| logged().contains(&line).then_some(()));
+}
+
+#[test]
 fn the_rate_limit_holds_and_the_agent_cannot_lift_it() {
     let studio = Studio::new();
     let mut quest = studio.server.connect("quest", "Quest 3");
