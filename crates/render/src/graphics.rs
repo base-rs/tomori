@@ -723,7 +723,8 @@ impl Renderer {
                 }
             }
             // Arrival's labels are drawn last: in a space they are the hand menu's, by the hand, nearer than the panels, so
-            // they blend over those behind them, and are hidden by any in front of them, which has written its depth.
+            // they blend over those behind them, and are hidden by any in front of them, which has written its depth. Nothing
+            // drawn after them needs theirs, so they write none.
             self.arrival
                 .draw(&mut pass, &self.camera_bindings[eye], &glyphs);
             // A teleport's blink darkens everything, panels too, so that the view does not jump.

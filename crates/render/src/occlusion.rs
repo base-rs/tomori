@@ -11,7 +11,8 @@
 //! a little behind it, by [`TIE`], so that between surfaces about as far away as each other, such as a panel carried over
 //! a wall's slot and the panel in that slot, the order the frame step draws them in still decides. A surface too faint
 //! to hide what is behind it, such as a wall's translucent board, a slot's outline or a fading label, writes no depth, so
-//! that nothing vanishes behind what can barely be seen.
+//! that nothing vanishes behind what can barely be seen. Arrival's labels, the hand menu's in a space, are drawn last,
+//! so nothing after them needs their depth, and they write none.
 
 /// How opaque a backing must be, from 0 to 1, to hide what is behind it: one that shows less than two fifths of what is
 /// behind it.
@@ -91,8 +92,8 @@ mod tests {
 
     #[test]
     fn backings_hide_what_is_behind_them_only_when_opaque_enough() {
-        // A panel's face, the label on the ray, the hint, the pill and a hand menu label hide what is behind them.
-        for alpha in [1.0, 0.95, 0.88, 0.82, 0.72, OCCLUDING] {
+        // A panel's face, the label on the ray, the hint, the pill and a worker's sign hide what is behind them.
+        for alpha in [1.0, 0.95, 0.88, 0.82, OCCLUDING] {
             assert!(occludes(alpha), "{alpha}");
         }
         // A wall's board, a curved wall's slots, a slot's outline and a label fading out do not.

@@ -392,8 +392,8 @@ struct Styled<'a> {
     alpha: f32,
 }
 
-/// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is. Every quad lies in the label's plane, so that a label tilted to face the viewer draws its glyphs whole and its background behind all of them. Where its background is opaque enough to hide what is behind it, the vertex its quad starts at is added to `occluders`.
-fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>, occluders: &mut Vec<u32>) {
+/// One label's text, on a translucent background, facing [`crate::arrival::HOME`] and anchored where its object is. Every quad lies in the label's plane, so that a label tilted to face the viewer draws its glyphs whole and its background behind all of them.
+fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>) {
     let label = styled.label;
     let p = label.pixel;
     let columns = label
@@ -424,16 +424,6 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>, occluders: &mut Vec<u32>)
     if alpha <= 0.0 {
         return;
     }
-    let (background, opacity) = if styled.hovered {
-        (HOVER_BACKGROUND, 0.9)
-    } else {
-        (BACKGROUND, 0.72)
-    };
-    // The background is the label's first quad.
-    let backing = mesh.len();
-    if crate::occlusion::occludes(opacity * alpha) && backing + 6 <= MAX_VERTICES {
-        occluders.push(backing as u32);
-    }
     let rgba = |rgb: [f32; 3], a: f32| [rgb[0], rgb[1], rgb[2], a * alpha];
     // A quad `x` and `y` along and down from the origin and `z` towards the viewer, in metres, drawn from `tile` of the glyph atlas.
     let mut quad =
@@ -458,6 +448,11 @@ fn label_into(styled: &Styled, mesh: &mut Vec<Vertex>, occluders: &mut Vec<u32>)
                 });
             }
         };
+    let (background, opacity) = if styled.hovered {
+        (HOVER_BACKGROUND, 0.9)
+    } else {
+        (BACKGROUND, 0.72)
+    };
     quad(
         -3.0 * p,
         -3.0 * p,
@@ -505,11 +500,6 @@ fn heading(scene: &Scene, hovered: Option<&Key>) -> Option<Label> {
 
 /// Every label's vertices in scene coordinates, the farthest from [`crate::arrival::HOME`] first, so that translucent backgrounds blend over what is behind them.
 pub fn label_mesh(scene: &Scene, hovered: Option<&Key>) -> Vec<Vertex> {
-    labels(scene, hovered).0
-}
-
-/// [`label_mesh`]'s vertices, with the vertex each background opaque enough to hide what is behind it starts at.
-fn labels(scene: &Scene, hovered: Option<&Key>) -> (Vec<Vertex>, Vec<u32>) {
     let heading = heading(scene, hovered);
     let mut labels: Vec<Styled> = scene
         .objects
@@ -533,25 +523,20 @@ fn labels(scene: &Scene, hovered: Option<&Key>) -> (Vec<Vertex>, Vec<u32>) {
     let distance = |styled: &Styled| styled.label.anchor.distance(viewer);
     labels.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
     let mut mesh = Vec::new();
-    let mut occluders = Vec::new();
     for styled in &labels {
-        label_into(styled, &mut mesh, &mut occluders);
+        label_into(styled, &mut mesh);
     }
-    (mesh, occluders)
+    mesh
 }
 
 /// The arrival labels on the GPU, rebuilt only when the scene or what is pointed at changes, or when glyphs they need were waiting for the atlas.
 pub struct ArrivalLabels {
     pipeline: wgpu::RenderPipeline,
-    /// Draws the backgrounds opaque enough to hide what is behind them into depth alone, once the labels are drawn.
-    occluder: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     capacity: usize,
     count: u32,
     /// The vertices in the buffer, drawn unless hidden.
     length: u32,
-    /// The vertex each background in the buffer opaque enough to hide what is behind it starts at.
-    occluders: Vec<u32>,
     /// What the mesh was built for, while it has every glyph, rather than lacking some that waited for a later frame's budget.
     cached: Option<(Scene, Option<Key>)>,
 }
@@ -583,7 +568,11 @@ impl ArrivalLabels {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(VERTICES)],
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &ATTRIBUTES,
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -614,24 +603,13 @@ impl ArrivalLabels {
             multiview_mask: None,
             cache: None,
         });
-        let occluder = crate::occlusion::occluder(
-            device,
-            "arrival label occluder",
-            &layout,
-            &shader,
-            VERTICES,
-            format,
-            samples,
-        );
         let vertices = Self::buffer(device, INITIAL_VERTICES);
         Self {
             pipeline,
-            occluder,
             vertices,
             capacity: INITIAL_VERTICES,
             count: 0,
             length: 0,
-            occluders: Vec::new(),
             cached: None,
         }
     }
@@ -662,7 +640,7 @@ impl ArrivalLabels {
             .is_some_and(|(cached, key)| cached == scene && key.as_ref() == hovered);
         if !unchanged {
             let waited = tomori_text::atlas::waited();
-            let (mesh, mut occluders) = labels(scene, hovered);
+            let mesh = label_mesh(scene, hovered);
             if mesh.len() > self.capacity {
                 self.capacity = mesh.len().next_power_of_two().min(MAX_VERTICES);
                 self.vertices = Self::buffer(device, self.capacity);
@@ -671,8 +649,6 @@ impl ArrivalLabels {
                 queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
             }
             self.length = mesh.len().min(self.capacity) as u32;
-            occluders.retain(|start| start + 6 <= self.length);
-            self.occluders = occluders;
             self.cached =
                 (tomori_text::atlas::waited() == waited).then(|| (scene.clone(), hovered.cloned()));
         }
@@ -695,18 +671,8 @@ impl ArrivalLabels {
         pass.set_bind_group(1, glyphs, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.count, 0..1);
-        pass.set_pipeline(&self.occluder);
-        for &start in &self.occluders {
-            pass.draw(start..start + 6, 0..1);
-        }
     }
 }
-
-const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-    array_stride: size_of::<Vertex>() as u64,
-    step_mode: wgpu::VertexStepMode::Vertex,
-    attributes: &ATTRIBUTES,
-};
 
 #[cfg(test)]
 mod tests {

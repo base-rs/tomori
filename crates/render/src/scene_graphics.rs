@@ -87,7 +87,8 @@ impl Panels {
 
     /// The panels to draw, each with its model in the eyes' space, which `scene_to_space` takes the scene to: the
     /// projection's walls and panels, then the inbox and cards, in the order the frame step gave them, farthest first, so
-    /// that a nearer card covers one behind it, as panels do not write depth; then the pill, card, badge and transcript.
+    /// that a nearer card blends over one behind it, as panels write depth only once drawn (`design/rendering.md`); then
+    /// the pill, card, badge and transcript.
     pub fn list(&self, scene_to_space: Mat4) -> Vec<(&Panel, Mat4)> {
         let cards = self
             .cards

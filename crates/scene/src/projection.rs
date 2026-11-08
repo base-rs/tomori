@@ -1159,8 +1159,9 @@ impl Projector {
     }
 
     /// What to draw: each wall with the panels in its layout, and the outline of the slot a panel carried would take,
-    /// and each panel floating or carried, the groups farthest from `viewer` first, since panels do not write depth, so
-    /// that a nearer one covers one behind it, and a wall's panels cover the wall.
+    /// and each panel floating or carried, the groups farthest from `viewer` first, since panels blend over what is drawn
+    /// before them and write depth only once drawn, so that a nearer one covers one behind it, and a wall's panels cover
+    /// the wall.
     fn sheets(
         &self,
         projection: &Projection,
