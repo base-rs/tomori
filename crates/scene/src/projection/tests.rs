@@ -1786,3 +1786,33 @@ fn a_panel_thrown_away_is_no_longer_carried_put_down_or_drawn_while_the_server_a
     });
     assert_eq!(projector.thrown, None);
 }
+
+#[test]
+fn the_server_takes_each_slot_to_be_where_it_is_drawn() {
+    // The server reasons about what people look at, and where it puts the agent's panels, from where it takes each
+    // slot to be, so it must agree with where this draws a panel in it, flat or curved, however the wall stands.
+    let turned = |mut wall: Wall, at: [f32; 3], towards: [f32; 3]| {
+        wall.pose = Pose::upright_facing(at, towards);
+        wall
+    };
+    let flat = Wall::new("wall-1", WallKind::Added, Pose::default());
+    for wall in [
+        curved(),
+        turned(curved(), [1.0, 0.8, 4.0], [-2.0, 0.8, 1.0]),
+        turned(flat.clone(), [0.0, 1.5, -2.0], [0.0, 1.5, 0.0]),
+        turned(flat, [3.0, 1.4, 1.0], [0.0, 1.6, -1.0]),
+    ] {
+        let drawn: Vec<Vec3> = slot_frames(&wall, model(&wall.pose).unwrap())
+            .iter()
+            .map(|frame| frame.transform_point3(Vec3::ZERO))
+            .collect();
+        let taken = tomori_server::presence::slot_centres(&wall);
+        assert_eq!(drawn.len(), taken.len());
+        for (drawn, taken) in drawn.iter().zip(taken) {
+            assert!(
+                drawn.distance(Vec3::from_array(taken)) < 0.001,
+                "{drawn} {taken:?}"
+            );
+        }
+    }
+}

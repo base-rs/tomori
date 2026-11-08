@@ -33,6 +33,7 @@ pub mod offline;
 mod option;
 mod outbox;
 mod pages;
+pub mod presence;
 mod process;
 mod projection;
 mod queue;

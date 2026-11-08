@@ -573,9 +573,12 @@ struct ParticipantRecord {
     engagement: Option<Engagement>,
     /// The environment intents they may still send, kept across their connections, so that reconnecting does not refill the burst. See `design/environments.md`.
     intents: crate::channel::Intents,
-    /// Where their head last was in the space they are in, from their presence, which decides the wall the agent projects
-    /// onto in answer to them. See `design/projection.md`.
-    head: Option<[f32; 3]>,
+    /// Where they last were in the space they are in, from their presence: their head, which decides the wall the agent
+    /// projects onto in answer to them, and their controllers and hands, which its `presence` tool reports. See
+    /// `design/projection.md` and `design/mcp.md`.
+    seen: Option<crate::presence::Seen>,
+    /// Whether their current connection has reported a controller or a hand, as only a headset does.
+    headset: bool,
 }
 
 struct SpaceRecord {
@@ -1185,7 +1188,7 @@ impl HubState {
         record.space = Some(space.to_owned());
         record.last_space = Some(space.to_owned());
         // Where they stood in another space means nothing in this one.
-        record.head = None;
+        record.seen = None;
         outbox.clear_audio();
         self.update_role(participant);
         if participates {
@@ -2630,7 +2633,8 @@ impl Hub {
                     departed: None,
                     engagement: None,
                     intents: crate::channel::Intents::new(Instant::now()),
-                    head: None,
+                    seen: None,
+                    headset: false,
                 },
             );
         }
@@ -2640,8 +2644,9 @@ impl Hub {
             .expect("inserted above");
         record.name = name;
         record.departed = None;
-        // A new connection may be from a client that reports nothing, which stays at the live edge.
+        // A new connection may be from a client that reports nothing, which stays at the live edge, and from another device.
         record.engagement = None;
+        record.headset = false;
         let source = record.source;
         let previous = record.connection.replace(connection);
         let rejoin = record.space.clone().or_else(|| record.last_space.clone());
@@ -2938,7 +2943,10 @@ impl Hub {
                     }
                     _ => Vec::new(),
                 };
-                let origin = state.participants[participant].head;
+                let origin = state.participants[participant]
+                    .seen
+                    .as_ref()
+                    .map(|seen| seen.head.position);
                 state.next_utterance += 1;
                 let id = UtteranceId(state.next_utterance);
                 state.utterances.insert(
@@ -3136,8 +3144,13 @@ impl Hub {
                     return;
                 };
                 let source = state.participants[participant].source;
-                let at = head.position;
-                let head_at = at.iter().all(|axis| axis.is_finite()).then_some(at);
+                let seen = crate::presence::Seen::reported(
+                    head,
+                    left,
+                    right,
+                    hands.as_deref(),
+                    Instant::now(),
+                );
                 for other in space.model.members() {
                     if other != participant {
                         state.send(
@@ -3152,11 +3165,14 @@ impl Hub {
                         );
                     }
                 }
-                state
+                let record = state
                     .participants
                     .get_mut(participant)
-                    .expect("a member is a participant")
-                    .head = head_at;
+                    .expect("a member is a participant");
+                record.headset |= seen
+                    .as_ref()
+                    .is_some_and(crate::presence::Seen::tracks_hands);
+                record.seen = seen;
             }
             ClientMessage::SetAttribution { enabled } => {
                 let Some(space) = in_space(state) else {

@@ -3425,7 +3425,7 @@ fn a_reply_s_panels_go_to_the_wall_nearest_whoever_asked_and_stay_in_its_text() 
         hub.lock()
             .participants
             .values()
-            .any(|record| record.name == "ada" && record.head.is_none())
+            .any(|record| record.name == "ada" && record.seen.is_none())
     );
 }
 
