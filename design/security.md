@@ -81,7 +81,7 @@ Checking credentials on the HTTP request means a refused or unauthenticated clie
 
 ## Scope
 
-The server's HTTP handling of `/connect` and its web pages, its MCP endpoint's authentication and how a tool call is scoped to the calling session's space (see `mcp.md`), its role checks, token store, display names, state directory and command-line options; `crates/security`; the protocol's Hello, `Welcome`, role, knock, participant handle and display name; the Bonjour TXT record; and how clients store credentials, pin certificates, pair and knock.
+The server's HTTP handling of `/connect` and its web pages, its MCP endpoint's authentication and how a tool call is scoped to the calling session's space (see `mcp.md`), the pairing tools a space's agent may use (`hub/agent_pairing.rs`), its role checks, token store, display names, state directory and command-line options; `crates/security`; the protocol's Hello, `Welcome`, role, knock, participant handle and display name; the Bonjour TXT record; and how clients store credentials, pin certificates, pair and knock.
 
 ## Validation
 
