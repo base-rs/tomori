@@ -64,3 +64,20 @@ fn opacity(covered: f32, color: vec3<f32>) -> f32 {
 fn fs_main(in: Output) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb, in.color.a * opacity(coverage(in.uv, in.weight), in.color.rgb));
 }
+// How far back a backing's depth is written, in the depth buffer's units, so that a surface drawn later just behind it, as near as a panel carried over a wall's slot, is still drawn over it. Set from `occlusion::TIE`.
+override TIE: f32 = 0.0;
+// A backing drawn into depth alone, once its panel is drawn, so that what is behind it and drawn later is hidden; its colour is not written. See `occlusion.rs`.
+@vertex
+fn vs_occlude(
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) weight: f32,
+) -> @builtin(position) vec4<f32> {
+    let at = camera.transform * vec4<f32>(position, 0.0, 1.0);
+    return vec4<f32>(at.xy, min(at.z + TIE * at.w, at.w), at.w);
+}
+@fragment
+fn fs_occlude() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}

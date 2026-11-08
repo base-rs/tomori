@@ -714,15 +714,18 @@ impl Renderer {
                 &glyphs,
                 matrices[eye] * scene_to_space,
             );
-            self.arrival
-                .draw(&mut pass, &self.camera_bindings[eye], &glyphs);
-            // Panels are translucent, so they are drawn last, against the depth of everything else.
+            // Panels are translucent, so they are drawn after the opaque scene, against its depth; each opaque enough to hide
+            // what is behind it then writes its backing's depth, so that what is behind it is hidden though drawn after it.
             if !panels.is_empty() {
                 self.panels.set(&mut pass, &glyphs);
                 for (panel, _) in panels {
-                    panel.draw(&mut pass, eye);
+                    panel.draw(&mut pass, &self.panels, eye);
                 }
             }
+            // Arrival's labels are drawn last: in a space they are the hand menu's, by the hand, nearer than the panels, so
+            // they blend over those behind them, and are hidden by any in front of them, which has written its depth.
+            self.arrival
+                .draw(&mut pass, &self.camera_bindings[eye], &glyphs);
             // A teleport's blink darkens everything, panels too, so that the view does not jump.
             if self.blink > 0.0 {
                 let blink = f64::from(self.blink);

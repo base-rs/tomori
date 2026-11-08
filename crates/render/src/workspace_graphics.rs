@@ -72,6 +72,8 @@ struct PanelRange {
     // Background strips, post and edge accent only: text shares this shallow
     // surface, with millimetre offsets. Never compare thousands of glyph quads.
     surface: Vec<[glam::Vec3; 3]>,
+    /// Whether the panel is opaque enough that its surface, drawn into depth once the panel is, hides what is behind it.
+    occludes: bool,
 }
 
 struct ProjectedTriangle {
@@ -341,6 +343,7 @@ impl PageCache {
             if start != end && panel.opacity > 0.0 {
                 self.ranges.push(PanelRange {
                     center: panel.center(),
+                    occludes: crate::occlusion::occludes(panel.opacity),
                     vertices: start..end,
                     surface: mesh[..((end - start) as usize).min(if panel.sign.is_some() {
                         26 * 6
@@ -362,6 +365,8 @@ impl PageCache {
 
 pub struct WorkspaceGraphics {
     pipeline: wgpu::RenderPipeline,
+    /// Draws an opaque enough panel's surface into depth alone, once the panel is drawn.
+    occluder: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     cache: PageCache,
     count: u32,
@@ -395,11 +400,7 @@ impl WorkspaceGraphics {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &ATTRIBUTES,
-                })],
+                buffers: &[Some(VERTICES)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -431,6 +432,15 @@ impl WorkspaceGraphics {
             multiview_mask: None,
             cache: None,
         });
+        let occluder = crate::occlusion::occluder(
+            device,
+            "world workspace occluder",
+            &layout,
+            &shader,
+            VERTICES,
+            format,
+            samples,
+        );
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bounded workspace quads"),
             size: (INITIAL_VERTICES * size_of::<Vertex>()) as u64,
@@ -439,6 +449,7 @@ impl WorkspaceGraphics {
         });
         Self {
             pipeline,
+            occluder,
             vertices,
             cache: PageCache::default(),
             count: 0,
@@ -536,15 +547,30 @@ impl WorkspaceGraphics {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         // Blending is order dependent. Preserve each panel's background-first
         // mesh order, but draw whole panels back-to-front for this eye. The
-        // shared depth attachment still occludes them with opaque scene bodies;
-        // no panel writes depth, so fades never leave invisible occluders.
+        // shared depth attachment still occludes them with opaque scene bodies.
         // Use overlap depths rather than center depths: a tilted card's center
         // can be nearer even though its overlapping edge is behind the sign.
+        // Once drawn, a panel opaque enough to hide what is behind it writes its
+        // surface's depth, so that panels and labels drawn later, behind it, are
+        // hidden; one fading out does not, so fades never leave invisible occluders.
         for index in panel_order(&self.cache.ranges, scene_to_clip) {
-            pass.draw(self.cache.ranges[index].vertices.clone(), 0..1);
+            let range = &self.cache.ranges[index];
+            pass.draw(range.vertices.clone(), 0..1);
+            if range.occludes {
+                let surface = range.vertices.start + range.surface.len() as u32 * 3;
+                pass.set_pipeline(&self.occluder);
+                pass.draw(range.vertices.start..surface, 0..1);
+                pass.set_pipeline(&self.pipeline);
+            }
         }
     }
 }
+
+const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<Vertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &ATTRIBUTES,
+};
 
 fn state_label(state: &State) -> (&'static str, [f32; 3]) {
     match state {
