@@ -1625,10 +1625,11 @@ mod tests {
 
     #[test]
     fn a_projection_of_code_panels_at_every_limit_fits_in_one_frame() {
-        // Every panel the largest code panel there can be: every line as long as it can be, in characters of four
-        // bytes, and as many spans as there can be, of the longest kind, as far into it as they can be.
-        let line = format!("{}…", "\u{1F600}".repeat(tomori_protocol::CODE_LINE_CHARS));
-        let body = vec![line; CODE_LINES].join("\n");
+        // Every panel the largest code panel there can be: as many lines as it holds, with every character it may
+        // have, in characters of four bytes, cut at the last, and as many spans as there can be, of the longest kind,
+        // as far into it as they can be.
+        let line = "\u{1F600}".repeat(tomori_protocol::CODE_CHARS / CODE_LINES);
+        let body = format!("{}…", vec![line; CODE_LINES].join("\n"));
         let length = body.chars().count() as u32;
         let spans = (0..tomori_protocol::CODE_SPANS as u32)
             .map(|index| {

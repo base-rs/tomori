@@ -7,6 +7,20 @@ use tomori_protocol::TokenKind;
 
 use super::*;
 
+/// The block the maintainer looked at on the Quest 3, whose sixth line showed cut with "…".
+const MAINTAINERS_BLOCK: &str = r#"use std::collections::HashMap;
+
+fn summarise(orders: &[(String, u32, f64)]) -> HashMap<String, (u32, f64)> {
+    let mut totals = HashMap::new();
+    for (customer, quantity, price) in orders {
+        let entry = totals.entry(customer.clone()).or_insert((0, 0.0));
+        entry.0 += quantity;
+        entry.1 += *quantity as f64 * price; // running total of what each customer has spent across every order so far
+    }
+    totals
+}
+"#;
+
 /// The code panel a block of `info` and `source` makes, if any.
 fn block(info: &str, source: &str) -> Option<Content> {
     let mut lines = Lines::new(info);
@@ -116,26 +130,51 @@ fn a_long_block_keeps_its_first_lines_each_cut_and_says_how_long_it_is() {
     // Blank lines inside it, and many at its end, still count as the block's own, but not those at its end.
     let gappy = format!("{}\n\n\n{}\n\n\n\n", "a", "b");
     assert_eq!(block("text", &gappy).unwrap().code.unwrap().lines, 4);
-    // A long line is cut with "…", and its spans with it: a span past the cut is dropped, one across it shortened.
-    let long = format!(
-        "let s = \"{}\"; let t = 1;\nfn f() {{}}",
-        "a".repeat(CODE_LINE_CHARS)
+    // A line far longer than a row is kept whole, to be wrapped where it is drawn, as are the lines of the maintainer's
+    // block, which were once each cut to 64 characters.
+    let source = MAINTAINERS_BLOCK.trim_end();
+    let content = block("rust", source).unwrap();
+    assert_eq!(content.body, source);
+    assert!(!content.body.contains('…'));
+    let found = tokens(&content);
+    assert!(found.iter().any(|(text, _)| text == "0.0"), "{found:?}");
+    assert!(
+        found.iter().any(|(text, kind)| *kind == TokenKind::Comment
+            && text.ends_with("across every order so far")),
+        "{found:?}"
     );
+    // The lines are cut with "…" only where they reach as many characters together as a panel could show, and the
+    // lines after are left out, counted among the block's; the spans with them: one past the cut is dropped, one
+    // across it shortened.
+    let first = format!("let s = \"{}\";", "a".repeat(CODE_CHARS / 2));
+    let second = format!("let t = \"{}\"; let u = 1;", "b".repeat(CODE_CHARS / 2));
+    let long = format!("{first}\n{second}\nfn f() {{}}");
     let content = block("rust", &long).unwrap();
-    let first = content.body.lines().next().unwrap();
-    assert_eq!(first.chars().count(), CODE_LINE_CHARS + 1);
-    assert!(first.ends_with('…'));
+    let shown: Vec<&str> = content.body.lines().collect();
+    assert_eq!(shown.len(), 2);
+    assert_eq!(shown[0], first);
+    assert!(shown[1].ends_with('…'));
+    assert_eq!(content.body.chars().count(), CODE_CHARS + 2);
+    assert_eq!(content.code.as_ref().unwrap().lines, 3);
     let found = tokens(&content);
     let string = found
         .iter()
-        .find(|(_, kind)| *kind == TokenKind::String)
+        .filter(|(_, kind)| *kind == TokenKind::String)
+        .nth(1)
         .unwrap();
-    assert_eq!(string.0.chars().count(), CODE_LINE_CHARS - "let s = ".len());
-    assert!(!found.contains(&("1".to_owned(), TokenKind::Constant)));
-    // The next line's spans are where it is shown.
-    assert!(found.contains(&("fn".to_owned(), TokenKind::Keyword)));
+    assert_eq!(
+        string.0.chars().count(),
+        CODE_CHARS - first.chars().count() - "let t = ".len()
+    );
+    assert!(!found.iter().any(|(text, _)| text == "1"));
+    assert!(!found.iter().any(|(text, _)| text == "fn"));
+    // Lines that take every character exactly are not cut, and the lines after are left out without a mark.
+    let exact = vec!["x".repeat(CODE_CHARS / 4); 5].join("\n");
+    let content = block("text", &exact).unwrap();
+    assert_eq!(content.body.lines().count(), 4);
+    assert!(!content.body.contains('…'));
     // At most so many spans, of lines full of them.
-    let dense = vec!["1,".repeat(CODE_LINE_CHARS / 2); CODE_LINES].join("\n");
+    let dense = vec!["1,".repeat(CODE_CHARS / CODE_LINES / 2); CODE_LINES].join("\n");
     let content = block("json", &format!("[{dense}]")).unwrap();
     assert_eq!(content.code.as_ref().unwrap().spans.len(), CODE_SPANS);
     tokens(&content);
@@ -160,20 +199,22 @@ fn hostile_blocks_are_bounded_and_highlighted_within_a_budget() {
     // A million lines of a megabyte each would be a terabyte: a block's lines are counted, and its first kept, cut.
     let huge = "(".repeat(1 << 20);
     for _ in 0..100_000 {
-        lines.push(&huge[..1024]);
+        lines.push(&huge[..100]);
     }
     lines.push(&huge);
-    assert_eq!(lines.kept.len(), CODE_LINES);
-    assert!(
+    assert!(lines.kept.len() <= CODE_LINES);
+    assert_eq!(
         lines
             .kept
             .iter()
-            .all(|line| line.chars().count() <= HIGHLIGHTED_CHARS)
+            .map(|line| line.chars().count())
+            .sum::<usize>(),
+        HIGHLIGHTED_CHARS
     );
     assert!(lines.info.chars().count() <= INFO_CHARS);
     let content = highlighted(lines.content().unwrap());
     assert_eq!(content.code.as_ref().unwrap().lines, 100_001);
-    assert!(content.body.chars().count() <= CODE_LINES * (CODE_LINE_CHARS + 2));
+    assert!(content.body.chars().count() <= CODE_CHARS + CODE_LINES);
     tokens(&content);
     // Deeply nested, pathological for a parser, invalid UTF-8 read lossily, and every control character.
     let lossy = String::from_utf8_lossy(b"fn \xff main() {\n \"\xc3\x28\" }").into_owned();

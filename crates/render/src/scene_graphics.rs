@@ -1022,4 +1022,179 @@ mod tests {
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }
+
+    /// Set `TOMORI_CODE_WRAP_PREVIEW` to a PNG path to save what this renders, at about the headset's resolution: the
+    /// block of Rust the maintainer looked at on the Quest 3, on the Tomori wall from 0.5 m, as an older server sent it,
+    /// each line cut to 64 characters with "…", then as it is sent now, every line whole, a long one wrapping onto as many
+    /// rows as it needs, then the same from home.
+    #[test]
+    fn a_code_panel_shows_every_line_whole_however_many_rows_it_wraps_onto() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("code wrap test eye"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut panels = Panels::new(&device, &renderer);
+            let rust = [
+                "use std::collections::HashMap;",
+                "",
+                "fn summarise(orders: &[(String, u32, f64)]) -> HashMap<String, (u32, f64)> {",
+                "    let mut totals = HashMap::new();",
+                "    for (customer, quantity, price) in orders {",
+                "        let entry = totals.entry(customer.clone()).or_insert((0, 0.0));",
+                "        entry.0 += quantity;",
+                "        entry.1 += *quantity as f64 * price; // running total of what each customer has spent across every order so far",
+                "    }",
+                "    totals",
+                "}",
+            ];
+            // The spans of `body`, of these texts in order, as a highlighter would find them, those past where a line
+            // is cut left out.
+            let spans = |body: &str| {
+                let mut spans = Vec::new();
+                let mut from = 0;
+                for (text, kind) in [
+                    ("use", tomori_protocol::TokenKind::Keyword),
+                    ("HashMap", tomori_protocol::TokenKind::Type),
+                    ("fn", tomori_protocol::TokenKind::Keyword),
+                    ("summarise", tomori_protocol::TokenKind::Function),
+                    ("String", tomori_protocol::TokenKind::Type),
+                    ("HashMap", tomori_protocol::TokenKind::Type),
+                    ("let", tomori_protocol::TokenKind::Keyword),
+                    ("mut", tomori_protocol::TokenKind::Keyword),
+                    ("new", tomori_protocol::TokenKind::Function),
+                    ("for", tomori_protocol::TokenKind::Keyword),
+                    ("in", tomori_protocol::TokenKind::Keyword),
+                    ("let", tomori_protocol::TokenKind::Keyword),
+                    ("entry", tomori_protocol::TokenKind::Function),
+                    ("clone", tomori_protocol::TokenKind::Function),
+                    ("or_insert", tomori_protocol::TokenKind::Function),
+                    ("0", tomori_protocol::TokenKind::Number),
+                    ("0.0", tomori_protocol::TokenKind::Number),
+                    ("as", tomori_protocol::TokenKind::Keyword),
+                    (
+                        "// running total of what each customer has spent across every order so far",
+                        tomori_protocol::TokenKind::Comment,
+                    ),
+                ] {
+                    let Some(at) = body[from..].find(text).map(|at| from + at) else {
+                        continue;
+                    };
+                    spans.push(tomori_protocol::Span::new(
+                        body[..at].chars().count() as u32,
+                        text.chars().count() as u32,
+                        kind,
+                    ));
+                    from = at + text.len();
+                }
+                assert!(tomori_protocol::valid_spans(body, &spans));
+                spans
+            };
+            let panel = |body: String| {
+                let spans = spans(&body);
+                tomori_protocol::Panel::new(
+                    "panel-1",
+                    "rust",
+                    body,
+                    tomori_protocol::Place::Wall {
+                        wall: tomori_protocol::TOMORI_WALL.into(),
+                        slot: 2,
+                    },
+                )
+                .with_code(tomori_protocol::Code::new("rust", rust.len() as u32).with_spans(spans))
+                .with_age(5)
+            };
+            let cut = rust
+                .iter()
+                .map(|line| match line.char_indices().nth(64) {
+                    Some((at, _)) => format!("{}…", &line[..at]),
+                    None => (*line).to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let whole = rust.join("\n");
+            let wall = tomori_wall();
+            let wall_frame = Mat4::from_rotation_translation(
+                glam::Quat::from_array(wall.pose.orientation),
+                Vec3::from_array(wall.pose.position),
+            );
+            let slots = tomori_scene::projection::slot_frames(&wall, wall_frame);
+            let slot = slots[2].w_axis.truncate();
+            let facing = slots[2].transform_vector3(Vec3::Z).normalize();
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            let lens = Mat4::perspective_rh(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let close = lens * Mat4::look_at_rh(slot + facing * 0.5, slot, Vec3::Y);
+            let from_home = lens * Mat4::look_at_rh(arrival::HOME, slot + Vec3::Y * 0.1, Vec3::Y);
+            let mut capture = |body: String, matrix: Mat4| {
+                let mut conversation = joined();
+                show_projection(&mut conversation, Vec::new(), vec![panel(body)]);
+                let mut step = Step::default();
+                let frame = step.update(
+                    &senses,
+                    &mut conversation,
+                    &mut felt(),
+                    Instant::now(),
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let before = capture(cut, close);
+            let after = capture(whole.clone(), close);
+            let after_from_home = capture(whole, from_home);
+            // What was cut is drawn, the rest of the sixth line and of the comment, so there is more text on the panel.
+            let ink = |image: &image::RgbaImage| {
+                image
+                    .pixels()
+                    .filter(|pixel| pixel.0[..3].iter().any(|channel| *channel > 120))
+                    .count()
+            };
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+            image::imageops::replace(&mut sheet, &before, 0, 0);
+            image::imageops::replace(&mut sheet, &after, 0, HEIGHT.into());
+            image::imageops::replace(&mut sheet, &after_from_home, 0, (2 * HEIGHT).into());
+            crate::test_support::preview("TOMORI_CODE_WRAP_PREVIEW", &sheet);
+            assert_ne!(before, after, "the whole lines must draw");
+            let (after_ink, before_ink) = (ink(&after), ink(&before));
+            assert!(
+                after_ink > before_ink + 200,
+                "what was cut is drawn: {after_ink} against {before_ink}"
+            );
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
 }

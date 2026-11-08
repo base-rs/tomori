@@ -3,15 +3,15 @@
 
 //! Code blocks: the fenced code blocks of any language but `panel` in the agent's replies, which the server projects as
 //! code panels, titled with their info string and highlighted here, on the server, never on a headset. Everything in
-//! them is untrusted, so each is bounded and cleaned: only a block's first [`CODE_LINES`] lines are kept, each cut to
-//! [`CODE_LINE_CHARS`] characters, with at most [`CODE_SPANS`] spans. See `design/projection.md`.
+//! them is untrusted, so each is bounded and cleaned: only a block's first [`CODE_LINES`] lines are kept, cut where they
+//! reach [`CODE_CHARS`] characters together, with at most [`CODE_SPANS`] spans. See `design/projection.md`.
 //!
 //! A block of a single line, such as a command, is left in the transcript and not projected: it reads as well there,
 //! and a panel for each would crowd the walls and replace the code panels of the reply before.
 //!
 //! A block is read into a plain code panel and its [`Source`], which is highlighted later, outside the hub's lock, since
 //! highlighting takes far longer than reading; see `crate::highlighting`.
-use tomori_protocol::{CODE_LINE_CHARS, CODE_LINES, CODE_SPANS, Code, Span};
+use tomori_protocol::{CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Span};
 
 use super::blocks::{META_KEY_CHARS, TITLE_CHARS};
 use super::{Content, Found};
@@ -19,9 +19,10 @@ use super::{Content, Found};
 /// The most code panels projected from one reply; later blocks stay only in the transcript.
 pub const CODE_PER_REPLY: usize = 4;
 
-/// The longest line highlighted, in characters: more than is shown, so that a line cut where it is shown is still
-/// highlighted as it continues, as a string that closes after the cut.
-const HIGHLIGHTED_CHARS: usize = 256;
+/// The most characters of a block's first lines highlighted, together: more than the [`CODE_CHARS`] shown, so that
+/// lines cut where they are shown are still highlighted as they continue, as a string that closes after the cut.
+const HIGHLIGHTED_CHARS: usize = 1_024;
+const _: () = assert!(HIGHLIGHTED_CHARS > CODE_CHARS);
 
 /// The longest info string kept, in characters, more than a title shows.
 const INFO_CHARS: usize = 2 * TITLE_CHARS;
@@ -36,8 +37,10 @@ const UNTITLED: &str = "code";
 #[derive(Debug)]
 pub struct Lines {
     info: String,
-    /// Its first [`CODE_LINES`] lines, from the first that is not blank, each cut to [`HIGHLIGHTED_CHARS`].
+    /// Its first [`CODE_LINES`] lines, from the first that is not blank, cut where they reach [`HIGHLIGHTED_CHARS`]
+    /// together, and how many characters they have.
     kept: Vec<String>,
+    characters: usize,
     /// How many lines it has, from the first that is not blank, and how many of the last are blank.
     total: u32,
     blank: u32,
@@ -49,6 +52,7 @@ impl Lines {
         Self {
             info: info.chars().take(INFO_CHARS).collect(),
             kept: Vec::new(),
+            characters: 0,
             total: 0,
             blank: 0,
         }
@@ -66,9 +70,11 @@ impl Lines {
         } else {
             0
         };
-        if self.kept.len() < CODE_LINES {
-            self.kept
-                .push(line.chars().take(HIGHLIGHTED_CHARS).collect());
+        let left = HIGHLIGHTED_CHARS - self.characters;
+        if self.kept.len() < CODE_LINES && left > 0 {
+            let kept: String = line.chars().take(left).collect();
+            self.characters += kept.chars().count();
+            self.kept.push(kept);
         }
     }
 
@@ -111,8 +117,8 @@ impl Lines {
     }
 }
 
-/// A code panel's code, as it is highlighted: its language, and its first lines, cleaned, each cut to
-/// [`HIGHLIGHTED_CHARS`], longer than they are shown.
+/// A code panel's code, as it is highlighted: its language, and its first lines, cleaned, cut where they reach
+/// [`HIGHLIGHTED_CHARS`] together, longer than they are shown.
 #[derive(Clone, Debug)]
 pub struct Source {
     language: String,
@@ -158,20 +164,27 @@ fn clean(line: &str) -> String {
     cleaned
 }
 
-/// `lines` as a code panel shows them, each cut to [`CODE_LINE_CHARS`] with "…", and `found`, their spans over the
-/// lines joined, as spans over what is shown, at most [`CODE_SPANS`]: a span's part past a cut is dropped.
+/// `lines` as a code panel shows them, cut with "…" where they reach [`CODE_CHARS`] together, without the lines after,
+/// and `found`, their spans over the lines joined, as spans over what is shown, at most [`CODE_SPANS`]: a span's part
+/// past the cut is dropped.
 fn shown(lines: &[String], found: Vec<Span>) -> (String, Vec<Span>) {
     let mut body = String::new();
     let mut spans = Vec::new();
     let mut found = found.into_iter().peekable();
-    // Where the line starts in the lines joined, and in what is shown.
+    // Where the line starts in the lines joined, and in what is shown, and how many characters are left to show.
     let (mut from, mut at) = (0_u32, 0_u32);
+    let mut left = CODE_CHARS as u32;
     for (index, line) in lines.iter().enumerate() {
+        // A line after those that took every character could not be shown either.
+        if left == 0 {
+            break;
+        }
         if index > 0 {
             body.push('\n');
         }
         let length = line.chars().count() as u32;
-        let kept = length.min(CODE_LINE_CHARS as u32);
+        let kept = length.min(left);
+        left -= kept;
         body.extend(line.chars().take(kept as usize));
         let cut = length > kept;
         if cut {
@@ -185,8 +198,11 @@ fn shown(lines: &[String], found: Vec<Span>) -> (String, Vec<Span>) {
                 spans.push(Span::new(at + start, end - start, span.kind));
             }
         }
+        if cut {
+            break;
+        }
         from += length + 1;
-        at += kept + u32::from(cut) + 1;
+        at += kept + 1;
     }
     (body, spans)
 }

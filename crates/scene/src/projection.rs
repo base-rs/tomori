@@ -56,6 +56,9 @@ const CODE_ROWS: usize = 3 + CODE_LINES + 1;
 const CODE_PADDING: (usize, usize) = (6, 12);
 /// The cells of a code panel's line number, and the space after it.
 const GUTTER: usize = 3;
+// The server cuts a code panel's lines where they reach as many characters together as its rows of code can show, so
+// that where they are cut is never shown.
+const _: () = assert!(CODE_LINES * (CODE_COLUMNS - GUTTER) <= tomori_protocol::CODE_CHARS);
 /// The size of a font pixel on a code panel, in metres, smaller than a text panel's so that the same panel holds its
 /// [`CODE_COLUMNS`] and [`CODE_LINES`], legible from about 2 m.
 pub const CODE_PIXEL: f32 = PIXEL * (COLUMNS * CELL_WIDTH + 2 * PADDING.0) as f32
@@ -369,7 +372,8 @@ fn code_face(panel: &Panel, code: &Code) -> Canvas {
         }
         at += line.chars().count() + 1;
         let mut wrapped = wrap_code(&cut(&spans, usize::MAX), room, step);
-        // A line cut by the server ends with a dim "…".
+        // A line cut by the server ends with a dim "…": past what the panel can show, or, from an older server, at 64
+        // characters.
         if let Some(last) = wrapped
             .last_mut()
             .and_then(|row| row.last_mut())
