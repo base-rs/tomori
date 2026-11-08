@@ -61,6 +61,14 @@ impl Cut {
     }
 }
 
+/// How far past a segment's limit its end depends on the audio: the most that [`listen`] and [`cut`] read beyond it, 1.125 seconds.
+pub const LOOKAHEAD: usize = PAUSE / 2 + CONTEXT;
+
+/// Whether the first `length` samples of a clip decide where the segment of it that starts at `start` ends, whatever follows them: they reach [`LOOKAHEAD`] past its limit, so [`listen`] and [`cut`] read the same samples of them as of the whole clip, and the segment ends before they do. A clip still being recorded can therefore have this segment cut, and decoded, before it ends.
+pub fn decided(length: usize, start: usize) -> bool {
+    length >= start + MAX_SEGMENT + LOOKAHEAD
+}
+
 /// The range of `samples` around the search for the end of the segment starting at `start` that a voice activity detector should hear, or `None` if the rest of the clip fits in one segment.
 pub fn listen(samples: &[i16], start: usize) -> Option<Range<usize>> {
     let limit = start + MAX_SEGMENT;
@@ -333,6 +341,34 @@ mod tests {
         assert_eq!(segments.len(), 3, "{segments:?}");
         assert!((23.0..=23.5).contains(&seconds(segments[0].end)));
         assert!((45.0..=45.5).contains(&seconds(segments[1].end)));
+    }
+
+    #[test]
+    fn a_decided_segment_ends_where_it_would_in_the_whole_clip() {
+        let mut samples = voice(90.0, 8000.0);
+        for pause in [20.0, 27.9, 47.0, 54.5] {
+            quieten(&mut samples, pause, pause + 0.4, 100.0);
+        }
+        let speech = [0..samples.len() / 3, samples.len() / 2..samples.len()];
+        let mut start = 0;
+        while start + MAX_SEGMENT + LOOKAHEAD <= samples.len() {
+            // The least that decides the segment's end, and anything longer, as when the clip is still being recorded.
+            let least = start + MAX_SEGMENT + LOOKAHEAD;
+            assert!(decided(least, start) && !decided(least - 1, start));
+            for length in [least, least + RATE as usize, samples.len()] {
+                let recorded = &samples[..length];
+                assert_eq!(listen(recorded, start), listen(&samples, start));
+                assert_eq!(cut(recorded, start, &speech), cut(&samples, start, &speech));
+                assert_eq!(cut(recorded, start, &[]), cut(&samples, start, &[]));
+                assert!(cut(recorded, start, &[]).end() < length);
+            }
+            // With less, the detector would hear less after the search.
+            assert_ne!(
+                listen(&samples[..least - 1], start),
+                listen(&samples, start)
+            );
+            start = cut(&samples, start, &speech).end();
+        }
     }
 
     #[test]

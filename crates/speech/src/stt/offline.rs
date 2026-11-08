@@ -3,11 +3,11 @@
 
 //! Whole-clip speech recognition for push-to-talk utterances.
 //!
-//! The [`OfflineRecognizer`] decodes a complete clip, once, so it is more accurate than the streaming [`super::StreamingRecognizer`]. The cost is latency: nothing is reported until the participant stops speaking, and the final transcript arrives once the whole clip is decoded, a couple of seconds after they let go, instead of almost at once.
+//! The [`OfflineRecognizer`] decodes a complete clip, once, so it is more accurate than the streaming [`super::StreamingRecognizer`]. The cost is latency: the final transcript arrives once the last of the clip is decoded, a couple of seconds after the participant lets go, instead of almost at once.
 //!
-//! [`OfflineRecognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`OfflineUtterance`]: audio is buffered and resampled to 16 kHz, and when the participant stops the clip is decoded and reported through the utterance's sink as exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`]. There are no partial events.
+//! [`OfflineRecognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`OfflineUtterance`]: audio is buffered and resampled to 16 kHz, and the utterance is reported through its sink as exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`], once it has ended or as soon as it fails.
 //!
-//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. What Whisper writes for a segment without speech, bracketed notes or a word or two the voice activity detector heard no speech for, is left out, so a clip with no speech in it at all is reported as an empty transcript. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
+//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. Each segment's end depends only on the audio up to a little past its limit, so a segment is cut and decoded as soon as that audio has arrived, while the participant is still speaking, exactly where it would be cut once the clip had ended; only the rest is decoded after they stop. The transcript so far is reported, as a [`TranscriptEvent::Partial`] of committed words, after each segment but the last. What Whisper writes for a segment without speech, bracketed notes or a word or two the voice activity detector heard no speech for, is left out, so a clip with no speech in it at all is reported as an empty transcript. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments, and they go before segments of utterances still being spoken, so decoding ahead never holds up an utterance that has ended by more than the segment already being decoded. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
 //!
 //! Once an utterance has ended, its sink is told when it waits behind another utterance, with [`Progress::Waiting`], and when it is transcribed after waiting, or in more than one segment, with [`Progress::Transcribing`] for each segment, so that the participant can tell recognition working from their words still on their way. An utterance that is transcribed at once, in one piece, is told only its outcome.
 //!
@@ -51,14 +51,22 @@ fn tell(sink: &Sink, event: TranscriptEvent) {
     (sink.lock().unwrap_or_else(PoisonError::into_inner))(event);
 }
 
-/// Every utterance begun and without an outcome yet, and whether it has ended, shared by the decode thread and the handles, so that one ending can tell whether it waits behind another.
-type Pending = Arc<Mutex<HashMap<u64, bool>>>;
+/// What the decode thread and the handles share, so that one ending can tell whether it waits behind another, and the decode thread whether an utterance's end or cancellation is on its way.
+#[derive(Default)]
+struct Shared {
+    /// Every utterance begun, not cancelled and without an outcome yet, and whether it has ended.
+    open: HashMap<u64, bool>,
+    /// The utterance still being spoken whose segment is being decoded ahead, if any.
+    decoding: Option<u64>,
+}
 
-fn pending(pending: &Pending) -> std::sync::MutexGuard<'_, HashMap<u64, bool>> {
+type Pending = Arc<Mutex<Shared>>;
+
+fn pending(pending: &Pending) -> std::sync::MutexGuard<'_, Shared> {
     pending.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// An offline speech recognition engine, which decodes a complete clip, once. It cannot see a clip that is still being spoken, so it reports nothing while the participant is speaking.
+/// An offline speech recognition engine, which decodes a complete clip, once. It cannot see a clip that is still being spoken, so while the participant speaks it is given only segments whose ends are decided.
 pub trait OfflineRecognizer: Send {
     /// Transcribe the complete 16 kHz mono clip, at most [`super::MAX_SEGMENT`] long.
     fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error>;
@@ -75,9 +83,11 @@ enum Command {
         key: u64,
         sink: Sink,
     },
+    /// More of the utterance's audio, pushed `at`.
     Audio {
         key: u64,
         samples: Vec<i16>,
+        at: Instant,
     },
     /// The participant stopped speaking `at`; `waiting` if the utterance was told that it waits behind another.
     End {
@@ -166,20 +176,32 @@ struct OfflineEntry {
     sink: Sink,
     /// The audio of the utterance, resampled to 16 kHz.
     samples: Vec<i16>,
-    /// When the participant stopped speaking, or when the utterance's last segment was decoded: it waits for its next segment from then. `None` while the participant is still speaking.
+    /// When the participant stopped speaking, or when the utterance's last segment was decoded, whichever is later: it waits for its next segment from then. `None` while the participant is still speaking.
     ready: Option<Instant>,
+    /// While the participant is still speaking, since when the audio has decided where its next segment ends, so that it can be decoded ahead, or since its last segment was decoded, whichever is later; `None` while it has not, or once it has ended.
+    due: Option<Instant>,
+    /// When its last segment was decoded.
+    last: Option<Instant>,
     /// Where the next segment to decode starts; the audio before it has been decoded.
     decoded: usize,
-    /// Where each segment ends, found once its first segment is due to be decoded.
+    /// Where each segment ends: each segment decoded while the participant was speaking was found as it was decoded, and the rest once the first of them is due after the end.
     cuts: Vec<Cut>,
     /// What its sink was last told of its progress.
     told: Told,
     /// The transcript of each segment decoded so far, in order, without the empty ones and those left out as having no speech.
     texts: Vec<String>,
-    /// How many segments have been decoded, how many of them ended at their limit because there was no pause, and how many were left out of the transcript as having no speech in them.
+    /// How many segments have been decoded, how many of them while the participant was speaking, how many ended at their limit because there was no pause, and how many were left out of the transcript as having no speech in them.
     segments: usize,
+    ahead: usize,
     hard: usize,
     skipped: usize,
+}
+
+impl OfflineEntry {
+    /// Whether its next segment can be decoded while the participant is still speaking.
+    fn decided(&self) -> bool {
+        segment::decided(self.samples.len(), self.decoded)
+    }
 }
 
 /// What an utterance that has ended was last told of its progress.
@@ -202,6 +224,8 @@ struct OfflineEngine<R: OfflineRecognizer> {
     disabled: bool,
     /// The most samples an utterance may buffer: [`MAX_UTTERANCE`], except in tests.
     limit: usize,
+    /// Whether segments are decoded while the participant is still speaking: always, except in tests that compare with decoding only once utterances end.
+    ahead: bool,
     pending: Pending,
 }
 
@@ -211,6 +235,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         recognizer: R,
         voice: Option<Box<dyn VoiceActivity>>,
         limit: usize,
+        ahead: bool,
         pending: Pending,
     ) -> Self {
         Self {
@@ -220,6 +245,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
             active: VecDeque::new(),
             disabled: false,
             limit,
+            ahead,
             pending,
         }
     }
@@ -234,9 +260,13 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         }
     }
 
-    /// Apply the waiting commands, waiting for one if there is nothing to decode, then decode one segment of an utterance that has ended; see [`OfflineEngine::step`]. Returns whether the engine keeps running.
+    /// Apply the waiting commands, waiting for one if there is nothing to decode, then decode one segment; see [`OfflineEngine::step`]. Returns whether the engine keeps running.
     fn turn(&mut self) -> bool {
-        if !self.active.iter().any(|entry| entry.ready.is_some()) {
+        if !self
+            .active
+            .iter()
+            .any(|entry| entry.ready.is_some() || entry.due.is_some())
+        {
             match self.commands.recv() {
                 Ok(command) => {
                     if !self.apply(command) {
@@ -267,18 +297,42 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         true
     }
 
-    /// Decode the next segment of the utterance that has waited longest for it: since the participant stopped speaking, or since its last segment was decoded. Utterances that have ended therefore take turns a segment at a time, and one that ends while another's long one is being decoded waits for at most one of its segments.
+    /// Decode the next segment of the utterance that has ended and waited longest for it: since the participant stopped speaking, or since its last segment was decoded. Utterances that have ended therefore take turns a segment at a time, and one that ends while another's long one is being decoded waits for at most one of its segments.
+    ///
+    /// While none has ended, decode ahead the next segment of the utterance still being spoken whose segment has been due longest, so that those being spoken take turns too. An utterance whose end is on its way, as its handle has said, goes first, so decoding ahead never starts once an utterance has ended; one that ends while a segment is decoded ahead is told that it waits.
     fn step(&mut self) {
-        let Some(index) = self
+        let ended = self
             .active
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| Some((index, entry.ready?)))
             .min_by_key(|&(_, ready)| ready)
-            .map(|(index, _)| index)
-        else {
+            .map(|(index, _)| index);
+        let Some(index) = ended.or_else(|| {
+            self.active
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| Some((index, entry.due?)))
+                .min_by_key(|&(_, due)| due)
+                .map(|(index, _)| index)
+        }) else {
             return;
         };
+        if ended.is_none() {
+            let mut shared = pending(&self.pending);
+            // An end on its way is in the commands, since a handle says it has ended as it sends it; the next turn applies it.
+            if shared.open.iter().any(|(&key, &ended)| {
+                ended
+                    && !self
+                        .active
+                        .iter()
+                        .any(|entry| entry.key == key && entry.ready.is_some())
+            }) {
+                return;
+            }
+            // An utterance that ends from now on waits for this segment, and is told so; one that ends while another that has ended is transcribed is told so for that.
+            shared.decoding = Some(self.active[index].key);
+        }
         let mut entry = self.active.remove(index).expect("index is in range");
         // The others that have ended now wait behind it, at least for this segment.
         for other in &mut self.active {
@@ -287,9 +341,18 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
                 tell(&other.sink, TranscriptEvent::Progress(Progress::Waiting));
             }
         }
-        match panic::catch_unwind(AssertUnwindSafe(|| self.advance(&mut entry))) {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| self.advance(&mut entry)));
+        // Including after a panic in the decode.
+        pending(&self.pending).decoding = None;
+        match result {
             Ok(true) => {
-                entry.ready = Some(Instant::now());
+                let now = Instant::now();
+                entry.last = Some(now);
+                if entry.ready.is_some() {
+                    entry.ready = Some(now);
+                } else {
+                    entry.due = entry.decided().then_some(now);
+                }
                 self.active.push_back(entry);
             }
             Ok(false) => {}
@@ -306,30 +369,37 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
 
     /// Tell `entry`'s sink its outcome, `event`, once it is no longer open, so that an utterance ending meanwhile does not wait behind it.
     fn conclude(&self, entry: &OfflineEntry, event: TranscriptEvent) {
-        pending(&self.pending).remove(&entry.key);
+        pending(&self.pending).open.remove(&entry.key);
         tell(&entry.sink, event);
     }
 
-    /// Decode `entry`'s next segment, and report the transcript to its sink once every segment is decoded, or the failure. Returns whether it has more to decode.
+    /// Decode `entry`'s next segment, and report the transcript to its sink once every segment is decoded, or the failure; until then, report the transcript so far after a segment that added to it. Returns whether it has more to decode.
     fn advance(&mut self, entry: &mut OfflineEntry) -> bool {
         if entry.samples.is_empty() {
             // Nothing was said; the transcript is empty, as the streaming path reports it.
             self.conclude(entry, TranscriptEvent::Final(String::new()));
             return false;
         }
-        if entry.cuts.is_empty() {
-            // Every segment is found at once, so that each can be told how many there are. The detector resets for each search, so finding them all first finds the same ones.
-            let mut start = 0;
+        let ended = entry.ready.is_some();
+        if ended {
+            // Every remaining segment is found at once, so that each can be told how many there are. The detector resets for each search, so finding them all first finds the same ones.
+            let mut start = entry.cuts.last().map_or(0, |cut| cut.end());
             while start < entry.samples.len() {
                 let cut = self.segmenter.cut(&entry.samples, start);
                 start = cut.end();
                 entry.cuts.push(cut);
             }
+        } else {
+            // While the participant speaks, only the next segment, whose end the audio so far decides: it ends where it would once they stop.
+            entry
+                .cuts
+                .push(self.segmenter.cut(&entry.samples, entry.decoded));
+            entry.ahead += 1;
         }
         let cut = entry.cuts[entry.segments];
         let parts = entry.cuts.len();
-        // An utterance transcribed at once and whole needs no word of it: the server has said it is being transcribed.
-        if parts > 1 || entry.told == Told::Waiting {
+        // An utterance transcribed at once and whole needs no word of it: the server has said it is being transcribed. Nothing is said of one still being spoken.
+        if ended && (parts > 1 || entry.told == Told::Waiting) {
             tell(
                 &entry.sink,
                 TranscriptEvent::Progress(Progress::Transcribing {
@@ -338,11 +408,16 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
                 }),
             );
         }
-        entry.told = Told::Transcribing;
+        if ended {
+            entry.told = Told::Transcribing;
+        }
         let end = cut.end();
         let segment = &entry.samples[entry.decoded..end];
         // A panic here is caught by `step`, which disables recognition and fails the utterance.
-        let text = match self.decode(segment) {
+        let decoded = self.decode(segment);
+        // Another utterance that ends now waits for nothing of one decoded ahead.
+        pending(&self.pending).decoding = None;
+        let text = match decoded {
             Ok(text) => text,
             Err(error) => {
                 log::warn!(
@@ -372,22 +447,35 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
             entry.skipped += 1;
         } else if !text.is_empty() {
             entry.texts.push(text.to_owned());
+            entry.decoded = end;
+            return self.complete(entry, true);
         }
         entry.decoded = end;
-        self.complete(entry)
+        self.complete(entry, false)
     }
 
-    /// Report `entry`'s transcript if every segment has been decoded. Returns whether it has more to decode.
-    fn complete(&mut self, entry: &mut OfflineEntry) -> bool {
+    /// Report `entry`'s transcript if every segment has been decoded, or, if its last segment `added` words, the transcript so far. Returns whether it has more to decode.
+    fn complete(&mut self, entry: &mut OfflineEntry, added: bool) -> bool {
         if entry.decoded < entry.samples.len() {
+            // Not to an utterance cancelled while its segment was decoded, whose words are no longer wanted. The handle forgets it before it sends the cancellation, so one cancelled from now on, as the sink is told, may still be told, and its server ignores it.
+            if added && pending(&self.pending).open.contains_key(&entry.key) {
+                tell(
+                    &entry.sink,
+                    TranscriptEvent::Partial(super::Transcript {
+                        committed: entry.texts.join(" "),
+                        tentative: String::new(),
+                    }),
+                );
+            }
             return true;
         }
         if entry.segments > 1 {
             log::info!(
-                "Utterance {}: {:.1} seconds transcribed in {} segments, {} cut without a pause and {} left out as having no speech.",
+                "Utterance {}: {:.1} seconds transcribed in {} segments, {} of them while it was spoken, {} cut without a pause and {} left out as having no speech.",
                 entry.key,
                 entry.samples.len() as f64 / f64::from(RATE),
                 entry.segments,
+                entry.ahead,
                 entry.hard,
                 entry.skipped
             );
@@ -431,7 +519,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         match command {
             Command::Begin { key, sink } => {
                 if self.recognizer.is_none() {
-                    pending(&self.pending).remove(&key);
+                    pending(&self.pending).open.remove(&key);
                     tell(
                         &sink,
                         TranscriptEvent::Failed(Error::Stopped(STOPPED_MESSAGE.into())),
@@ -443,16 +531,19 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
                     sink,
                     samples: Vec::new(),
                     ready: None,
+                    due: None,
+                    last: None,
                     decoded: 0,
                     cuts: Vec::new(),
                     told: Told::Nothing,
                     texts: Vec::new(),
                     segments: 0,
+                    ahead: 0,
                     hard: 0,
                     skipped: 0,
                 });
             }
-            Command::Audio { key, samples } => {
+            Command::Audio { key, samples, at } => {
                 let Some(index) = self
                     .active
                     .iter()
@@ -476,11 +567,17 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
                     return true;
                 }
                 entry.samples.extend(samples);
+                // Due from when its audio arrived, which may have been while another's segment was decoded.
+                if self.ahead && entry.due.is_none() && entry.decided() {
+                    entry.due = Some(at);
+                }
             }
             // An utterance that failed while it was spoken, as too long, has nothing left to end.
             Command::End { key, at, waiting } => {
                 if let Some(entry) = self.find(key) {
-                    entry.ready = Some(at);
+                    // A segment decoded ahead after the participant stopped, while the end was on its way, counts as its last turn.
+                    entry.ready = Some(entry.last.map_or(at, |last| last.max(at)));
+                    entry.due = None;
                     if waiting {
                         entry.told = Told::Waiting;
                     }
@@ -488,7 +585,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
             }
             Command::Cancel { key } => {
                 self.active.retain(|entry| entry.key != key);
-                pending(&self.pending).remove(&key);
+                pending(&self.pending).open.remove(&key);
             }
             Command::Stop => {
                 self.drain();
@@ -516,7 +613,7 @@ pub struct OfflineRecognition {
 impl OfflineRecognition {
     /// Recognize with `recognizer`, which decodes each clip once, whole. A clip longer than [`super::MAX_SEGMENT`] is split at its quietest points.
     pub fn spawn(recognizer: impl OfflineRecognizer + 'static) -> Self {
-        Self::start(recognizer, None, MAX_UTTERANCE)
+        Self::start(recognizer, None, MAX_UTTERANCE, true)
     }
 
     /// Recognize with `recognizer`, splitting a clip longer than [`super::MAX_SEGMENT`] at the pauses `voice` hears, and by loudness where it hears none.
@@ -524,13 +621,15 @@ impl OfflineRecognition {
         recognizer: impl OfflineRecognizer + 'static,
         voice: impl VoiceActivity + 'static,
     ) -> Self {
-        Self::start(recognizer, Some(Box::new(voice)), MAX_UTTERANCE)
+        Self::start(recognizer, Some(Box::new(voice)), MAX_UTTERANCE, true)
     }
 
+    /// Recognize with `recognizer` and `voice`, failing an utterance longer than `limit`, and decoding segments while the participant is still speaking if `ahead`.
     fn start(
         recognizer: impl OfflineRecognizer + 'static,
         voice: Option<Box<dyn VoiceActivity>>,
         limit: usize,
+        ahead: bool,
     ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let exited = Exited::default();
@@ -542,7 +641,7 @@ impl OfflineRecognition {
             .spawn(move || {
                 // Dropped last, once the recognizer has been unloaded.
                 let _guard = guard;
-                OfflineEngine::new(receiver, recognizer, voice, limit, shared).run();
+                OfflineEngine::new(receiver, recognizer, voice, limit, ahead, shared).run();
             })
             .expect("spawn the offline recognition thread");
         Self {
@@ -554,7 +653,7 @@ impl OfflineRecognition {
         }
     }
 
-    /// Begin an utterance whose audio arrives at `sample_rate`. Events are delivered to `sink` on the recognition thread, so it should not block, except [`Progress::Waiting`] as the utterance ends, which is delivered by [`OfflineUtterance::end`]; they are delivered one at a time, in order.
+    /// Begin an utterance whose audio arrives at `sample_rate`. Events are delivered to `sink` on the recognition thread, so it should not block, except [`Progress::Waiting`] as the utterance ends, which is delivered by [`OfflineUtterance::end`]; they are delivered one at a time, in order. A [`TranscriptEvent::Partial`] may come before the end, as segments are decoded while the participant speaks, and after it, between segments; progress comes only after the end.
     pub fn begin(
         &mut self,
         sample_rate: u32,
@@ -563,7 +662,7 @@ impl OfflineRecognition {
         self.next += 1;
         let key = self.next;
         let sink: Sink = Arc::new(Mutex::new(Box::new(sink)));
-        pending(&self.pending).insert(key, false);
+        pending(&self.pending).open.insert(key, false);
         let _ = self.commands.send(Command::Begin {
             key,
             sink: Arc::clone(&sink),
@@ -611,7 +710,7 @@ pub struct OfflineUtterance {
 }
 
 impl OfflineUtterance {
-    /// Append audio at the utterance's sample rate; it is buffered until the utterance ends.
+    /// Append audio at the utterance's sample rate. It is buffered, and each segment is decoded once the audio has decided where it ends, the rest once the utterance ends.
     pub fn push(&mut self, samples: &[i16]) {
         // Ending or cancelling takes the utterance, so it is open while audio is pushed.
         let mut resampled = Vec::new();
@@ -622,6 +721,7 @@ impl OfflineUtterance {
         let _ = self.commands.send(Command::Audio {
             key: self.key,
             samples: resampled,
+            at: Instant::now(),
         });
     }
 
@@ -635,36 +735,45 @@ impl OfflineUtterance {
         self.push(&frame.samples);
     }
 
-    /// The participant finished speaking: decode the buffered clip and deliver the final transcript. If another utterance that has ended is still being transcribed, the sink is first told, before this returns, that this one waits.
+    /// The participant finished speaking: decode the rest of the buffered clip and deliver the final transcript. If another utterance that has ended is still being transcribed, or another's segment is being decoded while it is spoken, the sink is first told, before this returns, that this one waits.
     pub fn end(mut self) {
         self.open = false;
-        // Taken together, so that the utterances that end first are first in line. One that has already failed waits for nothing.
-        let (at, waiting) = {
-            let mut pending = pending(&self.pending);
-            let ended = pending.get_mut(&self.key).is_some_and(|ended| {
+        // The sink is held while the end is sent and the wait told, so that nothing the engine tells of this utterance comes first, and the engine has the end once the wait is told.
+        let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
+        let waiting = {
+            // Taken together, and the end sent meanwhile, so that the utterances that end first are first in line, and the engine, which decodes ahead only while no utterance has ended, either sees this one ended, with its end among its commands, or has started decoding ahead, which this one waits for. One that has already failed waits for nothing.
+            let mut shared = pending(&self.pending);
+            let ended = shared.open.get_mut(&self.key).is_some_and(|ended| {
                 *ended = true;
                 true
             });
-            let others = pending
+            let others = shared
+                .open
                 .iter()
-                .any(|(&key, &ended)| ended && key != self.key);
-            (Instant::now(), ended && others)
+                .any(|(&key, &ended)| ended && key != self.key)
+                || shared.decoding.is_some_and(|key| key != self.key);
+            let waiting = ended && others;
+            let _ = self.commands.send(Command::End {
+                key: self.key,
+                at: Instant::now(),
+                waiting,
+            });
+            waiting
         };
-        // The sink is held while the end is sent and the wait told, so that nothing the engine tells of this utterance comes first, and the engine has the end once the wait is told.
-        let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = self.commands.send(Command::End {
-            key: self.key,
-            at,
-            waiting,
-        });
         if waiting {
             sink(TranscriptEvent::Progress(Progress::Waiting));
         }
     }
 
-    /// Discard the utterance without a transcript. No further events are delivered.
+    /// Discard the utterance without a transcript, and stop decoding it. No further events are delivered, except one already being delivered.
     pub fn cancel(mut self) {
         self.open = false;
+        self.forget();
+    }
+
+    /// Forget the utterance, so that the engine reports nothing more of it, not even the words of a segment it is decoding, and tell the engine to drop it.
+    fn forget(&self) {
+        pending(&self.pending).open.remove(&self.key);
         let _ = self.commands.send(Command::Cancel { key: self.key });
     }
 }
@@ -672,7 +781,7 @@ impl OfflineUtterance {
 impl Drop for OfflineUtterance {
     fn drop(&mut self) {
         if self.open {
-            let _ = self.commands.send(Command::Cancel { key: self.key });
+            self.forget();
         }
     }
 }
@@ -812,14 +921,22 @@ mod tests {
             .collect()
     }
 
-    /// The utterance's outcome, past any progress it was told.
+    /// The transcript so far, `text`, as an utterance is told it between segments.
+    fn so_far(text: &str) -> TranscriptEvent {
+        TranscriptEvent::Partial(crate::stt::Transcript {
+            committed: text.to_owned(),
+            tentative: String::new(),
+        })
+    }
+
+    /// The utterance's outcome, past any progress and transcripts so far it was told.
     fn collect(receiver: &mpsc::Receiver<TranscriptEvent>) -> TranscriptEvent {
         loop {
             match receiver
                 .recv_timeout(WAIT)
                 .expect("the utterance's outcome is reported in time")
             {
-                TranscriptEvent::Progress(_) => {}
+                TranscriptEvent::Progress(_) | TranscriptEvent::Partial(_) => {}
                 event => return event,
             }
         }
@@ -981,7 +1098,7 @@ mod tests {
     fn an_utterance_longer_than_the_limit_fails_as_it_passes_it() {
         log::set_max_level(log::LevelFilter::Trace);
         let (recorder, calls) = Recorder::new(|_, _| unreachable!("nothing is decoded"));
-        let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 2);
+        let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 2, true);
         let (sender, receiver) = mpsc::channel();
         let mut handle = offline.begin(RATE, move |event| {
             let _ = sender.send(event);
@@ -1028,42 +1145,42 @@ mod tests {
     }
 
     #[test]
-    fn an_utterance_cancelled_between_segments_reports_nothing() {
-        let (started, decoding) = mpsc::channel();
-        let (release, gate) = mpsc::channel::<()>();
-        let gate = Mutex::new(gate);
-        let (recorder, calls) = Recorder::new(move |_, _| {
-            let _ = started.send(());
-            let _ = gate.lock().unwrap().recv_timeout(WAIT);
-            Ok("words".to_owned())
-        });
-        let mut offline = OfflineRecognition::spawn(recorder);
-        // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
-        let release = release;
-        // Reporting an outcome would panic on the engine's thread, which disables recognition, as the next utterance would show.
-        let mut handle = offline.begin(RATE, |event| {
-            let TranscriptEvent::Progress(_) = event else {
-                unreachable!("reported {event:?}");
-            };
-        });
-        handle.push(&steady(70));
-        // The engine's commands are applied in order, so cancelling needs the key, which only the handle knows.
-        let key = handle.key;
-        let commands = handle.commands.clone();
-        handle.end();
-        decoding
-            .recv_timeout(WAIT)
-            .expect("a decode starts in time");
-        commands.send(Command::Cancel { key }).unwrap();
-        release.send(()).unwrap();
-        drop(release);
-        let (sender, receiver) = mpsc::channel();
-        let handle = offline.begin(RATE, move |event| {
-            let _ = sender.send(event);
-        });
-        handle.end();
-        assert_eq!(collect(&receiver), TranscriptEvent::Final(String::new()));
-        assert_eq!(calls.lock().unwrap().len(), 1);
+    fn an_utterance_cancelled_or_abandoned_while_a_segment_is_decoded_ahead_reports_nothing() {
+        for abandoned in [false, true] {
+            let (started, decoding) = mpsc::channel();
+            let (release, gate) = mpsc::channel::<()>();
+            let gate = Mutex::new(gate);
+            let (recorder, calls) = Recorder::new(move |_, _| {
+                let _ = started.send(());
+                let _ = gate.lock().unwrap().recv_timeout(WAIT);
+                Ok("words".to_owned())
+            });
+            let mut offline = OfflineRecognition::spawn(recorder);
+            // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
+            let release = release;
+            // Reporting anything, even the words of the segment being decoded, would panic on the engine's thread, which disables recognition, as the next utterance would show.
+            let mut handle = offline.begin(RATE, |event| unreachable!("reported {event:?}"));
+            // Enough for two segments to be decided while it is spoken.
+            handle.push(&steady(60));
+            decoding
+                .recv_timeout(WAIT)
+                .expect("the first segment is decoded while the participant speaks");
+            if abandoned {
+                drop(handle);
+            } else {
+                handle.cancel();
+            }
+            release.send(()).unwrap();
+            drop(release);
+            let (sender, receiver) = mpsc::channel();
+            let handle = offline.begin(RATE, move |event| {
+                let _ = sender.send(event);
+            });
+            handle.end();
+            assert_eq!(collect(&receiver), TranscriptEvent::Final(String::new()));
+            // Its second segment, already decided, is not decoded.
+            assert_eq!(calls.lock().unwrap().len(), 1);
+        }
     }
 
     #[test]
@@ -1076,7 +1193,8 @@ mod tests {
             let _ = gate.lock().unwrap().recv_timeout(WAIT);
             Ok(format!("{}", samples.len()))
         });
-        let mut offline = OfflineRecognition::spawn(recorder);
+        // Decoding only once utterances end, so that the long one's first part is decoded after its end.
+        let mut offline = OfflineRecognition::start(recorder, None, MAX_UTTERANCE, false);
         // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
         let release = release;
         let (sender, receiver) = mpsc::channel();
@@ -1098,10 +1216,10 @@ mod tests {
         for _ in 0..4 {
             release.send(()).unwrap();
         }
-        // The short one, told it waits as it ends, is transcribed next, whole; the long one waits for it, and is then transcribed by parts.
+        // The short one, told it waits as it ends, is transcribed next, whole; the long one waits for it, and is then transcribed by parts, with its words so far after each.
         let waiting = TranscriptEvent::Progress(Progress::Waiting);
         let part = |part, parts| TranscriptEvent::Progress(Progress::Transcribing { part, parts });
-        let events: Vec<_> = (0..8)
+        let events: Vec<_> = (0..10)
             .map(|_| {
                 receiver
                     .recv_timeout(WAIT)
@@ -1113,10 +1231,12 @@ mod tests {
             [
                 ("long", part(1, 3)),
                 ("short", waiting.clone()),
+                ("long", so_far(&format!("{MAX_SEGMENT}"))),
                 ("long", waiting),
                 ("short", part(1, 1)),
                 ("short", TranscriptEvent::Final(format!("{}", RATE))),
                 ("long", part(2, 3)),
+                ("long", so_far(&format!("{MAX_SEGMENT} {MAX_SEGMENT}"))),
                 ("long", part(3, 3)),
                 (
                     "long",
@@ -1142,14 +1262,20 @@ mod tests {
     fn an_utterance_is_told_each_of_its_parts_and_nothing_for_one() {
         let part = |part, parts| TranscriptEvent::Progress(Progress::Transcribing { part, parts });
         for (seconds, told) in [(10, vec![]), (70, vec![part(1, 3), part(2, 3), part(3, 3)])] {
-            let mut offline = OfflineRecognition::spawn(Fake("words".to_owned()));
+            // Decoding only once utterances end, so that every part is decoded after the end.
+            let mut offline =
+                OfflineRecognition::start(Fake("words".to_owned()), None, MAX_UTTERANCE, false);
             let (sender, receiver) = mpsc::channel();
             let mut handle = offline.begin(RATE, move |event| {
                 let _ = sender.send(event);
             });
             handle.push(&steady(seconds));
             handle.end();
-            let mut events: Vec<_> = receiver.iter().take(told.len() + 1).collect();
+            let mut events: Vec<_> = receiver
+                .iter()
+                .filter(|event| !matches!(event, TranscriptEvent::Partial(_)))
+                .take(told.len() + 1)
+                .collect();
             let Some(TranscriptEvent::Final(_)) = events.pop() else {
                 unreachable!("the outcome comes last");
             };
@@ -1167,7 +1293,7 @@ mod tests {
             let _ = gate.lock().unwrap().recv_timeout(WAIT);
             Ok("words".to_owned())
         });
-        let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 2);
+        let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 2, true);
         // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
         let release = release;
         let listen = |offline: &mut OfflineRecognition| {
@@ -1394,7 +1520,7 @@ mod tests {
         audio: &[i16],
     ) -> (TranscriptEvent, usize) {
         let (recorder, calls) = Recorder::new(move |_, _| Ok(heard.to_owned()));
-        let mut offline = OfflineRecognition::start(recorder, voice, MAX_UTTERANCE);
+        let mut offline = OfflineRecognition::start(recorder, voice, MAX_UTTERANCE, true);
         let (sender, receiver) = mpsc::channel();
         let mut handle = offline.begin(RATE, move |event| {
             let _ = sender.send(event);
@@ -1514,6 +1640,315 @@ mod tests {
         };
     }
 
+    #[test]
+    fn segments_are_decoded_while_the_participant_speaks_leaving_only_the_tail() {
+        let (done, decoded) = mpsc::channel();
+        let (recorder, calls) = Recorder::new(move |index, _| {
+            let _ = done.send(index);
+            Ok(format!("part {index}"))
+        });
+        let mut offline = OfflineRecognition::spawn(recorder);
+        let (sender, receiver) = mpsc::channel();
+        let mut handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        // In 100 ms frames, as the headset sends them. Without a pause, each segment ends at its limit, which is decided once the audio reaches a little past it.
+        let audio = steady(70);
+        let mut sent = 0;
+        let mut heard = Vec::new();
+        for frame in audio.chunks(RATE as usize / 10) {
+            handle.push(frame);
+            sent += frame.len();
+            if segment::decided(sent, heard.len() * MAX_SEGMENT) {
+                // The segment is decoded, and the words so far told, while the participant is still speaking.
+                assert_eq!(decoded.recv_timeout(WAIT).ok(), Some(heard.len()));
+                heard.push(format!("part {}", heard.len()));
+                assert_eq!(
+                    receiver.recv_timeout(WAIT).ok(),
+                    Some(so_far(&heard.join(" ")))
+                );
+            }
+        }
+        assert_eq!(heard.len(), 2);
+        handle.end();
+        // Only the last segment is left, and the utterance is told it is the last of three.
+        assert_eq!(
+            receiver.recv_timeout(WAIT).ok(),
+            Some(TranscriptEvent::Progress(Progress::Transcribing {
+                part: 3,
+                parts: 3
+            }))
+        );
+        assert_eq!(
+            receiver.recv_timeout(WAIT).ok(),
+            Some(TranscriptEvent::Final("part 0 part 1 part 2".to_owned()))
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![MAX_SEGMENT, MAX_SEGMENT, audio.len() - 2 * MAX_SEGMENT]
+        );
+    }
+
+    /// A fake detector that hears speech in each 10 ms of audio louder than a whisper.
+    struct Energy;
+
+    impl VoiceActivity for Energy {
+        fn speech(&mut self, samples: &[i16]) -> Result<Vec<Range<usize>>, Error> {
+            let frame = RATE as usize / 100;
+            let mut speech: Vec<Range<usize>> = Vec::new();
+            for (index, chunk) in samples.chunks(frame).enumerate() {
+                let loudness: i64 = chunk.iter().map(|&sample| i64::from(sample).abs()).sum();
+                if loudness <= 500 * chunk.len() as i64 {
+                    continue;
+                }
+                let start = index * frame;
+                match speech.last_mut() {
+                    Some(last) if last.end == start => last.end = start + chunk.len(),
+                    _ => speech.push(start..start + chunk.len()),
+                }
+            }
+            Ok(speech)
+        }
+    }
+
+    /// Two minutes and a quarter of loud, varied audio with breaths of 0.4 seconds at a few places, some close to a segment's limit, and 40 seconds of silence in the middle, long enough for a segment of nothing but silence.
+    fn talk() -> Vec<i16> {
+        let second = |seconds: f64| (seconds * f64::from(RATE)) as usize;
+        let breaths = [12.3, 21.7, 27.6, 45.2, 47.9, 52.0, 111.5, 120.0];
+        (0..second(135.0))
+            .map(|index| {
+                let breath = breaths
+                    .iter()
+                    .any(|&at| (second(at)..second(at + 0.4)).contains(&index));
+                if (second(60.0)..second(100.0)).contains(&index) {
+                    0
+                } else if breath {
+                    (index % 41) as i16 - 20
+                } else {
+                    ((index * 7919 % 2001) as i16 - 1000) * 6
+                }
+            })
+            .collect()
+    }
+
+    /// A recognizer that hears each clip by where it starts and how long it is, or as "you" for silence, as Whisper does, and tells `done` of each clip it has decoded.
+    fn hearing(done: mpsc::Sender<()>) -> (Recorder, Arc<Mutex<Vec<usize>>>) {
+        Recorder::new(move |_, samples| {
+            let _ = done.send(());
+            Ok(if samples.iter().all(|&sample| sample == 0) {
+                "you".to_owned()
+            } else {
+                format!("{} from {}.", samples.len(), samples[0])
+            })
+        })
+    }
+
+    #[test]
+    fn segments_decoded_while_the_participant_speaks_are_those_decoded_after_the_end() {
+        let audio = talk();
+        // Decoded only once the utterance ends, as before.
+        let (done, _) = mpsc::channel();
+        let (recorder, after) = hearing(done);
+        let mut offline =
+            OfflineRecognition::start(recorder, Some(Box::new(Energy)), MAX_UTTERANCE, false);
+        let (sender, receiver) = mpsc::channel();
+        let mut handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        handle.push(&audio);
+        handle.end();
+        let TranscriptEvent::Final(expected) = collect(&receiver) else {
+            unreachable!("the utterance is transcribed");
+        };
+        // A segment of silence is heard as "you", which the detector says is no speech, so it is left out.
+        let segments = after.lock().unwrap().len();
+        assert!(segments >= 6, "{after:?}");
+        assert!(!expected.contains("you"), "{expected}");
+        assert!(expected.matches(" from ").count() < segments, "{expected}");
+
+        // Decoded while it is spoken, in 100 ms frames, letting each segment that is decided be decoded before more is spoken.
+        let (done, decoded) = mpsc::channel();
+        let (recorder, ahead) = hearing(done);
+        let mut offline = OfflineRecognition::with_voice_activity(recorder, Energy);
+        let (sender, receiver) = mpsc::channel();
+        let mut handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        let mut sent = 0;
+        for frame in audio.chunks(RATE as usize / 10) {
+            handle.push(frame);
+            sent += frame.len();
+            while segment::decided(sent, ahead.lock().unwrap().iter().sum()) {
+                decoded
+                    .recv_timeout(WAIT)
+                    .expect("a decided segment is decoded");
+            }
+        }
+        let spoken = ahead.lock().unwrap().len();
+        handle.end();
+        assert_eq!(collect(&receiver), TranscriptEvent::Final(expected));
+        // The same segments, of which at most the last two are left once the participant stops.
+        assert_eq!(*ahead.lock().unwrap(), *after.lock().unwrap());
+        assert!(segments - spoken <= 2, "{spoken} of {segments}");
+    }
+
+    #[test]
+    fn an_utterance_that_ends_goes_before_segments_of_those_still_spoken() {
+        let (started, decoding) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let (recorder, _) = Recorder::new(move |_, samples| {
+            let _ = started.send(samples[0]);
+            let _ = gate.lock().unwrap().recv_timeout(WAIT);
+            Ok("words".to_owned())
+        });
+        let mut offline = OfflineRecognition::spawn(recorder);
+        // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
+        let release = release;
+        let next = || decoding.recv_timeout(WAIT).ok();
+        // Ada speaks for long enough that her first segment is decoded while she speaks.
+        let (sender, told) = mpsc::channel();
+        let mut ada = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        ada.push(&vec![1000; RATE as usize * 30]);
+        assert_eq!(next(), Some(1000));
+        // Meanwhile, Bob's first segment is decided too, and Carol's short words end; she is told at once that they wait.
+        let mut bob = offline.begin(RATE, |_| {});
+        bob.push(&vec![2000; RATE as usize * 30]);
+        let (sender, carol) = mpsc::channel();
+        let mut words = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        words.push(&vec![3000; RATE as usize]);
+        words.end();
+        assert_eq!(
+            carol.try_recv().ok(),
+            Some(TranscriptEvent::Progress(Progress::Waiting))
+        );
+        // Carol's words, which have ended, go before Bob's segment, which was due first.
+        release.send(()).unwrap();
+        assert_eq!(next(), Some(3000));
+        release.send(()).unwrap();
+        assert_eq!(next(), Some(2000));
+        release.send(()).unwrap();
+        assert_eq!(collect(&carol), TranscriptEvent::Final("words".to_owned()));
+        // Ada ends while her own second segment is decoded ahead: she waits for no one else's words, so she is not told she waits, and only her last part is left.
+        ada.push(&vec![1000; RATE as usize * 30]);
+        assert_eq!(next(), Some(1000));
+        ada.end();
+        release.send(()).unwrap();
+        assert_eq!(next(), Some(1000));
+        release.send(()).unwrap();
+        let mut events = Vec::new();
+        while !matches!(events.last(), Some(TranscriptEvent::Final(_))) {
+            events.push(told.recv_timeout(WAIT).expect("Ada is told in time"));
+        }
+        assert_eq!(
+            events,
+            [
+                so_far("words"),
+                so_far("words words"),
+                TranscriptEvent::Progress(Progress::Transcribing { part: 3, parts: 3 }),
+                TranscriptEvent::Final("words words words".to_owned()),
+            ]
+        );
+        drop(bob);
+    }
+
+    #[test]
+    fn utterances_still_spoken_take_turns_a_segment_at_a_time() {
+        let (started, decoding) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let (recorder, _) = Recorder::new(move |_, samples| {
+            let _ = started.send(samples[0]);
+            let _ = gate.lock().unwrap().recv_timeout(WAIT);
+            Ok(String::new())
+        });
+        let mut offline = OfflineRecognition::spawn(recorder);
+        // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
+        let release = release;
+        // Each has two segments decided while it is spoken. Bob's arrive while Ada's first is decoded, so they wait for it, but not for her second.
+        let mut ada = offline.begin(RATE, drop::<TranscriptEvent>);
+        ada.push(&vec![1000; RATE as usize * 60]);
+        let mut order = vec![
+            decoding
+                .recv_timeout(WAIT)
+                .expect("a decode starts in time"),
+        ];
+        let mut bob = offline.begin(RATE, drop::<TranscriptEvent>);
+        bob.push(&vec![2000; RATE as usize * 60]);
+        for _ in 0..3 {
+            release.send(()).unwrap();
+            order.push(
+                decoding
+                    .recv_timeout(WAIT)
+                    .expect("a decode starts in time"),
+            );
+        }
+        assert_eq!(order, vec![1000, 2000, 1000, 2000]);
+        // Nothing more is decided until they speak further.
+        release.send(()).unwrap();
+        assert!(decoding.recv_timeout(Duration::from_millis(200)).is_err());
+        ada.cancel();
+        bob.cancel();
+    }
+
+    #[test]
+    fn decoding_ahead_waits_for_an_end_on_its_way() {
+        let (mut engine, sender) = engine_of(Fake("words".to_owned()));
+        let ada = begin(&sender, 1);
+        sender
+            .send(Command::Audio {
+                key: 1,
+                samples: vec![1000; RATE as usize * 30],
+                at: Instant::now(),
+            })
+            .unwrap();
+        let bob = begin(&sender, 2);
+        // Bob's handle has said that he has ended, and its end is on its way.
+        pending(&engine.pending)
+            .open
+            .extend([(1, false), (2, true)]);
+        assert!(engine.turn());
+        assert!(ada.try_recv().is_err(), "a segment was decoded ahead");
+        sender
+            .send(Command::End {
+                key: 2,
+                at: Instant::now(),
+                waiting: false,
+            })
+            .unwrap();
+        assert!(engine.turn());
+        assert_eq!(
+            bob.try_recv().ok(),
+            Some(TranscriptEvent::Final(String::new()))
+        );
+        assert!(engine.turn());
+        assert_eq!(ada.try_recv().ok(), Some(so_far("words")));
+    }
+
+    #[test]
+    fn an_utterance_passing_the_limit_after_segments_were_decoded_ahead_fails() {
+        let (recorder, calls) = Recorder::new(|_, _| Ok("words".to_owned()));
+        let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 40, true);
+        let (sender, receiver) = mpsc::channel();
+        let mut handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        handle.push(&steady(30));
+        assert_eq!(receiver.recv_timeout(WAIT).ok(), Some(so_far("words")));
+        handle.push(&steady(11));
+        assert_eq!(
+            receiver.recv_timeout(WAIT).ok(),
+            Some(TranscriptEvent::Failed(Error::TooLong(40)))
+        );
+        handle.end();
+        assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
     /// Transcribes a minute of LibriSpeech, from the clips that come with the Whisper model, with Whisper and the Silero detector, as the offline backend does. Skipped without both models; see [`crate::test_models`].
     #[test]
     fn transcribes_a_long_utterance_with_whisper() {
@@ -1522,12 +1957,14 @@ mod tests {
             test_models,
         };
 
-        /// Whisper, recording the length of each segment it decodes.
-        struct Whisper(WhisperRecognizer, Arc<Mutex<Vec<usize>>>);
+        /// Whisper, recording the length of each segment once it has decoded it, and saying so.
+        struct Whisper(WhisperRecognizer, Arc<Mutex<Vec<usize>>>, mpsc::Sender<()>);
         impl OfflineRecognizer for Whisper {
             fn transcribe(&mut self, samples: &[i16]) -> Result<String, Error> {
+                let text = self.0.transcribe(samples);
                 self.1.lock().unwrap().push(samples.len());
-                self.0.transcribe(samples)
+                let _ = self.2.send(());
+                text
             }
         }
 
@@ -1565,17 +2002,19 @@ mod tests {
                 let length = audio.len();
                 assert!(length > 2 * MAX_SEGMENT, "{length} samples");
 
-                // With the detector, as the server runs, and by loudness alone, as when its model is not installed.
+                // With the detector, as the server runs, and by loudness alone, as when its model is not installed, decoding once the recording ends.
+                let mut decoded_after_the_end = None;
                 for detector in [true, false] {
                     let whisper = WhisperRecognizer::new(&config).unwrap();
                     let segments = Arc::new(Mutex::new(Vec::new()));
-                    let whisper = Whisper(whisper, Arc::clone(&segments));
-                    let mut offline = if detector {
-                        let vad = SileroVad::new(&vad).unwrap();
-                        OfflineRecognition::with_voice_activity(whisper, vad)
+                    let whisper = Whisper(whisper, Arc::clone(&segments), mpsc::channel().0);
+                    let voice: Option<Box<dyn VoiceActivity>> = if detector {
+                        Some(Box::new(SileroVad::new(&vad).unwrap()))
                     } else {
-                        OfflineRecognition::spawn(whisper)
+                        None
                     };
+                    let mut offline =
+                        OfflineRecognition::start(whisper, voice, MAX_UTTERANCE, false);
                     let (sender, receiver) = mpsc::channel();
                     let mut handle = offline.begin(RATE, move |event| {
                         let _ = sender.send(event);
@@ -1587,12 +2026,21 @@ mod tests {
                     let event = loop {
                         match receiver.recv_timeout(Duration::from_secs(600)).unwrap() {
                             TranscriptEvent::Progress(progress) => told.push(progress),
+                            TranscriptEvent::Partial(_) => {}
                             event => break event,
                         }
                     };
                     let TranscriptEvent::Final(text) = event else {
                         unreachable!("{event:?}");
                     };
+                    eprintln!(
+                        "Release to final transcript, decoding after the end: {:.2} seconds",
+                        started.elapsed().as_secs_f64()
+                    );
+                    if detector {
+                        decoded_after_the_end =
+                            Some((text.clone(), segments.lock().unwrap().clone()));
+                    }
                     // Each part was told as it started, counted against all of them.
                     let parts = segments.lock().unwrap().len();
                     let expected: Vec<_> = (1..=parts)
@@ -1624,6 +2072,62 @@ mod tests {
                     );
                     // A cut through a word would cost at least a word on each side of it; LibriSpeech spells "dishonoured" and "for ever" in British style, which Whisper does not, so a perfect transcript has 6 errors.
                     assert!(errors * 20 <= reference.len(), "{errors} errors: {text}");
+                }
+
+                // Decoded while it is spoken, as the server runs, in 100 ms frames, each segment that is decided being decoded before more is spoken, as on a machine that keeps up: the same segments are decoded, the transcript is the same, and only the tail is left once the participant stops.
+                let (expected, cuts) =
+                    decoded_after_the_end.expect("transcribed with the detector");
+                let segments = Arc::new(Mutex::new(Vec::new()));
+                let (done, decoded) = mpsc::channel();
+                let whisper = Whisper(
+                    WhisperRecognizer::new(&config).unwrap(),
+                    Arc::clone(&segments),
+                    done,
+                );
+                let mut offline =
+                    OfflineRecognition::with_voice_activity(whisper, SileroVad::new(&vad).unwrap());
+                let (sender, receiver) = mpsc::channel();
+                let mut handle = offline.begin(RATE, move |event| {
+                    let _ = sender.send(event);
+                });
+                let mut sent = 0;
+                for frame in audio.chunks(RATE as usize / 10) {
+                    handle.push(frame);
+                    sent += frame.len();
+                    // Segments are counted once decoded, so none is still being decoded when the participant stops.
+                    while segment::decided(sent, segments.lock().unwrap().iter().sum()) {
+                        decoded
+                            .recv_timeout(Duration::from_secs(600))
+                            .expect("a decided segment is decoded");
+                    }
+                }
+                let spoken = segments.lock().unwrap().len();
+                let released = std::time::Instant::now();
+                handle.end();
+                let mut heard = Vec::new();
+                let event = loop {
+                    match receiver.recv_timeout(Duration::from_secs(600)).unwrap() {
+                        TranscriptEvent::Partial(transcript) => heard.push(transcript.committed),
+                        TranscriptEvent::Progress(_) => {}
+                        event => break event,
+                    }
+                };
+                eprintln!(
+                    "Release to final transcript, decoding while spoken: {:.2} seconds, with {} of {} segments left: {heard:?}",
+                    released.elapsed().as_secs_f64(),
+                    cuts.len() - spoken,
+                    cuts.len()
+                );
+                assert_eq!(event, TranscriptEvent::Final(expected.clone()));
+                assert_eq!(*segments.lock().unwrap(), cuts);
+                assert!(
+                    spoken >= 1 && cuts.len() - spoken <= 2,
+                    "{spoken} of {cuts:?}"
+                );
+                // The words so far, told after each segment but the last, lead to the transcript.
+                assert!(!heard.is_empty(), "no words were told while spoken");
+                for words in &heard {
+                    assert!(expected.starts_with(words.as_str()), "{words:?}");
                 }
             },
         );
@@ -1779,6 +2283,7 @@ mod tests {
                 recognizer,
                 None,
                 MAX_UTTERANCE,
+                true,
                 Pending::default(),
             ),
             sender,
@@ -1816,6 +2321,7 @@ mod tests {
             .send(Command::Audio {
                 key: 1,
                 samples: vec![1000; 160],
+                at: Instant::now(),
             })
             .unwrap();
         drop(sender);

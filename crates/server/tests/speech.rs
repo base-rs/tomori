@@ -1300,6 +1300,40 @@ fn end(client: &mut TestClient, id: &str) {
     });
 }
 
+/// Wait until `client` is shown `text` as the words heard so far of utterance `id`.
+fn heard_so_far(client: &mut TestClient, id: &str, text: &str) {
+    client.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text: heard,
+            finished: false,
+        } if utterance == id && heard == text => Some(()),
+        _ => None,
+    });
+}
+
+#[test]
+fn an_offline_utterance_shows_its_words_while_it_is_spoken() {
+    let recognizer = FakeOfflineRecognizer::default();
+    let server = offline_server(FakeBackend::manual(), recognizer.clone());
+    let mut ada = server.connect("ada", "Ada");
+    ada.create_space("Heard");
+    begin(&mut ada, "long", false);
+    // Its first part ends at its limit, 28 seconds, which the audio decides a little after it.
+    speak_steadily(&mut ada, 30);
+    heard_so_far(&mut ada, "long", "28 seconds.");
+    speak_steadily(&mut ada, 30);
+    heard_so_far(&mut ada, "long", "28 seconds. 28 seconds.");
+    // Only the last part is decoded once it ends.
+    speak_steadily(&mut ada, 5);
+    end(&mut ada, "long");
+    assert_eq!(
+        transcript(&mut ada, "long"),
+        "28 seconds. 28 seconds. 9 seconds."
+    );
+    assert_eq!(recognizer.clips.lock().unwrap().len(), 3);
+}
+
 #[test]
 fn an_offline_utterance_is_said_to_be_received_then_each_of_its_parts() {
     let server = offline_server(FakeBackend::manual(), FakeOfflineRecognizer::default());
@@ -1307,17 +1341,16 @@ fn an_offline_utterance_is_said_to_be_received_then_each_of_its_parts() {
     ada.create_space("Parts");
     begin(&mut ada, "long", true);
     speak_steadily(&mut ada, 65);
+    // Two of its three parts are decided, and decoded, while it is spoken.
+    heard_so_far(&mut ada, "long", "28 seconds. 28 seconds.");
     end(&mut ada, "long");
-    let part = |number| Some(TranscriptPart { number, of: 3 });
     let transcribing = TranscriptStage::Transcribing;
     assert_eq!(
         progress_of(&mut ada, "long"),
         (
             vec![
                 (transcribing, None),
-                (transcribing, part(1)),
-                (transcribing, part(2)),
-                (transcribing, part(3)),
+                (transcribing, Some(TranscriptPart { number: 3, of: 3 })),
             ],
             Ok("28 seconds. 28 seconds. 9 seconds.".to_owned())
         )
@@ -1381,10 +1414,18 @@ fn an_offline_utterance_ending_behind_another_says_it_waits() {
     let (mut ada, mut bob) = pair(&server);
     begin(&mut ada, "long", true);
     speak_steadily(&mut ada, 40);
-    end(&mut ada, "long");
     decoding
         .recv_timeout(TIMEOUT)
-        .expect("the first part of Ada's utterance starts to be transcribed");
+        .expect("the first part of Ada's utterance starts to be transcribed while she speaks");
+    end(&mut ada, "long");
+    assert_eq!(
+        next_progress(&ada, "long"),
+        Some((TranscriptStage::Transcribing, None)),
+        "Ada's words are said to be received as their end arrives"
+    );
+    // Once Ada's end is handled, as her next message is, her words have ended.
+    ada.send(&ClientMessage::Ping { nonce: 1 });
+    ada.wait_for(|message| matches!(message, ServerMessage::Pong { nonce: 1 }).then_some(()));
     // Bob ends while the first part of Ada's is transcribed, so his words wait for it.
     begin(&mut bob, "short", true);
     speak_steadily(&mut bob, 2);
@@ -1407,16 +1448,13 @@ fn an_offline_utterance_ending_behind_another_says_it_waits() {
         progress_of(&mut bob, "short"),
         (vec![(transcribing, None)], Ok("2 seconds.".to_owned()))
     );
-    // Ada's waited for Bob's before its second part.
-    let part = |number| Some(TranscriptPart { number, of: 2 });
+    // Ada's, whose first part was decoded while she spoke, waited for Bob's before its second part.
     assert_eq!(
         progress_of(&mut ada, "long"),
         (
             vec![
-                (transcribing, None),
-                (transcribing, part(1)),
                 (TranscriptStage::Waiting, None),
-                (transcribing, part(2)),
+                (transcribing, Some(TranscriptPart { number: 2, of: 2 })),
             ],
             Ok("28 seconds. 12 seconds.".to_owned())
         )
@@ -1501,7 +1539,8 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
         error,
         "Nothing was sent: the speech was longer than 5 minutes, the most that is transcribed at once. Say it in shorter messages."
     );
-    // An end already on its way is ignored, and nothing is decoded or queued.
+    // An end already on its way is ignored, and nothing more is decoded, or queued.
+    let decoded = recognizer.clips.lock().unwrap().len();
     ada.send(&ClientMessage::UtteranceEnd {
         utterance: "u1".into(),
         pointed: None,
@@ -1514,7 +1553,15 @@ fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
             _ => {}
         }
     }
-    assert!(recognizer.clips.lock().unwrap().is_empty());
+    // Only whole parts were decoded, while it was spoken, and none after it failed.
+    let clips = recognizer.clips.lock().unwrap().clone();
+    assert_eq!(clips.len(), decoded, "{clips:?}");
+    assert!(
+        clips
+            .iter()
+            .all(|clip| *clip == tomori_speech::stt::MAX_SEGMENT),
+        "{clips:?}"
+    );
     assert!(server.backend.started()[0].log().prompts.is_empty());
 }
 
