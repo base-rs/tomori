@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tomori_protocol::{ClientMessage, PROTOCOL_VERSION, ServerMessage};
 use tomori_server::test_support::TestClient;
@@ -28,10 +29,73 @@ fn the_help_lists_the_placeholder_backend_beside_tomoris() {
     let output = Command::new(SERVER).arg("--help").output().unwrap();
     assert!(!output.status.success());
     let usage = String::from_utf8(output.stderr).unwrap();
-    assert!(usage.starts_with("Usage: tomori-server"), "{usage}");
+    assert!(usage.starts_with("Usage: tomori-example-server"), "{usage}");
     assert!(
         usage.contains("Available: fake, opencode, placeholder."),
         "{usage}"
+    );
+    // It lists the environments the example registers, in the order it offers them.
+    assert!(
+        usage.ends_with(
+            "  sky                  Sky, version 1.\n  minimal              Grid, version 1.\n  placeholder          Placeholder, version 1.\n"
+        ),
+        "{usage}"
+    );
+    assert!(!usage.contains("tomori-server"), "{usage}");
+    let output = Command::new(SERVER).arg("auth").output().unwrap();
+    let usage = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        usage.starts_with("Usage: tomori-example-server auth mint"),
+        "{usage}"
+    );
+}
+
+#[test]
+fn a_server_without_an_owner_token_says_how_to_mint_one_with_its_own_name() {
+    let directory = directory("tokens");
+    let state = directory.to_str().unwrap();
+    let mut server = Command::new(SERVER)
+        .args([
+            "--bind",
+            "127.0.0.1:0",
+            "--no-advertise",
+            "--no-mcp",
+            "--state-directory",
+            state,
+            "--workspace-root",
+            state,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Read on a thread of its own, so that a server that never says it fails the test at the deadline rather than hanging it.
+    let stderr = server.stderr.take().unwrap();
+    let (lines, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let said = loop {
+        match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line.starts_with("No owner token is issued yet") => break Some(line),
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    server.kill().unwrap();
+    server.wait().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    assert_eq!(
+        said.as_deref(),
+        Some(
+            "No owner token is issued yet, and pairing is closed. To pair this server's first device, type \"pair\" here, which opens pairing for 2 minutes, or start the server with --open-pairing; then choose the pairing object on the device and type the code it shows. Or run `tomori-example-server auth mint --owner --name NAME`."
+        )
     );
 }
 

@@ -26,6 +26,13 @@ fn help_and_unknown_arguments_fail_with_the_usage() {
         assert!(!output.status.success(), "{argument}");
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(error.contains("Usage: tomori-server"), "{error}");
+        // It lists the environments Tomori's own server registers, in the order it offers them.
+        assert!(
+            error.ends_with(
+                "\n\nEnvironments, offered in this order, the first by default:\n  sky                  Sky, version 1.\n  minimal              Grid, version 1.\n  farmyard             Farmyard, version 1.\n"
+            ),
+            "{error}"
+        );
     }
 }
 

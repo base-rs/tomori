@@ -11,12 +11,31 @@ use tomori_scene::{environment::Environment, locomotion::Locomotion};
 #[derive(Clone, Default)]
 pub struct Builder {
     sceneries: Sceneries,
+    /// The program's name, which `--help` gives, unless `tomori`. Only the desktop's command line reads it.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    program: Option<String>,
 }
 
 impl Builder {
     /// No sceneries but the built-in grid, as [`Builder::default`] is.
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Name the program `name` in what `--help` shows, as [`crate::main`] runs it, in place of `tomori`, such as a build's own executable's name. A name must be a plain executable name: one that is empty or holds whitespace, a control character or a zero-width character is not used, with a warning, and the build keeps the name it had.
+    pub fn program_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        match unusable(&name) {
+            None => self.program = Some(name),
+            Some(why) => log::warn!("The program name {name:?} is ignored, since {why}."),
+        }
+        self
+    }
+
+    /// The program's name, which `--help` gives: `tomori` unless [`Builder::program_name`] gave another.
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn program(&self) -> &str {
+        self.program.as_deref().unwrap_or("tomori")
     }
 
     /// Register on this build's sceneries with `register`, such as an environment's own crate's, like `tomori_environment_sky_client::register`.
@@ -154,6 +173,27 @@ impl Builder {
     }
 }
 
+/// Why `name` is not a plain executable name, which [`Builder::program_name`] takes, or `None` if it is one.
+fn unusable(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("it is empty");
+    }
+    name.chars().find_map(|character| {
+        if character.is_whitespace() {
+            Some("it holds whitespace")
+        } else if character.is_control() {
+            Some("it holds a control character")
+        } else if matches!(
+            character,
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+        ) {
+            Some("it holds a zero-width character")
+        } else {
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +221,51 @@ mod tests {
         assert_eq!(builder.environments().len(), 4);
         assert_eq!(builder.over_grid(), [Environment::new("board")]);
         assert_eq!(builder.over_grid()[0].version(), 2);
+    }
+
+    #[test]
+    fn a_build_names_its_program_or_is_tomori() {
+        assert_eq!(Builder::default().program(), "tomori");
+        let builder = Builder::empty().program_name("deck-headset");
+        assert_eq!(builder.program(), "deck-headset");
+        // Its sceneries are kept, and it is named again in place of its name.
+        let builder = builder
+            .scenery("floor", blank)
+            .program_name("floor-headset");
+        assert_eq!(builder.clone().program(), "floor-headset");
+        assert_eq!(builder.environments().len(), 2);
+        // A name that is not a plain executable name is not used.
+        // Each with why it is not used, which the warning gives.
+        for (name, why) in [
+            ("", "it is empty"),
+            ("floor x", "it holds whitespace"),
+            ("floor\u{1b}[2J", "it holds a control character"),
+            ("floor\u{200b}x", "it holds a zero-width character"),
+            ("floor\u{200c}x", "it holds a zero-width character"),
+            ("floor\u{200d}x", "it holds a zero-width character"),
+            ("floor\u{2060}x", "it holds a zero-width character"),
+            ("floor\u{feff}x", "it holds a zero-width character"),
+        ] {
+            assert_eq!(unusable(name), Some(why), "{name:?}");
+        }
+        assert_eq!(unusable("floor-ü"), None);
+        for name in [
+            "",
+            "floor headset",
+            "floor\nheadset",
+            "floor\u{1b}[2J",
+            "floor\u{200b}x",
+        ] {
+            assert_eq!(
+                Builder::default().program_name(name).program(),
+                "tomori",
+                "{name:?}"
+            );
+            assert_eq!(
+                builder.clone().program_name(name).program(),
+                "floor-headset"
+            );
+        }
     }
 
     #[test]

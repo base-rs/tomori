@@ -12,9 +12,10 @@ pub const ENVIRONMENT: &str = "placeholder";
 /// The floor's colour, linear.
 pub const COLOUR: [f32; 3] = [0.55, 0.25, 0.45];
 
-/// A headset drawing Sky, from `tomori-environment-sky-client`, and the placeholder floor too. The library's builder draws nothing but the grid until a scenery is registered.
+/// A headset drawing Sky, from `tomori-environment-sky-client`, and the placeholder floor too, whose `--help` names its executable, `tomori-example-headset`. The library's builder draws nothing but the grid until a scenery is registered.
 pub fn builder() -> tomori::Builder {
     tomori::Builder::default()
+        .program_name("tomori-example-headset")
         .register(tomori_environment_sky_client::register)
         .scenery(ENVIRONMENT, floor)
 }

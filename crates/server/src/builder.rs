@@ -38,6 +38,8 @@ type Hook = Box<dyn FnOnce(Server) -> Server>;
 ///
 /// Environments here are what the server knows of them today: an identifier, label and version offered to clients, their layer of a space's instructions, and their server sides. Their data sources and tools, planned in [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
 pub struct Builder {
+    /// The program's name, which its usage gives: `tomori-server` unless [`Builder::program_name`] gives another.
+    program: String,
     /// Each backend's name and how to make it, in the order `--help` lists them.
     backends: Vec<(String, Constructor)>,
     environments: Environments,
@@ -50,6 +52,7 @@ impl Default for Builder {
     /// Tomori's own backends, and no environments.
     fn default() -> Self {
         let builder = Self {
+            program: "tomori-server".to_owned(),
             backends: Vec::new(),
             environments: Environments::default(),
             options: Vec::new(),
@@ -116,6 +119,28 @@ impl Builder {
             None => self.backends.push((name, constructor)),
         }
         self
+    }
+
+    /// Name the program `name` in its usage, as `--help` and `auth --help` show it and as the server says to run `auth`, in place of `tomori-server`, such as an application's own executable's name. A name must be a plain executable name: one that is empty or holds whitespace, a control character or a zero-width character is not used, with a warning, and the program keeps the name it had.
+    ///
+    /// ```
+    /// use tomori_server::Server;
+    ///
+    /// // `observe-server --help` starts `Usage: observe-server`.
+    /// let builder = Server::builder().program_name("observe-server");
+    /// ```
+    pub fn program_name(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        match unusable(&name) {
+            None => self.program = name,
+            Some(why) => log::warn!("The program name {name:?} is ignored, since {why}."),
+        }
+        self
+    }
+
+    /// The program's name, which its usage gives: `tomori-server` unless [`Builder::program_name`] gave another.
+    pub(crate) fn program(&self) -> &str {
+        &self.program
     }
 
     /// Offer `environment` for spaces, in place of one with the same identifier, or else after those already offered. The first offered is the one a space whose creator names none is bound to. See [`Environment`].
@@ -195,14 +220,20 @@ impl Builder {
         self.run(std::env::args().skip(1))
     }
 
-    /// The command line's usage, naming the registered backends.
+    /// The command line's usage, naming the program and the registered backends, and listing the registered environments, in the order they are offered.
     pub(crate) fn usage(&self) -> String {
         let names: Vec<&str> = self
             .backends
             .iter()
             .map(|(name, _)| name.as_str())
             .collect();
-        command::usage(&names.join(", "), &self.options)
+        command::usage(
+            &self.program,
+            &names.join(", "),
+            self.environments(),
+            &self.options,
+            cfg!(feature = "speech"),
+        )
     }
 
     /// The backend registered as `name`, made as `arguments` say.
@@ -230,6 +261,27 @@ impl Builder {
     pub(crate) fn into_parts(self) -> (Vec<Environment>, Vec<Hook>, Vec<CommandOption>) {
         (self.environments.into_vec(), self.hooks, self.options)
     }
+}
+
+/// Why `name` is not a plain executable name, which [`Builder::program_name`] takes, or `None` if it is one.
+fn unusable(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("it is empty");
+    }
+    name.chars().find_map(|character| {
+        if character.is_whitespace() {
+            Some("it holds whitespace")
+        } else if character.is_control() {
+            Some("it holds a control character")
+        } else if matches!(
+            character,
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+        ) {
+            Some("it holds a zero-width character")
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -356,6 +408,105 @@ mod tests {
         assert_eq!(environments, [night.clone(), grid.clone()]);
         let builder = Server::builder().environment(grid.clone());
         assert_eq!(builder.environments(), [grid]);
+    }
+
+    #[test]
+    fn the_help_lists_the_registered_environments_in_the_order_offered() {
+        // None until they are registered, so that every space creation is refused.
+        assert!(Server::builder().usage().ends_with(
+            "  --help               Show this help.\n\nEnvironments: none, so every space creation is refused."
+        ));
+        let usage = Server::builder()
+            .environment(Environment::new("observe", "Observe"))
+            .environment(Environment::new(tomori_protocol::GRID, "Grid").with_version(2))
+            // In place of the first, keeping its place.
+            .environment(Environment::new("observe", "Night").with_version(3))
+            .usage();
+        assert!(
+            usage.ends_with(
+                "  --help               Show this help.\n\nEnvironments, offered in this order, the first by default:\n  observe              Night, version 3.\n  minimal              Grid, version 2."
+            ),
+            "{usage}"
+        );
+    }
+
+    #[test]
+    fn the_help_names_the_program_it_is_given() {
+        // Whether or not the server is built with speech, whose options the synopsis starts with.
+        let second = |usage: &str| usage.lines().nth(1).unwrap().to_owned();
+        let usage = Server::builder().usage();
+        assert!(usage.starts_with("Usage: tomori-server [--bind ADDRESS] [--backend NAME]..."));
+        assert!(second(&usage).starts_with(&format!("{}[--", " ".repeat(21))));
+        assert!(usage.contains(
+            "\n       tomori-server auth (mint|list|revoke) ...   (see tomori-server auth --help)\n"
+        ));
+        // Another program's, its synopsis lined up after its name, its options' too.
+        let usage = Server::builder()
+            .program_name("observe-server")
+            .option(fleet())
+            .usage();
+        assert!(
+            usage.starts_with("Usage: observe-server [--bind ADDRESS] [--backend NAME]..."),
+            "{usage}"
+        );
+        assert!(second(&usage).starts_with(&format!("{}[--", " ".repeat(22))));
+        assert!(usage.contains(
+            "\n                      [--no-mcp] [--open-pairing]\n                      [--fleet NAME]\n       observe-server auth (mint|list|revoke) ...   (see observe-server auth --help)\n"
+        ));
+        assert!(!usage.contains("tomori-server"), "{usage}");
+        // Lined up by characters, not bytes.
+        let usage = Server::builder().program_name("bühne").usage();
+        assert!(usage.starts_with("Usage: bühne [--bind"));
+        assert!(second(&usage).starts_with(&format!("{}[--", " ".repeat(13))));
+        // A name that is not a plain executable name is not used.
+        // Each with why it is not used, which the warning gives.
+        for (name, why) in [
+            ("", "it is empty"),
+            ("observe x", "it holds whitespace"),
+            ("observe\u{1b}[2J", "it holds a control character"),
+            ("observe\u{200b}x", "it holds a zero-width character"),
+            ("observe\u{200c}x", "it holds a zero-width character"),
+            ("observe\u{200d}x", "it holds a zero-width character"),
+            ("observe\u{2060}x", "it holds a zero-width character"),
+            ("observe\u{feff}x", "it holds a zero-width character"),
+        ] {
+            assert_eq!(unusable(name), Some(why), "{name:?}");
+        }
+        assert_eq!(unusable("observe-ü"), None);
+        for name in [
+            "",
+            "observe server",
+            "observe\nserver",
+            "observe\u{1b}[2J",
+            "observe\u{200b}x",
+        ] {
+            assert_eq!(
+                Server::builder().program_name(name).program(),
+                "tomori-server",
+                "{name:?}"
+            );
+        }
+        assert_eq!(
+            Server::builder()
+                .program_name("observe-server")
+                .program_name("observe server")
+                .program(),
+            "observe-server"
+        );
+    }
+
+    #[test]
+    fn the_help_keeps_each_environment_to_its_line() {
+        let usage = Server::builder()
+            .environment(Environment::new("a-very-long-environment-id", "Long"))
+            .environment(Environment::new("night\nshift", "Ob\tserve\u{1b}[2J"))
+            .usage();
+        assert!(
+            usage.ends_with(
+                "\n  a-very-long-environment-id Long, version 1.\n  night?shift          Ob?serve?[2J, version 1."
+            ),
+            "{usage}"
+        );
     }
 
     /// An option of an application's own, `--fleet NAME`, offering an environment named for the fleet, and refusing the fleet `nowhere` as it configures the server.
