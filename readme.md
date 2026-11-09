@@ -148,7 +148,7 @@ Replies are spoken in full. Any participant can switch a space to brief speech f
 
 The server keeps the latest two spoken replies, up to 5 minutes of audio. If you join a space, or put your headset back on, having missed any of the latest reply, you hear it from its start, then whatever followed, until you have caught up with live speech; others in the space are unaffected. Taking the headset off counts as away, and turns the live microphone off. The headset tells the server when it is put on or taken off, from its proximity sensor and the OpenXR session state, and the status line counts who is away.
 
-Recognition and synthesis run inside the server through sherpa-onnx, whose libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build links. Recognition uses a streaming transducer that shows words while you speak, and a punctuation model adds capitals and punctuation to the finished transcript; synthesis uses Kokoro. The models need about 560 MB in `.tools/`. From the repository root:
+Recognition and synthesis run inside the server through sherpa-onnx, whose libraries `scripts/fetch-sherpa-onnx.sh` downloads and checks, and the build links. Recognition uses a streaming transducer that shows words while you speak, and a punctuation model adds capitals and punctuation to the finished transcript; synthesis uses Kokoro, given English phonemes that the server works out in Rust with `loqui-g2p`. The models need about 560 MB in `.tools/`. From the repository root:
 
 ```sh
 bash scripts/fetch-asr-model.sh
@@ -234,7 +234,7 @@ The original audio remains 16 kHz mono even if PipeWire exposes the remapped inp
 
 Enable Quest developer mode, connect a USB data cable, and accept **Allow USB debugging** inside the headset. `adb devices -l` must show `device`, not `unauthorized`. Keep your boundary enabled and stay seated or stationary. Wake the Touch controllers before launching: Quest may otherwise show a **controllers required** dialog and block the application from starting.
 
-Install a **user-local rustup** toolchain (Rust 1.90+) and Android tools:
+Install a **user-local rustup** toolchain (Rust 1.92+) and Android tools:
 
 ```sh
 rustup target add aarch64-linux-android
@@ -305,7 +305,7 @@ The rendering tests draw offscreen with Vulkan: on a GPU when there is one, and 
 
 The speech tests that run the real recognition, punctuation, voice activity and synthesis models are skipped, each saying so, when the models aren't installed; set `TOMORI_REQUIRE_MODELS=1` to fail them instead, as CI does. They use Whisper `tiny.en` rather than the server's default, `small.en`; see [crates/speech/readme.md](crates/speech/readme.md#tests).
 
-`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests, including the rendering tests on lavapipe and the speech tests with their models, on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.90), and builds the client core and the headset APK for `aarch64-linux-android`. On stable Rust the tests run under `cargo bake test:coverage --all-targets true`, which fails unless every measured source region runs: the 100% region coverage that Base projects require. The main branch requires all of these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job.
+`cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests, including the rendering tests on lavapipe and the speech tests with their models, on current stable Rust and on the minimum supported version (the workspace's `rust-version`, 1.92), and builds the client core and the headset APK for `aarch64-linux-android`. On stable Rust the tests run under `cargo bake test:coverage --all-targets true`, which fails unless every measured source region runs: the 100% region coverage that Base projects require. The main branch requires all of these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job.
 
 Code that is not covered gets a test, or goes if nothing needs it. Regions inside `unreachable!` are not counted. The only other exceptions are a few thin files of device and platform calls that CI cannot make: the headset's OpenXR session and its Vulkan device, the desktop window and its audio devices, a forked child before it executes its program, the server process's `_exit`, and starting the multicast DNS daemon. Each is excluded in its crate's `Cargo.toml`, with its reason, and the coverage report lists their sizes; [design/testing.md](design/testing.md) lists them, and says which decisions are still in them rather than in covered modules. To measure coverage locally, install `cargo-llvm-cov` and the `llvm-tools` component. With a distribution's Rust whose standard library sources are under `/usr/src`, which `cargo bake test:coverage` cannot read, run `cargo llvm-cov --workspace --all-targets` and then `cargo llvm-cov report --ignore-filename-regex '^/usr/src/'` instead.
 
@@ -375,7 +375,8 @@ Original project code is released under the MIT License; see [license.md](licens
 - The server's syntax highlighting builds on tree-sitter, its grammars and syntect, under the MIT License, and syntect embeds Sublime Text's syntax definitions from [sublimehq/Packages](https://github.com/sublimehq/Packages), under that repository's permissive licence; see [crates/highlight/readme.md](crates/highlight/readme.md). None of them is in a client or the APK.
 - Basis Universal notices and test fixtures: [Apache-2.0](crates/render/assets/licenses/basisu-LICENSE.txt), with fixture provenance in [crates/render/tests/fixtures/README.md](crates/render/tests/fixtures/README.md).
 - The optional OBS plugin compatibility patch follows the upstream plugin's GPL-2.0-or-later licensing; its packaging metadata is under `packaging/`.
-- Speech models and native dependencies are downloaded separately, not bundled in this repository. Their licensing requirements are noted in the relevant setup sections above.
+- The server's speech stack is permissively licensed. It links sherpa-onnx (Apache-2.0) and the libraries its static archive bundles, among them ONNX Runtime (MIT), OpenFst, Kaldi's feature and decoder libraries and SentencePiece (Apache-2.0), kissfft (BSD-3-Clause) and utf8proc (MIT), which `scripts/fetch-sherpa-onnx.sh` downloads and verifies; and [`loqui-g2p`](https://github.com/Awakened-Labs/loqui) (MIT), which phonemizes English for Kokoro and embeds misaki's lexicons and a grapheme-to-phoneme model, both Apache-2.0, and spaCy's English tokenizer rules, under the MIT License; its `NOTICE` lists them. espeak-ng and piper-phonemize (GPL-3.0), which sherpa-onnx linked before 2.0, are no longer linked; see [crates/speech/readme.md](crates/speech/readme.md).
+- Speech models are downloaded separately, not bundled in this repository. Their licensing requirements are noted in the relevant setup sections above. The Kokoro archive that `scripts/fetch-tts-model.sh` fetches also contains espeak-ng's data (GPL-3.0), which the server does not read.
 
 ## Releasing
 

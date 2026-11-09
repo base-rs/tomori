@@ -19,9 +19,14 @@ shared = ["sherpa-onnx/shared"]
 [dependencies]
 base-markdown = "0.1.4"
 log = "0.4"
+# English phonemes for Kokoro, in Rust, without espeak-ng; pinned, as it is young, so that pronunciation changes only when it is upgraded on purpose.
+loqui-g2p = "=0.4.0"
+regex = "1"
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
-# 1.13.8 rather than 2.x: 2.0 removed the espeak-ng fallback for words missing from Kokoro's lexicon and skips such words instead; see readme.md.
-sherpa-onnx = { version = "=1.13.8", default-features = false }
+# The pronunciations in assets/pronunciations.toml, and a server's own; already in the lock file for proc-macro-crate, so it adds nothing.
+toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+# Pinned to the version whose libraries scripts/fetch-sherpa-onnx.sh verifies. 2.x links no espeak-ng; see readme.md.
+sherpa-onnx = { version = "=2.0.1", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

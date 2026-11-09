@@ -2,8 +2,11 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Kokoro synthesis in-process through sherpa-onnx, on a thread owned by the synthesizer.
+//!
+//! Text is turned into Kokoro's phonemes in Rust, by a [`Phonemizer`], and sherpa-onnx is given the phonemes, so that no GPL code is linked: sherpa-onnx 2 no longer pronounces text itself with espeak-ng.
 use std::{
     cell::Cell,
+    collections::HashSet,
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     rc::Rc,
@@ -20,7 +23,11 @@ use sherpa_onnx::{
     OfflineTtsModelConfig,
 };
 
-use super::{AudioChunk, Synthesizer, UNAVAILABLE};
+use super::{
+    AudioChunk, Synthesizer, UNAVAILABLE,
+    english::English,
+    phonemes::{self, Phonemizer},
+};
 use crate::{
     Error, Stopper,
     stop::{Exited, panic_message},
@@ -35,25 +42,21 @@ const VOICES: u32 = 54;
 /// The longest segment accepted, in characters. Segments come from [`crate::Speakable`], which yields sentences far shorter than this.
 const TEXT_LIMIT: usize = 2000;
 
-/// The files of the `kokoro-multi-lang-v1_0` model that synthesis uses.
-const FILES: [&str; 5] = [
-    "model.onnx",
-    "voices.bin",
-    "tokens.txt",
-    "lexicon-us-en.txt",
-    "espeak-ng-data",
-];
+/// The files of the `kokoro-multi-lang-v1_0` model that synthesis uses. Its lexicons and `espeak-ng-data` are not used: text is phonemized in Rust.
+const FILES: [&str; 3] = ["model.onnx", "voices.bin", "tokens.txt"];
 
 /// Where to find the model and how to speak.
 #[derive(Clone, Debug)]
 pub struct KokoroConfig {
-    /// The `kokoro-multi-lang-v1_0` directory: `model.onnx`, `voices.bin`, `tokens.txt`, `lexicon-us-en.txt` and `espeak-ng-data`.
+    /// The `kokoro-multi-lang-v1_0` directory: `model.onnx`, `voices.bin` and `tokens.txt`.
     pub model: PathBuf,
     /// The speaker id, 0 to 53.
     pub voice: u32,
     pub speed: f32,
     /// The ONNX Runtime threads used for synthesis.
     pub threads: u32,
+    /// A file of pronunciations that add to and replace Tomori's own, in the form of `assets/pronunciations.toml`, if it exists; the server's is `pronunciations.toml` in its state directory.
+    pub pronunciations: Option<PathBuf>,
 }
 
 impl KokoroConfig {
@@ -65,10 +68,12 @@ impl KokoroConfig {
             voice: 3,
             speed: 1.0,
             threads: 2,
+            pronunciations: None,
         }
     }
 
-    fn check(&self) -> Result<(), Error> {
+    /// Check the configuration and the installation, and return the phonemes the model knows.
+    fn check(&self) -> Result<HashSet<char>, Error> {
         if self.voice >= VOICES {
             return Err(Error::Unavailable(format!(
                 "Kokoro voice {} is out of range 0 to {}",
@@ -82,7 +87,14 @@ impl KokoroConfig {
                 self.model.display()
             )));
         }
-        Ok(())
+        let tokens = self.model.join("tokens.txt");
+        let tokens = std::fs::read_to_string(&tokens).map_err(|error| {
+            Error::Unavailable(format!(
+                "Kokoro's phonemes could not be read from {}: {error}",
+                tokens.display()
+            ))
+        })?;
+        Ok(phonemes::symbols(&tokens))
     }
 
     fn sherpa(&self) -> OfflineTtsConfig {
@@ -93,9 +105,7 @@ impl KokoroConfig {
                     model: file("model.onnx"),
                     voices: file("voices.bin"),
                     tokens: file("tokens.txt"),
-                    lexicon: file("lexicon-us-en.txt"),
-                    // espeak-ng pronounces words that the lexicon lacks.
-                    data_dir: file("espeak-ng-data"),
+                    // Each segment is given as phonemes, so no lexicon is loaded.
                     ..Default::default()
                 },
                 num_threads: i32::try_from(self.threads).unwrap_or(1).max(1),
@@ -103,7 +113,7 @@ impl KokoroConfig {
                 debug: false,
                 ..Default::default()
             },
-            // Generate and deliver one sentence at a time, so the first sentence of a segment is heard before the rest is synthesized.
+            // Generate and deliver one sentence at a time, so the first sentence of a segment is heard before the rest is synthesized; sherpa-onnx ignores any other value for Kokoro.
             max_num_sentences: 1,
             ..Default::default()
         }
@@ -117,10 +127,9 @@ trait Engine {
 
     fn sample_rate(&self) -> i32;
     fn num_speakers(&self) -> i32;
-    /// Synthesize `text` as `generation` says, passing each sentence's samples to `callback`, which returns whether to go on, and return the segment's audio, or `None` if it could not be synthesized.
+    /// Synthesize the sentences of phonemes that `generation` gives, passing each sentence's samples to `callback`, which returns whether to go on, and return the segment's audio, or `None` if it could not be synthesized.
     fn generate(
         &self,
-        text: &str,
         generation: &GenerationConfig,
         callback: impl FnMut(&[f32], f32) -> bool + 'static,
     ) -> Option<Self::Audio>;
@@ -140,16 +149,22 @@ impl Engine for OfflineTts {
 
     fn generate(
         &self,
-        text: &str,
         generation: &GenerationConfig,
         callback: impl FnMut(&[f32], f32) -> bool + 'static,
     ) -> Option<GeneratedAudio> {
-        self.generate_with_config(text, generation, Some(callback))
+        // The text is given as phonemes instead.
+        self.generate_with_config("", generation, Some(callback))
     }
 
     fn samples(audio: &GeneratedAudio) -> &[f32] {
         audio.samples()
     }
+}
+
+/// How the synthesis thread reads text: in phonemes, of which the model knows `symbols`.
+struct Reading<P> {
+    phonemizer: P,
+    symbols: HashSet<char>,
 }
 
 /// What the synthesis thread reports for a request.
@@ -190,18 +205,30 @@ pub struct KokoroSynthesizer {
 impl KokoroSynthesizer {
     /// Load the model on a new synthesis thread, waiting until it is ready so that the first segment does not wait for it.
     pub fn new(config: &KokoroConfig) -> Result<Self, Error> {
-        config.check()?;
+        let symbols = config.check()?;
         let sherpa = config.sherpa();
+        let pronunciations = config.pronunciations.clone();
         Self::start(
-            move || OfflineTts::create(&sherpa),
+            move || {
+                let phonemizer = English::with_pronunciations(pronunciations.as_deref());
+                OfflineTts::create(&sherpa).map(|tts| {
+                    (
+                        tts,
+                        Reading {
+                            phonemizer,
+                            symbols,
+                        },
+                    )
+                })
+            },
             config.voice,
             config.speed,
         )
     }
 
-    /// Load the model with `load` on a new synthesis thread, as [`new`](Self::new) does, to speak with `voice` at `speed`.
-    fn start<E: Engine + 'static>(
-        load: impl FnOnce() -> Option<E> + Send + 'static,
+    /// Load the model and its phonemizer with `load` on a new synthesis thread, as [`new`](Self::new) does, to speak with `voice` at `speed`.
+    fn start<E: Engine + 'static, P: Phonemizer + 'static>(
+        load: impl FnOnce() -> Option<(E, Reading<P>)> + Send + 'static,
         voice: u32,
         speed: f32,
     ) -> Result<Self, Error> {
@@ -216,14 +243,14 @@ impl KokoroSynthesizer {
             .spawn(move || {
                 // Dropped last, once the model has been unloaded.
                 let _guard = guard;
-                let Some(tts) = load() else {
+                let Some((tts, reading)) = load() else {
                     let _ = ready_sender.send(Err(Error::Unavailable(
                         "sherpa-onnx could not load the Kokoro model".into(),
                     )));
                     return;
                 };
                 let _ = ready_sender.send(Ok((tts.sample_rate(), tts.num_speakers())));
-                serve(&tts, receiver, &serving);
+                serve(&tts, &reading, receiver, &serving);
             })
             // As the other engine threads, a thread the system cannot start is not survived.
             .expect("spawn the Kokoro thread");
@@ -289,7 +316,12 @@ impl KokoroSynthesizer {
 }
 
 /// Serve requests on the synthesis thread until the synthesizer is dropped or stopped, or a panic disables it.
-fn serve<E: Engine>(tts: &E, commands: Receiver<Command>, stopping: &Arc<AtomicBool>) {
+fn serve<E: Engine, P: Phonemizer>(
+    tts: &E,
+    reading: &Reading<P>,
+    commands: Receiver<Command>,
+    stopping: &Arc<AtomicBool>,
+) {
     for command in commands {
         let Command::Synthesize(request) = command else {
             return;
@@ -300,7 +332,9 @@ fn serve<E: Engine>(tts: &E, commands: Receiver<Command>, stopping: &Arc<AtomicB
                 .send(Message::Failed(Error::Stopped(SHUTTING_DOWN.into())));
             continue;
         }
-        match panic::catch_unwind(AssertUnwindSafe(|| generate(tts, &request, stopping))) {
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            generate(tts, reading, &request, stopping)
+        })) {
             Ok(reply) => {
                 let _ = request.replies.send(reply);
             }
@@ -320,7 +354,20 @@ fn serve<E: Engine>(tts: &E, commands: Receiver<Command>, stopping: &Arc<AtomicB
 }
 
 /// Synthesize one request, streaming its audio, and return the final reply.
-fn generate<E: Engine>(tts: &E, request: &Request, stopping: &Arc<AtomicBool>) -> Message {
+fn generate<E: Engine, P: Phonemizer>(
+    tts: &E,
+    reading: &Reading<P>,
+    request: &Request,
+    stopping: &Arc<AtomicBool>,
+) -> Message {
+    let sentences = phonemes::codepoints(
+        reading.phonemizer.sentences(&request.text),
+        &reading.symbols,
+    );
+    // Nothing to pronounce, such as an emoji alone, is silent, as code is.
+    if sentences.is_empty() {
+        return Message::Done;
+    }
     let replies = request.replies.clone();
     let streamed = Rc::new(Cell::new(false));
     let callback = {
@@ -342,9 +389,10 @@ fn generate<E: Engine>(tts: &E, request: &Request, stopping: &Arc<AtomicBool>) -
     let generation = GenerationConfig {
         sid: request.voice,
         speed: request.speed,
+        phoneme_codepoints: Some(sentences),
         ..Default::default()
     };
-    let audio = tts.generate(&request.text, &generation, callback);
+    let audio = tts.generate(&generation, callback);
     if stopping.load(Ordering::SeqCst) {
         return Message::Failed(Error::Stopped(SHUTTING_DOWN.into()));
     }
@@ -508,31 +556,59 @@ mod tests {
                 let Err(Error::Stopped(_)) = synthesizer.synthesize("After.", &mut ignore) else {
                     unreachable!("expected Err(Error::Stopped(_))");
                 };
-                // The model itself, as the synthesis thread asks it.
+                // The model itself, as the synthesis thread asks it, given phonemes.
                 let tts = OfflineTts::create(&config.sherpa()).unwrap();
                 assert_eq!(Engine::sample_rate(&tts), 24_000);
                 assert_eq!(Engine::num_speakers(&tts), VOICES as i32);
-                let generation = GenerationConfig::default();
-                let audio = Engine::generate(&tts, "Hi.", &generation, |_, _| true).unwrap();
+                let generation = GenerationConfig {
+                    phoneme_codepoints: Some(vec!["hˈI.".chars().map(|c| c as i32).collect()]),
+                    ..Default::default()
+                };
+                let audio = Engine::generate(&tts, &generation, |_, _| true).unwrap();
                 assert!(!OfflineTts::samples(&audio).is_empty());
             },
         );
     }
 
+    /// Skipped without the Kokoro model; see [`crate::test_models`].
     #[test]
-    fn a_model_sherpa_onnx_cannot_load_is_said() {
+    fn speaks_words_the_lexicon_lacks_and_nothing_for_an_emoji() {
+        let config = KokoroConfig::from_root(&crate::test_models::root());
+        crate::test_models::with(
+            "the Kokoro model",
+            "bash scripts/fetch-tts-model.sh",
+            &[&config.model],
+            || {
+                let mut synthesizer = KokoroSynthesizer::new(&config).unwrap();
+                let mut length = |text: &str| {
+                    let mut samples = 0;
+                    synthesizer
+                        .synthesize(text, &mut |chunk| samples += chunk.samples.len())
+                        .map(|()| samples)
+                };
+                // A name in no lexicon is pronounced, rather than skipped as sherpa-onnx's own lexicon would: it takes as long to say as a word of its length.
+                let tomori = length("Tomori.").unwrap();
+                assert!(tomori > length("Hi.").unwrap() + 2_400, "{tomori} samples");
+                // An emoji alone is silent, and not an error.
+                assert_eq!(length("🎉"), Ok(0));
+            },
+        );
+    }
+
+    #[test]
+    fn a_voice_whose_phonemes_cannot_be_read_is_said() {
         let installed = KokoroConfig::from_root(&crate::test_models::root());
         crate::test_models::with(
             "the Kokoro model",
             "bash scripts/fetch-tts-model.sh",
             &[&installed.model],
             || {
-                // Without espeak-ng's data, which sherpa-onnx needs, the model is refused.
+                // `tokens.txt` is there, but cannot be read as text.
                 let partial = std::env::temp_dir()
                     .join(format!("tomori-kokoro-partial-{}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&partial);
-                std::fs::create_dir_all(partial.join("espeak-ng-data")).unwrap();
-                for file in FILES.iter().filter(|file| **file != "espeak-ng-data") {
+                std::fs::create_dir_all(partial.join("tokens.txt")).unwrap();
+                for file in FILES.iter().filter(|file| **file != "tokens.txt") {
                     std::os::unix::fs::symlink(installed.model.join(file), partial.join(file))
                         .unwrap();
                 }
@@ -543,7 +619,7 @@ mod tests {
                 let Err(Error::Unavailable(error)) = KokoroSynthesizer::new(&config) else {
                     unreachable!("the model is refused");
                 };
-                assert!(error.contains("could not load the Kokoro model"), "{error}");
+                assert!(error.contains("could not be read"), "{error}");
                 std::fs::remove_dir_all(partial).unwrap();
             },
         );
@@ -552,11 +628,33 @@ mod tests {
     /// What the stand-in model does with a segment, given the callback for its sentences.
     type Act = dyn Fn(&mut dyn FnMut(&[f32], f32) -> bool) -> Option<Vec<f32>> + Send + Sync;
 
-    /// A model that does what `act` says, at `rate` with `speakers` voices.
+    /// A model that does what `act` says, at `rate` with `speakers` voices, keeping the phonemes it is given.
     struct Fake {
         rate: i32,
         speakers: i32,
         act: Arc<Act>,
+        heard: Arc<std::sync::Mutex<Vec<Vec<i32>>>>,
+    }
+
+    /// A phonemizer that reads each letter as itself, and the text as one sentence.
+    struct Letters;
+
+    impl Phonemizer for Letters {
+        fn sentences(&self, text: &str) -> Vec<String> {
+            vec![text.to_owned()]
+        }
+    }
+
+    /// The model and how it reads, as [`KokoroSynthesizer::start`] loads them.
+    fn loaded(fake: Fake) -> Option<(Fake, Reading<Letters>)> {
+        let symbols = ('a'..='z').chain('A'..='Z').chain([' ', '.']).collect();
+        Some((
+            fake,
+            Reading {
+                phonemizer: Letters,
+                symbols,
+            },
+        ))
     }
 
     impl Engine for Fake {
@@ -572,10 +670,10 @@ mod tests {
 
         fn generate(
             &self,
-            _: &str,
-            _: &GenerationConfig,
+            generation: &GenerationConfig,
             mut callback: impl FnMut(&[f32], f32) -> bool + 'static,
         ) -> Option<Vec<f32>> {
+            *self.heard.lock().unwrap() = generation.phoneme_codepoints.clone().unwrap_or_default();
             (self.act)(&mut callback)
         }
 
@@ -587,13 +685,22 @@ mod tests {
     fn faked(
         act: impl Fn(&mut dyn FnMut(&[f32], f32) -> bool) -> Option<Vec<f32>> + Send + Sync + 'static,
     ) -> KokoroSynthesizer {
+        faked_hearing(act, Arc::default())
+    }
+
+    /// As [`faked`], keeping the phonemes the model is given in `heard`.
+    fn faked_hearing(
+        act: impl Fn(&mut dyn FnMut(&[f32], f32) -> bool) -> Option<Vec<f32>> + Send + Sync + 'static,
+        heard: Arc<std::sync::Mutex<Vec<Vec<i32>>>>,
+    ) -> KokoroSynthesizer {
         let act: Arc<Act> = Arc::new(act);
         KokoroSynthesizer::start(
             move || {
-                Some(Fake {
+                loaded(Fake {
                     rate: 24_000,
                     speakers: 4,
                     act,
+                    heard,
                 })
             },
             3,
@@ -614,18 +721,17 @@ mod tests {
     fn a_model_that_cannot_start_is_said() {
         let fake = |rate, speakers| {
             move || {
-                Some(Fake {
+                loaded(Fake {
                     rate,
                     speakers,
                     act: Arc::new(|_: &mut dyn FnMut(&[f32], f32) -> bool| None),
+                    heard: Arc::default(),
                 })
             }
         };
+        type Load = Box<dyn FnOnce() -> Option<(Fake, Reading<Letters>)> + Send>;
         for (load, said) in [
-            (
-                Box::new(|| None::<Fake>) as Box<dyn FnOnce() -> Option<Fake> + Send>,
-                "could not load the Kokoro model",
-            ),
+            (Box::new(|| None) as Load, "could not load the Kokoro model"),
             (
                 Box::new(|| panic!("the model is broken")),
                 "stopped while loading",
@@ -666,6 +772,18 @@ mod tests {
                 unreachable!("no audio is an error");
             };
         }
+    }
+
+    #[test]
+    fn the_model_is_given_the_phonemes_it_knows() {
+        let heard = Arc::default();
+        let mut synthesizer = faked_hearing(|_| Some(vec![0.5; 3]), Arc::clone(&heard));
+        assert_eq!(spoken(&mut synthesizer, "Hi❓ there.").unwrap(), [16384; 3]);
+        let expected: Vec<i32> = "Hi there.".chars().map(|c| c as i32).collect();
+        assert_eq!(*heard.lock().unwrap(), [expected]);
+        // Nothing it can pronounce is silent, without asking the model.
+        let mut silent = faked(|_| unreachable!("nothing is synthesized"));
+        assert_eq!(spoken(&mut silent, "🎉"), Ok(Vec::new()));
     }
 
     #[test]

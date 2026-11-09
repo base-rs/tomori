@@ -8,8 +8,8 @@ version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/ioquatix/tomori"
-# The oldest Rust that builds the workspace with its locked dependencies: wgpu-hal depends on ordered-float 5.5, which needs 1.90. The source itself needs 1.88, for let chains and `slice::as_chunks`. CI builds and tests with this version.
-rust-version = "1.90"
+# The oldest Rust that builds the workspace with its locked dependencies: loqui-g2p, which phonemizes English for Kokoro, needs 1.92, and wgpu-hal depends on ordered-float 5.5, which needs 1.90. The source itself needs 1.88, for let chains and `slice::as_chunks`. CI builds and tests with this version.
+rust-version = "1.92"
 
 [workspace.metadata.bake.release]
 reviewers = ["ioquatix"]

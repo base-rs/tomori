@@ -13,7 +13,7 @@ Speech recognition and synthesis for the Tomori server, run in the server proces
 | Transcript punctuation | English CNN-BiLSTM punctuation and casing, int8 | `stt::CnnBilstmPunctuator`, applied by `stt::Punctuated` |
 | Whole-clip recognition (`--speech-backend offline`) | Whisper `small.en` unless configured otherwise (`--speech-offline-model`), int8 | `stt::WhisperRecognizer`, run by `stt::OfflineRecognition` |
 | Pauses in long whole-clip utterances | Silero voice activity detector | `stt::SileroVad` |
-| Synthesis | Kokoro multi-language v1.0, voice 3 (`af_heart`) | `tts::KokoroSynthesizer` |
+| Synthesis | Kokoro multi-language v1.0, voice 3 (`af_heart`), given phonemes from [`loqui-g2p`](https://crates.io/crates/loqui-g2p) | `tts::KokoroSynthesizer` |
 
 The streaming recognizer decodes each utterance once, as the audio arrives, so partial words appear while the participant is still speaking and the final transcript is ready shortly after they let go. Its vocabulary has no capitals or punctuation, so `stt::Punctuated` passes each final transcript through the punctuation model on the recognition thread, and ends it with a full stop, question mark or exclamation mark. Partial transcripts stay lowercase, because punctuating them would change words already shown. Punctuation never fails an utterance: if the model fails or changes the words, the transcript is delivered as recognized, and a panic disables punctuation only, logged once. Without the punctuation model, transcripts are lowercase and unpunctuated, and the server says so when it starts. Whisper cannot stream, so the server uses it only with `--speech-backend offline`, which buffers each utterance and decodes it once it ends; it is also compared in the benchmark below.
 
@@ -31,6 +31,36 @@ Whisper decodes at most 30 seconds at once. `stt::OfflineRecognition` decodes an
 On a 32-core Linux PC, the test `transcribes_a_long_utterance_with_whisper` decodes 58.7 seconds of LibriSpeech, in three segments, with or without the detector, in about 8.6 seconds with `small.en` and 2 seconds with `tiny.en`, which the test uses, and with either model the transcripts match the reference apart from British spellings.
 
 Kokoro reports each sentence as soon as it is generated.
+
+### Phonemes
+
+sherpa-onnx 2 no longer pronounces text with espeak-ng (GPL-3.0), so the server phonemizes text itself, in Rust, and gives Kokoro the phonemes, one sentence at a time, through `GenerationConfig::phoneme_codepoints`. Kokoro v1.0 was trained on the phonemes of misaki, its own G2P, and [`loqui-g2p`](https://github.com/Awakened-Labs/loqui) is a Rust port of misaki's English: spaCy's tokenization, a part-of-speech tagger, so that "read" in "I read it yesterday" is said as "red", misaki's gold and silver lexicons, stress, and numbers, money and years. A word that no lexicon or rule covers, such as "Tomori" or "Hinoki", is pronounced by a small neural model trained on misaki's lexicons, rather than dropped as sherpa-onnx's own lexicon would drop it. Its lexicons and model are embedded in the crate, so there is nothing to download, and they add about 20 MB to the server; loading them takes about a tenth of a second when synthesis starts, and phonemizing a sentence under a millisecond, or a few for one with unknown words.
+
+Before phonemizing, `tts::english` normalizes what the agent writes and misaki reads poorly:
+
+- times: `3:45 pm` as "three forty-five pm", `3:05` as "three oh five", `3:00` as "three o'clock", `14:00` as "fourteen hundred", and other numbers joined by colons, such as `16:9`, with a space, as misaki would otherwise leave the colon, which Kokoro reads as a pause;
+- ISO dates: `2026-11-10` as "November 10th, 2026";
+- numbers of four digits that cannot be years: port `8443` as "eight thousand four hundred forty-three" rather than "eighty-four forty-three"; years from 1000 to 2099 stay years;
+- units after a number: `180 ms` as "180 milliseconds", and likewise `µs`, `ns`, `Hz`, `kHz`, `MHz`, `GHz`, `kB`, `MB`, `GB`, `TB`, `KiB`, `MiB`, `GiB` and `TiB`;
+- code: `std::sync::mpsc` as "std sync mpsc", `speak()` as "speak", `max_tokens` as "max tokens", `Vec<u8>` as "Vec of u8", and `KokoroSynthesizer` as "Kokoro Synthesizer", while `macOS` and `iOS` stay as they are;
+- file names, paths and addresses: `src/tts/kokoro.rs` as "src slash tts slash kokoro dot rs", with `https://` left out, while `e.g.`, `a.m.`, `50/50` and `1/2` stay as they are, and `and/or` is read "and or".
+
+misaki itself reads money, percentages, ordinals, decimals, abbreviations such as "e.g." and "etc.", and acronyms such as "CLI" and "API". Emoji are left out; sherpa-onnx 1.13 read their names, such as "party popper". A segment with nothing to pronounce, such as an emoji alone, is silent, as code is.
+
+#### Pronunciations
+
+Words that `loqui-g2p` gets wrong are given their pronunciations, from [`assets/pronunciations.toml`](assets/pronunciations.toml): "README", which it spells letter by letter, is "read me"; "JSON", "YAML", "TOML" and "ONNX" are said as words; "Kokoro", "Tomori", "Silero", "serde" and "nginx" as their authors say them; and `stdout`, `rustc`, `chmod`, "TODO" and the like as people read them aloud. A key is a word, matched whole and in any case, also within punctuation and backticks, as in `` `README.md` ``; it may join words with `-`, `.` or `_`, such as `"sherpa-onnx"`, and otherwise each word of such a run is matched on its own. A value is a respelling, words that `loqui-g2p` reads correctly, such as `github = "git hub"`, or phonemes in misaki's notation between slashes, such as `readme = "/ɹˈidmi/"`, where stress must be exact. To add a word:
+
+1. Check that `loqui-g2p` gets it wrong, by listening, or with `synthesis_benchmark --whisper small.en`, below; words it reads correctly, such as "GitHub", "OpenCode", "macOS", "iOS", "OAuth" and "crates.io", are left out.
+2. Add it, preferring a respelling, and run `cargo test -p tomori-speech the_built_in_pronunciations`, which checks that every entry loads and changes what `loqui-g2p` says.
+
+The server adds the pronunciations in `pronunciations.toml` in its state directory (`$XDG_STATE_HOME/tomori`, or `--state-directory`), in the same form, to these, preferring its own, when synthesis starts; restart it after changing them. An entry that cannot be used is left out, with a warning, as is a file that cannot be read or is not TOML; the rest are still used.
+
+Heteronyms that misaki's tagger misreads are decided by the words next to them, in `tts::heteronyms`: "live" is "laɪv" after a form of "go" or "be", a determiner, "make it" or "is it", and before a noun it describes, such as "live log", or a hyphen, as in "live-reload", where the tagger read "go live" as "go" and a verb, as in "go see"; and "lɪv" after a subject, a modal or "to", as in "I live". "Use", "Record" and "Present" that start a sentence before their object are verbs, which the tagger read as names because they are capitalised. Elsewhere the tagger decides, as it does correctly for "read" in "Read the README, then read it again: I read it yesterday", "lives" in "the preview lives here", "close", "content", "object" and "wind". Each is given to `loqui-g2p` with misaki's markup, `[live](/lˈIv/)`.
+
+Sentences end at `.`, `!`, `?` and `;`, as sherpa-onnx 1.13 ended them, and a sentence of at most 10 phonemes is spoken with the one before it while they have fewer than 50 together, or always if it has fewer than 5, as 1.13 joined them, so that segmentation, and the time to the first audio, are as before. A sentence of more than 400 phonemes, which sherpa-onnx would cut wherever it fell, is split after the last clause or word break within that limit. Phonemes Kokoro does not know are left out, and logged at debug level.
+
+The phonemizer sits behind a small trait inside the crate, `tts::phonemes::Phonemizer`, so that a language pack (#103) can supply its own, such as one for Kokoro's Japanese voices. Only American English is phonemized: Kokoro's British voices, such as those the benchmark below uses, are given American phonemes, as they were given the American lexicon before.
 
 ## Speakable text
 
@@ -91,24 +121,24 @@ This crate has no build script of its own: the archive is found only through `SH
    ```
 3. Run `bash scripts/fetch-sherpa-onnx.sh` before building, as here, and in its CI.
 
-Without the script, download the archive the script names for the machine, `sherpa-onnx-v1.13.8-PLATFORM-static-lib.tar.bz2` from `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/`, check it against the SHA-256 the script pins for it, and set `SHERPA_ONNX_ARCHIVE_DIR` to the directory holding it. The script is the only place the digests are kept.
+Without the script, download the archive the script names for the machine, `sherpa-onnx-v2.0.1-PLATFORM-static-lib.tar.bz2` from `https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/`, check it against the SHA-256 the script pins for it, and set `SHERPA_ONNX_ARCHIVE_DIR` to the directory holding it. The script is the only place the digests are kept.
 
 By default the libraries are linked statically and run on the CPU, so `tomori-server` needs no extra shared libraries at run time:
 
 - macOS (arm64 or x86_64): links `libc++` and the Foundation framework from the system.
 - Linux (x86_64 or aarch64): links `libstdc++`, `libm`, `libpthread` and `libdl`.
 
-The `sherpa-onnx` dependency is pinned to 1.13.8. In sherpa-onnx 2.0, Kokoro skips any word missing from its lexicon, such as "Tomori", instead of pronouncing it with espeak-ng. Check this before upgrading.
+The `sherpa-onnx` dependency is pinned to 2.0.1, the version whose libraries the script verifies. From 2.0, sherpa-onnx links no espeak-ng or piper-phonemize, which 1.13 linked statically, so the server is no longer bound by their GPL-3.0; it phonemizes text itself, as above. The test `the_server_links_sherpa_onnx_without_espeak_ng` in `tomori-server-app` checks the built server for espeak-ng's functions. The Kokoro archive that `scripts/fetch-tts-model.sh` fetches still contains `espeak-ng-data` and the lexicons, which the server no longer reads.
 
 ### CUDA on Linux
 
 The GPU build of sherpa-onnx is published only as shared libraries. To use it:
 
-1. Run `bash scripts/fetch-sherpa-onnx.sh cuda`, which downloads, verifies and unpacks `sherpa-onnx-v1.13.8-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu.tar.bz2` into `.tools/sherpa-onnx` and prints its `lib` directory. It needs CUDA 12 and cuDNN 9 installed.
+1. Run `bash scripts/fetch-sherpa-onnx.sh cuda`, which downloads, verifies and unpacks `sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu.tar.bz2` into `.tools/sherpa-onnx` and prints its `lib` directory. It needs CUDA 12 and cuDNN 9 installed.
 2. Build with the shared libraries:
 
    ```bash
-   SHERPA_ONNX_LIB_DIR=$PWD/.tools/sherpa-onnx/sherpa-onnx-v1.13.8-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu/lib \
+   SHERPA_ONNX_LIB_DIR=$PWD/.tools/sherpa-onnx/sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu/lib \
    	cargo build --release -p tomori-server-app --features speech-shared
    ```
 
@@ -169,3 +199,20 @@ Measured on the same machine on 1 November 2026, at load average 55, with `--pun
 - The LibriSpeech clips came back as "After early nightfall, the yellow lamps would light up here and there the squalid quarter of the brothels." and "Yet these thoughts affected Hester Prynne less with hope than apprehension.", with the names capitalized.
 - sherpa-onnx's Chinese and English CT-Transformer was faster, about 3 ms for a sentence, but writes Chinese full-width punctuation ("，", "。") and does not restore capitals, so it is not used.
 - Without the probe word described in `src/stt/punctuation.rs`, the CNN-BiLSTM model left the end of most utterances unpunctuated, such as "Run the tests" and "What do you think" without its question mark.
+
+### Synthesis
+
+`examples/synthesis_benchmark.rs` speaks 22 segments typical of the agent's replies, with pull request numbers, times, names, Rust identifiers, file paths, a question and two paragraphs of several sentences, as the server speaks them, and reports each one's time to its first audio and real-time factor. With `--output DIR --label LABEL` it writes each as `NN-LABEL.wav`, so that two runs pair up for listening, and with `--whisper small.en` it transcribes each again, which catches words dropped or badly mispronounced.
+
+```bash
+cargo run --release -p tomori-speech --example synthesis_benchmark -- --root . --whisper small.en --output target/synthesis --label new
+```
+
+Measured on 9 November 2026 on a 32-thread AMD Ryzen 9 9950X3D under other work (load average 3 to 36), as the median of six runs of each, alternated, with Kokoro's two threads:
+
+| Phonemes | Mean time to first audio | Real-time factor |
+|---|---|---|
+| sherpa-onnx 1.13.8, its lexicon and espeak-ng | 0.77 s | 0.179 |
+| sherpa-onnx 2.0.1 and `loqui-g2p` | 0.70 s | 0.182 |
+
+The first audio comes a little sooner because a segment with a semicolon, such as "Read the design doc first; I read it yesterday and it still holds.", now starts with the words before it, which 1.13 spoke together with the rest, and because emoji and `#` are no longer read aloud, as "party popper" and "hash". Whisper `small.en` heard the segments from both alike, apart from what the new phonemes say differently, units in full, ISO dates by their month, and no emoji or "hash", and from names that neither lexicon has, such as "Tomori", which it wrote "Tamari" or "Tamori".
