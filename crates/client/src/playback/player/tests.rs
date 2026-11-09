@@ -137,7 +137,14 @@ fn stopping_a_replay_stops_replaying_once_what_was_sent_has_played() {
     }
     render_resampled(&mut player, FRAME * 2);
     assert!(control.is_replaying());
-    // Stopped, the server sends no more of it, and the participant follows live speech, or silence.
+    // Stopped, the server sends no more of it, and the participant follows live speech, or silence; what was sent fades out here at once.
+    control.stop_replay();
+    let mut output = vec![0; FRAME * 2];
+    player.render(RATE * 2, Layout::Mono, &mut output);
+    assert!(
+        output[0] > 0 && output[FRAME * 2 - 1] < output[0],
+        "{output:?}"
+    );
     render_resampled(&mut player, PAST_THE_PAUSE);
     assert!(!control.is_replaying());
     // So the right stick asks for a replay again, and the next one is reported in turn.
@@ -206,7 +213,9 @@ fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
     sender.send(frame(1, 1, 100)).unwrap();
     sender.send(frame(AGENT_SOURCE, 1, 20)).unwrap();
     sender.send(frame(REPLAY_SOURCE, 1, 7)).unwrap();
-    assert_eq!(render(&mut player, FRAME), [127; FRAME]);
+    // Agent speech is one voice: the live speech that came first plays, and then what was played again.
+    assert_eq!(render(&mut player, FRAME), [120; FRAME]);
+    assert_eq!(render(&mut player, FRAME), [7; FRAME]);
     // The mute survives the mixer being made again for a new device rate.
     control.set_agent_muted(true);
     render(&mut player, FRAME);

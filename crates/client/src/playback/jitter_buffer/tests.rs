@@ -294,3 +294,72 @@ fn an_empty_frame_does_not_shorten_concealment() {
     );
     assert_eq!(statistics.concealed_frames, 1);
 }
+
+#[test]
+fn a_source_held_back_keeps_what_arrives_meanwhile_until_it_runs_dry() {
+    let mut statistics = PlaybackStatistics::default();
+    let mut buffer = JitterBuffer::new(RATE, options());
+    // Held back while other agent speech plays, it keeps eight frames, beyond its limit of five.
+    for sequence in 0..8 {
+        buffer.push(frame(sequence, sequence as i16), &mut statistics);
+        buffer.wait(4, RATE);
+    }
+    assert_eq!(buffer.buffered_samples(), 32);
+    assert!(!buffer.is_playing());
+    assert_eq!(buffer.idle_samples(), 4);
+    // Released, it plays them all, and the next that arrives while it plays.
+    buffer.push(frame(8, 8), &mut statistics);
+    let mut output = vec![0.0; 40];
+    assert_eq!(buffer.mix_into(&mut output, RATE, 1.0, &mut statistics), 36);
+    let expected: Vec<f32> = (0..9)
+        .flat_map(|value| [value as f32; 4])
+        .chain([0.0; 4])
+        .collect();
+    assert_eq!(output, expected);
+    assert_eq!(statistics.discarded_frames, 0);
+    // Run dry, its latency is its own again: beyond its limit, the oldest is discarded.
+    for sequence in 9..15 {
+        buffer.push(frame(sequence, 1), &mut statistics);
+    }
+    assert_eq!(statistics.discarded_frames, 4);
+}
+
+#[test]
+fn a_source_held_back_keeps_at_most_twice_its_limit() {
+    let mut statistics = PlaybackStatistics::default();
+    let mut buffer = JitterBuffer::new(RATE, options());
+    buffer.wait(100, RATE);
+    for sequence in 0..11 {
+        buffer.push(frame(sequence, 1), &mut statistics);
+    }
+    // Five frames are its limit, and five more were held back: the eleventh is too many.
+    assert_eq!(statistics.discarded_frames, 9);
+    assert_eq!(buffer.buffered_samples(), 8);
+}
+
+#[test]
+fn a_stream_resampled_to_the_device_rate_plays_every_sample_to_its_last() {
+    let mut statistics = PlaybackStatistics::default();
+    let mut buffer = JitterBuffer::new(RATE, options());
+    for sequence in 0..2 {
+        buffer.push(
+            AudioFrame {
+                samples: (0..4)
+                    .map(|index| 10 * (4 * sequence as i16 + index + 1))
+                    .collect(),
+                ..frame(sequence, 0)
+            },
+            &mut statistics,
+        );
+    }
+    // At twice its rate, each of its samples plays, the last included, with one between each pair; then it is dry.
+    let mut output = vec![0.0; 20];
+    assert_eq!(
+        buffer.mix_into(&mut output, RATE * 2, 1.0, &mut statistics),
+        15
+    );
+    let expected: Vec<f32> = (1..=15).map(|index| 5.0 * (index + 1) as f32).collect();
+    assert_eq!(&output[..15], expected.as_slice());
+    assert_eq!(&output[15..], [0.0; 5]);
+    assert!(!buffer.has_audio());
+}

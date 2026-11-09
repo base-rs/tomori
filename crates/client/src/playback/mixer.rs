@@ -100,6 +100,10 @@ struct Source {
     /// Whether the last mix of this source was at least [`super::duck::THRESHOLD`], which ducking follows.
     loud: bool,
     ears: Ears,
+    /// When this source's current audio began to arrive, counted in [`Mixer::arrivals`], so that agent speech that came first plays first.
+    arrived: u64,
+    /// Set while a replay stopped here fades out and then plays silently until it runs dry: how far it has faded, in samples, from 0 at full volume to the length of a fade, silent.
+    stopped: Option<u32>,
 }
 
 impl Source {
@@ -109,6 +113,8 @@ impl Source {
             level: 0.0,
             loud: false,
             ears: Ears::new(output_rate),
+            arrived: 0,
+            stopped: None,
         }
     }
 }
@@ -138,6 +144,84 @@ fn placement(scene: &Scene, sample_rate: u32, source: u32, layout: Layout) -> Pl
             scene.mono || layout == Layout::Mono,
         ),
         _ => Placement::CENTRE,
+    }
+}
+
+/// What one mix applies to each source it plays.
+struct Pass<'a> {
+    scene: &'a Scene,
+    rate: u32,
+    layout: Layout,
+    frames: usize,
+    /// How far a source's level falls over this mix.
+    release: f32,
+    /// The length of a fade, in samples.
+    fade: u32,
+    /// The length of this mix, in samples, as far as a fade goes in it.
+    step: u32,
+    /// The gain of agent speech from the start of this mix to its end, for its volume, mute, skip and ducking.
+    agent: (f32, f32),
+}
+
+impl Pass<'_> {
+    /// Add `source` to `accumulator`, mixed in `scratch`, after holding it back for its first `held` samples. Returns how many samples it played.
+    fn mix(
+        &self,
+        id: u32,
+        source: &mut Source,
+        held: usize,
+        scratch: &mut Vec<f32>,
+        accumulator: &mut [f32],
+        statistics: &mut PlaybackStatistics,
+    ) -> usize {
+        let frames = self.frames;
+        let placement = placement(self.scene, self.rate, id, self.layout);
+        let (stop_from, stop_to) = match source.stopped {
+            Some(faded) => {
+                let to = faded.saturating_add(self.step).min(self.fade);
+                source.stopped = Some(to);
+                (
+                    1.0 - faded as f32 / self.fade as f32,
+                    1.0 - to as f32 / self.fade as f32,
+                )
+            }
+            None => (1.0, 1.0),
+        };
+        let gain = if is_agent(id) {
+            (self.agent.0 * stop_from, self.agent.1 * stop_to)
+        } else {
+            (1.0, 1.0)
+        };
+        // Mixed at unity gain and measured before the gain is applied, so muted agent speech still shows as speaking.
+        scratch.clear();
+        scratch.resize(frames, 0.0);
+        let held = held.min(frames);
+        if held > 0 {
+            source.buffer.wait(held, self.rate);
+        }
+        // Held for the whole mix, it does not start, even with nothing to play into.
+        let played = if held < frames {
+            source
+                .buffer
+                .mix_into(&mut scratch[held..], self.rate, 1.0, statistics)
+        } else {
+            0
+        };
+        // Faded out and run dry, a stopped replay is over, and what comes next of it is heard.
+        if source.stopped == Some(self.fade) && !source.buffer.has_audio() {
+            source.stopped = None;
+        }
+        let energy: f32 = scratch.iter().map(|sample| sample * sample).sum();
+        let rms = (energy / frames.max(1) as f32).sqrt() / f32::from(i16::MAX);
+        source.level = rms.min(1.0).max(source.level * self.release);
+        source.loud = rms >= super::duck::THRESHOLD;
+        match self.layout {
+            Layout::Mono => source
+                .ears
+                .render_mono(scratch, placement, gain, accumulator),
+            Layout::Stereo => source.ears.render(scratch, placement, gain, accumulator),
+        }
+        played
     }
 }
 
@@ -187,6 +271,8 @@ pub struct Mixer {
     faded: u32,
     /// The ambient sounds playing.
     ambient: [Option<Ambient>; AMBIENT],
+    /// How many times a source's audio has begun to arrive, after running dry or for the first time.
+    arrivals: u64,
 }
 
 impl Mixer {
@@ -218,6 +304,7 @@ impl Mixer {
             probe: None,
             limited: Layout::Mono,
             ambient: Default::default(),
+            arrivals: 0,
         }
     }
 
@@ -386,6 +473,17 @@ impl Mixer {
         self.sources.remove(&source);
     }
 
+    /// Stop the agent speech played again here, as the participant asked the server to: what is buffered of it, and what
+    /// was already on its way, fades out over [`FADE`] and then plays silently until it runs dry, still consumed in real
+    /// time, so that it neither stops on a step nor holds back the live speech that follows. See `design/speech.md`.
+    pub fn stop_replay(&mut self) {
+        if let Some(source) = self.sources.get_mut(&REPLAY_SOURCE)
+            && source.buffer.has_audio()
+        {
+            source.stopped.get_or_insert(0);
+        }
+    }
+
     /// Whether `source` is contributing audio now, rather than buffering, stalled or absent. Agent speech that is muted still counts as playing, because it is consumed in real time.
     pub fn is_source_playing(&self, source: u32) -> bool {
         self.sources
@@ -425,6 +523,10 @@ impl Mixer {
                 self.options.sample_rate,
                 self.options.jitter,
             );
+        }
+        if !source.buffer.has_audio() {
+            source.arrived = self.arrivals;
+            self.arrivals += 1;
         }
         source.buffer.push(frame, &mut self.statistics);
     }
@@ -491,45 +593,75 @@ impl Mixer {
         let (duck_from, duck_to) = self.duck.update(speaking, frames, rate);
         let release =
             (-(frames as f64) / (LEVEL_RELEASE.as_secs_f64() * f64::from(rate))).exp() as f32;
+        // Agent speech is one voice, live or played again: of its sources with audio to play, the one playing, or else
+        // the one whose audio came first, plays, and the other is held back until it has played its last sample, and
+        // then follows it from the next sample, rather than speaking over its end. A replay stopped here holds nothing
+        // back. See `design/speech.md`.
+        let first = self
+            .sources
+            .iter()
+            .filter(|(id, source)| {
+                is_agent(**id) && source.stopped.is_none() && source.buffer.has_audio()
+            })
+            .min_by_key(|(_, source)| (!source.buffer.is_playing(), source.arrived))
+            .map(|(&id, _)| id);
+        let held = self
+            .sources
+            .iter()
+            .find(|(id, source)| {
+                is_agent(**id)
+                    && Some(**id) != first
+                    && source.stopped.is_none()
+                    && source.buffer.has_audio()
+                    && !source.buffer.is_playing()
+            })
+            .map(|(&id, _)| id);
+        let pass = Pass {
+            scene: &self.scene,
+            rate,
+            layout,
+            frames,
+            release,
+            fade,
+            step,
+            agent: (
+                agent_gain * skip_from * duck_from,
+                agent_gain * skip_to * duck_to,
+            ),
+        };
+        let mut ended = None;
         for (&id, source) in self.sources.iter_mut() {
-            let placement = placement(&self.scene, rate, id, layout);
-            let gain = if is_agent(id) {
-                (
-                    agent_gain * skip_from * duck_from,
-                    agent_gain * skip_to * duck_to,
-                )
-            } else {
-                (1.0, 1.0)
-            };
-            // Mixed at unity gain and measured before the gain is applied, so muted agent speech still shows as speaking.
-            self.scratch.clear();
-            self.scratch.resize(frames, 0.0);
-            source
-                .buffer
-                .mix_into(&mut self.scratch, rate, 1.0, &mut self.statistics);
-            let energy: f32 = self.scratch.iter().map(|sample| sample * sample).sum();
-            let rms = (energy / frames.max(1) as f32).sqrt() / f32::from(i16::MAX);
-            source.level = rms.min(1.0).max(source.level * release);
-            source.loud = rms >= super::duck::THRESHOLD;
-            match layout {
-                Layout::Mono => {
-                    source
-                        .ears
-                        .render_mono(&self.scratch, placement, gain, &mut self.accumulator)
-                }
-                Layout::Stereo => {
-                    source
-                        .ears
-                        .render(&self.scratch, placement, gain, &mut self.accumulator)
-                }
+            if Some(id) == held {
+                continue;
             }
+            let played = pass.mix(
+                id,
+                source,
+                0,
+                &mut self.scratch,
+                &mut self.accumulator,
+                &mut self.statistics,
+            );
+            if Some(id) == first && !source.buffer.has_audio() {
+                ended = Some(played);
+            }
+        }
+        if let Some(id) = held {
+            let source = self.sources.get_mut(&id).expect("found above");
+            pass.mix(
+                id,
+                source,
+                ended.unwrap_or(frames),
+                &mut self.scratch,
+                &mut self.accumulator,
+                &mut self.statistics,
+            );
         }
         // Heard if agent speech played in this mix and was not silent here.
         self.agent_heard = agent_gain * skip_to > 0.0
-            && self
-                .sources
-                .iter()
-                .any(|(&id, source)| is_agent(id) && source.buffer.is_playing());
+            && self.sources.iter().any(|(&id, source)| {
+                is_agent(id) && source.buffer.is_playing() && source.stopped.is_none()
+            });
         let idle_limit = (IDLE_LIMIT.as_secs_f64() * f64::from(rate)) as u64;
         self.sources.retain(|_, source| {
             source.buffer.has_audio() || source.buffer.idle_samples() < idle_limit

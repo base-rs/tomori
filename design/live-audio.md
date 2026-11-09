@@ -22,7 +22,7 @@ Push-to-talk ends when the client processes the release, within about a frame of
 
 Each client also plays its own sound cues (see `feedback.md`), which are local: never sent, never a source, never counted as someone speaking and never muted with agent speech.
 
-Each client mixes every incoming participant stream together with the space's agent speech stream, and agent speech played again for its participant from `REPLAY_SOURCE` (see `speech.md`), into one stereo output, each source placed where it is in the client's scene, and agent speech ducked while a person speaks, as `spatial-audio.md` describes. Agent speech played again is mixed like live agent speech: placed, muted and ducked with it, and silenced during push-to-talk.
+Each client mixes every incoming participant stream together with the space's agent speech stream, and agent speech played again for its participant from `REPLAY_SOURCE` (see `speech.md`), into one stereo output, each source placed where it is in the client's scene, and agent speech ducked while a person speaks, as `spatial-audio.md` describes. Agent speech played again is mixed like live agent speech: placed, muted and ducked with it, and silenced during push-to-talk; the two are one voice, so neither plays over the other's end (see `speech.md`).
 
 What a participant records never plays back to them, through any gate. The server never relays a participant's audio to that participant, and a client also discards any audio attributed to its own participant number, in case a server does. The agent's speech is not the participant's own audio: its reply to a question they asked plays to them like everyone else.
 

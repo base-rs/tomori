@@ -537,13 +537,15 @@ pub enum ClientMessage {
         admit: bool,
     },
     /// Play a retained reply again to this participant only, from its start, from [`crate::REPLAY_SOURCE`]: `None`
-    /// for the latest reply. Live agent speech of a later reply stops it. Sent only to a server whose
+    /// for the latest reply. A later reply that starts meanwhile waits for it, and follows it as live speech from its
+    /// start. Sent only to a server whose
     /// [`crate::SpaceState::speech`] is known. See `design/speech.md`.
     Replay {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    /// Stop this participant's replay or catch-up, and follow live speech from here on.
+    /// Stop this participant's replay or catch-up, and follow live speech from here on, from the start of a later reply
+    /// waiting for it, if one is.
     StopReplay,
     /// Whether this participant is wearing their device and attending, sent when it changes and once on entering a
     /// space. Sent only to a server whose [`crate::SpaceState::speech`] is known. See `design/spaces.md`.
