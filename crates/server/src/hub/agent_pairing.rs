@@ -52,12 +52,13 @@ fn announced(reason: &str) -> String {
 
 /// Two or more `names`, as a sentence lists them: "Ada and Bob", "Ada, Bob and Cy".
 fn listed(names: &[String]) -> String {
-    let (last, rest) = names.split_last().expect("two or more names");
-    format!("{} and {last}", rest.join(", "))
+    names.split_last().map_or_else(String::new, |(last, rest)| {
+        format!("{} and {last}", rest.join(", "))
+    })
 }
 
 impl HubState {
-    /// Who is in `space` now, as a notice names them: "while Ada was in the space", or "with nobody in the space".
+    /// Who is in `space` now, as a notice names them: "while Ada was in the space", or "while Ada and Bob were in the space". Whoever asked is always among them, since the server checks that they are there before the agent decides anything.
     fn present_in(&self, space: &str) -> String {
         let names: Vec<String> = self
             .space(space)
@@ -67,9 +68,8 @@ impl HubState {
             .filter(|participant| participant.connection.is_some())
             .map(|participant| participant.name.clone())
             .collect();
-        match names.len() {
-            0 => "with nobody in the space".to_owned(),
-            1 => format!("while {} was in the space", names[0]),
+        match names.as_slice() {
+            [one] => format!("while {one} was in the space"),
             _ => format!("while {} were in the space", listed(&names)),
         }
     }

@@ -275,6 +275,14 @@ fn the_agent_lists_the_pairing_waiting_but_never_its_code() {
     assert!(
         failure(&studio.call("decline_pairing", json!({}))).starts_with("No pairing is waiting.")
     );
+    // Who asked is a name, as text.
+    for tool in ["confirm_pairing", "decline_pairing"] {
+        assert_eq!(
+            failure(&studio.call(tool, json!({"code": "123 456", "requested_by": 1}))),
+            "requested_by is a participant's name, as text.",
+            "{tool}"
+        );
+    }
 
     // Before the device reveals its value, it shows no code, and is withdrawn sooner.
     let mut quest = studio.server.connect("quest", "Quest 3");

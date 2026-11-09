@@ -276,8 +276,12 @@ fn private(path: &Path) -> io::Result<File> {
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let file = options.open(path)?;
     #[cfg(unix)]
-    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    Ok(file)
+    let file = file
+        .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .map(|()| file);
+    #[cfg(not(unix))]
+    let file = Ok(file);
+    file
 }
 
 /// Whether `directory` can be read or entered by anyone but its user, as a state directory made by something else, or before, may be. The files Tomori keeps there are readable only by their user whatever the directory allows, so this is told, not changed, since the operator may have chosen the directory. See `design/security.md`.

@@ -59,10 +59,9 @@ impl Requester {
     }
 }
 
-/// The name of a role, as a refusal says it.
+/// The name of a role refused, as a refusal says it: never an owner's, since an owner may ask for anything these tools do.
 fn role_name(role: ConnectionRole) -> &'static str {
     match role {
-        ConnectionRole::Owner => "an owner",
         ConnectionRole::Collaborator => "a collaborator",
         _ => "a visitor",
     }

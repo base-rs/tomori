@@ -1932,6 +1932,14 @@ mod tests {
     #[test]
     fn a_server_started_with_open_pairing_opens_it_once_it_listens() {
         let directory = directory("open-pairing");
+        // A state directory only its user can read is not warned about.
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &directory,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(!tomori_security::shared_directory(&directory).unwrap());
         let arguments = local(&directory, &["--open-pairing"]);
         let (server, fingerprint) = configured(&arguments).unwrap();
         let pairing = server.pairing();

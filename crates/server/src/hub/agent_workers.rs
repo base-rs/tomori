@@ -260,10 +260,11 @@ impl Hub {
             match checked {
                 Ok(requester) => Some(requester),
                 Err(reason) => {
-                    log::info!(
+                    let line = format!(
                         "The agent of space {space}, session {session}, {} and was refused: {reason}",
                         asked(&removal)
                     );
+                    log::info!("{line}");
                     return Err(reason);
                 }
             }
