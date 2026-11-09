@@ -182,6 +182,32 @@ mod tests {
     }
 
     #[test]
+    fn a_range_metric_says_over_which_range_with_its_unit() {
+        let end = Timestamp::from_millis(1_762_682_400_000);
+        let range = Range::new(
+            end - std::time::Duration::from_secs(3600),
+            end,
+            std::time::Duration::from_millis(15_500),
+        );
+        let json = Metric::range("production", "up", range)
+            .with_unit("requests per second")
+            .to_json();
+        assert_eq!(json["at"], Value::Null);
+        assert_eq!(
+            json["range"],
+            json!({
+                "start": "2025-11-09T09:00:00.000Z",
+                "end": "2025-11-09T10:00:00.000Z",
+                "step_seconds": 15.5,
+            })
+        );
+        assert_eq!(json["unit"], "requests per second");
+        assert_eq!(json["query"], "up");
+        assert_eq!(json["datasource"], "production");
+        assert_eq!(json["labels"], json!({}));
+    }
+
+    #[test]
     fn a_link_holds_no_credential() {
         let metric = Metric::instant("production", "up", Timestamp::from_millis(0));
         for link in [
@@ -202,7 +228,7 @@ mod tests {
         ] {
             let error = metric.clone().with_link(link).unwrap_err();
             assert!(!error.to_string().contains("secret"), "{link}");
-            assert!(matches!(error, Error::Invalid(_)), "{link}");
+            assert!(matches!(error, Error::Invalid(_)));
         }
     }
 }
