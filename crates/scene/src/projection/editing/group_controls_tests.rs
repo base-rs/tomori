@@ -162,8 +162,39 @@ fn arrangements(pose: Pose, scale: f32) -> Vec<(&'static str, Vec<Wall>)> {
 }
 
 /// Whether the box about `points`, as they stand on `wall`'s surface, reaching `half` beyond them across and up, meets
-/// its slots.
+/// its slots: a flat wall's, about them all; a curved wall's, each as it is drawn, flat, turned to face the line the
+/// arc curves about, which reaches less far around than its length along the arc.
 fn over_slots(wall: &Wall, points: &[Vec3], half: (f32, f32)) -> bool {
+    // A tenth of a millimetre's leeway for rounding.
+    let tiny = 1e-4;
+    if wall.radius().is_some() {
+        let frame = model(&wall.frame()).unwrap();
+        return wall.slot_frames().iter().any(|slot| {
+            let local = (frame
+                * Mat4::from_translation(Vec3::from_array(slot.position))
+                * Mat4::from_rotation_y(slot.yaw))
+            .inverse();
+            let (mut left, mut right, mut bottom, mut top) =
+                (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            for point in points.iter().map(|point| local.transform_point3(*point)) {
+                (left, right, bottom, top) = (
+                    left.min(point.x),
+                    right.max(point.x),
+                    bottom.min(point.y),
+                    top.max(point.y),
+                );
+            }
+            // Before it or behind it, not across the arc, as a slot of a wall curved more than half around is.
+            let near = points.iter().all(|point| {
+                local.transform_point3(*point).z.abs() < wall.radius().unwrap_or_default()
+            });
+            let (width, height) = (slot.size[0] / 2.0, slot.size[1] / 2.0);
+            near && left - half.0 < width - tiny
+                && right + half.0 > -width + tiny
+                && bottom - half.1 < height - tiny
+                && top + half.1 > -height + tiny
+        });
+    }
     let on = |point: &Vec3| {
         let (u, y, ..) = group::on_surface(
             &wall.pose,
@@ -180,8 +211,6 @@ fn over_slots(wall: &Wall, points: &[Vec3], half: (f32, f32)) -> bool {
         (left, right, bottom, top) = (left.min(u), right.max(u), bottom.min(y), top.max(y));
     }
     let slots = wall.extent();
-    // A tenth of a millimetre's leeway for rounding.
-    let tiny = 1e-4;
     left - half.0 < slots.right - tiny
         && right + half.0 > slots.left + tiny
         && bottom - half.1 < slots.top - tiny

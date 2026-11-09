@@ -1529,8 +1529,8 @@ mod tests {
 
     /// Set `TOMORI_WALL_HANDLES_PREVIEW` to a PNG path to save what this renders: a wall someone added, taken hold of
     /// with the grip, its handles around it, the knob the ray meets highlighted, and the hint of the controls above it;
-    /// then its right edge dragged out to a fourth column; then its knob taken and the hand moved down half the wall's
-    /// height, bending it halfway, its radius said above it, before either is let go.
+    /// then its right edge dragged out to a fourth column; then its knob taken and the hand moved to the right half its
+    /// travel, bending it, its radius said above it, before either is let go.
     #[test]
     fn a_wall_taken_hold_of_shows_its_handles_and_hint_and_changes_as_they_are_dragged() {
         const WIDTH: u32 = 960;
@@ -1656,7 +1656,7 @@ mod tests {
                 )),
                 "{sent:?}"
             );
-            // The knob taken and the hand moved down half the wall's height, bending the wall halfway, as it was before the
+            // The knob taken and the hand moved to the right half its travel, bending the wall, as it was before the
             // server answered.
             let mut conversation = joined();
             show_editable_walls(&mut conversation, vec![wall.clone()], panels.clone());
@@ -1674,8 +1674,8 @@ mod tests {
                 &senses(point(Handle::Bend), 1.0),
             );
             let half = tomori_scene::projection::editing::DEAD_ZONE
-                + tomori_scene::projection::editing::travel(&wall) / 2.0;
-            let drawn = arrival::HOME - Vec3::Y * half;
+                + tomori_scene::projection::editing::TRAVEL / 2.0;
+            let drawn = arrival::HOME + Vec3::X * half;
             let bent = capture(
                 &mut step,
                 &mut conversation,
@@ -3991,6 +3991,123 @@ mod tests {
                 image::imageops::replace(&mut sheet, *image, 0, (HEIGHT * row as u32).into());
             }
             crate::test_support::preview("TOMORI_WALL_TILT_PREVIEW", &sheet);
+            assert!(pollster::block_on(scope.pop()).is_none());
+        });
+    }
+
+    /// Set `TOMORI_BIG_CURVED_HANDLES_PREVIEW` to a PNG path to save what this renders: a wall of one slot five times a
+    /// standard one, bent as tightly as it may, 4.5 m away, before and after it is taken hold of, its hinge pointed at:
+    /// its handles stand beside its slot's edges, where the slot is drawn, not out in front of them where an arc as long
+    /// as the slot would end.
+    #[test]
+    fn a_big_wall_bent_tightly_shows_its_handles_beside_its_slot_s_edges() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 720;
+        use tomori_protocol::{Grid, Wall, WallKind, WallShape};
+        use tomori_scene::projection::editing::{Handle, handle_point};
+        let middle = Vec3::new(0.0, 1.6, -4.5);
+        let flat = Wall::new(
+            "wall-1",
+            WallKind::Added,
+            tomori_protocol::Pose::upright_facing(middle.to_array(), arrival::HOME.to_array()),
+        )
+        .with_grid(Grid::new(1, 1).unwrap())
+        .with_scale(tomori_protocol::wall::SCALES.1);
+        // As tightly as it may bend: as the knob dragged all the way makes it.
+        let radius = tomori_scene::projection::editing::bent(&flat, 1e3).unwrap();
+        let wall = flat.with_shape(WallShape::Arc { radius });
+        let frame =
+            Mat4::from_rotation_translation(glam::Quat::from_array(wall.pose.orientation), middle);
+        let slot = tomori_scene::projection::slot_frames(&wall, frame)[0];
+        let half = wall.slot_size().0 / 2.0 / wall.scale();
+        let (left, right) = (
+            slot.transform_point3(-Vec3::X * half),
+            slot.transform_point3(Vec3::X * half),
+        );
+        let point = |handle: Handle| handle_point(&wall, frame, handle, arrival::HOME).0;
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let (texture, view) = eye(&device, "big curved wall test eye", (WIDTH, HEIGHT));
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let lens = Mat4::perspective_rh(1.2, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+            let view_matrix = lens * Mat4::look_at_rh(arrival::HOME, middle, Vec3::Y);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = |aim: Vec3, grip: f32| Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                grip: Some(grip),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, aim - arrival::HOME),
+                ..Default::default()
+            };
+            let now = Instant::now();
+            let mut capture = |step: &mut Step,
+                               conversation: &mut tomori_scene::conversation::Conversation,
+                               senses: &Senses| {
+                let frame = step.update(senses, conversation, &mut felt(), now, 0.01);
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[view_matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            };
+            let pixel = |at: Vec3| {
+                let clip = view_matrix * at.extend(1.0);
+                let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+                assert!(x.abs() < 1.0 && y.abs() < 1.0, "{at} is in view");
+                glam::Vec2::new(
+                    (x + 1.0) / 2.0 * WIDTH as f32,
+                    (1.0 - y) / 2.0 * HEIGHT as f32,
+                )
+            };
+            let around = |at: glam::Vec2| {
+                (
+                    (at.x as u32 - 20, at.y as u32 - 20),
+                    (at.x as u32 + 20, at.y as u32 + 20),
+                )
+            };
+            let mut conversation = joined();
+            show_editable_walls(&mut conversation, vec![wall.clone()], Vec::new());
+            let mut step = Step::default();
+            let empty = slot.transform_point3(Vec3::Y * 0.1);
+            let plain = capture(
+                &mut step,
+                &mut conversation,
+                &senses(middle + Vec3::Y * 3.0, 0.0),
+            );
+            // Taken hold of by a squeeze on its empty slot, let go, and its hinge pointed at.
+            capture(&mut step, &mut conversation, &senses(empty, 1.0));
+            capture(&mut step, &mut conversation, &senses(empty, 0.0));
+            let hinge = point(Handle::Tilt);
+            let held = capture(&mut step, &mut conversation, &senses(hinge, 0.0));
+            // Its hinge and the handle of its columns are drawn, each beside its slot's edge as seen, within a handle
+            // or so, where the slot is drawn.
+            for (handle, edge) in [(Handle::Tilt, left), (Handle::Columns, right)] {
+                let at = pixel(point(handle));
+                let (from, to) = around(at);
+                assert!(
+                    difference(&plain, &held, from, to) > 0.02,
+                    "{handle:?} is drawn"
+                );
+                let apart = at.distance(pixel(edge));
+                assert!(apart < 70.0, "{handle:?} is {apart} pixels from its edge");
+            }
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+            image::imageops::replace(&mut sheet, &plain, 0, 0);
+            image::imageops::replace(&mut sheet, &held, 0, HEIGHT.into());
+            crate::test_support::preview("TOMORI_BIG_CURVED_HANDLES_PREVIEW", &sheet);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }
