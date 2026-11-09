@@ -66,18 +66,28 @@ fn fs_main(in: Output) -> @location(0) vec4<f32> {
 }
 // How far back a backing's depth is written, in the depth buffer's units, so that a surface drawn later just behind it, as near as a panel carried over a wall's slot, is still drawn over it. Set from `occlusion::TIE`.
 override TIE: f32 = 0.0;
-// A backing drawn into depth alone, once its panel is drawn, so that what is behind it and drawn later is hidden; its colour is not written. See `occlusion.rs`.
+// How opaque a fragment of a backing must be to write its depth, from 0 to 1: a rounded corner's outside, a glyph's or shape's margin, or an antialiased edge more transparent than this writes none, so that what is drawn later behind it still shows through it. Set from `occlusion::OCCLUDING`.
+override OCCLUDING: f32 = 0.6;
+// A backing drawn into depth alone, once its surface is drawn, so that what is behind it and drawn later is hidden; its colour is not written, and only where it is opaque enough. See `occlusion.rs`.
 @vertex
 fn vs_occlude(
     @location(0) position: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) weight: f32,
-) -> @builtin(position) vec4<f32> {
+) -> Output {
+    var out: Output;
     let at = camera.transform * vec4<f32>(position, 0.0, 1.0);
-    return vec4<f32>(at.xy, min(at.z + TIE * at.w, at.w), at.w);
+    out.position = vec4<f32>(at.xy, min(at.z + TIE * at.w, at.w), at.w);
+    out.color = color;
+    out.uv = uv;
+    out.weight = weight;
+    return out;
 }
 @fragment
-fn fs_occlude() -> @location(0) vec4<f32> {
+fn fs_occlude(input: Output) -> @location(0) vec4<f32> {
+    if input.color.a * opacity(coverage(input.uv, input.weight), input.color.rgb) < OCCLUDING {
+        discard;
+    }
     return vec4<f32>(0.0);
 }

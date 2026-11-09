@@ -677,6 +677,7 @@ impl Renderer {
         cubes: &[crate::delegation::Cube],
         stations: &[crate::delegation::Station],
         workspace: &crate::delegation::Workspace,
+        viewer: Option<glam::Vec3>,
     ) {
         self.scene.truncate(self.base_scene_len);
         // The scene owns the worker lifecycle: it can retain unknown workers
@@ -689,7 +690,8 @@ impl Renderer {
             }
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scene));
-        self.workspace.update(device, queue, workspace, stations);
+        self.workspace
+            .update(device, queue, workspace, stations, viewer);
     }
 
     /// How many vertices the arrival labels' buffer holds now.
@@ -855,23 +857,43 @@ impl Renderer {
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw_translucent(&mut pass, eye);
             }
-            self.workspace.draw(
-                &mut pass,
-                &self.camera_bindings[eye],
-                &glyphs,
-                matrices[eye] * scene_to_space,
-            );
-            // Panels are translucent, so they are drawn after the opaque scene, against its depth; each opaque enough to hide
-            // what is behind it then writes its backing's depth, so that what is behind it is hidden though drawn after it.
-            if !panels.is_empty() {
-                self.panels.set(&mut pass, &glyphs);
-                for (panel, _) in panels {
-                    panel.draw(&mut pass, &self.panels, eye);
-                    // An image panel's image, over its face, before the panels in front of it.
-                    if self.images.draw(&mut pass, panel, eye) {
-                        self.panels.set(&mut pass, &glyphs);
-                    }
+            // Workers' signs and the space's panels are translucent, so they are drawn after the opaque scene, against its
+            // depth, back to front from this eye: each in the order it keeps among its own, the signs' by where they
+            // overlap and the panels' as the frame step gave them, farthest first, and between the two whichever is
+            // farther, so that a translucent wall's board behind a sign is drawn before it and shows about its rounded
+            // corners. Each opaque enough to hide what is behind it then writes its backing's depth where it is itself
+            // opaque enough, so that what is behind it is hidden though drawn after it.
+            let signs = self.workspace.order(scene_to_clip);
+            let ahead = |model: &Mat4| (matrices[eye] * *model).w_axis.w;
+            let (mut sign, mut panel) = (0, 0);
+            let mut drawing_panels = false;
+            while sign < signs.len() || panel < panels.len() {
+                let next_sign = sign < signs.len()
+                    && panels
+                        .get(panel)
+                        .is_none_or(|(_, model)| signs[sign].1 >= ahead(model));
+                if next_sign {
+                    self.workspace.draw_panel(
+                        &mut pass,
+                        &self.camera_bindings[eye],
+                        &glyphs,
+                        signs[sign].0,
+                    );
+                    drawing_panels = false;
+                    sign += 1;
+                    continue;
                 }
+                if !drawing_panels {
+                    self.panels.set(&mut pass, &glyphs);
+                    drawing_panels = true;
+                }
+                let (shown, _) = panels[panel];
+                shown.draw(&mut pass, &self.panels, eye);
+                // An image panel's image, over its face, before the panels in front of it.
+                if self.images.draw(&mut pass, shown, eye) {
+                    self.panels.set(&mut pass, &glyphs);
+                }
+                panel += 1;
             }
             // Arrival's labels are drawn last: in a space they are the hand menu's, by the hand, nearer than the panels, so
             // they blend over those behind them, and are hidden by any in front of them, which has written its depth. Nothing
@@ -1670,20 +1692,20 @@ mod tests {
                         .collect(),
                     ..Default::default()
                 };
-                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
                 assert_eq!(renderer.presentation_page_count(), 5);
                 let page0 = capture(&renderer, matrices, Mat4::IDENTITY);
                 assert_ne!(page0[0], empty[0]);
                 assert_ne!(page0[1], empty[1]);
                 assert_ne!(page0[0], page0[1], "each eye uses its own matrix");
                 renderer.set_presentation_content_page(1);
-                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
                 let content_page1 = capture(&renderer, matrices, Mat4::IDENTITY);
                 for eye in 0..2 {
                     assert_ne!(page0[eye], content_page1[eye], "content page in eye {eye}");
                 }
                 renderer.set_presentation_content_page(0);
-                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
                 let recenter = Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0));
                 let compensated = capture(
                     &renderer,
@@ -1704,7 +1726,7 @@ mod tests {
                     );
                 }
                 renderer.set_presentation_page(1);
-                renderer.update_workspace(&device, &queue, &[], &[], &workspace);
+                renderer.update_workspace(&device, &queue, &[], &[], &workspace, None);
                 let page1 = capture(&renderer, matrices, Mat4::IDENTITY);
                 assert_ne!(page0[0], page1[0]);
                 assert_ne!(page1[0], empty[0]);
@@ -1726,6 +1748,7 @@ mod tests {
                     &[cube, invalid],
                     &[],
                     &Default::default(),
+                    None,
                 );
                 assert_eq!(renderer.scene.len(), renderer.base_scene_len + 1);
                 let unrotated = capture(&renderer, matrices, Mat4::IDENTITY);
@@ -1734,7 +1757,14 @@ mod tests {
                         .to_array(),
                     ..cube
                 };
-                renderer.update_workspace(&device, &queue, &[rotated], &[], &Default::default());
+                renderer.update_workspace(
+                    &device,
+                    &queue,
+                    &[rotated],
+                    &[],
+                    &Default::default(),
+                    None,
+                );
                 assert_ne!(
                     unrotated,
                     capture(&renderer, matrices, Mat4::IDENTITY),
@@ -1750,9 +1780,10 @@ mod tests {
                     &[invalid_rotation],
                     &[],
                     &Default::default(),
+                    None,
                 );
                 assert_eq!(renderer.scene.len(), renderer.base_scene_len);
-                renderer.update_workspace(&device, &queue, &[], &[], &Default::default());
+                renderer.update_workspace(&device, &queue, &[], &[], &Default::default(), None);
                 assert_eq!(renderer.scene.len(), renderer.base_scene_len);
                 assert_eq!(renderer.presentation_page_count(), 0);
                 assert_eq!(capture(&renderer, matrices, Mat4::IDENTITY), empty);
@@ -1784,6 +1815,7 @@ mod tests {
                     &[],
                     workers.stations(),
                     &label_workspace,
+                    None,
                 );
                 let with_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
                 for eye in 0..2 {
@@ -1794,7 +1826,7 @@ mod tests {
                 }
                 let mut faded = workers.stations().to_vec();
                 faded[0].opacity = 0.4;
-                renderer.update_workspace(&device, &queue, &[], &faded, &label_workspace);
+                renderer.update_workspace(&device, &queue, &[], &faded, &label_workspace, None);
                 let faded_label = capture(&renderer, label_matrices, Mat4::IDENTITY);
                 for eye in 0..2 {
                     assert_ne!(
@@ -1848,6 +1880,7 @@ mod tests {
                             scene.cubes(),
                             &[],
                             &Default::default(),
+                            None,
                         );
                         assert_eq!(
                             renderer.scene.len(),
@@ -1965,7 +1998,7 @@ mod tests {
             for _ in 0..30 {
                 scene.update(Some("root"), &workspace, 0.05);
             }
-            renderer.update_workspace(&device, &queue, &[], scene.stations(), &workspace);
+            renderer.update_workspace(&device, &queue, &[], scene.stations(), &workspace, None);
             let station = glam::Vec3::from_array(scene.stations()[0].position);
             let card = look(glam::Vec3::new(-3.4, 2.45, -3.35), 0.5);
             let sign = look(station + glam::Vec3::new(0.0, 0.32, 0.0), 0.32);
@@ -2475,6 +2508,7 @@ mod tests {
                             workers.cubes(),
                             workers.stations(),
                             &workspace,
+                            None,
                         );
                         renderer.update_arrival(
                             &device,

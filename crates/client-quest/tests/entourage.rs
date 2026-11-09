@@ -6,9 +6,11 @@
 //! workers gliding after it. `TOMORI_ENTOURAGE_PREVIEW`, set to a directory, saves the renders there to look at:
 //! `travel.png`, the wall at home, mid-fold, mid-journey and unfolded at its travel spot; for each arrangement compared,
 //! `arc-*.png`, three, six and ten workers, down the sheet, at home and summoned, across it; `signs.png`, the first four
-//! workers' signs close up, summoned; `home.png`, the agent at home with its wall beneath it, from the arrival; and
-//! `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by someone standing, 1.6 m and 1.8 m,
-//! down the sheet. See `design/projection.md` and `design/environments.md`.
+//! workers' signs close up, summoned; `signs-viewpoints.png`, the default arc of six, summoned, seen from in front, 45°
+//! to its left and 70° to its right, each sign turned to face whoever looks; `home.png`, the agent at home with its wall
+//! beneath it, from the arrival; and `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by
+//! someone standing, 1.6 m and 1.8 m, down the sheet. See `design/projection.md`, `design/environments.md` and
+//! `design/interaction.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -570,6 +572,62 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
                     .save(directory.join(format!("{name}.png")))
                     .expect("the preview is saved");
             }
+        }
+        // Walking about the default arc of six workers, summoned into the open yard: from in front of it, where Ada
+        // stands, 45° to its left and 70° to its right about its middle. Each sign turns to
+        // face her wherever she stands, upright, its rows centred above its worker. She stands 4.5 m from its middle,
+        // to see the whole arc.
+        let mut conversation = joined(6, None);
+        let mut step = Step::default();
+        let mut now = start;
+        run(
+            &mut step,
+            &mut conversation,
+            &mut feedback,
+            &home,
+            8.0,
+            &mut now,
+        );
+        summon(&mut conversation, 6);
+        let frame = run(
+            &mut step,
+            &mut conversation,
+            &mut feedback,
+            &turned,
+            8.0,
+            &mut now,
+        );
+        let middle = frame
+            .stations
+            .iter()
+            .map(|station| Vec3::from_array(station.position))
+            .sum::<Vec3>()
+            / frame.stations.len() as f32;
+        // Far enough back to see the whole arc from each side.
+        let from = (eyes - middle).with_y(0.0).normalize() * 4.5;
+        let mut sheet = image::RgbaImage::new(WIDTH * 3, HEIGHT);
+        for (index, degrees) in [0.0_f32, 45.0, -70.0].into_iter().enumerate() {
+            let at =
+                middle.with_y(eyes.y) + glam::Quat::from_rotation_y(degrees.to_radians()) * from;
+            let looking = (middle + Vec3::Y * 0.35 - at).normalize();
+            let walked = senses(at, looking);
+            let frame = run(
+                &mut step,
+                &mut conversation,
+                &mut feedback,
+                &walked,
+                2.0,
+                &mut now,
+            );
+            let facing = frame.sign_facing.expect("signs face whoever looks at them");
+            assert!(facing.distance(at) < 0.05, "{degrees}: {facing} {at}");
+            let drawn = capture_with(&frame, at, looking, 1.2);
+            image::imageops::replace(&mut sheet, &drawn, i64::from(WIDTH) * index as i64, 0);
+        }
+        if let Some(directory) = &preview {
+            sheet
+                .save(directory.join("signs-viewpoints.png"))
+                .expect("the preview is saved");
         }
         assert!(pollster::block_on(scope.pop()).is_none());
     });

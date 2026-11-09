@@ -6,7 +6,8 @@
 //! Panels, labels and signs are translucent, so they are drawn with the depth test and without writing depth, each blended
 //! over what is behind it. On its own, that leaves which of two of them is in front to the order they are drawn in. So
 //! once a surface is drawn, the backing behind its text, where it is opaque enough to hide what is behind it, is drawn
-//! again into depth alone, with an [`occluder`] pipeline: whatever is drawn after it and behind it is hidden, as the
+//! again into depth alone, with an [`occluder`] pipeline, fragment by fragment, only where it is itself opaque enough,
+//! so that a rounded corner's outside or a glyph's margin, though in the same quad, writes none: whatever is drawn after it and behind it is hidden, as the
 //! scene's opaque bodies hide it, and whatever is drawn after it and in front of it still covers it. Its depth is written
 //! a little behind it, by [`TIE`], so that between surfaces about as far away as each other, such as a panel carried over
 //! a wall's slot and the panel in that slot, the order the frame step draws them in still decides. A surface too faint
@@ -32,9 +33,12 @@ pub fn occludes(alpha: f32) -> bool {
 }
 
 /// A pipeline that draws `vertex`'s triangles into depth alone, [`TIE`] behind where they are, depth tested, with no
-/// colour, within a pass of `format` and `samples`: the backings of surfaces already drawn. `shader` has the vertex entry
-/// point `vs_occlude`, which moves its position back by its override `TIE`, and the fragment entry point `fs_occlude`,
-/// whose colour is not written.
+/// colour, within a pass of `format` and `samples`: the backings of surfaces already drawn, only where each fragment is
+/// at least [`OCCLUDING`] opaque. `shader` has the vertex entry point `vs_occlude`, which moves its position back by its
+/// override `TIE`, and the fragment entry point `fs_occlude`, whose colour is not written, and which discards a fragment
+/// less opaque than its override `OCCLUDING`, as its colour's alpha and its coverage of the atlas, under its override
+/// `GAMMA` as the surface's own pipeline draws it, make it: so that a rounded corner's outside, a glyph's margin or an
+/// antialiased edge, drawn in the same quad as what is opaque, never hides what is drawn after it behind it.
 pub fn occluder(
     device: &wgpu::Device,
     label: &str,
@@ -44,6 +48,30 @@ pub fn occluder(
     format: wgpu::TextureFormat,
     samples: u32,
 ) -> wgpu::RenderPipeline {
+    occluder_at(
+        device, label, layout, shader, vertex, format, samples, OCCLUDING,
+    )
+}
+
+/// As [`occluder`], writing depth only where a fragment is at least `occluding` opaque: none is discarded at 0, as every
+/// backing's whole quad wrote its depth before November 2026, which tests compare with.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn occluder_at(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    vertex: wgpu::VertexBufferLayout<'_>,
+    format: wgpu::TextureFormat,
+    samples: u32,
+    occluding: f32,
+) -> wgpu::RenderPipeline {
+    // The fragment stage's overrides: the threshold, and, where the target is sRGB, the glyphs' `GAMMA`, as the
+    // surface's own pipeline draws it.
+    let fragment = [
+        ("OCCLUDING", f64::from(occluding)),
+        ("GAMMA", f64::from(crate::glyphs::GAMMA)),
+    ];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -59,7 +87,10 @@ pub fn occluder(
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs_occlude"),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &fragment[..if format.is_srgb() { 2 } else { 1 }],
+                ..Default::default()
+            },
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: None,

@@ -72,6 +72,12 @@ impl SpectatorView {
             &frame.worker_cubes,
             &frame.worker_stations,
             &frame.workspace,
+            // Workers' signs face the followed participant, as they do on their own headset.
+            Some(tomori_render::scenery::eye(
+                Mat4::from_cols_array(&frame.projection)
+                    * Mat4::from_cols_array(&frame.scene_to_space),
+            ))
+            .filter(|eye| eye.is_finite()),
         );
         input
             .renderer

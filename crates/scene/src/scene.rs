@@ -170,6 +170,9 @@ pub struct Frame<'a> {
     pub content: usize,
     pub cubes: &'a [delegation::Cube],
     pub stations: &'a [delegation::Station],
+    /// Where this client's viewer is, followed smoothly, which workers' signs turn to face; nowhere without one, when
+    /// they face whoever the agent faces. See [`crate::sign_facing`].
+    pub sign_facing: Option<Vec3>,
     pub workspace: &'a delegation::Workspace,
     /// Arrival's objects, while there are any to draw.
     pub arrival: Option<Arrival>,
@@ -363,6 +366,8 @@ pub struct Step {
     arrival_time: f32,
     delegation_scene: delegation::Scene,
     workers: delegation::Workers,
+    /// Where workers' signs face in this client.
+    sign_facing: crate::sign_facing::SignFacing,
     presentation_navigation: CardNavigation,
     /// In a space, the panel stands in the world and follows lazily; see `design/interaction.md`.
     panel: PanelAnchor,
@@ -440,6 +445,7 @@ impl Default for Step {
             arrival_time: 0.0,
             delegation_scene: delegation::Scene::new(),
             workers: delegation::Workers::default(),
+            sign_facing: crate::sign_facing::SignFacing::default(),
             presentation_navigation: CardNavigation::default(),
             panel: PanelAnchor::default(),
             board: crate::board::Board::default(),
@@ -1485,6 +1491,7 @@ impl Step {
             content: self.presentation_navigation.content,
             cubes: self.delegation_scene.cubes(),
             stations: self.delegation_scene.stations(),
+            sign_facing: self.sign_facing.update(senses.viewer, dt),
             workspace,
             arrival,
             panels: Panels {
@@ -4219,6 +4226,76 @@ mod tests {
             assert!(conversation.take_actions().is_empty());
             assert!(!earcons(&mut feedback).contains(&Earcon::Choose));
         }
+    }
+
+    #[test]
+    fn signs_face_whoever_walks_about_them_and_a_worker_pointed_at_from_aside_is_attended_to() {
+        use tomori_protocol::Resource;
+        let mut conversation = lobby(ConnectionRole::Owner);
+        conversation.apply(space(|state| {
+            state.workers = vec![tomori_protocol::Worker {
+                id: "ses_a".into(),
+                parent: None,
+                title: "Review".into(),
+                state: tomori_protocol::WorkerState::Running,
+            }];
+        }));
+        conversation.take_actions();
+        let mut step = Step::default();
+        let mut feedback = felt();
+        let now = Instant::now();
+        let mut senses = Senses {
+            beam: true,
+            ..senses()
+        };
+        for _ in 0..200 {
+            step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        }
+        let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        let worker = Vec3::from_array(output.stations[0].position);
+        // Signs face this participant, not whoever the agent faces.
+        assert_eq!(output.sign_facing, Some(arrival::HOME));
+        // From in front, 45° to its left and 70° to its right, about the worker, as far from it as home is: the signs
+        // turn to face them there, and the ray from there at the worker names it as the words begin.
+        let from_home = (arrival::HOME - worker).with_y(0.0);
+        for degrees in [0.0_f32, 45.0, -70.0] {
+            let eyes = worker
+                + glam::Quat::from_rotation_y(degrees.to_radians()) * from_home
+                + Vec3::Y * (arrival::HOME.y - worker.y);
+            let head = Mat4::from_translation(eyes);
+            senses.head = Some(head);
+            senses.head_pose = Pose::from_transform(head);
+            senses.viewer = Some(eyes);
+            senses.ray = Ray::new(eyes, worker - eyes);
+            let mut facing = None;
+            for _ in 0..72 {
+                facing = step
+                    .update(&senses, &mut conversation, &mut feedback, now, FRAME)
+                    .sign_facing;
+            }
+            let facing = facing.expect("signs face the viewer");
+            assert!(
+                facing.distance(eyes)
+                    <= crate::sign_facing::DEAD_ZONE + crate::sign_facing::SETTLE + 1e-4,
+                "{degrees}: {facing} {eyes}"
+            );
+            conversation.take_actions();
+            conversation.talk(true);
+            conversation.talk(false);
+            let actions = conversation.take_actions();
+            let Some(Action::BeginUtterance(utterance)) = actions.first() else {
+                unreachable!("recording begins, not {actions:?}")
+            };
+            assert_eq!(
+                utterance.attention,
+                [Resource::worker("ses_a")],
+                "{degrees}"
+            );
+        }
+        // Without a viewer, as a spectator's, they face whoever the agent faces.
+        senses.viewer = None;
+        let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+        assert_eq!(output.sign_facing, None);
     }
 
     #[test]
