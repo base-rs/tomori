@@ -854,6 +854,9 @@ fn ghost(cells: Cells) -> Canvas {
     canvas
 }
 
+/// How far below a curved wall's rows its label's middle stands, in metres.
+const ARC_LABEL_DROP: f32 = 0.04;
+
 /// A curved wall's label, below the middle of its row of slots.
 fn arc_label(wall: &Wall) -> Canvas {
     let (label, color) = wall_label(wall);
@@ -1088,6 +1091,18 @@ fn hit_within(model: Mat4, (width, height): (f32, f32), margin: f32, ray: &Ray) 
         .then_some(along)
 }
 
+/// Where `ray` meets `wall`, standing at `frame`, as the distance along it: its flat board, or, curved, one of its slots.
+pub(crate) fn wall_hit(wall: &Wall, frame: Mat4, ray: &Ray) -> Option<f32> {
+    let board = wall
+        .board()
+        .and_then(|size| hit_within(frame, size, 0.0, ray));
+    slot_frames(wall, frame)
+        .into_iter()
+        .filter_map(|slot| hit(slot, slot_unit(wall), ray))
+        .chain(board)
+        .min_by(f32::total_cmp)
+}
+
 /// A slot a panel carried would be put in if let go: the wall, the slot, where it stands, and where the ray meets it,
 /// when the ray chose it.
 #[derive(Clone, Debug, PartialEq)]
@@ -1237,6 +1252,8 @@ pub struct Input<'a> {
     /// A panel to scroll, this participant's own view of it, which nobody else sees: the one pointed at as the right
     /// stick was pushed or the mouse's wheel turned, and how many rows down, or up where fewer than none.
     pub scroll: Option<(&'a str, f32)>,
+    /// What the participant may do with walls.
+    pub rights: editing::Rights,
     pub now: Instant,
     /// Seconds since the last frame.
     pub dt: f32,
@@ -1261,8 +1278,16 @@ pub struct Output {
     pub preview: Option<(String, u32)>,
     /// Where the ray ends on a panel: where it meets the panel pointed at, or the middle of the one carried.
     pub end: Option<Vec3>,
+    /// Where the ray ends on what is projected, and how far along it: on a panel carried, a wall carried or a handle
+    /// dragged, held, or else the nearest of the panel, the handle and the wall it meets, where the participant may
+    /// take hold of a wall.
+    pub hit: Option<crate::pointing::End>,
     /// The hint beside the panel carried, saying what each control does to it, drawn over everything else.
     pub hint: Option<Sheet>,
+    /// A change to a wall to send, made with its handles or by carrying it.
+    pub wall: Option<editing::Change>,
+    /// A wall was taken hold of, or the handle the ray meets changed, or the wall carried turned: to tick.
+    pub wall_ticked: bool,
 }
 
 /// The panels across frames: the one carried, the slot it would be put in, and the one let go that the server has not
@@ -1283,6 +1308,8 @@ pub struct Projector {
     layouts: HashMap<String, Laid>,
     /// How far down each panel shown this frame scrolls at most, in rows, as it is sized.
     limits: HashMap<String, usize>,
+    /// The wall taken hold of, its handles, and a wall carried.
+    editor: editing::Editor,
 }
 
 /// A code panel's code laid out, at each width its faces have had, and the body and code it was laid out from.
@@ -1310,6 +1337,7 @@ impl Projector {
             self.scrolls.clear();
             self.layouts.clear();
             self.limits.clear();
+            self.editor.stop();
             return Output::default();
         };
         self.lay_out(projection);
@@ -1334,8 +1362,9 @@ impl Projector {
             self.held = None;
         }
         let viewer = input.viewer.unwrap_or(HOME);
-        let walls: Vec<(&Wall, Mat4)> = projection
-            .walls
+        // The walls as drawn: one being changed as it is being changed.
+        let shown_walls = self.editor.walls(projection);
+        let walls: Vec<(&Wall, Mat4)> = shown_walls
             .iter()
             .filter_map(|wall| model(&wall.pose).map(|frame| (wall, frame)))
             .collect();
@@ -1409,14 +1438,14 @@ impl Projector {
             *scroll = (scroll.min(limit) + rows).clamp(0.0, limit);
         }
         // The nearest panel the ray meets, other than one carried, is pointed at.
-        let carried = self.held();
+        let carried = self.held().map(str::to_owned);
         let pointed = input
             .ray
             .filter(|_| input.active && input.pointing)
             .and_then(|ray| {
                 standing
                     .iter()
-                    .filter(|(panel, ..)| Some(panel.id.as_str()) != carried)
+                    .filter(|(panel, ..)| Some(panel.id.as_str()) != carried.as_deref())
                     .filter_map(|(panel, model, fit)| {
                         hit(*model, self.size(panel, *fit), &ray)
                             .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
@@ -1428,8 +1457,65 @@ impl Projector {
         });
         output.pointed =
             pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
+        // The wall taken hold of, and its handles, take the squeeze first, a handle before a panel and a panel before the
+        // wall it is on; a wall carried or a handle dragged is let go as the grip is.
+        let edited = self.editor.update(
+            editing::Input {
+                projection,
+                ray: input.ray,
+                pressed: pressed && carried.is_none(),
+                released,
+                active: input.active,
+                pointing: input.pointing,
+                nearer: input.nearer,
+                panel: output
+                    .pointed
+                    .as_ref()
+                    .map_or(f32::INFINITY, |(_, distance, _)| *distance),
+                stick: if self.held.is_none() {
+                    input.stick
+                } else {
+                    Vec2::ZERO
+                },
+                straighten: input.straighten && self.held.is_none(),
+                viewer,
+                rights: input.rights,
+                controls: input.controls,
+                now: input.now,
+                dt: input.dt,
+            },
+            &walls,
+        );
+        output.wall = edited.change;
+        output.wall_ticked = edited.ticked;
+        // What the editor changed this frame is drawn this frame, the panels on a wall with it.
+        let redrawn = self.editor.walls(projection);
+        let walls: Vec<(&Wall, Mat4)> = redrawn
+            .iter()
+            .filter_map(|wall| model(&wall.pose).map(|frame| (wall, frame)))
+            .collect();
+        let standing: Vec<Standing> = projection
+            .panels
+            .iter()
+            .filter_map(|panel| {
+                self.stands(panel, &walls)
+                    .map(|(model, fit)| (panel, model, fit))
+            })
+            .collect();
+        self.lay_out_standing(&standing);
+        // A handle the ray meets is pointed at rather than a panel behind it.
+        if edited.reach.is_some_and(|reach| {
+            output
+                .pointed
+                .as_ref()
+                .is_none_or(|(_, distance, _)| reach < *distance)
+        }) {
+            output.pointed = None;
+            output.item = None;
+        }
         // A squeeze pulls off the panel pointed at, unless something nearer takes it.
         if pressed
+            && !edited.took
             && carried.is_none()
             && let Some((panel, distance, _)) = output
                 .pointed
@@ -1458,7 +1544,22 @@ impl Projector {
                     .and_then(|aim| aim.point)
                     .unwrap_or(held.model.w_axis.truncate()),
             ),
-            None => output.pointed.as_ref().map(|(_, _, point)| *point),
+            None => edited
+                .end
+                .or(output.pointed.as_ref().map(|(_, _, point)| *point)),
+        };
+        output.hit = match (&self.held, input.ray.filter(|_| input.active)) {
+            (Some(_), Some(ray)) => output
+                .end
+                .map(|end| crate::pointing::End::held(ray.origin, end)),
+            (Some(_), None) => None,
+            (None, _) => crate::pointing::end([
+                edited.hit,
+                output
+                    .pointed
+                    .as_ref()
+                    .map(|(_, distance, point)| crate::pointing::End::new(*distance, *point)),
+            ]),
         };
         output.sheets = self.sheets(
             projection,
@@ -1467,6 +1568,8 @@ impl Projector {
             viewer,
             output.pointed.as_ref().map(|(id, ..)| id.as_str()),
         );
+        // The handles of the wall taken hold of, and the hint below it, over the walls.
+        output.sheets.extend(edited.sheets);
         // While a panel is carried, the hint beside it says what each control does to it, and what letting go would do,
         // from the frame after it is pulled off, once where it would go is known.
         let carried = self
@@ -1574,7 +1677,10 @@ impl Projector {
                         boards.push(Sheet {
                             canvas: Some(arc_label(wall)),
                             model: Some(
-                                *frame * Mat4::from_translation(-Vec3::Y * (height / 2.0 + 0.04)),
+                                *frame
+                                    * Mat4::from_translation(
+                                        -Vec3::Y * (height / 2.0 + ARC_LABEL_DROP),
+                                    ),
                             ),
                         });
                         boards
@@ -1724,8 +1830,41 @@ impl Projector {
     fn size(&self, panel: &Panel, fit: Fit) -> (f32, f32) {
         size_of(panel, fit, self.layout(&panel.id, fit))
     }
+
+    /// The wall taken hold of, whose handles show, by identity.
+    pub fn editing_wall(&self) -> Option<&str> {
+        self.editor.editing()
+    }
+
+    /// The wall being carried, by identity.
+    pub fn carried_wall(&self) -> Option<&str> {
+        self.editor.carrying()
+    }
+
+    /// Whether a panel or a wall is carried, so that the right stick, its click and B are its.
+    pub fn carrying(&self) -> bool {
+        self.held.is_some() || self.editor.carrying().is_some()
+    }
+
+    /// Let go of the wall taken hold of, as B does when nothing is carried. Returns whether one was held.
+    pub fn stop_editing(&mut self) -> bool {
+        self.editor.stop()
+    }
+
+    /// B pressed while carrying a wall at `now`: the wall to remove, or `None` while it waits for a second press to
+    /// confirm removing one that holds panels, which then float.
+    pub fn remove_wall(&mut self, projection: &Projection, now: Instant) -> Option<String> {
+        let wall = self.editor.carrying()?.to_owned();
+        let held = projection
+            .panels
+            .iter()
+            .filter(|panel| matches!(&panel.place, Place::Wall { wall: on, .. } if *on == wall))
+            .count();
+        self.editor.remove(held, now)
+    }
 }
 
+pub mod editing;
 mod image;
 
 #[cfg(test)]

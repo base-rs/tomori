@@ -2000,6 +2000,7 @@ impl Conversation {
                 | ClientMessage::StopReplay
                 | ClientMessage::AddWall { .. }
                 | ClientMessage::RemoveWall { .. }
+                | ClientMessage::SetWall { .. }
                 | ClientMessage::PlacePanel { .. }
                 | ClientMessage::DismissPanel { .. }
         );
@@ -3319,6 +3320,43 @@ impl Conversation {
     /// Whether this participant manages the joined space's walls: an owner, in a space the server projects in.
     fn manages_walls(&self) -> bool {
         self.role == ConnectionRole::Owner && self.projection().is_some()
+    }
+
+    /// What this participant may do with the joined space's walls on the headset: adjust them, as a participant in a space
+    /// whose server takes wall changes, and remove one someone added, as an owner there too. See `design/projection.md`.
+    pub fn wall_rights(&self) -> crate::projection::editing::Rights {
+        let adjust = self.role.participates()
+            && self.projection().is_some()
+            && self.joined_space().is_some_and(|(space, _)| space.walls);
+        crate::projection::editing::Rights {
+            adjust,
+            remove: adjust && self.manages_walls(),
+        }
+    }
+
+    /// Change a wall as `change` says, for everyone in the space. Says whether it asked, as only a participant does, in a
+    /// space whose server takes wall changes.
+    pub fn set_wall(&mut self, change: crate::projection::editing::Change) -> bool {
+        if !self.wall_rights().adjust {
+            return false;
+        }
+        self.send(ClientMessage::SetWall {
+            wall: change.wall,
+            grid: change.grid,
+            scale: change.scale,
+            aspect: change.aspect,
+            shape: change.shape,
+            pose: change.pose,
+        })
+    }
+
+    /// Remove the wall `wall`, one someone added, for everyone, as an owner; its panels float where they were. Says
+    /// whether it asked.
+    pub fn remove_wall_by_id(&mut self, wall: String) -> bool {
+        if !self.wall_rights().remove {
+            return false;
+        }
+        self.send(ClientMessage::RemoveWall { wall })
     }
 
     /// The added wall nearest the participant's head, if there is one and they manage the walls.

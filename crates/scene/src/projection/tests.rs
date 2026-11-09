@@ -61,6 +61,7 @@ fn input(projection: &Projection, ray: Option<Ray>, grip: f32, now: Instant) -> 
         straighten: false,
         controls: Controls::Controllers,
         scroll: None,
+        rights: editing::Rights::default(),
         now,
         dt: 1.0 / 72.0,
     }
