@@ -2594,11 +2594,13 @@ mod tests {
                 assert!(right.x > previous.x && right.z > previous.z);
             }
         }
-        // Sixteen workers: those on the band through the agent, 2.3 m from home, the rest on the arc 3.2 m from home.
-        assert!(scene.workers.values().all(|worker| {
-            let radius = worker.anchor.x.hypot(worker.anchor.z);
-            (radius - 2.3).abs() < 0.0001 || (radius - 3.2).abs() < 0.0001
-        }));
+        // Sixteen workers, all on the band through the agent, 2.3 m from home, which holds eighteen.
+        assert!(
+            scene
+                .workers
+                .values()
+                .all(|worker| { (worker.anchor.x.hypot(worker.anchor.z) - 2.3).abs() < 0.0001 })
+        );
         // Rotation changes the view coordinates, not Scene's world positions.
         let world = Vec3::from_array(original["w-00"]);
         let view = glam::Quat::from_rotation_y(0.7).inverse() * world;

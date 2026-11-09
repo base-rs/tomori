@@ -501,11 +501,7 @@ mod tests {
             let at = slot_position(slot);
             at.x.atan2(-at.z).abs().to_degrees()
         };
-        assert!(
-            (near(0) - 40.0 * ARC_RADIUS / 2.3).abs() < 1e-3,
-            "{}",
-            near(0)
-        );
+        assert!((near(0) - 40.0 * ARC_RADIUS / 2.3).abs() < 1e-3);
         assert!((near(2) - near(0) - 280.0 / 15.0 * ARC_RADIUS / 2.3).abs() < 1e-3);
         // Its column 5, past 170⅔° there, and its third row, stand on the arc 3.2 m from home, at their own angles, two
         // rows up, above and behind the band.
