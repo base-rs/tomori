@@ -4,7 +4,7 @@
 #
 # Each value is either a respelling, written as words that `loqui-g2p` already pronounces correctly, such as "git hub", or Kokoro's phonemes between slashes, in misaki's notation, such as "/ɹˈidmi/", where stress must be exact. Prefer a respelling: it is easier to read and to check.
 #
-# Add a word only after checking that `loqui-g2p` gets it wrong, and that the entry fixes it; the test `the_built_in_pronunciations_are_needed_and_right` in `crates/speech/src/tts/english.rs` checks each one. Words it gets right, such as "GitHub", "OpenCode", "macOS", "iOS", "OAuth", "CLI", "API", "URL", "tokio", "clippy" and "crates.io", are left out.
+# Add a word only after checking that `loqui-g2p` gets it wrong, and that the entry fixes it; the test `the_built_in_pronunciations_are_needed_and_right` in `crates/speech/src/tts/english.rs` checks each one. Words it gets right in every case, such as "OpenCode", "macOS", "OAuth", "MCP", "CI", "SSH", "Vulkan", "tokio", "clippy" and "crates.io", are left out.
 #
 # A server's operator can add words, or change these, in `pronunciations.toml` in the server's state directory, in the same form.
 
@@ -22,7 +22,26 @@ quic = "quick"
 wasm = "/wˈɑzəm/"
 
 # Read as a word where it is spelled, or the other way round.
-adb = "A D B"
+#
+# "id" is an identifier in Tomori, as in "the panel's id" or a panel's "id:" line, almost never the Freudian id, so it is spelled "I D" in any case, as "ID" already is; the rare id of psychology is spelled too, which is accepted.
+id = "ID"
+ids = "IDs"
+# Acronyms that `loqui-g2p` spells only in capitals, and reads as words in lowercase, as in code and file names, such as "tomori.apk" as "app-k": respelled in capitals, so that every case sounds as the capitals do.
+adb = "ADB"
+apk = "APK"
+apks = "APKs"
+api = "API"
+cli = "CLI"
+cpu = "CPU"
+gpu = "GPU"
+os = "OS"
+prs = "PRs"
+ui = "UI"
+url = "URL"
+urls = "URLs"
+usb = "USB"
+openxr = "OpenXR"
+promql = "PromQL"
 ai = "/ˌAˈI/"
 ios = "/ˌIˌOˈɛs/"
 uv = "U V"
@@ -32,6 +51,8 @@ xcode = "X code"
 rustc = "rust C"
 systemd = "system D"
 chmod = "C H mod"
+# Git's "reuse recorded resolution", which it reads as two syllables.
+rerere = "/ɹˌiɹˌiɹˈi/"
 
 # Names.
 kokoro = "/kˈOkəɹO/"
