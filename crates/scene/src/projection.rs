@@ -182,6 +182,30 @@ fn body_rows(panel: &Panel, columns: usize) -> Vec<Vec<crate::ui_text::Cell>> {
     crate::transcript::parse_markdown(&panel.body, columns)
 }
 
+/// The line of `panel`'s body, from 0, that the list item `point` is on begins on, where the ray meets a text panel drawn
+/// with `model` and sized as `fit` and its body scrolled `scroll` rows down: found from the body row under the point, as its face lays the body out, so that what
+/// the participant points at as they speak names the item, such as one of a checklist. `None` off its body, on a row of
+/// no list item, and on a code panel.
+pub fn item_at(panel: &Panel, model: Mat4, fit: Fit, scroll: usize, point: Vec3) -> Option<u32> {
+    if panel.code.is_some() {
+        return None;
+    }
+    let (columns, body_count) = self::fit(panel, fit);
+    let (_, height) = sized(columns, body_count);
+    let local = model.inverse().transform_point3(point);
+    let from_top = (height / 2.0 - local.y) / PIXEL - PADDING.1 as f32;
+    if from_top.is_nan() || from_top < 0.0 {
+        return None;
+    }
+    // Below the title, the metadata and the rule.
+    let row = (from_top / CELL_HEIGHT as f32) as usize;
+    let body = row.checked_sub(3).filter(|body| *body < body_count)?;
+    let (_, line) = crate::transcript::markdown_lines(&panel.body, columns)
+        .into_iter()
+        .nth(scroll + body)?;
+    line.and_then(|line| u32::try_from(line).ok())
+}
+
 /// How many columns and body rows a text panel's face has when it is sized as `fit` says: a slot's, or, to fit its
 /// text, as wide as its widest row, title and metadata, within [`FIT_COLUMNS`], its body wrapped at that width, as many
 /// rows as that takes, within [`FIT_ROWS`]. A code panel's columns are always a slot's, and its rows of code are its
@@ -1188,6 +1212,8 @@ pub struct Output {
     pub sheets: Vec<Sheet>,
     /// The panel the ray points at, by identity, and how far along the ray and where it meets it.
     pub pointed: Option<(String, f32, Vec3)>,
+    /// The line of the body of the panel pointed at that the list item the ray meets begins on, as [`item_at`] finds it.
+    pub item: Option<u32>,
     /// A panel was pulled off.
     pub picked: bool,
     /// The panel carried turned a snap, or back to square.
@@ -1346,7 +1372,7 @@ impl Projector {
         }
         // The nearest panel the ray meets, other than one carried, is pointed at.
         let carried = self.held();
-        output.pointed = input
+        let pointed = input
             .ray
             .filter(|_| input.active && input.pointing)
             .and_then(|ray| {
@@ -1355,10 +1381,15 @@ impl Projector {
                     .filter(|(panel, ..)| Some(panel.id.as_str()) != carried)
                     .filter_map(|(panel, model, fit)| {
                         hit(*model, self.size(panel, *fit), &ray)
-                            .map(|distance| (panel.id.clone(), distance, ray.at(distance)))
+                            .map(|distance| (*panel, *model, *fit, distance, ray.at(distance)))
                     })
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .min_by(|a, b| a.3.total_cmp(&b.3))
             });
+        output.item = pointed.and_then(|(panel, model, fit, _, point)| {
+            item_at(panel, model, fit, self.scroll(&panel.id), point)
+        });
+        output.pointed =
+            pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
         // A squeeze pulls off the panel pointed at, unless something nearer takes it.
         if pressed
             && carried.is_none()

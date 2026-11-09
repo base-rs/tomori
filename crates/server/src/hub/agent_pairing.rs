@@ -238,6 +238,7 @@ impl Hub {
                     body: format!("The agent {did}."),
                     meta: vec![("source".to_owned(), "Tomori".to_owned())],
                     code: None,
+                    slug: None,
                 };
                 let panel = record.stage.project_to(
                     &walls,

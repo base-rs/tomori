@@ -485,6 +485,9 @@ pub(crate) fn described(met: &Met, along: f32, projection: &Projection) -> Value
             let mut described = json!({ "kind": "panel", "panel": panel });
             if let Some(panel) = projection.panel(panel) {
                 described["title"] = json!(title(panel));
+                if let Some(slug) = &panel.slug {
+                    described["id"] = json!(slug);
+                }
                 if let Some(code) = &panel.code {
                     described["language"] = json!(code.language);
                 }
@@ -505,6 +508,14 @@ pub(crate) fn described(met: &Met, along: f32, projection: &Projection) -> Value
         Met::Person { name } => json!({ "kind": "person", "name": name }),
     };
     described["distance"] = json!(round(along, 2));
+    described
+}
+
+/// `described`, a panel's description, with the id the agent gave `panel`, if it gave one.
+fn named(mut described: Value, panel: &Panel) -> Value {
+    if let Some(slug) = &panel.slug {
+        described["id"] = json!(slug);
+    }
     described
 }
 
@@ -628,13 +639,16 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
             let used: Vec<Value> = (0..WALL_SLOTS)
                 .filter_map(|slot| {
                     held.iter().find(|(at, _)| *at == slot).map(|(_, panel)| {
-                        json!({
-                            "slot": slot,
-                            "panel": panel.id,
-                            "title": title(panel),
-                            "code": panel.code.is_some(),
-                            "pinned": panel.pinned,
-                        })
+                        named(
+                            json!({
+                                "slot": slot,
+                                "panel": panel.id,
+                                "title": title(panel),
+                                "code": panel.code.is_some(),
+                                "pinned": panel.pinned,
+                            }),
+                            panel,
+                        )
                     })
                 })
                 .collect();
@@ -673,12 +687,15 @@ pub(crate) fn walls(projection: &Projection) -> (Value, Value) {
         .panels
         .iter()
         .filter_map(|panel| match &panel.place {
-            Place::Free { pose } => Some(json!({
-                "panel": panel.id,
-                "title": title(panel),
-                "position": position(pose.position),
-                "pinned": panel.pinned,
-            })),
+            Place::Free { pose } => Some(named(
+                json!({
+                    "panel": panel.id,
+                    "title": title(panel),
+                    "position": position(pose.position),
+                    "pinned": panel.pinned,
+                }),
+                panel,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();

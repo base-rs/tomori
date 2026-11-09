@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tomori_protocol::SpeechSetting;
 
 use crate::application::{ResponseBody, response};
+use crate::hub::agent_panels::{self, Update};
 use crate::hub::agent_workers::{Outcome, REMOVAL_LIMIT, Removal};
 use crate::hub::tools::Changed;
 use crate::hub::{Decision, Hub};
@@ -342,8 +343,41 @@ fn tools() -> Value {
             "annotations": read,
         },
         {
+            "name": "panels",
+            "description": "The panels shown in your space now: each one's identity, the id you gave it, if any, its title, whether it is text or code, its wall and slot or that it floats, whether a participant put it there, and how long ago it was projected and last updated; and, for a text panel, its body and its list items, numbered from 1, each with its depth, whether it is ticked (true, false, or null for an item without a box) and its text. Read a list here before changing it.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": read,
+        },
+        {
+            "name": "update_panel",
+            "description": "Update a text panel you projected, in place, for everyone in your space, by its id, identity or title: title and body replace its title and body; check and uncheck then tick and untick its list items, each by its number from 1, as panels lists them, or by its text, giving a box to an item without one; place moves it, in the forms move_panel takes, unless a participant put it where it is. It keeps its wall, slot or where it floats, and is not a new panel. Use it to tick off an agenda or to-do list as the conversation covers each item, rather than projecting the list again. Code panels cannot be updated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "panel": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "title": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "body": { "type": "string", "maxLength": crate::stage::BLOCK_BYTES },
+                    "check": {
+                        "type": "array",
+                        "items": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "string" }] },
+                        "maxItems": agent_panels::ITEMS,
+                        "description": "Items to tick, each by its number from 1 or its text.",
+                    },
+                    "uncheck": {
+                        "type": "array",
+                        "items": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "string" }] },
+                        "maxItems": agent_panels::ITEMS,
+                        "description": "Items to untick, each by its number from 1 or its text.",
+                    },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["panel"],
+            },
+            "annotations": change,
+        },
+        {
             "name": "move_panel",
-            "description": "Move a panel in your space, for everyone in it, by its identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall. near, looking and front alone are about whoever asked. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
+            "description": "Move a panel in your space, for everyone in it, by its id, identity or title, as presence lists it: place is near NAME, onto the wall nearest them; looking NAME, onto the wall or empty slot they are looking at, or the wall in their view; front NAME, floating in front of them; or wall WALL, by its identity or name, such as Tomori wall. near, looking and front alone are about whoever asked. You may move any panel, even one a participant placed, which stays theirs where it goes, when someone asks or when it serves what they asked for, and then say what you moved; Tomori also says so on its wall. A panel someone is carrying is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -499,6 +533,8 @@ async fn call(
         "space" => session.and_then(|session| hub.tool_space(session).map(structured)),
         "presence" => session.and_then(|session| hub.tool_presence(session).map(structured)),
         "move_panel" => session.and_then(|session| move_panel(hub, session, arguments)),
+        "panels" => session.and_then(|session| hub.tool_panels(session).map(structured)),
+        "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_speech" => session.and_then(|session| set_speech(hub, session, arguments)),
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
         "rename_space" => session.and_then(|session| rename_space(hub, session, arguments)),
@@ -539,6 +575,62 @@ fn move_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, Stri
     crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
     crate::limits::check(place, crate::limits::IDENTIFIER_BYTES, "place")?;
     hub.agent_move_panel(session, panel, place).map(structured)
+}
+
+/// The optional text argument `name` of `arguments`, of at most `limit` bytes.
+fn optional_text(arguments: &Value, name: &str, limit: usize) -> Result<Option<String>, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            crate::limits::check(value, limit, name)?;
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(format!("{name} is text.")),
+    }
+}
+
+/// The list of items `name` of `arguments`, each by its number from 1 or by its text, empty when it is not given.
+fn items(arguments: &Value, name: &str) -> Result<Vec<agent_panels::Item>, String> {
+    let given = match arguments.get(name) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(given)) if given.len() <= agent_panels::ITEMS => given,
+        Some(Value::Array(_)) => {
+            return Err(format!(
+                "Tomori ticks and unticks at most {} items in one call.",
+                agent_panels::ITEMS
+            ));
+        }
+        Some(_) => return Err(format!("{name} is a list of items.")),
+    };
+    given
+        .iter()
+        .map(|item| match item {
+            Value::Number(number) if number.as_u64().is_some_and(|number| number >= 1) => Ok(
+                agent_panels::Item::Number(number.as_u64().expect("checked above")),
+            ),
+            Value::String(text) if text.len() <= crate::limits::IDENTIFIER_BYTES => {
+                Ok(agent_panels::Item::Text(text.clone()))
+            }
+            _ => Err(format!(
+                "Each of {name} is an item's number, from 1, or its text."
+            )),
+        })
+        .collect()
+}
+
+/// The `update_panel` tool.
+fn update_panel(hub: &Hub, session: &str, arguments: &Value) -> Result<Value, String> {
+    let panel = text(arguments, "panel")?;
+    crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
+    let update = Update {
+        panel: panel.to_owned(),
+        title: optional_text(arguments, "title", crate::limits::IDENTIFIER_BYTES)?,
+        body: optional_text(arguments, "body", crate::stage::BLOCK_BYTES)?,
+        check: items(arguments, "check")?,
+        uncheck: items(arguments, "uncheck")?,
+        place: optional_text(arguments, "place", crate::limits::IDENTIFIER_BYTES)?,
+    };
+    hub.agent_update_panel(session, update).map(structured)
 }
 
 /// The `set_speech` tool.

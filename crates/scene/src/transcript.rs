@@ -196,10 +196,25 @@ fn markdown(id: &str, text: &str, width: usize) -> std::rc::Rc<Vec<Vec<Cell>>> {
     })
 }
 
+/// A task item's box, empty for one not ticked, and ticked for one that is: one cell each, from the bundled symbols.
+pub const UNTICKED: char = '☐';
+pub const TICKED: char = '☑';
+
 /// `text`'s Markdown-lite as rows `width` wide, styled as the transcript styles a message, as a panel's body is too.
 pub(crate) fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
-    let mut rows = Vec::new();
+    markdown_lines(text, width)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// `text`'s Markdown-lite as rows `width` wide, as [`parse_markdown`] lays them out, each with the line of `text` the list
+/// item it belongs to begins on, from 0, for a row of a list item. A task item, `- [ ]` or `- [x]`, shows a box in place
+/// of its bullet, after its number, empty or ticked, and a ticked one's text is dimmed, so that what is done recedes.
+pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<(Vec<Cell>, Option<usize>)> {
+    let mut lines = Vec::new();
     for block in markdown_lite::parse(text) {
+        let mut rows = Vec::new();
         let spans = |base: Style| -> Vec<Span> {
             block
                 .text
@@ -236,11 +251,30 @@ pub(crate) fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
             }
             Kind::Item { depth, marker } => {
                 let indent = 2 * depth.saturating_sub(1);
-                let marker = marker
-                    .as_deref()
-                    .map_or(String::new(), |marker| format!("{marker} "));
+                // A task item's box stands in place of its bullet, as GitHub shows it, and after its number.
+                let mut marker = match marker.as_deref() {
+                    Some(marker) if !(block.task.is_some() && marker == "•") => {
+                        format!("{marker} ")
+                    }
+                    _ => String::new(),
+                };
                 let mut item = vec![Span::new(marker.clone(), style(DIM))];
-                item.extend(spans(style(TEXT)));
+                let text = match block.task {
+                    Some(ticked) => {
+                        let (glyph, color) = if ticked {
+                            (TICKED, GREEN)
+                        } else {
+                            (UNTICKED, BRIGHT)
+                        };
+                        // Only the first block of an item is a task's, and shows its box.
+                        let shown = format!("{glyph} ");
+                        item.push(Span::new(shown.clone(), Style::bold(color)));
+                        marker.push_str(&shown);
+                        if ticked { DIM } else { TEXT }
+                    }
+                    None => TEXT,
+                };
+                item.extend(spans(style(text)));
                 rows.extend(wrap(
                     &item,
                     width,
@@ -269,8 +303,9 @@ pub(crate) fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
             }
             Kind::Rule => rows.push(cut(&[Span::new("─".repeat(width), style(DIM))], width)),
         }
+        lines.extend(rows.into_iter().map(|row| (row, block.line)));
     }
-    rows
+    lines
 }
 
 /// A group's rows when expanded, each starting with the bar's column: its name, its chips, then its texts.
@@ -1645,6 +1680,50 @@ mod tests {
                 .iter()
                 .all(|(_, style)| style.background == Some(CODE))
         );
+    }
+
+    #[test]
+    fn a_checklist_shows_boxes_its_ticked_items_dimmed_and_each_row_knows_its_item_s_line() {
+        let lines = markdown_lines(
+            "Agenda:\n\n- [ ] Decide the pairing window length\n- [x] Panel ids\n  - [ ] Nested\n1. [x] Numbered\n- plain",
+            20,
+        );
+        let text: Vec<(String, Option<usize>)> = lines
+            .iter()
+            .map(|(row, line)| (row.iter().map(|(ch, _)| *ch).collect(), *line))
+            .collect();
+        assert_eq!(
+            text,
+            [
+                ("Agenda:".into(), None),
+                ("☐ Decide the pairing".into(), Some(2)),
+                ("  window length".into(), Some(2)),
+                ("☑ Panel ids".into(), Some(3)),
+                ("  ☐ Nested".into(), Some(4)),
+                ("1. ☑ Numbered".into(), Some(5)),
+                ("• plain".into(), Some(6)),
+            ]
+        );
+        // The empty box is bright and the ticked one green, both bold, and a ticked item's text dim.
+        let (unticked, _) = &lines[1];
+        assert_eq!(unticked[0], (UNTICKED, Style::bold(BRIGHT)));
+        assert_eq!(unticked[2].1, style(TEXT));
+        let (ticked, _) = &lines[3];
+        assert_eq!(ticked[0], (TICKED, Style::bold(GREEN)));
+        assert!(ticked[2..].iter().all(|(_, style)| style.color == DIM));
+        // Both boxes are drawn from a bundled font, one cell each.
+        for glyph in [UNTICKED, TICKED] {
+            assert!(tomori_text::fonts::covers(glyph));
+            assert_eq!(crate::ui_text::width(&glyph.to_string()), 1);
+        }
+        assert_eq!(
+            parse_markdown("- [x] a", 20),
+            lines_of(markdown_lines("- [x] a", 20))
+        );
+    }
+
+    fn lines_of(lines: Vec<(Vec<Cell>, Option<usize>)>) -> Vec<Vec<Cell>> {
+        lines.into_iter().map(|(row, _)| row).collect()
     }
 
     fn approval_of(text: &str) -> Approval {

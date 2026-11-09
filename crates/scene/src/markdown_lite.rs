@@ -3,7 +3,7 @@
 
 //! Markdown-lite: a message's Markdown as blocks of text with their emphasis, for the transcript to style, so that none of `**`, `#` or backticks shows. Parsed with `base-markdown`, as the speech crate splits replies.
 //!
-//! Headings, list items with their bullets or numbers, code blocks, quotes, rules and table rows are blocks; strong text, emphasis and inline code are marked within them; links show their text only.
+//! Headings, list items with their bullets or numbers, code blocks, quotes, rules and table rows are blocks; strong text, emphasis and inline code are marked within them; links show their text only. A task item, `- [ ]` or `- [x]`, says whether it is ticked rather than showing its box as text, and every block of a list item knows the line of the source the item begins on, so that what is pointed at on a panel can be named.
 use std::sync::LazyLock;
 
 use base_markdown::{
@@ -48,6 +48,10 @@ pub enum Kind {
 pub struct Block {
     pub kind: Kind,
     pub text: Vec<(String, Inline)>,
+    /// For a task item, whether it is ticked.
+    pub task: Option<bool>,
+    /// For a block of a list item, the line of the source the item begins on, from 0.
+    pub line: Option<usize>,
 }
 
 impl Block {
@@ -71,6 +75,10 @@ struct Builder {
     quote: usize,
     header: bool,
     cells: usize,
+    /// The line each open list item begins on, the innermost last.
+    items: Vec<usize>,
+    /// A task's box was just read, so the space after it is not shown.
+    boxed: bool,
 }
 
 impl Builder {
@@ -86,9 +94,14 @@ impl Builder {
 
     fn open(&mut self, kind: Kind) {
         self.flush();
+        let line = matches!(kind, Kind::Item { .. })
+            .then(|| self.items.last().copied())
+            .flatten();
         self.current = Some(Block {
             kind,
             text: Vec::new(),
+            task: None,
+            line,
         });
     }
 
@@ -106,12 +119,25 @@ impl Builder {
         }
     }
 
-    fn push(&mut self, text: &str, inline: Inline) {
+    /// The open block, opening the one text goes into when none is.
+    fn block(&mut self) -> &mut Block {
         if self.current.is_none() {
             let kind = self.implied();
             self.open(kind);
         }
-        let block = self.current.as_mut().expect("opened above");
+        self.current.as_mut().expect("opened above")
+    }
+
+    fn push(&mut self, text: &str, inline: Inline) {
+        let text = if std::mem::take(&mut self.boxed) {
+            text.trim_start()
+        } else {
+            text
+        };
+        if text.is_empty() && self.current.is_some() {
+            return;
+        }
+        let block = self.block();
         match block.text.last_mut() {
             Some((last, mark)) if *mark == inline => last.push_str(text),
             _ => block.text.push((text.to_owned(), inline)),
@@ -149,6 +175,20 @@ pub fn parse(source: &str) -> Vec<Block> {
     for event in EventParser::new(source, &OPTIONS).filter_map(Result::ok) {
         match event.kind {
             EventKind::Start(tag) => match tag {
+                Tag::Item { .. } => {
+                    builder.flush();
+                    let begins = source.get(..event.span.start).unwrap_or_default();
+                    builder.items.push(begins.matches('\n').count());
+                    let marker = match builder.lists.last_mut() {
+                        Some(Some(number)) => {
+                            let marker = format!("{number}.");
+                            *number += 1;
+                            marker
+                        }
+                        _ => "•".to_owned(),
+                    };
+                    builder.marker = Some(marker);
+                }
                 Tag::Paragraph { .. } => {
                     let kind = builder.implied();
                     builder.open(kind);
@@ -161,18 +201,6 @@ pub fn parse(source: &str) -> Vec<Block> {
                 Tag::List { start, .. } => {
                     builder.flush();
                     builder.lists.push(start.map(u64::from));
-                }
-                Tag::Item { .. } => {
-                    builder.flush();
-                    let marker = match builder.lists.last_mut() {
-                        Some(Some(number)) => {
-                            let marker = format!("{number}.");
-                            *number += 1;
-                            marker
-                        }
-                        _ => "•".to_owned(),
-                    };
-                    builder.marker = Some(marker);
                 }
                 Tag::Strong => builder.strong += 1,
                 Tag::Emphasis => builder.emphasis += 1,
@@ -201,6 +229,7 @@ pub fn parse(source: &str) -> Vec<Block> {
                         });
                     }
                     builder.flush();
+                    builder.items.pop();
                 }
                 TagKind::List => {
                     builder.flush();
@@ -241,9 +270,11 @@ pub fn parse(source: &str) -> Vec<Block> {
                 builder.open(Kind::Rule);
                 builder.flush();
             }
-            // The space after the marker is in the text that follows it.
+            // The item's block says whether it is ticked; the space after the box is in the text that follows it, and is
+            // not shown.
             EventKind::TaskMarker(done) => {
-                builder.push(if done { "[x]" } else { "[ ]" }, Inline::Plain)
+                builder.block().task = Some(done);
+                builder.boxed = true;
             }
             // GitHub's Markdown, which this parses, has no math.
             EventKind::Html { value, .. } => {
@@ -381,14 +412,46 @@ mod tests {
     }
 
     #[test]
-    fn a_task_marker_is_followed_by_one_space() {
-        let item = Kind::Item {
-            depth: 1,
+    fn a_task_item_says_whether_it_is_ticked_without_its_box_or_the_space_after_it() {
+        let item = |depth| Kind::Item {
+            depth,
             marker: Some("•".into()),
         };
+        let blocks = parse("- [x] done\n- [ ] **todo**\n  - [X] nested\n- plain\n");
         assert_eq!(
-            plain(&parse("- [x] done\n- [ ] todo\n")),
-            [(item.clone(), "[x] done".into()), (item, "[ ] todo".into())]
+            plain(&blocks),
+            [
+                (item(1), "done".into()),
+                (item(1), "todo".into()),
+                (item(2), "nested".into()),
+                (item(1), "plain".into()),
+            ]
+        );
+        assert_eq!(
+            blocks.iter().map(|block| block.task).collect::<Vec<_>>(),
+            [Some(true), Some(false), Some(true), None]
+        );
+        assert_eq!(blocks[1].text, [("todo".into(), Inline::Strong)]);
+    }
+
+    #[test]
+    fn each_block_of_a_list_item_knows_the_line_its_item_begins_on() {
+        let blocks = parse(
+            "Topics:\n\n- one\n  continued\n\n  second paragraph\n- [ ] two\n  1. inner\n\nAfter.\n",
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.plain(), block.line))
+                .collect::<Vec<_>>(),
+            [
+                ("Topics:".into(), None),
+                ("one continued".into(), Some(2)),
+                ("second paragraph".into(), Some(2)),
+                ("two".into(), Some(6)),
+                ("inner".into(), Some(7)),
+                ("After.".into(), None),
+            ]
         );
     }
 

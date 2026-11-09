@@ -429,6 +429,8 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             "spaces",
             "space",
             "presence",
+            "panels",
+            "update_panel",
             "move_panel",
             "set_speech",
             "set_environment",
@@ -527,6 +529,8 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
     for tool in [
         "space",
         "presence",
+        "panels",
+        "update_panel",
         "move_panel",
         "set_speech",
         "set_environment",
@@ -618,6 +622,8 @@ fn space_tools_act_on_the_space_bound_to_the_calling_session() {
     for tool in [
         "space",
         "presence",
+        "panels",
+        "update_panel",
         "move_panel",
         "set_speech",
         "set_environment",
@@ -1478,7 +1484,7 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
     eventually(|| (walls(&session)[0]["used"].as_array()?.len() == 2).then_some(()));
     assert_eq!(
         failure(&move_panel("Notes", "wall tomori")),
-        "More than one panel here has that title, so name it by its identity, as presence lists it."
+        "More than one panel here has that title, so name it by its id or identity, as panels lists them."
     );
 
     // Once Ada puts it somewhere herself, the agent still moves it when asked, and it stays hers: pinned where it goes,
