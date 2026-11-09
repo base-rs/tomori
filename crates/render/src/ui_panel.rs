@@ -641,5 +641,6 @@ mod tests {
         });
     }
 
+    mod handles;
     mod shapes;
 }

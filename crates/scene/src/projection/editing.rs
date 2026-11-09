@@ -51,15 +51,16 @@ const ASPECT_SNAP: f32 = 0.035;
 /// drag, to a little over twice as far.
 pub const CORNER_GAIN: f32 = 2.0;
 
-/// The least and most the hand moves up or down, in metres, from where it took hold of the knob or the hinge, to bend a
-/// wall from flat to as tightly as it may curve, or tilt it from one end of [`layout::TILTS`] to the other: the wall's
-/// own height, within these, so that one movement as tall as the wall takes it through the whole range, a small wall is
-/// not too touchy to set and a large one is still within an arm's reach. See [`travel`].
-pub const TRAVELS: (f32, f32) = (0.2, 1.0);
+/// How far the hand moves, in metres, past [`DEAD_ZONE`] from where it took hold of the knob or the hinge, to take a
+/// wall through the whole range: the knob across, to the right, from flat to as tightly as it may curve, and the hinge
+/// up or down from one end of [`layout::TILTS`] to the other, half of it from upright to either end. It is the same
+/// for a wall of any size, a comfortable movement of the hand alone, so that a large wall needs no reach and a small one
+/// no more care; [`ease`] keeps a little fine to set.
+pub const TRAVEL: f32 = 0.25;
 
-/// How far the hand moves up or down, in metres, from where it took hold of the knob or the hinge, before it bends or
-/// tilts the wall at all: a hand held still drifts and shakes by less, so that taking hold changes nothing, and moving
-/// back to where it took hold is the wall as it was.
+/// How far the hand moves, in metres, from where it took hold of the knob across or of the hinge up or down, before it
+/// bends or tilts the wall at all: a hand held still drifts and shakes by less, so that taking hold changes nothing, and
+/// moving back to where it took hold is the wall as it was.
 pub const DEAD_ZONE: f32 = 0.01;
 
 /// How little a wall bends, as a proportion of the most it may, before it snaps flat.
@@ -126,12 +127,13 @@ pub enum Handle {
     Rows,
     /// A stepper: one column or row fewer (-1) or more (1).
     Step(Axis, i8),
-    /// The knob at its top middle: moved down from where it was taken hold of, it bends the wall around the
-    /// participant, and back up, flattens it, flat near where it bends least.
+    /// The knob at its top middle: moved to the right, as the participant sees it, from where it was taken hold of,
+    /// it bends the wall around the participant, and back to the left, flattens it, flat near where it bends least;
+    /// moving up or down does nothing.
     Bend,
     /// The hinge at the middle of its left edge, on the line it tilts about: moved down from where it was taken hold
     /// of, it tilts the wall's top towards the participant, so that it faces down, and up, tilts it back, upright near
-    /// where it tilts least.
+    /// where it tilts least; moving across does nothing.
     Tilt,
     /// The padlock beyond its top left corner, closed while the wall is locked and open while it is not: squeezed by an
     /// owner, it locks or unlocks the wall, for everyone.
@@ -234,6 +236,9 @@ struct Drag {
     origin: Vec3,
     along: f32,
     point: Vec3,
+    /// The participant's right as they took hold, level and across the line from their eyes to the handle, which the
+    /// knob's drag is measured along.
+    right: Vec3,
     /// Whether the knob or the hinge is at one end of its range, or at flat or upright, where it stops, so that reaching
     /// one ticks.
     stopped: bool,
@@ -609,9 +614,10 @@ const BAR_MOST: f32 = 5.0;
 /// so curved that it folds, where they are moved on.
 const BAR_ROWS: usize = 8;
 
-/// Whether points `a` and `b`, as large as handles `size` across, stand a handle's [`SPACING`] apart as seen from
-/// `viewer` looking `ahead`, across or up, so that the ray meeting one never meets the other.
-fn seen_apart(a: Vec3, b: Vec3, size: f32, viewer: Vec3, ahead: Vec3) -> bool {
+/// How much further than a handle's [`SPACING`] apart points `a` and `b`, as large as handles `size` across, stand as
+/// seen from `viewer` looking `ahead`, across or up, whichever is further, as an angle: at least none, so that the ray
+/// meeting one never meets the other, where they stand apart.
+fn seen_gap(a: Vec3, b: Vec3, size: f32, viewer: Vec3, ahead: Vec3) -> f32 {
     let right = ahead.cross(Vec3::Y).normalize_or(Vec3::X);
     let up = right.cross(ahead);
     let seen = |point: Vec3| {
@@ -628,7 +634,7 @@ fn seen_apart(a: Vec3, b: Vec3, size: f32, viewer: Vec3, ahead: Vec3) -> bool {
     };
     let ((a, across), (b, other)) = (seen(a), seen(b));
     let reach = (across + other) / 2.0 * SPACING;
-    (a.x - b.x).abs() >= reach || (a.y - b.y).abs() >= reach
+    (a.x - b.x).abs().max((a.y - b.y).abs()) - reach
 }
 
 /// The handles of `wall` and its bar as [`lay_out`] lays them out, sized for a handle `far` from the viewer, or else for
@@ -640,25 +646,53 @@ fn lay_out_handles(
     far: Option<f32>,
     around: &Around,
 ) -> (Vec<(Handle, Vec3)>, f32, Bar) {
-    // The wall measured along itself, about its middle: a flat wall's board, or a curved wall's slots along their arc,
-    // where a handle beyond its edge continues along the arc's last direction.
+    // The wall measured along itself, about its middle: a flat wall's board, or a curved wall's slots, each flat, as
+    // they are drawn, its middle on the arc and turned to face the line it curves about, so that a point along the wall
+    // is on the slot whose column it is in, or across the gap between two, and its edges are where its slots end.
+    // Measured along the arc alone, a wall of few wide slots, such as one slot five times a standard one, curved
+    // tightly, would have its edges, and the handles beside them, far in front of where its slots end.
     let (width, height) = wall.size();
     let (right, top) = (width / 2.0, height / 2.0);
     let (left, bottom) = (-right, -top);
     let radius = wall.radius();
-    let place = |x: f32, y: f32| match radius {
-        None => Vec3::new(x, y, 0.0),
-        Some(radius) => {
-            let on = x.clamp(left, right);
-            let angle = on / radius;
-            let tangent = Vec3::new(angle.cos(), 0.0, angle.sin());
-            Vec3::new(radius * angle.sin(), y, radius * (1.0 - angle.cos())) + tangent * (x - on)
+    let columns = wall.grid().columns as f32;
+    let (slot, gap) = (wall.slot_size().0, wall.gap());
+    let step = slot + gap;
+    // Where `x` along the wall stands, level with its middle, in its own frame, and which way the wall runs there.
+    let along = |x: f32| -> (Vec3, Vec3) {
+        let Some(radius) = radius else {
+            return (Vec3::new(x, 0.0, 0.0), Vec3::X);
+        };
+        // `from` the middle of `column`'s slot, along it.
+        let on_slot = |column: f32, from: f32| {
+            let angle = (column - (columns - 1.0) / 2.0) * step / radius;
+            let (sin, cos) = angle.sin_cos();
+            let runs = Vec3::new(cos, 0.0, sin);
+            (
+                Vec3::new(radius * sin, 0.0, radius * (1.0 - cos)) + runs * from,
+                runs,
+            )
+        };
+        let column = (x / step + (columns - 1.0) / 2.0)
+            .round()
+            .clamp(0.0, columns - 1.0);
+        let from = x - (column - (columns - 1.0) / 2.0) * step;
+        if from.abs() <= slot / 2.0 || x.abs() >= right {
+            return on_slot(column, from);
         }
+        // Across the gap beside its slot, from its edge to its neighbour's.
+        let side = from.signum();
+        let (edge, _) = on_slot(column, side * slot / 2.0);
+        let (other, _) = on_slot(column + side, -side * slot / 2.0);
+        let across = (from.abs() - slot / 2.0) / gap;
+        (
+            edge.lerp(other, across),
+            (other - edge).normalize_or(Vec3::X) * side,
+        )
     };
-    let tangent = |x: f32| {
-        let angle = radius.map_or(0.0, |radius| x.clamp(left, right) / radius);
-        frame.transform_vector3(Vec3::new(angle.cos(), 0.0, angle.sin()))
-    };
+    // The point of the wall nearest `x` along it and `y` up it, on its edge where they are beyond it, in its frame.
+    let on_wall = |x: f32, y: f32| along(x.clamp(left, right)).0 + Vec3::Y * y.clamp(bottom, top);
+    let tangent = |x: f32| frame.transform_vector3(along(x.clamp(left, right)).1);
     let samples = [
         (left, top),
         (right, top),
@@ -668,17 +702,17 @@ fn lay_out_handles(
     ];
     let far = samples
         .iter()
-        .map(|(x, y)| frame.transform_point3(place(*x, *y)).distance(viewer))
+        .map(|(x, y)| frame.transform_point3(on_wall(*x, *y)).distance(viewer))
         .fold(far.unwrap_or(0.3), f32::max);
     let size = HANDLE_ANGLE * far;
     // A handle's worth along the wall and up it, longer as the wall is seen more obliquely, where it is seen most
-    // obliquely, so that the handles stand as far apart to the eye wherever they are.
+    // obliquely, so that the handles stand as far apart to the eye wherever they are along it.
     let least = |axis: &dyn Fn(f32) -> Vec3| {
         samples
             .iter()
             .map(|(x, y)| {
                 let towards =
-                    (frame.transform_point3(place(*x, *y)) - viewer).normalize_or(Vec3::NEG_Z);
+                    (frame.transform_point3(on_wall(*x, *y)) - viewer).normalize_or(Vec3::NEG_Z);
                 let axis = axis(*x).normalize_or(Vec3::X);
                 (1.0 - axis.dot(towards).powi(2)).max(0.0).sqrt()
             })
@@ -686,10 +720,25 @@ fn lay_out_handles(
             .max(OBLIQUE)
     };
     let up = frame.transform_vector3(Vec3::Y);
-    let (u, v) = (size / least(&tangent), size / least(&|_| up));
-    // Where each handle stands, along the wall and up it, put in the space once it is chosen.
+    let (across_seen, up_seen) = (least(&tangent), least(&|_| up));
+    let (u, v) = (size / across_seen, size / up_seen);
+    // Above or below an edge, a handle stands off it square to the line the eyes see it along, as far as it is seen
+    // to, so that above the top of a wall seen receding, as a wall tilted back is, it stands near the edge rather than
+    // far up where the wall would go on, each row further out seen as less apart. Beyond its sides, a handle stands
+    // along the slot at that end, as the wall would go on, so that it stands clear of the slots it is beside.
+    let above = |at: Vec3| {
+        let sight = (at - viewer).normalize_or(Vec3::NEG_Z);
+        (up - sight * up.dot(sight)).normalize_or(up)
+    };
+    let beside = |side: f32| tangent(side * right).normalize_or(Vec3::X) * side;
+    // Where each handle stands, along the wall and up it, put in the space once it is chosen: on the wall, or beyond
+    // its nearest edge, along the slot at its side, and above or below, as far as it is seen to be.
     let at = |x: f32, y: f32| (x, y);
-    let put = |(x, y): (f32, f32)| frame.transform_point3(place(x, y));
+    let put = |(x, y): (f32, f32)| {
+        let (across, upward) = (x - x.clamp(left, right), y - y.clamp(bottom, top));
+        let edge = frame.transform_point3(on_wall(x, y)) + tangent(x) * across;
+        edge + above(edge) * upward * up_seen
+    };
     let (xl, xr) = (left - OUTSET * u, right + OUTSET * u);
     let (yt, yb) = (top + OUTSET * v, bottom - OUTSET * v);
     let (pu, pv) = (SPACING * u, SPACING * v);
@@ -806,31 +855,44 @@ fn lay_out_handles(
     let outward = if below { -pv } else { pv };
     let (least, most) = (BAR_LEAST * ub / 2.0, BAR_MOST * ub / 2.0);
     let preferred = (width / 6.0).clamp(least, most);
-    let clear = |fixed: &[Vec3], row: f32, half: f32| {
+    // How far apart from `fixed` a bar `half` long either way along `row` stands, as seen, as [`seen_gap`] says of
+    // the nearest.
+    let gap = |fixed: &[Vec3], row: f32, half: f32| {
         let samples = ((2.0 * half / (0.2 * size)).ceil() as usize).max(1);
-        // The bar its group shows stands over none of its group's slots, as thick as it is drawn.
-        (!around.bar || around.clear(0.0, row, (half, BAR_THICKNESS * size / 2.0)))
-            && (0..=samples).all(|sample| {
+        (0..=samples)
+            .flat_map(|sample| {
                 let x = -half + 2.0 * half * sample as f32 / samples as f32;
-                let point = frame.transform_point3(Vec3::new(x, row, 0.0));
+                let point = put(at(0.0, row)) + frame.transform_vector3(Vec3::X * x);
                 fixed
                     .iter()
-                    .all(|handle| seen_apart(point, *handle, size, viewer, ahead))
+                    .map(move |handle| seen_gap(point, *handle, size, viewer, ahead))
             })
+            .fold(f32::INFINITY, f32::min)
     };
-    // As long as it may be, nearest the wall, that stands clear of `fixed`.
+    let clear = |fixed: &[Vec3], row: f32, half: f32| {
+        // The bar its group shows stands over none of its group's slots, as thick as it is drawn.
+        (!around.bar || around.clear(0.0, row, (half, BAR_THICKNESS * size / 2.0)))
+            && gap(fixed, row, half) >= 0.0
+    };
+    // As long as it may be, nearest the wall, that stands clear of `fixed`; or else, where none does, as seen from
+    // beside the end of a wall curved around the participant, whose handles there are near and large, the one that
+    // stands furthest from them.
     let choose = |fixed: &[Vec3]| {
-        (0..BAR_ROWS)
-            .flat_map(|lift| {
-                (0..=4).map(move |step| {
-                    (
-                        first + outward * lift as f32,
-                        preferred + (least - preferred) * step as f32 / 4.0,
-                    )
-                })
+        let candidates = (0..BAR_ROWS).flat_map(|lift| {
+            (0..=4).map(move |step| {
+                (
+                    first + outward * lift as f32,
+                    preferred + (least - preferred) * step as f32 / 4.0,
+                )
             })
+        });
+        candidates
+            .clone()
             .find(|(row, half)| clear(fixed, *row, *half))
-            .unwrap_or((first + outward * BAR_ROWS as f32, least))
+            .or_else(|| {
+                candidates.max_by(|a, b| gap(fixed, a.0, a.1).total_cmp(&gap(fixed, b.0, b.1)))
+            })
+            .unwrap_or((first, least))
     };
     let (bar_row, bar_half) = choose(&fixed);
     // Along the top, a row beyond the bar where it stands there: the corners, the knob at the middle where it has room,
@@ -908,13 +970,16 @@ fn lay_out_handles(
     let (away, lifts): (Vec<f32>, Vec<bool>) = ways.into_iter().unzip();
     // A wall curved so far that it folds as seen from the side may still bring two together: the one that is not a
     // corner moves on, beyond its edge, until none overlaps.
-    let outward = |handle: Handle, away: f32| match handle {
-        Handle::Bend | Handle::Step(Axis::Columns, _) => up.normalize_or(Vec3::Y) * pv * away,
-        Handle::Rows => -up.normalize_or(Vec3::Y) * pv * away,
-        Handle::Tilt => -tangent(left).normalize_or(Vec3::X) * pu,
-        // Beyond the left edge, or the right where it stands there.
-        Handle::Lock | Handle::Reset => -tangent(left * away).normalize_or(Vec3::X) * pu * away,
-        _ => tangent(right * away).normalize_or(Vec3::X) * pu * away,
+    let outward = |handle: Handle, away: f32, at: Vec3| {
+        let spacing = SPACING * size;
+        match handle {
+            Handle::Bend | Handle::Step(Axis::Columns, _) => above(at) * spacing * away,
+            Handle::Rows => -above(at) * spacing * away,
+            Handle::Tilt => beside(-1.0) * pu,
+            // Beyond the left edge, or the right where it stands there.
+            Handle::Lock | Handle::Reset => beside(-away) * pu,
+            _ => beside(away) * pu,
+        }
     };
     let rank = |handle: Handle| match handle {
         Handle::Corner(..) => 0,
@@ -939,7 +1004,7 @@ fn lay_out_handles(
                     } else {
                         second
                     };
-                    let by = outward(points[moving].0, away[moving]);
+                    let by = outward(points[moving].0, away[moving], points[moving].1);
                     points[moving].1 += by;
                     moved = true;
                 }
@@ -965,7 +1030,7 @@ fn lay_out_handles(
         let (row, half) = choose(&others);
         for ((_, at), top) in points.iter_mut().zip(&top) {
             if *top {
-                *at += up * (beyond(row) - yk);
+                *at += above(*at) * (beyond(row) - yk) * up_seen;
             }
         }
         (row, half)
@@ -991,7 +1056,7 @@ fn lay_out_handles(
         }
         for ((_, at), lifted) in points.iter_mut().zip(&lifted) {
             if *lifted {
-                *at += up * pv;
+                *at += above(*at) * pv * up_seen;
             }
         }
     }
@@ -1015,11 +1080,13 @@ fn lay_out_handles(
             around.keep == Some(*handle) || *handle == Handle::Lock || around.clear(x, y, half)
         });
     }
+    // Turned as the wall is, where it stands.
+    let middle = put(at(0.0, bar_row));
     let bar = Bar {
-        middle: frame.transform_point3(Vec3::new(0.0, bar_row, 0.0)),
+        middle,
         half: frame.transform_vector3(Vec3::X * bar_half),
         size,
-        model: frame * Mat4::from_translation(Vec3::new(0.0, bar_row, 0.0)),
+        model: Mat4::from_translation(middle - frame.transform_point3(Vec3::ZERO)) * frame,
     };
     (points, size, bar)
 }
@@ -1086,20 +1153,78 @@ pub fn handle_point_among(
     (at, size)
 }
 
-/// What `handle` shows.
+/// What `handle` shows as text: the knob's dot, which its glyph centres on its cell; every other symbol is drawn as
+/// shapes, by [`symbol`], centred on its handle, as a glyph's ink, sitting on its baseline, is not.
 fn glyph(handle: Handle) -> &'static str {
     match handle {
-        Handle::Corner(..) => " ",
-        Handle::Columns => "↔",
-        Handle::Rows => "↕",
-        Handle::Step(_, -1) => "-",
-        Handle::Step(..) => "+",
         Handle::Bend => "●",
-        // Drawn as shapes, a hinge and the face tilted about it.
-        Handle::Tilt => " ",
-        // Drawn as a padlock, of shapes.
-        Handle::Lock => " ",
-        Handle::Reset => "↺",
+        _ => " ",
+    }
+}
+
+/// How thick the lines of a handle's symbol are, in font pixels: as a bold glyph's.
+const STROKE: f32 = 1.3;
+
+/// What `handle` shows drawn as shapes, in font pixels from its cell's top left corner, centred on the cell, and so on
+/// the handle: the arrows of its edges, across or down; a stepper's minus or plus; the hinge; the padlock, closed while
+/// its wall is `locked`; and a circle's arrow turning back for the reset. `behind` is the colour behind it, which
+/// hides what a shape leaves out.
+fn symbol(handle: Handle, locked: bool, behind: [f32; 4]) -> Vec<crate::shapes::Shape> {
+    use crate::shapes::Shape;
+    use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH};
+    let middle = Vec2::new(CELL_WIDTH as f32 / 2.0, CELL_HEIGHT as f32 / 2.0);
+    let rule = |from: Vec2, to: Vec2| Shape::Rule {
+        from: (middle + from).to_array(),
+        to: (middle + to).to_array(),
+        width: STROKE,
+        color: BRIGHT,
+    };
+    // An arrow from end to end through the middle, along `along`, with a head at each end.
+    let arrow = |along: Vec2| {
+        let (tip, side) = (along * 4.5, along.perp() * 2.5);
+        vec![
+            rule(-tip, tip),
+            rule(tip, tip - along * 2.5 + side),
+            rule(tip, tip - along * 2.5 - side),
+            rule(-tip, -tip + along * 2.5 + side),
+            rule(-tip, -tip + along * 2.5 - side),
+        ]
+    };
+    match handle {
+        Handle::Columns => arrow(Vec2::X),
+        Handle::Rows => arrow(Vec2::Y),
+        Handle::Step(_, -1) => vec![rule(Vec2::new(-3.0, 0.0), Vec2::new(3.0, 0.0))],
+        Handle::Step(..) => vec![
+            rule(Vec2::new(-3.0, 0.0), Vec2::new(3.0, 0.0)),
+            rule(Vec2::new(0.0, -3.0), Vec2::new(0.0, 3.0)),
+        ],
+        Handle::Tilt => hinge_shapes(),
+        Handle::Lock => padlock(locked, behind),
+        // A ring, its quarter at the top right left out, and a head at its right end, pointing up, the way it turns.
+        // Its ring a little left of the middle, so that with its head it centres.
+        Handle::Reset => {
+            let (radius, left) = (3.6, Vec2::X * 0.9);
+            let line = radius / 3.0;
+            let centre = middle - left;
+            let tip = Vec2::new(radius - line / 2.0, -1.6) - left;
+            vec![
+                Shape::Ring {
+                    centre: centre.to_array(),
+                    radius,
+                    color: BRIGHT,
+                },
+                Shape::Fill {
+                    x: centre.x + 0.3,
+                    y: centre.y - radius - 0.5,
+                    width: radius + 0.5,
+                    height: radius - 0.3,
+                    color: behind,
+                },
+                rule(tip, tip + Vec2::new(-2.2, 2.6)),
+                rule(tip, tip + Vec2::new(2.2, 2.6)),
+            ]
+        }
+        Handle::Corner(..) | Handle::Bend => Vec::new(),
     }
 }
 
@@ -1107,8 +1232,8 @@ fn glyph(handle: Handle) -> &'static str {
 pub const LOCKED: [f32; 4] = [1.0, 0.8, 0.38, 1.0];
 
 /// A handle's face, `size` across, highlighted while the ray meets it or it is dragged; the padlock closed while its
-/// wall is `locked`, and open while it is not.
-fn handle_face(handle: Handle, size: f32, highlighted: bool, locked: bool) -> Canvas {
+/// wall is `locked`, and open while it is not. Its symbol is centred on it, by what it draws.
+pub fn handle_face(handle: Handle, size: f32, highlighted: bool, locked: bool) -> Canvas {
     let mut canvas = Canvas::new(1, 1.0);
     // About square, so that it is as easy to meet across as down.
     canvas.padding = (4, 2);
@@ -1119,27 +1244,24 @@ fn handle_face(handle: Handle, size: f32, highlighted: bool, locked: bool) -> Ca
     };
     canvas.border = Some(if highlighted { HIGHLIGHT } else { FRAME });
     canvas.rows = vec![Row::text(glyph(handle), Style::bold(BRIGHT), 1)];
-    if handle == Handle::Tilt {
-        canvas.shapes = hinge_shapes();
-    }
-    if handle == Handle::Lock {
-        let [red, green, blue, _] = canvas.background;
-        canvas.shapes = padlock(locked, [red, green, blue, 1.0]);
-    }
+    let [red, green, blue, _] = canvas.background;
+    canvas.shapes = symbol(handle, locked, [red, green, blue, 1.0]);
     let (width, _) = canvas.size_in_pixels();
     canvas.pixel = size / width as f32;
     canvas
 }
 
-/// The hinge's face, in font pixels of its canvas, a cell padded 4 across and 2 down: the line the wall tilts about, level
-/// through its middle, dim, and the wall's face tilted across it, bright, as a door is drawn on its hinge.
+/// The hinge's face, in font pixels from its cell's top left corner, inside its canvas's padding, as every shape is:
+/// the line the wall tilts about, level through the cell's middle and out into the padding, dim, and the wall's face
+/// tilted across it, bright, as a door is drawn on its hinge, so that it is centred on its handle.
 fn hinge_shapes() -> Vec<crate::shapes::Shape> {
     use crate::shapes::Shape;
-    let middle = [8.5, 8.0];
+    use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH};
+    let middle = [CELL_WIDTH as f32 / 2.0, CELL_HEIGHT as f32 / 2.0];
     vec![
         Shape::Rule {
-            from: [2.5, middle[1]],
-            to: [14.5, middle[1]],
+            from: [middle[0] - 6.0, middle[1]],
+            to: [middle[0] + 6.0, middle[1]],
             width: 1.0,
             color: DIM,
         },
@@ -1165,8 +1287,9 @@ pub fn padlock(locked: bool, behind: [f32; 4]) -> Vec<crate::shapes::Shape> {
     use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH};
     let (width, height) = (CELL_WIDTH as f32, CELL_HEIGHT as f32);
     let color = if locked { LOCKED } else { BRIGHT };
-    // The body, a little rounded, across most of the cell's lower half.
-    let body = (1.0, height * 0.5, width - 2.0, height * 0.42);
+    // The body, a little rounded, across most of the cell's lower half, raised a little so that, heavier than the
+    // shackle above it, the whole centres on the cell, and so on its handle.
+    let body = (1.0, height * 0.5 - 1.5, width - 2.0, height * 0.42);
     let radius = (body.2 - 1.6) / 2.0;
     let middle = width / 2.0;
     // The shackle's top, a ring, its lower half hidden, with a leg down each side: open, it is raised, its right leg
@@ -1304,37 +1427,44 @@ fn allowed(wall: &Wall) -> bool {
         }
 }
 
-/// How far the hand moves up or down to take `wall` through the whole range of its knob or its hinge, in metres: its
-/// height, within [`TRAVELS`].
-pub fn travel(wall: &Wall) -> f32 {
-    wall.size().1.clamp(TRAVELS.0, TRAVELS.1)
-}
-
-/// How far `moved` metres down from where a handle was taken hold of counts, past [`DEAD_ZONE`] either way, as a
-/// proportion of `wall`'s [`travel`]: 0 within it, and continuous beyond it, so that leaving it does not jump.
-fn moved_by(wall: &Wall, moved: f32) -> f32 {
+/// How far `moved` metres from where a handle was taken hold of counts, past [`DEAD_ZONE`] either way, as a proportion
+/// of [`TRAVEL`]: 0 within it, and continuous beyond it, so that leaving it does not jump.
+fn moved_by(moved: f32) -> f32 {
     if !moved.is_finite() {
         return 0.0;
     }
-    moved.signum() * (moved.abs() - DEAD_ZONE).max(0.0) / travel(wall)
+    moved.signum() * (moved.abs() - DEAD_ZONE).max(0.0) / TRAVEL
 }
 
-/// The radius `wall`, as it was when its knob was taken hold of, bends to when the hand has moved `moved` metres down
-/// from where it took hold of it, or flat: its curvature, one over its radius, is as it was and grows evenly with the
-/// movement, from flat to [`most_bend`] over the wall's [`travel`], its height, so that moving further down bends it
-/// more and back up towards where it was taken, and beyond, bends it less, never beyond either. Within [`DEAD_ZONE`] of
-/// where it was taken, it is as it was; bending less than [`FLAT_BEND`] of the most it may, unless it was bent less
-/// than twice that, it is flat. A radius is a whole number of centimetres, rounded so that the wall stays within half a
-/// circle.
+/// How much of a range, from its start, flat or upright, to either end, a handle `along` of the way there takes: half
+/// as fast as evenly at its start, so that a little is fine to set, and half as fast again at its end, so that the end
+/// still comes within [`TRAVEL`]; never less for further, and odd, so that either way is alike.
+pub fn ease(along: f32) -> f32 {
+    along * (1.0 + along.abs()) / 2.0
+}
+
+/// How far of the way along a range a handle is to take `taken` of it: the inverse of [`ease`].
+pub fn unease(taken: f32) -> f32 {
+    taken.signum() * ((1.0 + 8.0 * taken.abs()).sqrt() - 1.0) / 2.0
+}
+
+/// The radius `wall`, as it was when its knob was taken hold of, bends to when the hand has moved `moved` metres to the
+/// right, as the participant sees it, from where it took hold of it, or flat: the knob is as far along its range as the
+/// wall's curvature, one over its radius, is [`ease`]d of [`most_bend`], and moves along it with the hand, from flat to
+/// the most over [`TRAVEL`], so that moving further right bends it more and back left towards where it was taken, and
+/// beyond, bends it less, never beyond either. Within [`DEAD_ZONE`] of where it was taken, it is as it was; bending
+/// less than [`FLAT_BEND`] of the most it may, unless it was bent less than twice that, it is flat. A radius is a whole
+/// number of centimetres, rounded so that the wall stays within half a circle.
 pub fn bent(wall: &Wall, moved: f32) -> Option<f32> {
     let start = wall.radius();
-    let moved = moved_by(wall, moved);
+    let moved = moved_by(moved);
     if moved == 0.0 {
         return start;
     }
     let most = most_bend(wall);
     let was = start.map_or(0.0, |radius| 1.0 / radius);
-    let curvature = (was + moved * most).clamp(0.0, most);
+    let along = (unease(was / most) + moved).clamp(0.0, 1.0);
+    let curvature = most * ease(along);
     let flat = if was > 0.0 {
         (FLAT_BEND * most).min(was / 2.0)
     } else {
@@ -1352,17 +1482,18 @@ const LONGEST_RADIUS: f32 = 50.0;
 
 /// How far `wall`, as it was when its hinge was taken hold of, tilts, in degrees, when the hand has moved `moved` metres
 /// down from where it took hold of it: as it was, more, its top towards the participant, as the hand moves down, and
-/// less, then back, as it moves up, evenly, from one end of [`layout::TILTS`] to the other over the wall's [`travel`],
-/// its height, never beyond either. Within [`DEAD_ZONE`] of where it was taken, it is as it was; within
-/// [`UPRIGHT_SNAP`] of upright, it is upright. A tilt is a whole number of degrees.
+/// less, then back, as it moves up, the hinge as far along its range as its tilt is [`ease`]d of [`layout::MOST_TILT`]
+/// either way, from one end of [`layout::TILTS`] to the other over [`TRAVEL`], never beyond either. Within
+/// [`DEAD_ZONE`] of where it was taken, it is as it was; within [`UPRIGHT_SNAP`] of upright, it is upright. A tilt is a
+/// whole number of degrees.
 pub fn tilted(wall: &Wall, moved: f32) -> f32 {
     let start = wall.tilt();
-    let moved = moved_by(wall, moved);
+    let moved = moved_by(moved);
     if moved == 0.0 {
         return start;
     }
-    let range = layout::TILTS.1 - layout::TILTS.0;
-    let tilt = (start + moved * range).clamp(layout::TILTS.0, layout::TILTS.1);
+    let along = (unease(start / layout::MOST_TILT) + 2.0 * moved).clamp(-1.0, 1.0);
+    let tilt = (layout::MOST_TILT * ease(along)).clamp(layout::TILTS.0, layout::TILTS.1);
     if tilt.abs() < UPRIGHT_SNAP {
         0.0
     } else {
@@ -1623,13 +1754,25 @@ impl Editor {
                     handle => {
                         let grab =
                             on_plane(*frame, &ray).map_or(Vec2::ONE, |at| Vec2::new(at.x, at.y));
+                        let point = ray.at(along);
+                        // Seen from straight above or below, the wall's own right.
+                        let right = (point - input.viewer)
+                            .with_y(0.0)
+                            .cross(Vec3::Y)
+                            .normalize_or(
+                                frame
+                                    .transform_vector3(Vec3::X)
+                                    .with_y(0.0)
+                                    .normalize_or(Vec3::X),
+                            );
                         self.drag = Some(Drag {
                             handle,
                             start: wall.clone(),
                             grab,
                             origin: ray.origin,
                             along,
-                            point: ray.at(along),
+                            point,
+                            right,
                             // Taken hold of where it is, it ticks only once it reaches a stop again.
                             stopped: true,
                         });
@@ -1709,13 +1852,16 @@ impl Editor {
             // Where it stood as the handle was taken hold of, which is shown, as one no longer shown is let go of.
             let frame = model(&drag.start.frame()).unwrap_or_default();
             let start = &drag.start;
-            // How far the hand has moved down from where it took hold of the knob or the hinge, so that moving across
-            // or towards the wall does nothing; in the desktop window, whose ray begins at the eyes, how far the point
-            // it was taken at has moved down.
-            let down = match input.controls {
-                Controls::Keyboard => drag.point.y - ray.at(drag.along).y,
-                Controls::Controllers => drag.origin.y - ray.origin.y,
+            // How far the hand has moved from where it took hold of the knob or the hinge; in the desktop window,
+            // whose ray begins at the eyes, how far the point it was taken at has moved. The hinge counts how far down,
+            // and the knob how far to the right, as the participant saw it as they took hold, so that moving the other
+            // way, or towards the wall, does nothing.
+            let moved = match input.controls {
+                Controls::Keyboard => ray.at(drag.along) - drag.point,
+                Controls::Controllers => ray.origin - drag.origin,
             };
+            let down = -moved.y;
+            let right = moved.dot(drag.right);
             let changed = match drag.handle {
                 // A corner sizes its slots' width and height apart, each as far across as the ray now meets the wall's
                 // plane against where it met it as it was taken hold of, to the power of [`CORNER_GAIN`], the wall
@@ -1739,13 +1885,13 @@ impl Editor {
                     Some(start.clone().with_tilt((tilt != 0.0).then_some(tilt)))
                 }
                 // The knob, the last handle dragged: a stepper changes the wall at once, as it is squeezed. It bends as
-                // far as the hand has moved down from where it took hold of it.
+                // far as the hand has moved to the right from where it took hold of it.
                 _ => Some(laid_out(
                     start,
                     start.grid(),
                     start.scale(),
                     start.aspect,
-                    bent(start, down),
+                    bent(start, right),
                 )),
             };
             if let Some(changed) = changed.filter(allowed) {
@@ -2471,13 +2617,9 @@ pub fn hint_for(
             rows.push((format!("{grip} corner"), "size and shape".to_owned(), false));
         }
         rows.push((format!("{grip} - +"), "one fewer / more".to_owned(), false));
-        let moving = if keyboard { "drag" } else { "move" };
-        rows.push((format!("{grip} ●"), format!("{moving} down to bend"), false));
-        rows.push((
-            format!("{grip} hinge"),
-            format!("{moving} down to tilt"),
-            false,
-        ));
+        // The knob moved across bends, and the hinge moved up or down tilts.
+        rows.push((format!("{grip} knob"), "↔ bend".to_owned(), false));
+        rows.push((format!("{grip} hinge"), "↕ tilt".to_owned(), false));
         if wall.kind == WallKind::Added || (rights.locks && self::carried(wall, rights)) {
             rows.push((format!("{grip} bar"), "carry it".to_owned(), false));
         }
