@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use tomori_protocol::{Activity, QueueState, Role, SpaceState};
 
 use crate::markdown_lite::{self, Inline, Kind};
+use crate::shapes::Mark;
 use crate::speakers::{self, Known, Speaker};
 use crate::ui_text::{Cell, Rgba, Row, Span, Style, Wrap, cut, fit, wrap};
 
@@ -196,9 +197,10 @@ fn markdown(id: &str, text: &str, width: usize) -> std::rc::Rc<Vec<Vec<Cell>>> {
     })
 }
 
-/// A task item's box, empty for one not ticked, and ticked for one that is: one cell each, from the bundled symbols.
-pub const UNTICKED: char = '☐';
-pub const TICKED: char = '☑';
+/// A task item's box, empty for one not ticked, and ticked for one that is: one cell each, drawn as a checkbox, and these
+/// characters where text is printed.
+pub const UNTICKED: char = Mark::Check { ticked: false }.stand_in();
+pub const TICKED: char = Mark::Check { ticked: true }.stand_in();
 
 /// `text`'s Markdown-lite as rows `width` wide, styled as the transcript styles a message, as a panel's body is too.
 pub(crate) fn parse_markdown(text: &str, width: usize) -> Vec<Vec<Cell>> {
@@ -269,7 +271,9 @@ pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<Line> {
                 wrap(&spans(style(DIM)), width.saturating_sub(2), Wrap::default())
                     .into_iter()
                     .map(|row| {
-                        let mut quoted = vec![('│', style(DIM)), (' ', style(DIM))];
+                        let bar = Mark::Quote.stand_in();
+                        let mut quoted =
+                            vec![(bar, style(DIM).marked(Mark::Quote)), (' ', style(DIM))];
                         quoted.extend(row);
                         quoted
                     }),
@@ -298,15 +302,13 @@ pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<Line> {
                 let mut item = vec![Span::new(marker.clone(), style(DIM))];
                 let text = match block.task {
                     Some(ticked) => {
-                        let (glyph, color) = if ticked {
-                            (TICKED, GREEN)
-                        } else {
-                            (UNTICKED, BRIGHT)
-                        };
+                        let color = if ticked { GREEN } else { BRIGHT };
                         // Only the first block of an item is a task's, and shows its box.
-                        let shown = format!("{glyph} ");
-                        item.push(Span::new(shown.clone(), Style::bold(color)));
-                        marker.push_str(&shown);
+                        let check = Mark::Check { ticked };
+                        item.push(check.span(1, Style::bold(color)));
+                        item.push(Span::new(" ", Style::bold(color)));
+                        marker.push(check.stand_in());
+                        marker.push(' ');
                         if ticked { DIM } else { TEXT }
                     }
                     None => TEXT,
@@ -352,7 +354,7 @@ pub(crate) fn markdown_lines(text: &str, width: usize) -> Vec<Line> {
                     table: Some(span),
                 }));
             }
-            Kind::Rule => rows.push(cut(&[Span::new("─".repeat(width), style(DIM))], width)),
+            Kind::Rule => rows.push(cut(&[Mark::Rule.span(width, style(DIM))], width)),
         }
         lines.extend(rows.into_iter().map(|cells| Line {
             cells,
@@ -741,7 +743,8 @@ pub fn header(space: &SpaceState, columns: usize) -> Row {
         .map(|mode| mode.name.clone())
         .or_else(|| space.mode.clone().filter(|_| !space.modes.is_empty()));
     let mut right = vec![
-        Span::new("● ", style(color)),
+        Mark::Dot.span(1, style(color)),
+        Span::new(" ", style(color)),
         Span::new(label, style(color)),
     ];
     if let Some(mode) = mode {
@@ -851,10 +854,15 @@ fn queue_rows(space: &SpaceState, input: &Input<'_>, state: &State, columns: usi
     if entries.is_empty() {
         return Vec::new();
     }
-    let title = format!("── Queue ({}) ", entries.len());
-    let rule = "─".repeat(columns.saturating_sub(crate::ui_text::width(&title)));
+    // A title on a rule, the rule drawn as a line either side of it.
+    let title = format!(" Queue ({}) ", entries.len());
+    let rest = columns.saturating_sub(crate::ui_text::width(&title) + 2);
     let mut rows = vec![Row::new(cut(
-        &[Span::new(format!("{title}{rule}"), style(DIM))],
+        &[
+            Mark::Rule.span(2, style(DIM)),
+            Span::new(title, style(DIM)),
+            Mark::Rule.span(rest, style(DIM)),
+        ],
         columns,
     ))];
     let focused = entries
@@ -1759,12 +1767,17 @@ mod tests {
                 ("• plain".into(), Some(6)),
             ]
         );
-        // The empty box is bright and the ticked one green, both bold, and a ticked item's text dim.
+        // The empty box is bright and the ticked one green, both bold and drawn as checkboxes, and a ticked item's text
+        // dim.
         let unticked = &lines[1].cells;
-        assert_eq!(unticked[0], (UNTICKED, Style::bold(BRIGHT)));
+        let check = |ticked| Mark::Check { ticked };
+        assert_eq!(
+            unticked[0],
+            (UNTICKED, Style::bold(BRIGHT).marked(check(false)))
+        );
         assert_eq!(unticked[2].1, style(TEXT));
         let ticked = &lines[3].cells;
-        assert_eq!(ticked[0], (TICKED, Style::bold(GREEN)));
+        assert_eq!(ticked[0], (TICKED, Style::bold(GREEN).marked(check(true))));
         assert!(ticked[2..].iter().all(|(_, style)| style.color == DIM));
         // Both boxes are drawn from a bundled font, one cell each.
         for glyph in [UNTICKED, TICKED] {

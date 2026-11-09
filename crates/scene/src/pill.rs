@@ -6,6 +6,7 @@
 //! This is free of rendering code: [`rows`] lays out a [`Status`] that the conversation gives.
 use tomori_protocol::Activity;
 
+use crate::shapes::Mark;
 pub use crate::turn::Speaking;
 use crate::ui_text::{Row, Span, Style, cut};
 
@@ -24,9 +25,9 @@ const GREEN: [f32; 4] = [0.3, 0.9, 0.5, 1.0];
 const VIOLET: [f32; 4] = [0.74, 0.56, 1.0, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// The dot while the agent speaks, ringed, so that it is told from the others by its shape as well as its colour.
-const SPEAKING_DOT: &str = "◉ ";
+const SPEAKING_DOT: Mark = Mark::Ring { dot: true };
 /// The dot while a reply waits for the participant: the ring alone, in speaking's violet, as it is about to be.
-const WAITING_DOT: &str = "○ ";
+const WAITING_DOT: Mark = Mark::Ring { dot: false };
 
 /// What needs the participant, most pressing first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,13 +78,14 @@ pub fn rows(status: &Status) -> Vec<Row> {
     } else if status.speaking.is_some() {
         SPEAKING_DOT
     } else {
-        "● "
+        Mark::Dot
     };
     let pulse = f32::from(status.pulse) / 255.0;
     let lit =
         std::array::from_fn(|channel| color[channel] + (WHITE[channel] - color[channel]) * pulse);
     let mut first = vec![
-        Span::new(dot, Style::plain(lit)),
+        dot.span(1, Style::plain(lit)),
+        Span::new(" ", Style::plain(lit)),
         Span::new(label, Style::plain(color)),
     ];
     if let Some(mode) = &status.mode {

@@ -3,7 +3,7 @@
 
 //! Panels of styled text in their own local space, drawn in the scene pass with depth testing and alpha blending, so that a hand or controller in front of one covers it, and then, where a panel's backing is opaque enough, its backing again into depth alone, so that whatever is behind it is hidden though drawn after it (see [`occlusion`](crate::occlusion)).
 //!
-//! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up, its glyphs drawn from the [`Glyphs`](crate::glyphs::Glyphs) atlas and its filled quads from the atlas's solid block; it needs no GPU, so that layouts are tested without one. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame.
+//! A [`Canvas`] is what a panel shows: rows of [`ui_text`](crate::ui_text) cells on a translucent backing, with a colour per span, row backgrounds, speaker bars, meters and shapes. [`Canvas::mesh`] turns it into quads in the panel's plane, in metres, centred on the panel's origin, with +X right and +Y up, its glyphs drawn from the [`Glyphs`](crate::glyphs::Glyphs) atlas, its shapes from the atlas's shape tiles and its filled quads from its solid block; it needs no GPU, so that layouts are tested without one. A [`Panel`] holds one canvas on the GPU and rebuilds its mesh only when the canvas changes, so that moving it costs one matrix per eye per frame.
 use glam::Mat4;
 
 pub use tomori_scene::canvas::{Canvas, Vertex};
@@ -411,17 +411,60 @@ mod tests {
         canvas: &Canvas,
         scale: f32,
         shift: f32,
-    ) -> (image::RgbaImage, impl Fn(f32, f32) -> (f32, f32)) {
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
-        let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
-        let mut panel = Panel::new(&gpu.device, &pipeline, 100_000);
+    ) -> (image::RgbaImage, impl Fn(f32, f32) -> (f32, f32) + use<>) {
+        face_on_in(
+            gpu,
+            canvas,
+            scale,
+            shift,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        )
+    }
+
+    /// As [`drawn_face_on`], into a target of `format`: a linear one, such as `Rgba8Unorm`, holds each pixel's coverage.
+    fn face_on_in(
+        gpu: &crate::test_gpu::Gpu,
+        canvas: &Canvas,
+        scale: f32,
+        shift: f32,
+        format: wgpu::TextureFormat,
+    ) -> (image::RgbaImage, impl Fn(f32, f32) -> (f32, f32) + use<>) {
         let (columns, rows) = canvas.size_in_pixels();
         // Rows read back are a multiple of 256 bytes.
         let (width, height) = (
             ((columns as f32 * scale) as u32 + 16).next_multiple_of(64),
             (rows as f32 * scale) as u32 + 16,
         );
+        // From the panel's plane, in metres about its centre, to clip space: a font pixel `scale` screen pixels.
+        let per_metre = scale / canvas.pixel;
+        let shifted = 2.0 * shift / glam::Vec2::new(width as f32, -(height as f32));
+        let transform = Mat4::from_translation(shifted.extend(0.0))
+            * Mat4::from_scale(glam::Vec3::new(
+                2.0 * per_metre / width as f32,
+                2.0 * per_metre / height as f32,
+                1.0,
+            ));
+        let image = drawn_by(gpu, canvas, &[transform], (width, height), format);
+        let place = move |x: f32, y: f32| {
+            (
+                width as f32 / 2.0 + (x - columns as f32 / 2.0) * scale + shift,
+                height as f32 / 2.0 + (y - rows as f32 / 2.0) * scale + shift,
+            )
+        };
+        (image, place)
+    }
+
+    /// `canvas` drawn once by each of `transforms`, from its plane in metres about its centre to clip space, onto an
+    /// image of `format` `width` by `height`, its width a multiple of 64, with depth, as the headset draws panels.
+    fn drawn_by(
+        gpu: &crate::test_gpu::Gpu,
+        canvas: &Canvas,
+        transforms: &[Mat4],
+        (width, height): (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> image::RgbaImage {
+        let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+        let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
         let size = wgpu::Extent3d {
             width,
             height,
@@ -442,29 +485,27 @@ mod tests {
         let texture = target(
             format,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            "face on",
+            "drawn",
         );
         let depth = target(
             wgpu::TextureFormat::Depth32Float,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
-            "face on depth",
+            "drawn depth",
         );
-        // From the panel's plane, in metres about its centre, to clip space: a font pixel `scale` screen pixels.
-        let per_metre = scale / canvas.pixel;
-        let shifted = 2.0 * shift / glam::Vec2::new(width as f32, -(height as f32));
-        let transform = Mat4::from_translation(shifted.extend(0.0))
-            * Mat4::from_scale(glam::Vec3::new(
-                2.0 * per_metre / width as f32,
-                2.0 * per_metre / height as f32,
-                1.0,
-            ));
-        panel.set(&gpu.queue, canvas);
-        panel.prepare(&gpu.queue, 0, transform);
+        let panels: Vec<Panel> = transforms
+            .iter()
+            .map(|&transform| {
+                let mut panel = Panel::new(&gpu.device, &pipeline, 100_000);
+                panel.set(&gpu.queue, canvas);
+                panel.prepare(&gpu.queue, 0, transform);
+                panel
+            })
+            .collect();
         glyphs.sync(&gpu.device, &gpu.queue);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("face on"),
+                label: Some("drawn"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &texture.create_view(&Default::default()),
                     depth_slice: None,
@@ -485,18 +526,12 @@ mod tests {
                 ..Default::default()
             });
             pipeline.set(&mut pass, &glyphs.binding());
-            panel.draw(&mut pass, &pipeline, 0);
+            for panel in &panels {
+                panel.draw(&mut pass, &pipeline, 0);
+            }
         }
         gpu.queue.submit([encoder.finish()]);
-        let image =
-            crate::test_support::read_back(&gpu.device, &gpu.queue, &texture, (width, height));
-        let place = move |x: f32, y: f32| {
-            (
-                width as f32 / 2.0 + (x - columns as f32 / 2.0) * scale + shift,
-                height as f32 / 2.0 + (y - rows as f32 / 2.0) * scale + shift,
-            )
-        };
-        (image, place)
+        crate::test_support::read_back(&gpu.device, &gpu.queue, &texture, (width, height))
     }
 
     /// How bright `image` is at `(x, y)`, the sum of its channels.
@@ -605,4 +640,6 @@ mod tests {
             );
         });
     }
+
+    mod shapes;
 }

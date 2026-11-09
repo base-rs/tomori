@@ -2,6 +2,87 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
+use crate::shapes::Shape;
+
+/// A box a shape is drawn in, or part of one, as a test reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Part {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 4],
+}
+
+/// The box `shape` fills: a box's, or a bar's track.
+fn part(shape: &Shape) -> Option<Part> {
+    match *shape {
+        Shape::Rect {
+            x,
+            y,
+            width,
+            height,
+            color,
+            ..
+        }
+        | Shape::Fill {
+            x,
+            y,
+            width,
+            height,
+            color,
+        } => Some(Part {
+            x,
+            y,
+            width,
+            height,
+            color,
+        }),
+        Shape::Bar {
+            x,
+            y,
+            width,
+            height,
+            track,
+            ..
+        } => Some(Part {
+            x,
+            y,
+            width,
+            height,
+            color: track,
+        }),
+        _ => None,
+    }
+}
+
+/// A scroll bar's track and its thumb, from the one bar in `shapes`.
+fn scroll_bar_of(shapes: &[Shape]) -> Option<[Part; 2]> {
+    let [
+        Shape::Bar {
+            x,
+            y,
+            width,
+            height,
+            fill,
+            from,
+            to,
+            ..
+        },
+    ] = *shapes
+    else {
+        return None;
+    };
+    let track = part(&shapes[0])?;
+    let thumb = Part {
+        x,
+        y: y + height * from,
+        width,
+        height: height * (to - from),
+        color: fill,
+    };
+    Some([track, thumb])
+}
 use tomori_protocol::{Grid, Meta, TOMORI_WALL, WALL_SLOTS, WallShape};
 
 /// How a curved wall's slots are sized unless it says otherwise.
@@ -140,7 +221,12 @@ fn a_flat_wall_of_any_grid_draws_its_board_and_marks_its_slots_where_its_panels_
             assert_eq!(face.shapes.len() as u32, grid.slots());
             // Each slot marked where a panel in it stands, in the face's own pixels from its top left.
             let frames = slot_frames(&wall, Mat4::IDENTITY);
-            for (shape, frame) in face.shapes.iter().zip(&frames) {
+            for (shape, frame) in face
+                .shapes
+                .iter()
+                .map(|shape| part(shape).unwrap())
+                .zip(&frames)
+            {
                 let middle = Vec3::new(
                     (shape.x + shape.width / 2.0 + WALL_PADDING.0 as f32) * PIXEL - width / 2.0,
                     height / 2.0 - (shape.y + shape.height / 2.0 + WALL_PADDING.1 as f32) * PIXEL,
@@ -2192,7 +2278,7 @@ fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
     let top = scrolled(&panel, Fit::SLOT, 0);
     assert!(footer(&top).starts_with("↓ "), "{}", footer(&top));
     assert!(!footer(&top).contains('↑'));
-    let [track, thumb] = top.shapes.as_slice() else {
+    let Some([track, thumb]) = scroll_bar_of(&top.shapes) else {
         panic!("a bar: {:?}", top.shapes);
     };
     assert_eq!((track.color, thumb.color), (SCROLL_TRACK, SCROLL_THUMB));
@@ -2214,7 +2300,7 @@ fn a_code_panel_scrolls_within_its_rows_saying_what_is_above_and_below() {
         "{above}"
     );
     assert!(!above.contains('↓'));
-    let [track, thumb] = end.shapes.as_slice() else {
+    let Some([track, thumb]) = scroll_bar_of(&end.shapes) else {
         panic!("a bar");
     };
     assert!((thumb.y + thumb.height - (track.y + track.height)).abs() < 1e-3);
@@ -2299,8 +2385,24 @@ fn a_text_panel_longer_than_its_face_scrolls_too() {
     // At the top, cut with "…", with a bar beside the body; at the end, its last row shown whole.
     let top = scrolled(&panel, Fit::SLOT, 0);
     assert!(row_text(&top.rows[3 + BODY_ROWS - 1]).ends_with('…'));
-    assert_eq!(top.shapes.len(), 2);
-    assert_eq!(top.shapes[0].height, (BODY_ROWS * CELL_HEIGHT) as f32);
+    let [track, _] = scroll_bar_of(&top.shapes).expect("a bar");
+    assert_eq!(track.height, (BODY_ROWS * CELL_HEIGHT) as f32);
+    assert!(scroll_bar_of(&[]).is_none());
+    // A filled area is a box too, and a dot is not.
+    let fill = Shape::Fill {
+        x: 1.0,
+        y: 2.0,
+        width: 3.0,
+        height: 4.0,
+        color: [1.0; 4],
+    };
+    assert_eq!(part(&fill).map(|part| part.width), Some(3.0));
+    let dot = Shape::Disc {
+        centre: [0.0; 2],
+        radius: 1.0,
+        color: [1.0; 4],
+    };
+    assert!(part(&dot).is_none());
     let end = scrolled(&panel, Fit::SLOT, most + 3);
     assert_eq!(row_text(&end.rows[3]).trim(), "• step 9");
     assert_eq!(row_text(&end.rows[3 + BODY_ROWS - 1]).trim(), "• step 20");
@@ -2507,7 +2609,7 @@ fn a_table_on_a_wall_is_a_grid_its_cells_wrapped_within_their_columns_never_cut(
     assert!(rows.iter().all(|row| !row.contains('…')), "{rows:#?}");
     // It scrolls, with its bar.
     assert!(most_scroll(&panel, Fit::SLOT, None) > 0);
-    assert_eq!(face.shapes.len(), 2);
+    assert!(scroll_bar_of(&face.shapes).is_some());
 }
 
 #[test]
