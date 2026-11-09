@@ -163,6 +163,8 @@ mod tests {
     use glam::Vec3;
     use std::time::Instant;
 
+    mod image_sharpness;
+
     #[test]
     fn a_frame_draws_its_panels_where_the_step_placed_them() {
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {

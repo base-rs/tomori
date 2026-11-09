@@ -579,7 +579,7 @@ fn tools() -> Value {
         },
         {
             "name": "show_image",
-            "description": "Show an image file on this machine as a panel on a wall in your space, for everyone in it: a PNG, JPEG, WebP or GIF (its first frame), of at most 20 MB, by its absolute path or one relative to your working directory. Use it when seeing helps, such as a render, a diagram, a screenshot or a preview you made or found; give it a short title and a caption, and say in a sentence what it shows, since it is not read aloud. Tomori scales it to at most 2048 pixels on a side.",
+            "description": "Show an image file on this machine as a panel on a wall in your space, for everyone in it: a PNG, JPEG, WebP or GIF (its first frame), of at most 20 MB, by its absolute path or one relative to your working directory. Use it when seeing helps, such as a render, a diagram, a screenshot or a preview you made or found; give it a short title and a caption, and say in a sentence what it shows, since it is not read aloud. Tomori scales it to at most 2048 pixels on a side, but a headset shows it on a wall only a few hundred pixels across, about 200 tall: crop it to what matters, keep any text in it at least a twentieth of its height, prefer a wide image to a tall one, which a slot shows smaller, and show two pictures as two images rather than stacked in one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
