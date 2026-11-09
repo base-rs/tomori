@@ -173,6 +173,11 @@ fn form(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A loopback address that refuses connections: the discard port, where nothing listens, below the range a listener bound to port 0 is given a port from, so that no other test's fake can be given it, as one bound and closed at once could be while tests run together.
+fn refusing() -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], 9))
+}
+
 /// A client is shared across a server side's threads.
 const _: fn() = || {
     fn shared<T: Send + Sync>() {}
@@ -565,9 +570,7 @@ fn a_broken_answer_is_a_transport_failure() {
 
 #[test]
 fn unreachable_sources_are_transport_failures() {
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = closed.local_addr().unwrap();
-    drop(closed);
+    let address = refusing();
     let client = Client::builder(&format!("http://{address}"))
         .build()
         .unwrap();
@@ -576,7 +579,7 @@ fn unreachable_sources_are_transport_failures() {
         matches!(&error, Error::Transport(message) if message.starts_with("could not connect")),
         "{error}"
     );
-    assert!(!error.to_string().contains(&address.port().to_string()));
+    assert!(!error.to_string().contains(&address.to_string()));
 
     let mut builder = Client::builder("https://prometheus.example");
     builder.resolver = Some(Arc::new(Vec::new));
@@ -736,9 +739,7 @@ fn a_connection_the_source_closes_is_replaced() {
 #[test]
 fn each_address_is_tried_until_one_connects_and_is_kept() {
     let fake = Fake::start();
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let refusing = closed.local_addr().unwrap();
-    drop(closed);
+    let refusing = refusing();
     let listening: std::net::SocketAddr = fake.url.trim_start_matches("http://").parse().unwrap();
     let resolved = Arc::new(AtomicUsize::new(0));
     let counter = resolved.clone();
@@ -1016,9 +1017,7 @@ fn a_time_out_longer_than_a_day_is_taken_as_a_day() {
 #[test]
 fn an_address_still_connecting_when_its_caller_gives_up_is_not_preferred() {
     let (_, roots) = certificate();
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let refusing = closed.local_addr().unwrap();
-    drop(closed);
+    let refusing = refusing();
     let stall = stalling();
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let mut builder = Client::builder("https://localhost").timeout(Duration::from_millis(300));
