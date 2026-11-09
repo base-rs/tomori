@@ -106,7 +106,7 @@ impl Pose {
     /// assert!((origin[2] + 8.0).abs() < 1e-5);
     /// ```
     pub fn carriage(arrival: &Self) -> Self {
-        // Facing as home does, unturned exactly, rather than by the difference of two `atan2`s, which differ by a
+        // Turned exactly as home is, unturned exactly, rather than by the difference of two `atan2`s, which differ by a
         // rounding where the compiler folds home's and the platform's library computes the arrival's, as macOS's does:
         // so that the default arrival's carriage is exactly the identity everywhere.
         let yaw = if arrival.orientation == Self::HOME.orientation {
