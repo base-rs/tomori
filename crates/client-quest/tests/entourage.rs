@@ -4,8 +4,9 @@
 //! The agent's entourage in the farmyard, drawn on lavapipe: its workers on their arc and its Tomori wall, at home and
 //! summoned, the wall folding, travelling and unfolding before whoever summoned it, the workers gliding after it.
 //! `TOMORI_ENTOURAGE_PREVIEW`, set to a directory, saves the renders there to look at: `travel.png`, the wall at home,
-//! mid-fold, mid-journey and unfolded at its travel spot; and, for each arrangement compared, `arc-*.png`, three, six
-//! and ten workers, down the sheet, at home and summoned, across it. See `design/projection.md` and
+//! mid-fold, mid-journey and unfolded at its travel spot; for each arrangement compared, `arc-*.png`, three, six and
+//! ten workers, down the sheet, at home and summoned, across it; and `signs.png`, the first four workers' signs close
+//! up, summoned. See `design/projection.md` and
 //! `design/environments.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -321,14 +322,14 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
         let view = texture.create_view(&Default::default());
         let mut sceneries = Sceneries::empty();
         tomori_environment_farmyard_client::register(&mut sceneries);
-        let capture = |frame: &Frame, eyes: Vec3, towards: Vec3| {
+        let capture_with = |frame: &Frame, eyes: Vec3, towards: Vec3, fov: f32| {
             let mut renderer =
                 Renderer::with_sceneries(&device, &queue, format, WIDTH, HEIGHT, 1, &sceneries);
             let mut panels = Panels::new(&device, &renderer);
             draw(&mut renderer, &device, &queue, &mut panels, frame);
             // Wide, to see the arc either side of the agent.
-            let matrix = Mat4::perspective_rh(1.3, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
-                * Mat4::look_to_rh(eyes, towards - Vec3::Y * 0.12, Vec3::Y);
+            let matrix = Mat4::perspective_rh(fov, WIDTH as f32 / HEIGHT as f32, 0.05, 80.0)
+                * Mat4::look_to_rh(eyes, towards, Vec3::Y);
             renderer.render(
                 &device,
                 &queue,
@@ -368,6 +369,10 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
             let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
             buffer.unmap();
             image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
+        };
+        // Wide, to see the arc either side of the agent, looking a little down.
+        let capture = |frame: &Frame, eyes: Vec3, towards: Vec3| {
+            capture_with(frame, eyes, towards - Vec3::Y * 0.12, 1.3)
         };
         let preview = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW").map(std::path::PathBuf::from);
         let eyes = Vec3::from_array(SUMMONER);
@@ -522,6 +527,23 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
                     WIDTH.into(),
                     (row as u32 * HEIGHT).into(),
                 );
+                // Close up, as Ada turns her head to each of the first four workers' signs.
+                if name == "arc-default" && workers == 6 {
+                    let mut close = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
+                    let mut stations: Vec<_> = frame.stations.iter().collect();
+                    stations.sort_by(|a, b| a.id.cmp(&b.id));
+                    for (index, station) in stations.iter().take(4).enumerate() {
+                        let at = Vec3::from_array(station.position) + Vec3::Y * 0.4;
+                        let drawn = capture_with(&frame, eyes, (at - eyes).normalize(), 0.45);
+                        let (x, y) = (index as u32 % 2 * WIDTH, index as u32 / 2 * HEIGHT);
+                        image::imageops::replace(&mut close, &drawn, x.into(), y.into());
+                    }
+                    if let Some(directory) = &preview {
+                        close
+                            .save(directory.join("signs.png"))
+                            .expect("the preview is saved");
+                    }
+                }
             }
             if let Some(directory) = &preview {
                 sheet

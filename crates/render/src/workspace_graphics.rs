@@ -65,8 +65,9 @@ struct Panel {
 #[derive(Default)]
 struct PageCache {
     panels: Vec<Panel>,
-    /// Each panel's mesh, with whether it has every glyph, rather than lacking some that waited for a later frame's budget.
-    meshes: Vec<(Panel, Vec<Vertex>, bool)>,
+    /// Each panel's mesh, with whether it has every glyph, rather than lacking some that waited for a later frame's budget,
+    /// and how many of its first vertices are its surface.
+    meshes: Vec<(Panel, Vec<Vertex>, bool, usize)>,
     vertices: Vec<Vertex>,
     ranges: Vec<PanelRange>,
     builds: usize,
@@ -321,22 +322,27 @@ impl PageCache {
             key.opacity = 1.0;
             let entry = if let Some(entry) = old
                 .remove(&mesh_id(&key))
-                .filter(|(cached, _, complete)| *complete && *cached == key)
+                .filter(|(cached, _, complete, _)| *complete && *cached == key)
             {
                 entry
             } else {
                 let waited = tomori_text::atlas::waited();
                 let mut vertices = Vec::new();
-                panel_mesh(&key, &mut vertices);
+                let surface = panel_mesh(&key, &mut vertices);
                 self.builds += 1;
-                (key, vertices, tomori_text::atlas::waited() == waited)
+                (
+                    key,
+                    vertices,
+                    tomori_text::atlas::waited() == waited,
+                    surface,
+                )
             };
             self.meshes.push(entry);
         }
-        self.complete = self.meshes.iter().all(|(_, _, complete)| *complete);
+        self.complete = self.meshes.iter().all(|(_, _, complete, _)| *complete);
         self.vertices.clear();
         self.ranges.clear();
-        for (panel, (_, mesh, _)) in panels.iter().zip(&self.meshes) {
+        for (panel, (_, mesh, _, surface)) in panels.iter().zip(&self.meshes) {
             let start = self.vertices.len() as u32;
             assert!(
                 self.vertices.len() + mesh.len() <= MAX_VERTICES,
@@ -353,11 +359,7 @@ impl PageCache {
                     center: panel.center(),
                     occludes: crate::occlusion::occludes(panel.opacity),
                     vertices: start..end,
-                    surface: mesh[..((end - start) as usize).min(if panel.sign.is_some() {
-                        26 * 6
-                    } else {
-                        2 * 6
-                    })]
+                    surface: mesh[..((end - start) as usize).min(*surface)]
                         .as_chunks::<3>()
                         .0
                         .iter()
@@ -580,15 +582,17 @@ const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     attributes: &ATTRIBUTES,
 };
 
+/// What a worker's sign says of its state, in its pill, and the state's colour, which tints the pill, its symbol and
+/// the leader down to the worker.
 fn state_label(state: &State) -> (&'static str, [f32; 3]) {
     match state {
-        State::Running => ("RUNNING", [0.4, 0.72, 1.0]),
-        State::Waiting => ("WAITING", [1.0, 0.72, 0.24]),
-        State::Idle => ("IDLE", [0.55, 0.7, 0.78]),
-        State::Completed => ("COMPLETED", [0.3, 0.95, 0.65]),
-        State::Error => ("ERROR", [1.0, 0.35, 0.3]),
-        State::Stopped => ("STOPPED", [0.8, 0.68, 0.55]),
-        State::Unknown => ("UNKNOWN", [0.7, 0.65, 0.8]),
+        State::Running => ("Running", [0.4, 0.72, 1.0]),
+        State::Waiting => ("Waiting", [1.0, 0.72, 0.24]),
+        State::Idle => ("Idle", [0.55, 0.7, 0.78]),
+        State::Completed => ("Finished", [0.3, 0.95, 0.65]),
+        State::Error => ("Error", [1.0, 0.35, 0.3]),
+        State::Stopped => ("Stopped", [0.8, 0.68, 0.55]),
+        State::Unknown => ("Unknown", [0.7, 0.65, 0.8]),
     }
 }
 
@@ -1011,31 +1015,25 @@ fn shape(mesh: &mut Vec<Vertex>, shape: &Shape, p: f32, z: f32) {
 /// The widest strip of a shape on a panel, in font pixels: a sign's backing's, 24 strips across its 28 cells.
 const STRIP_PIXELS: f32 = 10.0;
 
-/// A line symbol from `a` to `b`, in local panel metres with y up, `width` across, `p` metres to a font pixel.
-fn stroke(mesh: &mut Vec<Vertex>, a: [f32; 2], b: [f32; 2], width: f32, p: f32, color: [f32; 4]) {
-    let rule = Shape::Rule {
-        from: [a[0] / p, -a[1] / p],
-        to: [b[0] / p, -b[1] / p],
-        width: width / p,
-        color,
-    };
-    shape(mesh, &rule, p, 0.001);
-}
-
-fn status_symbol(mesh: &mut Vec<Vertex>, state: State, p: f32, color: [f32; 4]) {
-    // Right of the status word, with room for even "COMPLETED".
-    let x = 14.0 * 9.0 * p;
-    let y = -15.0 * p;
-    let size = 5.0 * p;
+/// The symbol of `state`, drawn as lines about `centre`, `size` font pixels from its middle to its edge, `p` metres to a
+/// font pixel: a distinct shape for each state, so that colour is never all that tells them apart.
+fn status_symbol(
+    mesh: &mut Vec<Vertex>,
+    state: State,
+    centre: [f32; 2],
+    size: f32,
+    p: f32,
+    color: [f32; 4],
+) {
     let mut line = |a: [f32; 2], b: [f32; 2]| {
-        stroke(
-            mesh,
-            [x + a[0] * size, y + a[1] * size],
-            [x + b[0] * size, y + b[1] * size],
-            1.5 * p,
-            p,
+        // In the symbol's own frame, y up, as it was designed.
+        let rule = Shape::Rule {
+            from: [centre[0] + a[0] * size, centre[1] - a[1] * size],
+            to: [centre[0] + b[0] * size, centre[1] - b[1] * size],
+            width: 1.4,
             color,
-        );
+        };
+        shape(mesh, &rule, p, SIGN_TEXT);
     };
     match state {
         State::Completed => {
@@ -1076,52 +1074,183 @@ fn status_symbol(mesh: &mut Vec<Vertex>, state: State, p: f32, color: [f32; 4]) 
     }
 }
 
-fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
+/// How a worker's sign is drawn, in font pixels from its text's top-left corner, y down: its plate reaches
+/// [`PLATE_MARGIN`] beyond its text across and down, its corners rounded by [`PLATE_RADIUS`]; its title in one colour,
+/// [`TITLE`]; its state as a pill on its last row, [`PILL_HEIGHT`] tall, its symbol in its first [`PILL_SYMBOL`] and its
+/// word after; and a leader [`LEADER_WIDTH`] wide from the middle of its plate's bottom edge to its worker's middle,
+/// ending in a dot [`LEADER_DOT`] across. Depths, in metres in front of the sign's plane: the leader behind the plate,
+/// the pill on it, its text and symbol in front.
+const PLATE_MARGIN: [f32; 2] = [2.0, 3.0];
+const PLATE_RADIUS: f32 = 3.0;
+const PLATE: [f32; 3] = [0.016, 0.03, 0.055];
+const TITLE: [f32; 3] = [0.92, 0.95, 1.0];
+const PILL_HEIGHT: f32 = 10.0;
+const PILL_SYMBOL: f32 = 12.0;
+const LEADER_WIDTH: f32 = 1.3;
+const LEADER_DOT: f32 = 2.6;
+const SIGN_LEADER: f32 = -0.006;
+const SIGN_PLATE: f32 = -0.004;
+const SIGN_PILL: f32 = -0.002;
+const SIGN_TEXT: f32 = 0.0;
+
+/// A worker's sign: its plate, its title, its state's pill and the leader down to its worker, in the sign's own frame,
+/// `p` metres to a font pixel, x across and y up from its text's top-left corner, before it is bowed and placed.
+/// Returns how many of its first vertices are its plate, its surface, which hides what is behind it.
+fn sign_mesh(panel: &Panel, sign: &Sign, mesh: &mut Vec<Vertex>) -> usize {
+    let p = panel.pixel;
+    let color = |rgb: [f32; 3], alpha: f32| [rgb[0], rgb[1], rgb[2], alpha * panel.opacity];
+    let width = (panel.columns * 9) as f32;
+    let rows = panel.lines.len();
+    let height = (rows * 11) as f32;
+    // The plate, first, so that it is the surface.
+    let plate = Shape::Rect {
+        x: -PLATE_MARGIN[0],
+        y: -PLATE_MARGIN[1],
+        width: width + 2.0 * PLATE_MARGIN[0],
+        height: height + 2.0 * PLATE_MARGIN[1],
+        color: color(PLATE, 1.0),
+        radius: PLATE_RADIUS,
+        outline: None,
+    };
+    shape(mesh, &plate, p, SIGN_PLATE);
+    let surface = mesh.len();
+    // The leader, from the middle of the plate's bottom edge to the worker's middle, wherever the sign stands, ending in a
+    // dot there, in the state's colour, faint.
+    let station = glam::Vec3::from_array(sign.station) - glam::Vec3::from_array(panel.origin);
+    let to = [
+        station.dot(glam::Vec3::from_array(sign.right)) / p,
+        -station.y / p,
+    ];
+    let from = [width / 2.0, height + PLATE_MARGIN[1]];
+    shape(
+        mesh,
+        &Shape::Rule {
+            from,
+            to,
+            width: LEADER_WIDTH,
+            color: color(panel.accent, 0.55),
+        },
+        p,
+        SIGN_LEADER,
+    );
+    shape(
+        mesh,
+        &Shape::Disc {
+            centre: to,
+            radius: LEADER_DOT,
+            color: color(panel.accent, 0.85),
+        },
+        p,
+        SIGN_LEADER,
+    );
+    // The title, every row in one colour.
+    let row = |mesh: &mut Vec<Vertex>, text: &str, x: f32, index: usize, rgb: [f32; 3]| {
+        let cells: Vec<(char, ())> =
+            crate::ui_text::cut(&[crate::ui_text::Span::new(text, ROW_STYLE)], panel.columns)
+                .into_iter()
+                .map(|(ch, _)| (ch, ()))
+                .collect();
+        let top = (index * 11) as f32;
+        for (glyph, ()) in crate::ui_text::quads(&cells, x, top, 11.0, |()| false) {
+            textured(
+                mesh,
+                [
+                    glyph.x * p,
+                    -glyph.y * p,
+                    SIGN_TEXT,
+                    glyph.width * p,
+                    glyph.height * p,
+                ],
+                color(rgb, 1.0),
+                glyph.tile,
+                glyph.weight,
+            );
+        }
+    };
+    let (status, title) = panel
+        .lines
+        .split_last()
+        .expect("a sign has its state's row");
+    for (index, line) in title.iter().enumerate() {
+        row(mesh, line, 0.0, index, TITLE);
+    }
+    // Its state, a pill on the last row: tinted, its symbol, then its word, in the state's colour.
+    let top = height - 11.0;
+    let words = crate::ui_text::width(status) as f32 * 9.0;
+    shape(
+        mesh,
+        &Shape::Rect {
+            x: -1.0,
+            y: top + (11.0 - PILL_HEIGHT) / 2.0,
+            width: PILL_SYMBOL + words + 5.0,
+            height: PILL_HEIGHT,
+            color: color(panel.accent, 0.2),
+            radius: PILL_HEIGHT / 2.0,
+            outline: None,
+        },
+        p,
+        SIGN_PILL,
+    );
+    status_symbol(
+        mesh,
+        sign.state,
+        [PILL_SYMBOL / 2.0, top + 5.5],
+        3.0,
+        p,
+        color(panel.accent, 1.0),
+    );
+    row(mesh, status, PILL_SYMBOL, rows - 1, panel.accent);
+    surface
+}
+
+/// A panel's mesh: a sign's, or a card's or notice's. Returns how many of its first vertices are its surface, which
+/// hides what is behind it.
+fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) -> usize {
     let start = mesh.len();
-    // Work in panel-local coordinates, then rotate and gently bow the sign.
+    let p = panel.pixel;
+    let surface = match &panel.sign {
+        Some(sign) => sign_mesh(panel, sign, mesh),
+        None => card_mesh(panel, mesh),
+    } - start;
+    for vertex in &mut mesh[start..] {
+        let [x, y, z] = vertex.position;
+        vertex.position = if let Some(sign) = &panel.sign {
+            let mid = (panel.columns * 9) as f32 * p * 0.5;
+            // Only 5 cm of depth across the roughly one-metre sign.
+            let bow = 0.05 * ((x - mid) / mid).powi(2);
+            [
+                panel.origin[0] + sign.right[0] * x + sign.normal[0] * (z + bow),
+                panel.origin[1] + y,
+                panel.origin[2] + sign.right[2] * x + sign.normal[2] * (z + bow),
+            ]
+        } else {
+            [
+                panel.origin[0] + x,
+                panel.origin[1] + y,
+                panel.origin[2] + z,
+            ]
+        };
+    }
+    surface
+}
+
+/// A card's or notice's mesh, in its own frame: its background, its accent bar, its rule and its rows. Returns the
+/// length of the mesh once its background is in it.
+fn card_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) -> usize {
     let (x, y, z) = (0.0, 0.0, 0.0);
     let p = panel.pixel;
     let width = (panel.columns * 9 + 4) as f32 * p;
     let height = (panel.lines.len() * 11 + 4) as f32 * p;
     let color = |rgb: [f32; 3]| [rgb[0], rgb[1], rgb[2], panel.opacity];
-    if panel.sign.is_some() {
-        let mid = (panel.columns * 9) as f32 * p * 0.5;
-        // A thin post reaches down towards the station without dominating it, to just above its flock.
-        let lift = panel.sign.as_ref().map_or(1.0, |sign| sign.scale) * SIGN_LIFT;
-        quad(
-            mesh,
-            mid - 1.3 * p,
-            y - height + 2.0 * p,
-            z - 0.008,
-            2.6 * p,
-            lift - 0.12,
-            color([0.16, 0.25, 0.3]),
-        );
-        // Strip tessellation tracks the shallow arc; foreground glyphs stay in
-        // front by 4 mm even between strip vertices.
-        const STRIPS: usize = 24;
-        for i in 0..STRIPS {
-            quad(
-                mesh,
-                x - p * 2.0 + width * i as f32 / STRIPS as f32,
-                y + p * 2.0,
-                z - 0.004,
-                width / STRIPS as f32,
-                height,
-                color([0.012, 0.024, 0.045]),
-            );
-        }
-    } else {
-        quad(
-            mesh,
-            x - p * 2.0,
-            y + p * 2.0,
-            z - 0.003,
-            width,
-            height,
-            color([0.012, 0.024, 0.045]),
-        );
-    }
+    quad(
+        mesh,
+        x - p * 2.0,
+        y + p * 2.0,
+        z - 0.003,
+        width,
+        height,
+        color([0.012, 0.024, 0.045]),
+    );
     quad(
         mesh,
         x - p * 3.0,
@@ -1131,13 +1260,7 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
         height,
         color(panel.accent),
     );
-    if let Some(sign) = &panel.sign {
-        let symbol_start = mesh.len();
-        status_symbol(mesh, sign.state, p, color(panel.accent));
-        for vertex in &mut mesh[symbol_start..] {
-            vertex.position[1] -= panel.lines.len().saturating_sub(2) as f32 * 11.0 * p;
-        }
-    }
+    let surface = mesh.len();
     if let Some(row) = panel.rule.filter(|&row| row < ROWS.min(panel.lines.len())) {
         let middle = (row * 11) as f32 + 5.5;
         let rule = Shape::Rule {
@@ -1181,40 +1304,7 @@ fn panel_mesh(panel: &Panel, mesh: &mut Vec<Vertex>) {
             );
         }
     }
-    for vertex in &mut mesh[start..] {
-        let [x, y, z] = vertex.position;
-        vertex.position = if let Some(sign) = &panel.sign {
-            let mid = (panel.columns * 9) as f32 * p * 0.5;
-            // Only 5 cm of depth across the roughly one-metre sign.
-            let bow = 0.05 * ((x - mid) / mid).powi(2);
-            [
-                panel.origin[0] + sign.right[0] * x + sign.normal[0] * (z + bow),
-                panel.origin[1] + y,
-                panel.origin[2] + sign.right[2] * x + sign.normal[2] * (z + bow),
-            ]
-        } else {
-            [
-                panel.origin[0] + x,
-                panel.origin[1] + y,
-                panel.origin[2] + z,
-            ]
-        };
-    }
-    if let Some(sign) = &panel.sign {
-        let center = panel.center();
-        let station = glam::Vec3::from_array(sign.station);
-        // A sign moved off its own place, beside its station or above it, keeps a
-        // thin, literal station association; this is a signpost, not an inferred
-        // worker communication edge.
-        if !sign.own || (center.x - station.x).hypot(center.z - station.z) > 0.2 {
-            for (index, side) in [(2, 1.0), (4, 1.0), (5, -1.0)] {
-                mesh[start + index].position = (station
-                    + glam::Vec3::Y * 0.18
-                    + glam::Vec3::from_array(sign.right) * (side * 1.3 * p))
-                    .to_array();
-            }
-        }
-    }
+    surface
 }
 
 #[cfg(test)]
@@ -1325,9 +1415,9 @@ mod tests {
         ];
         for title in &titles {
             // A sign: rows of at most its width in cells, never more than its most rows, and a title that does not fit them ends with "…".
-            let lines = label_lines(title, "COMPLETED");
+            let lines = label_lines(title, "Finished");
             let (status, rows) = lines.split_last().unwrap();
-            assert_eq!(status, "COMPLETED");
+            assert_eq!(status, "Finished");
             assert!(rows.len() <= SIGN_TITLE_ROWS, "{lines:?}");
             assert!(
                 rows.iter().all(|row| width(row) <= SIGN_COLUMNS),
@@ -1391,11 +1481,11 @@ mod tests {
             );
         }
         // The Japanese title fits its sign whole, fourteen characters a row.
-        let lines = label_lines(&titles[0], "COMPLETED");
+        let lines = label_lines(&titles[0], "Finished");
         assert_eq!(lines[..lines.len() - 1].concat(), titles[0]);
         assert!(lines.iter().all(|line| !line.contains('…')));
         // The longest Japanese title is cut at the sign's last row, with "…".
-        let lines = label_lines(&titles[3], "COMPLETED");
+        let lines = label_lines(&titles[3], "Finished");
         assert_eq!(lines.len(), SIGN_TITLE_ROWS + 1);
         assert!(lines[SIGN_TITLE_ROWS - 1].ends_with('…'), "{lines:?}");
         // A wide character that would cross the edge of a row goes to the next, whole.
@@ -1478,7 +1568,7 @@ mod tests {
                         panel.lines[..panel.lines.len() - 1].concat(),
                         stations[i].title
                     );
-                    assert_eq!(panel.lines.last().unwrap(), "UNKNOWN");
+                    assert_eq!(panel.lines.last().unwrap(), "Unknown");
                     assert_eq!(panel.sign.as_ref().unwrap().station, stations[i].position);
                     // At one spot, the signs about it hold 30 stations apart, three columns within 30° of ten rows;
                     // beyond that they may overlap, rather than stand far off (see `LabelPlacement`).
@@ -1496,7 +1586,7 @@ mod tests {
                     cache
                         .meshes
                         .iter()
-                        .map(|(_, mesh, _)| mesh.len())
+                        .map(|(_, mesh, _, _)| mesh.len())
                         .sum::<usize>()
                 );
                 assert_eq!(
@@ -1681,23 +1771,29 @@ mod tests {
             opacity: 1.0,
             position: [0.0, 1.2, -3.0],
         };
-        let post_bottom = |sign: [f32; 3]| {
+        // Where its leader ends: the lowest point of its mesh, its dot about the station's middle.
+        let leader_end = |sign: [f32; 3]| {
             let panel = station_panel(&station, sign, State::Running);
             let mut mesh = Vec::new();
             panel_mesh(&panel, &mut mesh);
-            mesh[..6]
-                .iter()
-                .map(|vertex| vertex.position[1])
-                .fold(f32::INFINITY, f32::min)
+            mesh.iter()
+                .map(|vertex| glam::Vec3::from_array(vertex.position))
+                .min_by(|a, b| a.y.total_cmp(&b.y))
+                .unwrap()
         };
-        // In its own place, its post is its own, hanging below the sign rather than drawn to the station.
-        assert!((post_bottom(station.position) - (1.2 + 0.18)).abs() > 1e-3);
-        // Stacked straight above it, or beside it, the post reaches down to just above the station.
-        for moved in [[0.0, 1.2 + 2.0 * SIGN_ROW, -3.0], [1.1, 1.2, -2.8]] {
-            assert!(
-                (post_bottom(moved) - (1.2 + 0.18)).abs() < 1e-4,
-                "{moved:?}"
-            );
+        let middle = glam::Vec3::from_array(station.position);
+        // In its own place, straight above it, stacked above it, or beside it, its leader reaches down to the station's
+        // middle, ending in a dot there, in the sign's plane, so that from whoever it faces it is over the station.
+        for place in [
+            station.position,
+            [0.0, 1.2 + 2.0 * SIGN_ROW, -3.0],
+            [1.1, 1.2, -2.8],
+        ] {
+            let panel = station_panel(&station, place, State::Running);
+            let normal = glam::Vec3::from_array(panel.sign.unwrap().normal);
+            let off = leader_end(place) - middle;
+            let across = off - normal * off.dot(normal);
+            assert!(across.length() < 0.03, "{place:?}: {off}");
         }
     }
 
@@ -1853,7 +1949,7 @@ mod tests {
         let labels: Vec<_> = panels.iter().filter(|p| p.columns == 28).collect();
         assert_eq!(labels.len(), 64);
         for (i, label) in labels.iter().enumerate() {
-            assert_eq!(label.lines[1], "COMPLETED");
+            assert_eq!(label.lines[1], "Finished");
             assert!(
                 labels
                     .iter()
@@ -1874,7 +1970,7 @@ mod tests {
                 .0
                 .iter()
                 .filter(|p| p.columns == 28)
-                .all(|p| p.lines[1] == "COMPLETED")
+                .all(|p| p.lines[1] == "Finished")
         );
         for stale in [
             Workspace {
@@ -1889,7 +1985,7 @@ mod tests {
                 panels
                     .iter()
                     .filter(|p| p.columns == 28)
-                    .all(|p| p.lines[1] == "UNKNOWN")
+                    .all(|p| p.lines[1] == "Unknown")
             );
             assert!(panels.iter().any(|p| p.columns == 28));
         }
@@ -2024,7 +2120,7 @@ mod tests {
         let panel = labels.iter().find(|p| p.columns == 28).unwrap();
         assert!(arriving.opacity > 0.0 && arriving.opacity < 1.0);
         assert_eq!(panel.opacity, arriving.opacity);
-        assert_eq!(panel.lines[1], "COMPLETED");
+        assert_eq!(panel.lines[1], "Finished");
         for _ in 0..40 {
             scene.update(Some("root"), &workspace, 0.05);
         }
@@ -2034,7 +2130,7 @@ mod tests {
         let panel = labels.iter().find(|p| p.columns == 28).unwrap();
         assert!(departing.opacity < 1.0);
         assert_eq!(panel.opacity, departing.opacity);
-        assert_eq!(panel.lines[1], "UNKNOWN");
+        assert_eq!(panel.lines[1], "Unknown");
     }
 
     fn test_sign(position: [f32; 3], state: State) -> Panel {
@@ -2066,7 +2162,7 @@ mod tests {
             assert_eq!(panel.lines, ["Readable task", state_label(&state).0]);
             assert_eq!(panel.sign.as_ref().unwrap().state, state);
             let mut symbol = Vec::new();
-            status_symbol(&mut symbol, state, panel.pixel, [1.0; 4]);
+            status_symbol(&mut symbol, state, [6.0, 5.5], 3.0, panel.pixel, [1.0; 4]);
             assert!(!symbol.is_empty());
             let positions: Vec<_> = symbol.iter().map(|v| v.position).collect();
             assert!(
@@ -2075,9 +2171,10 @@ mod tests {
             );
             shapes.push(positions);
             let mut mesh = Vec::new();
-            panel_mesh(&panel, &mut mesh);
-            // Text runs still exist beyond the post, background and symbol.
-            assert!(mesh.len() > (24 + 2 + symbol.len() / 6) * 6);
+            let surface = panel_mesh(&panel, &mut mesh);
+            // Its plate is its surface, and its title's text is drawn beyond its plate, leader, pill and symbol.
+            assert!(surface > 0);
+            assert!(mesh.len() > surface + symbol.len() + "Readabletask".len() * 6);
         }
         let workspace = Workspace {
             nodes: vec![node("a", State::Error)],
@@ -2092,7 +2189,7 @@ mod tests {
             opacity: 1.0,
         };
         let panel = test_layout(&workspace, &[old_snapshot], 0, 0).0.remove(0);
-        assert_eq!(panel.lines[1], "ERROR");
+        assert_eq!(panel.lines[1], "Error");
         assert_eq!(panel.sign.unwrap().state, State::Error);
     }
 
@@ -2125,22 +2222,39 @@ mod tests {
                     .chain(v.color.iter())
                     .all(|n| n.is_finite())
             }));
-            // First quad is the post, extending below the sign to just above its station's flock.
-            let post_bottom = mesh[..6]
+            // Its leader reaches down to its station's middle, ending in a dot there.
+            let lowest = mesh
                 .iter()
                 .map(|v| v.position[1])
                 .fold(f32::INFINITY, f32::min);
-            let lift = SIGN_LIFT * sign.scale;
+            let dot = (LEADER_DOT + 4.0) * panel.pixel;
             assert!(
-                (post_bottom - (position[1] + 0.12)).abs() < 0.01 * sign.scale,
-                "{post_bottom} {position:?} {lift}"
+                lowest <= position[1] && lowest >= position[1] - dot,
+                "{lowest} {position:?}"
             );
-            // Both background edges bow towards the observer, with text in front.
-            let mid = 12 * 6;
-            let distance = |v: &Vertex| {
-                (v.position[0] - panel.origin[0]) * nx + (v.position[2] - panel.origin[2]) * nz
+            // Its plate's edges bow towards the observer, its middle not.
+            let mut surface = Vec::new();
+            let plate = panel_mesh(&panel, &mut surface);
+            let local = |v: &Vertex| {
+                let d = glam::Vec3::from_array(v.position) - glam::Vec3::from_array(panel.origin);
+                (
+                    d.dot(glam::Vec3::from_array(sign.right)),
+                    d.dot(glam::Vec3::from_array(sign.normal)),
+                )
             };
-            assert!(distance(&mesh[6]) > distance(&mesh[6 + mid]) + 0.03);
+            let points: Vec<(f32, f32)> = surface[..plate].iter().map(local).collect();
+            let mid = (panel.columns * 9) as f32 * panel.pixel * 0.5;
+            let edge = points
+                .iter()
+                .filter(|(x, _)| (x - mid).abs() > mid * 0.95)
+                .map(|(_, z)| *z)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let middle = points
+                .iter()
+                .filter(|(x, _)| (x - mid).abs() < mid * 0.1)
+                .map(|(_, z)| *z)
+                .fold(f32::INFINITY, f32::min);
+            assert!(edge > middle + 0.03, "{edge} {middle}");
         }
         for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY, 101.0] {
             let workspace = Workspace {
@@ -2177,10 +2291,27 @@ mod tests {
                 d.dot(glam::Vec3::from_array(sign.normal)),
             )
         };
-        let background = &mesh[6..(1 + 24) * 6];
-        // Check the foreground edges and their midpoints against the straight
-        // strip surfaces, not just against the ideal quadratic bow.
-        for quad in mesh[(1 + 24 + 1) * 6..].as_chunks::<6>().0 {
+        let mut surface = Vec::new();
+        let plate = panel_mesh(&panel, &mut surface);
+        let background = &mesh[..plate];
+        let mid = (panel.columns * 9) as f32 * panel.pixel * 0.5;
+        // Each vertex's depth in front of the sign's plane, before it is bowed.
+        let depth = |v: &Vertex| {
+            let (x, z) = local(v);
+            z - 0.05 * ((x - mid) / mid).powi(2)
+        };
+        // Check the foreground edges and their midpoints against the straight strip surfaces, not just against the
+        // ideal quadratic bow: the text and symbol, 4 mm in front of the plate, and the pill, 2 mm.
+        for (quad, clear) in mesh[plate..].as_chunks::<6>().0.iter().filter_map(|quad| {
+            let z = depth(&quad[0]);
+            if z > SIGN_PILL + 1e-4 {
+                Some((quad, 0.0037))
+            } else if z > SIGN_PLATE + 1e-4 {
+                Some((quad, 0.0017))
+            } else {
+                None
+            }
+        }) {
             for (a, b) in [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2)] {
                 let (xa, za) = local(&quad[a]);
                 let (xb, zb) = local(&quad[b]);
@@ -2188,10 +2319,10 @@ mod tests {
                 for strip in background.as_chunks::<6>().0 {
                     let (left, zl) = local(&strip[0]);
                     let (right, zr) = local(&strip[1]);
-                    if x >= left && x <= right {
+                    if x >= left && x <= right && right > left {
                         let behind = zl + (zr - zl) * (x - left) / (right - left);
                         assert!(
-                            z - behind > 0.0037,
+                            z - behind > clear,
                             "foreground is too close to the background"
                         );
                         break;
@@ -2262,7 +2393,8 @@ mod tests {
             assert!(
                 cache.vertices[..sign_len]
                     .iter()
-                    .all(|v| v.color[3] == opacity)
+                    .zip(&original)
+                    .all(|(v, before)| v.color[3] == before.color[3] * opacity)
             );
             assert_eq!(
                 bytemuck::cast_slice::<Vertex, u8>(&cache.vertices[sign_len..]),
@@ -2800,11 +2932,11 @@ mod tests {
                                 );
                                 let glyphs: Vec<_> = (0..512 * 512)
                                     .map(|p| p * 4)
-                                    // The title's colour at half coverage or more: at four metres its strokes are under half a pixel wide, and antialiased rather than aliased, so few pixels are wholly covered.
+                                    // The title's white at half coverage or more, which nothing else of the sign is: at four metres its strokes are under half a pixel wide, and antialiased rather than aliased, so few pixels are wholly covered.
                                     .filter(|&i| {
-                                        sign_image[i] > 30
-                                            && sign_image[i + 1] > 120
-                                            && sign_image[i + 2] > 80
+                                        sign_image[i] > 110
+                                            && sign_image[i + 1] > 110
+                                            && sign_image[i + 2] > 110
                                             && rear_image[i + 1] < 100
                                     })
                                     .collect();
@@ -2901,10 +3033,11 @@ mod tests {
                         let buggy = capture_order(&graphics, matrix, false, false);
                         let glyphs: Vec<_> = (0..512 * 512)
                             .map(|p| p * 4)
+                            // The title's white, which nothing else of the sign is.
                             .filter(|&i| {
-                                sign_image[i] > 50
-                                    && sign_image[i + 1] > 180
-                                    && sign_image[i + 2] > 120
+                                sign_image[i] > 150
+                                    && sign_image[i + 1] > 150
+                                    && sign_image[i + 2] > 150
                             })
                             .collect();
                         assert!(glyphs.len() > 5);
@@ -2950,7 +3083,8 @@ mod tests {
                     let mut blocked = 0;
                     let mut visible = 0;
                     for i in (0..sign_image.len()).step_by(4) {
-                        if sign_image[i] > 50 && sign_image[i + 1] > 180 && sign_image[i + 2] > 120
+                        // The title's white, which nothing else of the sign is.
+                        if sign_image[i] > 150 && sign_image[i + 1] > 150 && sign_image[i + 2] > 150
                         {
                             if body_image[i + 2] > 190 && body_image[i + 1] < 50 {
                                 blocked += 1;
@@ -3025,7 +3159,7 @@ mod tests {
                         .cache
                         .meshes
                         .iter()
-                        .map(|(_, mesh, _)| mesh.len())
+                        .map(|(_, mesh, _, _)| mesh.len())
                         .sum::<usize>()
                 );
                 assert!(graphics.vertex_capacity >= graphics.cache.vertices.len());
@@ -3044,8 +3178,8 @@ mod tests {
                     let image = capture(&graphics, matrix, false);
                     let glyphs = (245..270)
                         .flat_map(|y| (180..330).map(move |x| (y * 512 + x) * 4))
-                        // White at about two thirds coverage or more: from two to five metres, strokes are under a pixel wide and antialiased rather than aliased, so few pixels are wholly covered.
-                        .filter(|&p| image[p] > 150 && image[p + 1] > 150 && image[p + 2] > 150)
+                        // The title's white at about half coverage or more: from two to five metres, and as much as 50° above the eyes, strokes are under a pixel wide and antialiased rather than aliased, so few pixels are wholly covered.
+                        .filter(|&p| image[p] > 110 && image[p + 1] > 110 && image[p + 2] > 110)
                         .count();
                     assert!(glyphs > 4, "source {i} has no readable center glyphs");
                     {
@@ -3075,7 +3209,13 @@ mod tests {
     #[test]
     fn shapes_stop_at_the_vertex_limit_and_a_stroke_needs_a_length() {
         let mut mesh = Vec::new();
-        stroke(&mut mesh, [0.0, 0.0], [0.0, 0.0], 0.01, 0.001, [1.0; 4]);
+        let rule = |to: [f32; 2]| Shape::Rule {
+            from: [0.0, 0.0],
+            to,
+            width: 10.0,
+            color: [1.0; 4],
+        };
+        shape(&mut mesh, &rule([0.0, 0.0]), 0.001, 0.0);
         assert!(mesh.is_empty());
         mesh.resize(
             MAX_VERTICES - 5,
@@ -3087,7 +3227,7 @@ mod tests {
             },
         );
         quad(&mut mesh, 0.0, 0.0, 0.0, 1.0, 1.0, [1.0; 4]);
-        stroke(&mut mesh, [0.0, 0.0], [1.0, 0.0], 0.01, 0.001, [1.0; 4]);
+        shape(&mut mesh, &rule([1000.0, 0.0]), 0.001, 0.0);
         assert_eq!(mesh.len(), MAX_VERTICES - 5);
     }
 
