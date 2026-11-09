@@ -2202,6 +2202,31 @@ mod tests {
     }
 
     #[test]
+    fn surfaces_that_only_touch_along_an_edge_have_no_order() {
+        // Two triangles of a square, at different depths, sharing its diagonal: their bounds overlap, but what they
+        // share is a line, of no area, so neither is in front.
+        let triangle = |points: [[f32; 3]; 3]| {
+            let points = points.map(glam::Vec3::from_array);
+            ProjectedTriangle {
+                points,
+                low: points
+                    .iter()
+                    .fold(glam::Vec2::splat(f32::INFINITY), |low, p| {
+                        low.min(p.truncate())
+                    }),
+                high: points
+                    .iter()
+                    .fold(glam::Vec2::splat(f32::NEG_INFINITY), |high, p| {
+                        high.max(p.truncate())
+                    }),
+            }
+        };
+        let near = triangle([[0.0, 0.0, 0.2], [1.0, 0.0, 0.2], [0.0, 1.0, 0.2]]);
+        let far = triangle([[1.0, 0.0, 0.8], [1.0, 1.0, 0.8], [0.0, 1.0, 0.8]]);
+        assert_eq!(overlap_order(&[near], &[far]), None);
+    }
+
+    #[test]
     fn angular_overlap_respects_bearings_wrap_distance_and_height() {
         let a = test_sign([1.0, 1.18, -1.0], State::Running);
         let separate = test_sign([1.0, 1.18, -4.0], State::Running);

@@ -5,7 +5,7 @@
 //! stands before the eyes at home, so that it goes where the conversation went rather than staying behind. The wall's
 //! home never changes; the travel spot is for the summons alone, and the wall goes back home with the agent. See
 //! `design/projection.md`.
-use tomori_environment::sightlines::{READING, Solid};
+use tomori_environment::sightlines::Solid;
 use tomori_protocol::{Pose, Wall};
 
 /// How far ahead of the eyes of whoever summoned the agent the middle of the Tomori wall's row stands, horizontally, in
@@ -34,7 +34,7 @@ const THICKNESS: f32 = 0.05;
 /// are at `eyes`, or, unknown, where the agent faces from 1.2 m away, as a participant's trigger leaves it: before them,
 /// [`DISTANCE`] ahead and [`DROP`] below their eyes, towards the agent, facing them, so that its curved row curves about
 /// them as it does about the eyes at home. Where that is not clear, it turns aside from the agent, up to 45° either way,
-/// and stands nearer or further, at the first spot within [`READING`] of their eyes at which every slot, at its corners
+/// and stands nearer or further, each within `tomori_environment::sightlines::READING` of their eyes, at the first spot at which every slot, at its corners
 /// and middle, stands outside the environment's `solids`, the other walls shown, `others`, and the swarm, and nothing of
 /// the solids and walls is between their eyes and any slot's middle. None where no spot is clear: it stays at home.
 pub fn spot(
@@ -87,18 +87,10 @@ pub fn spot(
         .find(|pose| clear(eyes, pose, wall, &blocking, &swarm))
 }
 
-/// Whether `wall`, standing at `pose`, is within reading distance of `eyes`, and every slot of it stands clear of
-/// `solids` and `swarm`, seen from `eyes` past the solids.
+/// Whether every slot of `wall`, standing at `pose`, stands clear of `solids` and `swarm`, seen from `eyes` past the
+/// solids. Every spot tried is within reading distance of the eyes: at most [`DISTANCES`]' furthest ahead and [`DROP`]
+/// below them.
 fn clear(eyes: [f32; 3], pose: &Pose, wall: &Wall, solids: &[Solid], swarm: &Solid) -> bool {
-    let distance = |a: [f32; 3], b: [f32; 3]| {
-        (0..3)
-            .map(|axis| (a[axis] - b[axis]).powi(2))
-            .sum::<f32>()
-            .sqrt()
-    };
-    if distance(eyes, pose.position) > READING {
-        return false;
-    }
     let mut placed = wall.clone();
     placed.pose = *pose;
     let inside =
@@ -152,7 +144,7 @@ fn boxes(wall: &Wall) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tomori_environment::sightlines::{Spot, readable};
+    use tomori_environment::sightlines::{READING, Spot, readable};
     use tomori_protocol::{TOMORI_WALL, WallKind};
 
     fn tomori() -> Wall {
@@ -266,6 +258,13 @@ mod tests {
 
     fn spot_with(eyes: [f32; 3], agent: &Pose, others: &[Wall], solids: &[Solid]) -> Pose {
         spot(Some(eyes), agent, &tomori(), others, solids).expect("clear")
+    }
+
+    #[test]
+    fn every_spot_it_may_stand_at_is_within_reading_distance_of_the_eyes() {
+        for distance in DISTANCES {
+            assert!(distance.hypot(DROP) < READING, "{distance}");
+        }
     }
 
     #[test]
