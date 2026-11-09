@@ -4,6 +4,7 @@
 //! What a space's agent may do with a device pairing through Tomori's tools: list the pairing waiting without its code or the device's name, confirm it with the code a participant read aloud from the device, or decline it, always where everyone can see. See `design/security.md` and `design/mcp.md`.
 use std::time::Instant;
 
+use super::provenance::{Needs, Requester};
 use super::{Confirmation, Hub, HubState, PAIRING_DECISIONS, PairingEvent, REVEAL_TIMEOUT};
 use serde_json::{Value, json};
 
@@ -113,10 +114,13 @@ impl Hub {
     }
 
     /// Confirm or decline the pairing waiting, as the agent of the space bound to `session` asked. A code that does not match declines the pairing, through the same check as the console's; one that is not six digits is refused and changes nothing. Every decision and refusal is logged with the space and session, shown on the console and the status page, and put on the space's Tomori wall for everyone in it. See `design/security.md`.
+    ///
+    /// `requested_by` names the participant whose words asked for it, which the server checks, in code, before anything else is decided: the words given to the agent last in its space are theirs, within [`super::REQUEST_RECENT`], and they are an owner in the space now (see [`HubState::requester`]). Each notice names them.
     pub(crate) fn agent_decide_pairing(
         &self,
         session: &str,
         decision: Decision<'_>,
+        requested_by: Option<&str>,
     ) -> Result<Decided, String> {
         let mut state = self.lock();
         let space = match self.calling_space(&state, session) {
@@ -136,6 +140,7 @@ impl Hub {
             self.announce_pairing(
                 &space,
                 session,
+                None,
                 &format!(
                     "{} and was refused: {}",
                     decision.asked(),
@@ -147,6 +152,12 @@ impl Hub {
         if !self.pairs() {
             return refuse(state, NO_PAIRING);
         }
+        // Who asked, checked by the server rather than left to the agent: only an owner's own words, given to the agent last and recently, decide a pairing. See `design/security.md`.
+        let requester = match self.requester(&state, &space, requested_by, Needs::Owner) {
+            Ok(requester) => requester,
+            Err(reason) => return refuse(state, &reason),
+        };
+        let by = Some(&requester);
         if state.pairing.is_none() {
             return refuse(state, "No pairing is waiting.");
         }
@@ -158,6 +169,7 @@ impl Hub {
                 self.announce_pairing(
                     &space,
                     session,
+                    by,
                     &format!("declined the pairing waiting {present}"),
                 );
                 return Ok(Decided { confirmed: false });
@@ -182,6 +194,7 @@ impl Hub {
                 self.announce_pairing(
                     &space,
                     session,
+                    by,
                     "gave a code that did not match the one the device shows, so its pairing was declined",
                 );
                 return Err(announced(error));
@@ -194,6 +207,7 @@ impl Hub {
                 self.announce_pairing(
                     &space,
                     session,
+                    by,
                     &format!("confirmed the pairing waiting {present}; the device is now an owner"),
                 );
                 Ok(Decided { confirmed: true })
@@ -202,6 +216,7 @@ impl Hub {
                 self.announce_pairing(
                     &space,
                     session,
+                    by,
                     &format!(
                         "confirmed the pairing waiting {present}, but {}",
                         error.trim_end_matches('.').to_lowercase()
@@ -227,8 +242,8 @@ impl Hub {
         }
     }
 
-    /// Say that the agent of `space`, called from `session`, `did` something with a pairing: to the operator and owners, naming the space and the session, and to everyone in the space, on its Tomori wall, where it stays until someone dismisses it. See `design/security.md`.
-    fn announce_pairing(&self, space: &str, session: &str, did: &str) {
+    /// Say that the agent of `space`, called from `session`, `did` something with a pairing, as `by` asked, if the server found who asked: to the operator and owners, naming the space, the session and who asked, with their entry, and to everyone in the space, on its Tomori wall, naming who asked, where it stays until someone dismisses it. See `design/security.md`.
+    fn announce_pairing(&self, space: &str, session: &str, by: Option<&Requester>, did: &str) {
         let mut state = self.lock();
         let environments = self.environments();
         // The space may have been forgotten since the decision, as its token was issued; the operator is told anyway.
@@ -238,7 +253,10 @@ impl Hub {
                 let walls = environments.walls(&record.model.environment);
                 let content = crate::stage::Content {
                     title: "Pairing".to_owned(),
-                    body: format!("The agent {did}."),
+                    body: match by {
+                        Some(by) => format!("The agent, as {} asked, {did}.", by.name),
+                        None => format!("The agent {did}."),
+                    },
                     meta: vec![("source".to_owned(), "Tomori".to_owned())],
                     code: None,
                     slug: None,
@@ -256,8 +274,9 @@ impl Hub {
         state.touch_projection(space);
         drop(state);
         self.keep();
+        let asked = by.map_or_else(String::new, |by| format!(" as {} asked,", by.logged()));
         self.tell_operator(format!(
-            "The agent of space {space} ({title:?}), session {session}, {did}."
+            "The agent of space {space} ({title:?}), session {session},{asked} {did}."
         ));
     }
 }

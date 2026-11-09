@@ -21,6 +21,22 @@ const MESSAGE_LIMIT: usize = 50;
 /// Longest message text sent to clients.
 const MESSAGE_TEXT_LIMIT: usize = 20_000;
 
+/// A participant's entry of input that the space gave its agent, the last one given, which began the agent's current
+/// turn: Tomori's number for it, who said it and when it was given, so that a tool the agent calls on someone's word
+/// can be checked against who spoke. Only the server makes one, from input a participant's connection sent; nothing
+/// the agent, a tool or a visitor sends makes one. See `design/security.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Given {
+    /// Tomori's number for the entry, counting the entries given to this space's agent since the server started.
+    pub entry: u64,
+    /// The speaker's participant number, their public handle.
+    pub source: u32,
+    /// The speaker's display name, as the agent was given it.
+    pub speaker: String,
+    /// When it was given to the agent.
+    pub at: std::time::Instant,
+}
+
 /// The shared state of one space, driven by backend events and participant actions. Pure: no I/O.
 #[derive(Debug)]
 pub struct SpaceModel {
@@ -49,6 +65,10 @@ pub struct SpaceModel {
     user_messages: HashSet<String>,
     queue: InputQueue,
     in_flight: Option<Prompt>,
+    /// The entry given to the agent last, if it was delivered and nothing has been given since; see [`Given`].
+    given: Option<Given>,
+    /// How many entries have been given to the agent, numbering each.
+    entries_given: u64,
     /// Pending permissions, oldest first. The first is presented; the rest wait their turn.
     approvals: VecDeque<Permission>,
     /// Permissions whose decision has been sent to the backend but not yet confirmed.
@@ -495,6 +515,8 @@ impl SpaceModel {
             user_messages: HashSet::new(),
             queue: InputQueue::default(),
             in_flight: None,
+            given: None,
+            entries_given: 0,
             approvals: VecDeque::new(),
             deciding: Vec::new(),
             questions: VecDeque::new(),
@@ -1457,6 +1479,7 @@ impl SpaceModel {
         let attribution = self.attribution;
         let entry = self.queue.begin_next()?;
         let key = entry.id.clone();
+        let (source, speaker) = (entry.source, entry.speaker.clone());
         // What the speaker attended to comes before their words, described as the space knows it now.
         let context = self
             .attending
@@ -1478,7 +1501,34 @@ impl SpaceModel {
         self.origins.retain(|key, _| waiting.contains(key.as_str()));
         let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
+        // Who began the turn, from the moment it is given, since the agent may call a tool before delivery is confirmed.
+        self.entries_given += 1;
+        self.given = Some(Given {
+            entry: self.entries_given,
+            source,
+            speaker,
+            at: std::time::Instant::now(),
+        });
         Some(prompt)
+    }
+
+    /// The entry given to the agent last, which began its current turn, if it has not failed to be delivered. See
+    /// [`Given`].
+    pub fn given(&self) -> Option<&Given> {
+        self.given.as_ref()
+    }
+
+    /// Give the agent an entry from the participant numbered `source`, called `speaker`, at `at`, as delivering their
+    /// input does, for tests of who asked.
+    #[cfg(test)]
+    pub fn give(&mut self, source: u32, speaker: &str, at: std::time::Instant) {
+        self.entries_given += 1;
+        self.given = Some(Given {
+            entry: self.entries_given,
+            source,
+            speaker: speaker.to_owned(),
+            at,
+        });
     }
 
     fn delivered(&mut self, key: &str) {
@@ -1513,6 +1563,8 @@ impl SpaceModel {
                     .is_some_and(|prompt| prompt.key == key)
                 {
                     self.in_flight = None;
+                    // The agent was not given it, so nobody's word stands behind its turn.
+                    self.given = None;
                     self.queue.finish(key, QueueState::Failed);
                     self.error = Some(format!("Could not deliver input: {error}"));
                     self.unattended_problem();

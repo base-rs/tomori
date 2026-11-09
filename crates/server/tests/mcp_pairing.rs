@@ -89,6 +89,8 @@ impl Studio {
         let session = tomori_backend::Session::id(&server.backend.started()[0]);
         // The server has an owner, so a device may ask to pair only in a window, which the agent cannot open: the operator opens it here.
         pairing.open().unwrap();
+        // Ada asks the agent, whose turn her words begin, so that the pairing tools may act on her word.
+        say(&mut ada, "asking", "decide the pairing");
         Self {
             server,
             pairing,
@@ -110,7 +112,11 @@ impl Studio {
         call(&self.server, &self.token, &params)
     }
 
-    fn call(&self, name: &str, arguments: Value) -> Value {
+    /// Call `name` as the studio's agent, passing Ada, whose words it was given last, as who asked for a pairing tool, unless `arguments` names someone else, or `null` for nobody.
+    fn call(&self, name: &str, mut arguments: Value) -> Value {
+        if name.ends_with("_pairing") && arguments.get("requested_by").is_none() {
+            arguments["requested_by"] = json!("Ada");
+        }
         self.call_as(Some(&self.session.clone()), name, arguments)
     }
 
@@ -130,19 +136,9 @@ impl Studio {
         })
     }
 
-    /// The line the operator and owners are told, which names the space and the session, once it is logged.
+    /// The line the operator and owners are told, which names the space, the session and who asked, if anyone, with their entry, once it is logged.
     fn told(&self, did: &str) -> String {
-        let line = format!(
-            "The agent of space {} (\"Studio\"), session {}, {did}.",
-            self.space, self.session
-        );
-        // The console is told after the log, so once it is, both are; the console is this server's alone.
-        let notice = PairingEvent::Agent {
-            notice: line.clone(),
-        };
-        eventually(|| self.prompts.lock().unwrap().contains(&notice).then_some(()));
-        assert!(logged().contains(&line), "{line}");
-        line
+        told(&self.prompts, &self.space, "Studio", &self.session, did)
     }
 
     /// The status page, as Ada sees it.
@@ -158,6 +154,45 @@ impl Studio {
         stream.read_to_string(&mut response).unwrap();
         response
     }
+}
+
+/// `client` says `words` to the agent of their space, and waits until it is given them.
+fn say(client: &mut TestClient, utterance: &str, words: &str) {
+    client.say(utterance, words);
+    client.space(|state| {
+        state.queue.iter().any(|entry| {
+            entry.text == words && entry.state == tomori_protocol::QueueState::Delivered
+        })
+    });
+}
+
+/// The line the operator and owners are told that the agent of `space`, titled `title`, from `session`, `did` something, as someone asked, with their entry, or as it asked and was refused, once it is logged.
+fn told(
+    prompts: &Mutex<Vec<PairingEvent>>,
+    space: &str,
+    title: &str,
+    session: &str,
+    did: &str,
+) -> String {
+    let start = format!("The agent of space {space} ({title:?}), session {session},");
+    let end = format!(" {did}.");
+    // The console is told after the log, so once it is, both are; the console is this server's alone.
+    let line = eventually(|| {
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                PairingEvent::Agent { notice }
+                    if notice.starts_with(&start) && notice.ends_with(&end) =>
+                {
+                    Some(notice.clone())
+                }
+                _ => None,
+            })
+    });
+    assert!(logged().contains(&line), "{line}");
+    line
 }
 
 /// Call a tool with `params` at `server`'s MCP endpoint, with `token`, and return its result.
@@ -325,8 +360,13 @@ fn the_agent_confirms_a_pairing_with_the_code_read_from_the_device() {
     // Everyone in the space sees it on the Tomori wall, the operator on the console and in the log, with the space and session, and owners on the status page.
     let did =
         "confirmed the pairing waiting while Ada was in the space; the device is now an owner";
-    assert_eq!(studio.notice(did), format!("The agent {did}."));
+    // The notice names who asked, and the log their entry, as the server checked them.
+    assert_eq!(
+        studio.notice(did),
+        format!("The agent, as Ada asked, {did}.")
+    );
     let line = studio.told(did);
+    assert!(line.contains(", as Ada (entry 1, given "), "{line}");
     let page = studio.status_page();
     assert!(page.contains("<h3>By agents</h3>"), "{page}");
     let escaped = line.replace('"', "&quot;");
@@ -417,7 +457,7 @@ fn the_agent_declines_a_pairing() {
 }
 
 #[test]
-fn only_a_session_bound_to_a_space_may_decide_though_nobody_need_be_in_it() {
+fn only_a_session_bound_to_a_space_may_decide_and_only_as_an_owner_there_asked() {
     let mut studio = Studio::new();
     let mut quest = studio.server.connect("quest", "Quest 3");
     let shown = pair(&mut quest);
@@ -443,28 +483,68 @@ fn only_a_session_bound_to_a_space_may_decide_though_nobody_need_be_in_it() {
         eventually(|| logged().contains(&line).then_some(()));
     }
 
-    // Bob, another owner, and then nobody: the agent may still decide, as for a maintainer whose only headset lost its pairing, and the notice says who was there.
+    // Bob, another owner, asks: the agent decides as he asked, since his words are the last it was given, and not as Ada did.
     let (_, bob) = studio.server.issue("Bob", tomori_security::Grant::Owner);
     let mut bob = studio.server.connect_with_token("bob", "Bob", &bob);
     bob.send(&ClientMessage::Join {
         space: studio.space.clone(),
     });
     bob.space(|state| state.participants.len() == 2);
-    studio.call("decline_pairing", json!({}));
-    studio.notice("declined the pairing waiting while Ada and Bob were in the space");
+    say(&mut bob, "bob", "decline it");
+    assert!(
+        failure(&studio.call("decline_pairing", json!({"requested_by": "Ada"}))).starts_with(
+            "The words you were given last in this space are not from the participant you named"
+        )
+    );
+    assert!(studio.pairing.pending().is_some());
+    studio.call("decline_pairing", json!({"requested_by": "Bob"}));
+    assert_eq!(
+        studio.notice("as Bob asked"),
+        "The agent, as Bob asked, declined the pairing waiting while Ada and Bob were in the space."
+    );
     failed(&quest);
-    for client in [&mut studio.ada, &mut bob] {
+
+    // A collaborator in the space cannot decide a pairing, nor can an owner who has left, nor can nobody.
+    let (_, cy) = studio.server.issue(
+        "Cy",
+        tomori_security::Grant::Collaborator {
+            space: studio.space.clone(),
+        },
+    );
+    let mut cy = studio.server.connect_with_token("cy", "Cy", &cy);
+    cy.send(&ClientMessage::Join {
+        space: studio.space.clone(),
+    });
+    cy.space(|state| state.participants.len() == 3);
+    say(&mut cy, "cy", "confirm the pairing");
+    let shown = pair(&mut quest);
+    assert_eq!(
+        failure(&studio.call(
+            "confirm_pairing",
+            json!({"code": shown, "requested_by": "Cy"})
+        )),
+        "Cy is a collaborator here, and only an owner may ask for this. Tomori has said so on the space's wall; tell everyone there too."
+    );
+    studio.told("asked to confirm a pairing and was refused: Cy is a collaborator here, and only an owner may ask for this");
+    say(&mut studio.ada, "again", "confirm it");
+    for client in [&mut studio.ada, &mut bob, &mut cy] {
         client.send(&ClientMessage::Leave);
         client.wait_for(|message| matches!(message, ServerMessage::Left { .. }).then_some(()));
     }
-    let shown = pair(&mut quest);
-    let confirmed = studio.call("confirm_pairing", json!({ "code": shown }));
-    assert_eq!(
-        confirmed["structuredContent"]["confirmed"], true,
-        "{confirmed}"
+    assert!(
+        failure(&studio.call("confirm_pairing", json!({ "code": shown })))
+            .starts_with("Ada is not in this space now, so Tomori will not act on their word.")
     );
-    studio
-        .told("confirmed the pairing waiting with nobody in the space; the device is now an owner");
+    // Without anyone named, nothing is decided, whatever the code.
+    assert!(
+        failure(&studio.call(
+            "confirm_pairing",
+            json!({ "code": shown, "requested_by": null })
+        ))
+        .starts_with("This tool needs requested_by")
+    );
+    assert!(studio.pairing.pending().is_some());
+    assert_eq!(studio.server.tokens.as_ref().unwrap().entries().len(), 3);
 }
 
 #[test]
@@ -491,20 +571,29 @@ fn a_deleted_space_s_agent_can_no_longer_decide_and_another_space_s_decides_the_
         assert_eq!(result["isError"], true, "{tool}: {result}");
     }
     assert!(studio.pairing.pending().is_some());
-    // The workshop's agent confirms the server's one pairing, and then there is none for either space to decide.
-    let confirmed = studio.call_as(Some(&other), "confirm_pairing", json!({ "code": shown }));
+    // The workshop's agent confirms the server's one pairing, as Ada asked there, and then there is none for either space to decide.
+    studio.ada.send(&ClientMessage::Join {
+        space: workshop.clone(),
+    });
+    studio.ada.space(|state| state.id == workshop);
+    say(&mut studio.ada, "workshop", "confirm the pairing");
+    let asked = json!({ "code": shown, "requested_by": "Ada" });
+    let confirmed = studio.call_as(Some(&other), "confirm_pairing", asked.clone());
     assert_eq!(
         confirmed["structuredContent"]["confirmed"], true,
         "{confirmed}"
     );
     assert!(
-        failure(&studio.call_as(Some(&other), "confirm_pairing", json!({ "code": shown })))
+        failure(&studio.call_as(Some(&other), "confirm_pairing", asked))
             .starts_with("No pairing is waiting.")
     );
-    let line = format!(
-        "The agent of space {workshop} (\"Workshop\"), session {other}, confirmed the pairing waiting with nobody in the space; the device is now an owner."
+    told(
+        &studio.prompts,
+        &workshop,
+        "Workshop",
+        &other,
+        "confirmed the pairing waiting while Ada was in the space; the device is now an owner",
     );
-    eventually(|| logged().contains(&line).then_some(()));
 }
 
 #[test]

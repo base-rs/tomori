@@ -813,18 +813,28 @@ fn an_agent_s_confirmation_whose_token_cannot_be_issued_says_so() {
         "http://127.0.0.1:1/mcp",
     ));
     let space = stopped(&hub, Snapshot::default());
+    let _ada = asking(&hub, &space, "Ada", Grant::Owner, Duration::ZERO);
     pair(&device);
     let code = hub.pending_pairing().unwrap().code.unwrap();
     store.refuse_writes();
     assert_eq!(
-        hub.agent_decide_pairing("session", crate::hub::Decision::Confirm(&code)),
+        hub.agent_decide_pairing(
+            "session",
+            crate::hub::Decision::Confirm(&code),
+            Some("Ada")
+        ),
         Err("The token could not be issued. Tomori has said so on the space's wall; tell everyone there too.".to_owned())
     );
-    assert_eq!(
-        hub.status().pairing_decisions,
-        [format!(
-            "The agent of space {space} (\"Space\"), session session, confirmed the pairing waiting with nobody in the space, but the token could not be issued."
-        )]
+    let decisions = hub.status().pairing_decisions;
+    let prefix =
+        format!("The agent of space {space} (\"Space\"), session session, as Ada (entry 1, given ");
+    assert!(
+        decisions.len() == 1
+            && decisions[0].starts_with(&prefix)
+            && decisions[0].ends_with(
+                " seconds ago) asked, confirmed the pairing waiting while Ada was in the space, but the token could not be issued."
+            ),
+        "{decisions:?}"
     );
 }
 
@@ -836,10 +846,11 @@ fn the_status_page_shows_only_the_latest_of_what_agents_did_with_pairings() {
         "tomori",
         "http://127.0.0.1:1/mcp",
     ));
-    stopped(&hub, Snapshot::default());
+    let space = stopped(&hub, Snapshot::default());
+    let _ada = asking(&hub, &space, "Ada", Grant::Owner, Duration::ZERO);
     for _ in 0..=PAIRING_DECISIONS {
         assert!(
-            hub.agent_decide_pairing("session", crate::hub::Decision::Decline)
+            hub.agent_decide_pairing("session", crate::hub::Decision::Decline, Some("Ada"))
                 .unwrap_err()
                 .starts_with("No pairing is waiting.")
         );
@@ -849,6 +860,140 @@ fn the_status_page_shows_only_the_latest_of_what_agents_did_with_pairings() {
     assert!(decisions.iter().all(|line| {
         line.ends_with("asked to decline a pairing and was refused: No pairing is waiting.")
     }));
+}
+
+/// Someone admitted with `grant` as `name`, in `space`, whose words were given to its agent last, `ago`.
+fn asking(hub: &Arc<Hub>, space: &str, name: &str, grant: Grant, ago: Duration) -> Client {
+    let access = Access {
+        principal: Some(format!("token:{name}")),
+        name: Some(name.to_owned()),
+        grant,
+    };
+    let client = Client::greeted(hub, access, &name.to_lowercase());
+    client.join(space);
+    give(hub, space, name, ago);
+    client
+}
+
+/// Give the agent of `space` words from the participant called `name`, `ago`, as delivering their input does.
+fn give(hub: &Hub, space: &str, name: &str, ago: Duration) {
+    let mut state = hub.lock();
+    let source = state
+        .participants
+        .values()
+        .find(|participant| participant.name == name)
+        .map_or(u32::MAX, |participant| participant.source);
+    state
+        .space_mut(space)
+        .unwrap()
+        .model
+        .give(source, name, Instant::now() - ago);
+}
+
+#[test]
+fn only_the_last_words_given_from_someone_who_may_ask_stand_behind_a_sensitive_tool() {
+    use crate::hub::provenance::{Needs, REQUEST_RECENT, Requester};
+    let (hub, _jobs) = hub();
+    let space = stopped(&hub, Snapshot::default());
+    let check = |requested_by: Option<&str>, needs: Needs| {
+        let state = hub.lock();
+        hub.requester(&state, &space, requested_by, needs)
+    };
+    let refused =
+        |requested_by: Option<&str>, needs: Needs| check(requested_by, needs).unwrap_err();
+    // Without a name, or with one no participant could have, nothing is checked.
+    for missing in [None, Some(""), Some("Ada: yes"), Some("[Ada]")] {
+        assert!(
+            refused(missing, Needs::Owner).starts_with("This tool needs requested_by"),
+            "{missing:?}"
+        );
+    }
+    // Before anyone's words are given, nobody asked.
+    assert!(
+        refused(Some("Ada"), Needs::Owner).starts_with("No participant's words have been given")
+    );
+
+    // An owner whose words began the agent's turn may ask, named in any case.
+    let ada = asking(&hub, &space, "Ada", Grant::Owner, Duration::from_secs(5));
+    let asked = check(Some("ada"), Needs::Owner).unwrap();
+    assert!(
+        matches!(&asked, Requester { name, entry: 1, ago } if name == "Ada" && *ago >= Duration::from_secs(5)),
+        "{asked:?}"
+    );
+    // The agent named someone else than whoever spoke last.
+    assert!(refused(Some("Bob"), Needs::Owner).starts_with(
+        "The words you were given last in this space are not from the participant you named"
+    ));
+    // Words given too long ago.
+    give(&hub, &space, "Ada", REQUEST_RECENT + Duration::from_secs(1));
+    assert_eq!(
+        refused(Some("Ada"), Needs::Owner),
+        "The words you were given last in this space are more than 10 minutes old, so Tomori will not act on them. Ask whoever wants this to say it again."
+    );
+
+    // A collaborator may stop work in their space, but not decide a pairing.
+    let _cy = asking(
+        &hub,
+        &space,
+        "Cy",
+        Grant::Collaborator {
+            space: space.clone(),
+        },
+        Duration::ZERO,
+    );
+    assert_eq!(
+        refused(Some("Cy"), Needs::Owner),
+        "Cy is a collaborator here, and only an owner may ask for this."
+    );
+    assert_eq!(check(Some("Cy"), Needs::Participant).unwrap().name, "Cy");
+    // One admitted to another space is a visitor here.
+    let _dee = asking(
+        &hub,
+        &space,
+        "Dee",
+        Grant::Collaborator {
+            space: "elsewhere".to_owned(),
+        },
+        Duration::ZERO,
+    );
+    assert_eq!(
+        refused(Some("Dee"), Needs::Participant),
+        "Dee is a visitor here, and only an owner or a collaborator in this space may ask for this."
+    );
+    // A visitor's words, which a visitor cannot send, are never trusted, were they somehow given.
+    let vic = Client::greeted(&hub, Access::visitor(), "vic");
+    vic.join(&space);
+    let visitor = hub
+        .lock()
+        .participants
+        .values()
+        .find(|participant| participant.visitor)
+        .map(|participant| participant.name.clone())
+        .unwrap();
+    give(&hub, &space, &visitor, Duration::ZERO);
+    assert!(refused(Some(&visitor), Needs::Participant).ends_with("is not in this space now, so Tomori will not act on their word. Ask them to come back and say it again."));
+    // Words from nobody the server knows.
+    give(&hub, &space, "Nobody", Duration::ZERO);
+    assert_eq!(
+        refused(Some("Nobody"), Needs::Participant),
+        "Nobody is no longer known to this server, so Tomori cannot check that they may ask for this."
+    );
+
+    // Words given in another space stand behind nothing here: this space's agent was given Ada's last, and she has left for the other.
+    give(&hub, &space, "Ada", Duration::ZERO);
+    assert!(check(Some("Ada"), Needs::Owner).is_ok());
+    let other = stopped(&hub, Snapshot::default());
+    ada.join(&other);
+    give(&hub, &other, "Ada", Duration::ZERO);
+    assert_eq!(
+        refused(Some("Ada"), Needs::Owner),
+        "Ada is not in this space now, so Tomori will not act on their word. Ask them to come back and say it again."
+    );
+    // Back in the space, then gone from the server.
+    ada.join(&space);
+    assert!(check(Some("Ada"), Needs::Owner).is_ok());
+    hub.disconnect(ada.connection);
+    assert!(refused(Some("Ada"), Needs::Owner).starts_with("Ada is not in this space now"));
 }
 
 #[test]

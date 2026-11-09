@@ -222,6 +222,16 @@ impl Spaces {
         call(&self.server, &self.token, Some(&self.one), name, arguments)
     }
 
+    /// Ada says `words` to the agent, and waits until it is given them, so that a tool may act on her word.
+    fn ask(&mut self, words: &str) {
+        self.ada.say("asking", words);
+        self.ada.space(|state| {
+            state.queue.iter().any(|entry| {
+                entry.text == words && entry.state == tomori_protocol::QueueState::Delivered
+            })
+        });
+    }
+
     /// Give the space `workers`, and wait until its participant sees them, returning the space as they see it.
     fn workers(&self, workers: Vec<Worker>) -> SpaceState {
         let ids: Vec<String> = workers.iter().map(|worker| worker.id.clone()).collect();
@@ -412,7 +422,7 @@ fn finished_workers_are_removed_for_everyone_with_one_notice() {
 
 #[test]
 fn a_running_worker_is_removed_only_with_force_which_stops_it() {
-    let spaces = Spaces::new();
+    let mut spaces = Spaces::new();
     let one = spaces.one.clone();
     let mut workers = family(&one);
     // w4 has finished, but a worker of its own still runs.
@@ -458,10 +468,53 @@ fn a_running_worker_is_removed_only_with_force_which_stops_it() {
         "{again}"
     );
 
-    // With force, each is stopped first and removed, and the notice says so.
+    // Stopping work in progress needs who asked, which the server checks: the words the agent was given last are theirs.
+    assert_eq!(
+        failure(&spaces.call(
+            "remove_workers",
+            json!({"sessions": ["w3", "w4"], "force": true}),
+        )),
+        "This tool needs requested_by: the name of the participant whose words asked for it, as Tomori gave you their words, such as Ada for \"Ada: …\"."
+    );
+    assert!(
+        failure(&spaces.call(
+            "remove_workers",
+            json!({"sessions": ["w3", "w4"], "force": true, "requested_by": "Ada"}),
+        ))
+        .starts_with("No participant's words have been given to you in this space")
+    );
+    spaces.ask("stop the tests and the survey");
+    assert!(
+        failure(&spaces.call(
+            "remove_workers",
+            json!({"sessions": ["w3", "w4"], "force": true, "requested_by": "Bob"}),
+        ))
+        .starts_with(
+            "The words you were given last in this space are not from the participant you named"
+        )
+    );
+    assert_eq!(
+        failure(&spaces.call(
+            "remove_workers",
+            json!({"sessions": ["w3"], "force": true, "requested_by": 1}),
+        )),
+        "requested_by is a participant's name, as text."
+    );
+    // Someone named without force is checked too, so that a notice never names anyone unchecked.
+    assert!(
+        failure(&spaces.call(
+            "remove_workers",
+            json!({"finished": true, "requested_by": "Bob"}),
+        ))
+        .starts_with(
+            "The words you were given last in this space are not from the participant you named"
+        )
+    );
+    assert!(spaces.backend.stopped_workers().is_empty());
+    // With force, as Ada asked, each is stopped first and removed, and the notice says so, and who asked.
     let forced = spaces.call(
         "remove_workers",
-        json!({"sessions": ["w3", "w4"], "force": true}),
+        json!({"sessions": ["w3", "w4"], "force": true, "requested_by": "Ada"}),
     );
     let forced = content(&forced);
     assert_eq!(sessions(forced, "removed"), ["w3", "w4", "w5"]);
@@ -474,14 +527,14 @@ fn a_running_worker_is_removed_only_with_force_which_stops_it() {
     assert_eq!(
         said,
         [
-            "Tomori removed 3 workers. 2 were still running, and were stopped first.\n\n- Run tests\n- Survey\n- Survey part"
+            "Tomori removed 3 workers, as Ada asked. 2 were still running, and were stopped first.\n\n- Run tests\n- Survey\n- Survey part"
         ]
     );
 }
 
 #[test]
 fn only_the_space_s_own_workers_are_ever_removed() {
-    let spaces = Spaces::new();
+    let mut spaces = Spaces::new();
     let one = spaces.one.clone();
     let two = spaces.two.clone();
     // The other space's session listed as one of this space's workers, as the worker of one of them.
@@ -508,9 +561,10 @@ fn only_the_space_s_own_workers_are_ever_removed() {
     });
     spaces.bob.space(|state| shown(state) == ["o1", "o2"]);
 
+    spaces.ask("remove them all");
     let refused = spaces.call(
         "remove_workers",
-        json!({"sessions": [one, two, "o1", "o2", "ses_unrelated", "w8"], "force": true}),
+        json!({"sessions": [one, two, "o1", "o2", "ses_unrelated", "w8"], "force": true, "requested_by": "Ada"}),
     );
     let refused = content(&refused);
     assert!(sessions(refused, "removed").is_empty(), "{refused}");

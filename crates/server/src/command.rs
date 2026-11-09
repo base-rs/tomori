@@ -510,6 +510,15 @@ fn admission(
         .iter()
         .filter(|entry| entry.grant == tomori_security::Grant::Owner)
         .count();
+    // Its files are readable only by the server's user whatever the directory allows, but others should not list them either; the operator may have chosen the directory, so it is told rather than changed. See `design/security.md`.
+    if tomori_security::shared_directory(&state).unwrap_or(false) {
+        let warning = format!(
+            "The state directory {} can be read by other users; its files are readable only by this user, but run `chmod 700` on it to keep others from listing them.",
+            state.display()
+        );
+        eprintln!("Warning: {warning}");
+        log::warn!("{warning}");
+    }
     eprintln!(
         "Admitting holders of this server's tokens ({owners} owner tokens, in {}){}.",
         state.display(),
