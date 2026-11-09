@@ -99,8 +99,10 @@ fn clear(eyes: [f32; 3], pose: &Pose, wall: &Wall, solids: &[Solid], swarm: &Sol
         swarm.blocks(from, to) || solids.iter().any(|solid| solid.blocks(from, to))
     };
     let hidden = |point: [f32; 3]| solids.iter().any(|solid| solid.blocks(eyes, point));
+    // Its slots stand in its frame, tilted as the space tilted it.
+    let frame = placed.frame();
     placed.slot_frames().iter().all(|slot| {
-        let (middle, [a, b, c, d]) = corners(slot, pose);
+        let (middle, [a, b, c, d]) = corners(slot, &frame);
         // Its edges, about it, and its diagonals, across it.
         let lines = [(a, b), (b, d), (d, c), (c, a), (a, d), (b, c)];
         !lines.into_iter().any(crosses) && !hidden(middle)
@@ -148,10 +150,10 @@ fn corners(slot: &tomori_protocol::wall::SlotFrame, wall: &Pose) -> ([f32; 3], [
     )
 }
 
-/// The box about each slot of `wall`, where it stands, aligned with the space's axes.
+/// The box about each slot of `wall`, where it stands, tilted as it tilts, aligned with the space's axes.
 fn boxes(wall: &Wall) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
     wall.slot_frames().into_iter().map(move |slot| {
-        let (middle, corners) = corners(&slot, &wall.pose);
+        let (middle, corners) = corners(&slot, &wall.frame());
         corners
             .into_iter()
             .fold((middle, middle), |(low, high), corner| {
@@ -324,6 +326,28 @@ mod tests {
             (below.position[0] - (1.0 - DISTANCE)).abs() < 1e-3,
             "{below:?}"
         );
+    }
+
+    #[test]
+    fn a_tilted_wall_is_kept_clear_as_it_tilts() {
+        let eyes = [0.0, 1.6, 0.0];
+        let agent = Pose::at([0.0, 1.4, -3.0]).facing_towards(eyes);
+        // A low shelf just in front of the top of its middle slots, which the wall upright stands behind.
+        let shelf = Solid::new([-0.3, 0.59, -2.22], [0.3, 0.7, -2.17]);
+        let upright = spot_with(eyes, &agent, &[], &[shelf]);
+        assert!((across(upright.position, eyes) - DISTANCE).abs() < 1e-4);
+        assert!(across(upright.position, [0.0, 0.0, -DISTANCE]) < 1e-4);
+        // Tilted with its top forward, the top of its middle slots would stand in the shelf: it turns aside.
+        let tilted = tomori().with_tilt(Some(45.0));
+        let aside = spot(Some(eyes), &agent, &tilted, &[], &[shelf]).expect("clear");
+        assert!(
+            across(aside.position, [0.0, 0.0, -DISTANCE]) > 0.3,
+            "{aside:?}"
+        );
+        // Another wall tilted towards where it would stand is kept clear of as it tilts too.
+        let mut leaning = tomori().with_tilt(Some(45.0));
+        leaning.pose = Pose::at([0.0, 0.52, -2.3]).facing_towards(eyes);
+        assert!(boxes(&leaning).all(|(low, high)| high[2] - low[2] > 0.1));
     }
 
     #[test]
